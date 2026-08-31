@@ -61,6 +61,12 @@ def viewer_client():
     from nicegui.page import page
 
     clear_neuron_index_cache()
+    # Warm the type mapper up front: its first load takes a minute and
+    # would otherwise race the panel assertions below.
+    from comparison.cross_dataset_type_mapper import get_type_mapper
+
+    assert get_type_mapper().load() is True
+
     client = Client(page('/alias-panel-test'))
     with client:
         content = ui.element('div')
