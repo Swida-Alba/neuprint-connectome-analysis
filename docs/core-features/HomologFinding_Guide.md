@@ -352,10 +352,10 @@ scene).
   that resolves to a single query type writes `results/`, `profiles/`,
   `overlaps/` and `visualization/` directly into the run folder (no
   `by_type/` nesting).
-- Cross-dataset runs plot the query source inside the target brain:
-  `visualization/source_neurons/` renders the transformed query in the
-  target template (layer label `query_transformed_{neuron name}`), and the
-  `bodyId_level/` / `type_level/` scenes include the same overlay layer.
+- Cross-dataset runs plot the query source inside the target brain as the
+  `query_transformed_*` overlay layer of the `bodyId_level/` / `type_level/`
+  scenes; `visualization/source_neurons/` is only a fallback scene in the
+  source dataset's own template, drawn when the transform is unavailable.
 - Individual per-neuron profile exports are disabled by default
   (`individual_profiles=False`); the batch scene HTML/PNG and the overlay
   layer cover the visual output.
