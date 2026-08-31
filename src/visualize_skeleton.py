@@ -5040,6 +5040,48 @@ class VisualizeSkeleton:
             warn('background_color', f"value {self.background_color!r} is not a valid color", "'white'")
             self.background_color = standardize_color('white')
 
+    def _overlay_source_metadata(self, dataset, bids):
+        """Neuron-table metadata rows for cross-dataset overlay layers.
+
+        Overlay (``custom_neurons``) layers would otherwise export with only
+        their bodyId: the per-layer metadata lookup runs against the SCENE
+        dataset's table, which does not know the source dataset's bodyIds.
+        Reads the source dataset's neuron index / allneurons table (local
+        files, no network) and returns the rows for *bids*, or ``None``.
+        """
+        from pathlib import Path
+
+        if not dataset or not bids:
+            return None
+        safe_name = str(dataset).replace(':', '_').replace('.', '_')
+        root = Path(getattr(self, 'script_path', '') or '')
+        candidates = [
+            root / 'neuron_indexes' / safe_name / 'neuron_index.parquet',
+            root / 'datasets' / safe_name / f'{safe_name}_allneurons_neuron_df.parquet',
+            root / 'datasets' / safe_name / f'{safe_name}_allneurons_neuron_df.csv',
+        ]
+        wanted = {str(int(b)) for b in bids}
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                if path.suffix == '.parquet':
+                    frame = pd.read_parquet(path)
+                else:
+                    frame = pd.read_csv(path, low_memory=False)
+            except Exception:
+                continue
+            if 'bodyId' not in frame.columns:
+                continue
+            keys = frame['bodyId'].map(
+                lambda v: str(int(v)) if pd.notna(v) and str(v).replace(
+                    '.0', '').isdigit() else str(v))
+            rows = frame[keys.isin(wanted)]
+            if rows.empty:
+                continue
+            return rows.reset_index(drop=True)
+        return None
+
     def _inject_custom_neurons(self):
         """Prepend custom_neurons overlay layers as the scene's first layer.
 
@@ -5105,11 +5147,31 @@ class VisualizeSkeleton:
                 except (TypeError, ValueError):
                     bids.append(0)
             layer_nm = str(layer_nm)
+            # Overlay neurons belong to the SOURCE dataset (stamped by the
+            # homolog overlay builder); enrich their export rows from the
+            # source dataset's neuron table so neuron_info.csv is not blank.
+            source_dataset = None
+            for n in neurons:
+                ds = getattr(n, '_drocat_source_dataset', None)
+                if ds:
+                    source_dataset = str(ds)
+                    break
+            meta_frame = None
+            if source_dataset:
+                meta_frame = self._overlay_source_metadata(source_dataset, bids)
+            if meta_frame is not None:
+                self._vprint(
+                    f'  ℹ️ Overlay layer "{layer_nm}" metadata resolved from '
+                    f'{source_dataset} ({len(meta_frame)} rows)',
+                    level='full',
+                )
+            else:
+                meta_frame = pd.DataFrame({'bodyId': bids})
             # Insert at the front so the overlay is layer 1 (before the
             # rank-1 homolog). Multiple overlays keep their order at the
             # front.
             self.neuron_layers.insert(insert_pos, bids)
-            self.neuron_dfs.insert(insert_pos, pd.DataFrame({'bodyId': bids}))
+            self.neuron_dfs.insert(insert_pos, meta_frame)
             self.layer_criteria.insert(insert_pos, None)
             self.roi_dfs.insert(insert_pos, None)
             self.layer_names.insert(insert_pos, layer_nm)
@@ -8145,15 +8207,23 @@ class VisualizeSkeleton:
 
     def _resolve_fafb_sources(self, body_ids, allow_mesh_cache=True,
                               api_only=False):
-        """Resolve per-body FAFB sources, SWC-first for every render mode.
+        """Resolve per-body FAFB sources for rendering.
 
         Priority per body:
-        1. healed-ZIP SWC (canonical raw bundle; member-existence checked
-           inside the shared batch loader),
+
+        Tube mode (``allow_mesh_cache`` — caching enabled at/above the
+        prepared level):
+        1. prepared CAVE mesh cache (``FlyWireMeshCache``) — CAVE-derived,
+           extrusion-free, and already at the render preparation level,
         2. shared raw SWC cache (+ legacy API-pickle migration),
-        3. prepared CAVE mesh cache (``FlyWireMeshCache``), only when
-           caching is enabled in tube mode at/above the prepared level,
+        3. healed-ZIP SWC (canonical raw bundle),
         4. CAVE API (online, no skeletonization, no SWC writes).
+
+        Line mode (mesh cache disabled): the order is SWC-first —
+        1. shared raw SWC cache, 2. healed-ZIP SWC, 3. CAVE API — because
+        mesh sources would have to be skeletonized in memory at the render
+        boundary and would render with different geometry than the trees
+        used in tube mode.
 
         Bodies are classified as ``zip``, ``raw_cache``, ``mesh_cache``,
         ``local_repaired`` or ``cave``.  Cache sources (2/3) are skipped when
@@ -8188,8 +8258,11 @@ class VisualizeSkeleton:
 
         remaining = list(requested)
 
-        # 1. Healed ZIP SWC.
-        if remaining:
+        def _take_bundle():
+            """Healed-ZIP SWC (canonical raw bundle)."""
+            nonlocal remaining
+            if not remaining:
+                return
             zip_skeletons = self._preload_fafb_skeletons(
                 body_ids_filter=remaining)
             if zip_skeletons:
@@ -8203,9 +8276,11 @@ class VisualizeSkeleton:
                              if b not in zip_neurons]
                 skeleton_cache.update(zip_neurons)
 
-        # 2. Shared raw SWC cache (local cache source: skipped under the
-        #    strict use_cache=False policy).
-        if remaining and self.cache_neurons:
+        def _take_raw_cache():
+            """Shared raw SWC cache (skipped under use_cache=False)."""
+            nonlocal remaining
+            if not remaining or not self.cache_neurons:
+                return
             raw_skeletons, missing = self._load_api_cached_skeletons(
                 remaining)
             if raw_skeletons:
@@ -8219,8 +8294,11 @@ class VisualizeSkeleton:
                              if b not in raw_neurons]
                 skeleton_cache.update(raw_neurons)
 
-        # 3. Prepared CAVE mesh cache.
-        if remaining and allow_mesh_cache:
+        def _take_mesh_cache():
+            """Prepared CAVE mesh cache (tube mode only)."""
+            nonlocal remaining
+            if not remaining:
+                return
             loaded, missing = self._load_cached_fafb_meshes(remaining)
             if loaded:
                 mesh_neurons = {
@@ -8232,6 +8310,22 @@ class VisualizeSkeleton:
                 remaining = [b for b in missing
                              if b not in mesh_neurons]
                 mesh_cache.update(mesh_neurons)
+
+        if allow_mesh_cache:
+            # Tube mode: the prepared mesh cache wins. Its entries are
+            # CAVE-derived (extrusion-free) and already at the render
+            # preparation level, so they skip the extrusion check/repair
+            # cycle that tree sources go through below.
+            _take_mesh_cache()
+            _take_raw_cache()
+            _take_bundle()
+        else:
+            # Line mode: SWC-first (raw cache before the canonical bundle,
+            # matching the pipeline priority); mesh sources would be
+            # skeletonized in memory at the render boundary with different
+            # geometry.
+            _take_raw_cache()
+            _take_bundle()
 
         # Extrusion repair on TreeNeuron sources only.
         tree_bodies = [

@@ -1602,6 +1602,12 @@ class ComparisonParameters:
                 print(f"{indent}    ({split_types_str})")
                 print(f"{indent}    💡 Results from {tgt_ds} will aggregate these {len(split_types)} types.")
                 print(f"{indent}    To avoid aggregation, use custom LabelMapper or set auto_type_mapping=False.")
+
+        # Always tell the user to double check automatic mappings
+        if (summary['different_mappings'] or summary['n_to_1_warnings']
+                or summary['one_to_n_warnings']):
+            print(f"\n{indent}⚠️  These auto type mappings were applied automatically - "
+                  f"please double check them before interpreting cross-dataset results.")
     
     def get_auto_type_mapper(self) -> Optional[Any]:
         """

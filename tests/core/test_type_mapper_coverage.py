@@ -195,6 +195,190 @@ def test_missing_flywire_table_disables_rename(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# User warning notes (expanded / N-to-1 / 1-to-N)
+# ---------------------------------------------------------------------------
+
+def test_build_user_warning_notes_expanded_rename(rename_mapper):
+    notes = rename_mapper.build_user_warning_notes(['Mc249'], [MCNS, FW])
+    # one expanded note + the double-check advice
+    assert len(notes) == 2
+    assert "'Mc249'" in notes[0] and "'APDN3'" in notes[0]
+    assert 'FAFB' in notes[0]
+    assert any('double check' in n.lower() for n in notes)
+
+
+def test_build_user_warning_notes_n_to_1(rename_mapper):
+    # McCB and McPV share the FAFB type LPN: one N-to-1 note (per conflict,
+    # not per queried type), plus expanded notes and the advice.
+    notes = rename_mapper.build_user_warning_notes(['McCB', 'McPV'], [MCNS, FW])
+    n_to_1_notes = [n for n in notes if 'N-to-1' in n]
+    assert len(n_to_1_notes) == 1
+    assert 'McCB' in n_to_1_notes[0] and 'McPV' in n_to_1_notes[0]
+    assert 'LPN' in n_to_1_notes[0]
+    assert any('double check' in n.lower() for n in notes)
+
+
+def test_build_user_warning_notes_one_to_n(rename_mapper):
+    notes = rename_mapper.build_user_warning_notes(['McOld'], [MCNS, FW])
+    # no expanded note (ambiguous split maps to nothing) ...
+    assert not any('expanded' in n for n in notes)
+    assert any(
+        '1-to-N' in n and 'SplitA' in n and 'SplitB' in n
+        and 'no automatic mapping' in n
+        for n in notes
+    )
+    assert any('double check' in n.lower() for n in notes)
+
+
+def test_build_user_warning_notes_empty_cases(rename_mapper):
+    # identical name everywhere -> no notes
+    assert rename_mapper.build_user_warning_notes(['Same1'], [MCNS, FW]) == []
+    # unknown types, empty inputs, patterns, non-str -> no notes
+    assert rename_mapper.build_user_warning_notes(['NoSuchType'], [MCNS, FW]) == []
+    assert rename_mapper.build_user_warning_notes([], [MCNS, FW]) == []
+    assert rename_mapper.build_user_warning_notes(['Mc249'], []) == []
+    assert rename_mapper.build_user_warning_notes(['Agg*'], [MCNS, FW]) == []
+    assert rename_mapper.build_user_warning_notes([123], [MCNS, FW]) == []
+
+
+def test_build_user_warning_notes_unloaded_mapper(tmp_path):
+    m = CrossDatasetTypeMapper(
+        neuron_df_path=str(tmp_path / 'missing.csv'), verbose=False)
+    assert m.build_user_warning_notes(['Mc249'], [MCNS, FW]) == []
+
+
+# ---------------------------------------------------------------------------
+# Alias candidates (expanded viewer search)
+# ---------------------------------------------------------------------------
+
+ALIAS_ROWS = (
+    "bodyId,type,flywireType,hemibrainType,mancType\n"
+    "21,Duo,Duo,,\n"
+    "22,DuoB,DuoB,,\n"
+)
+ALIAS_FAFB_TABLE = (
+    "bodyId,type,instance,additional_type(s)\n"
+    "g1,Duo,Duo_1,DuoB\n"
+)
+
+
+@pytest.fixture
+def alias_mapper(tmp_path):
+    """Same-name candidate carrying the orthogonal aggregation annotation:
+    FAFB 'Duo' is native and aggregates male-cns Duo + DuoB."""
+    mcns_csv = tmp_path / 'mcns_alias.csv'
+    mcns_csv.write_text(ALIAS_ROWS, encoding='utf-8')
+    fafb_csv = tmp_path / 'fafb_alias.csv'
+    fafb_csv.write_text(ALIAS_FAFB_TABLE, encoding='utf-8')
+    m = CrossDatasetTypeMapper(
+        neuron_df_path=str(mcns_csv),
+        flywire_neuron_df_paths={
+            'flywire_FAFB_v783': str(fafb_csv),
+            'flywire_BANC_v626': None,
+        },
+        verbose=False,
+    )
+    assert m.load() is True
+    return m
+
+
+def test_get_alias_candidates_renamed(rename_mapper):
+    res = rename_mapper.get_alias_candidates('Mc249', [MCNS, FW])
+    assert res[MCNS]['outcome'] == 'matched'
+    assert res[MCNS]['candidates'] == [
+        {'name': 'Mc249', 'kind': 'same name', 'aggregates': None},
+    ]
+    assert res[FW]['outcome'] == 'matched'
+    assert res[FW]['candidates'] == [
+        {'name': 'APDN3', 'kind': 'renamed', 'aggregates': None},
+    ]
+
+
+def test_get_alias_candidates_renamed_with_aggregates(rename_mapper):
+    # LPN receives McCB and McPV: the renamed candidate must warn that a
+    # match by it also covers the sibling type.
+    res = rename_mapper.get_alias_candidates('McCB', [MCNS, FW])
+    assert res[FW]['candidates'] == [
+        {'name': 'LPN', 'kind': 'renamed', 'aggregates': ['McCB', 'McPV']},
+    ]
+
+
+def test_get_alias_candidates_same_name_with_aggregates(alias_mapper):
+    res = alias_mapper.get_alias_candidates('Duo', [MCNS, FW])
+    assert res[MCNS]['candidates'] == [
+        {'name': 'Duo', 'kind': 'same name', 'aggregates': None},
+    ]
+    assert res[FW]['candidates'] == [
+        {'name': 'Duo', 'kind': 'same name', 'aggregates': ['Duo', 'DuoB']},
+    ]
+    # ...and the reverse: DuoB is renamed to Duo, with the same warning.
+    res_b = alias_mapper.get_alias_candidates('DuoB', [MCNS, FW])
+    assert res_b[FW]['candidates'] == [
+        {'name': 'Duo', 'kind': 'renamed', 'aggregates': ['Duo', 'DuoB']},
+    ]
+
+
+def test_get_alias_candidates_one_of_n(rename_mapper):
+    # LPN's reverse aggregation is refused: the male-cns candidates are the
+    # group members, labelled 'one of N'.
+    res = rename_mapper.get_alias_candidates('LPN', [FW, MCNS])
+    assert res[FW]['candidates'] == [
+        {'name': 'LPN', 'kind': 'same name', 'aggregates': ['McCB', 'McPV']},
+    ]
+    assert [c['name'] for c in res[MCNS]['candidates']] == ['McCB', 'McPV']
+    assert all(c['kind'] == 'one of N' for c in res[MCNS]['candidates'])
+    assert all(c['aggregates'] is None for c in res[MCNS]['candidates'])
+
+
+def test_get_alias_candidates_splits_into(rename_mapper):
+    res = rename_mapper.get_alias_candidates('McOld', [MCNS, FW])
+    assert res[MCNS]['outcome'] == 'matched'
+    assert res[FW]['candidates'] == [
+        {'name': 'SplitA', 'kind': 'splits into', 'aggregates': None},
+        {'name': 'SplitB', 'kind': 'splits into', 'aggregates': None},
+    ]
+
+
+def test_get_alias_candidates_outcomes(rename_mapper):
+    # unknown name -> explicit per-dataset outcome
+    res = rename_mapper.get_alias_candidates('NoSuchType', [MCNS, FW])
+    assert res[MCNS]['outcome'] == 'no counterpart known'
+    assert res[FW]['outcome'] == 'no counterpart known'
+    # non-plain-name queries are not applicable
+    for query in ('123', 'Agg*', '', 'a', None, 123):
+        res = rename_mapper.get_alias_candidates(query, [MCNS, FW])
+        assert all(o['outcome'] == 'not applicable' for o in res.values()), query
+
+
+def test_get_alias_candidates_unloaded_mapper(tmp_path):
+    m = CrossDatasetTypeMapper(
+        neuron_df_path=str(tmp_path / 'missing.csv'), verbose=False)
+    res = m.get_alias_candidates('Mc249', [MCNS, FW])
+    assert all(o['outcome'] == 'mapper unavailable' for o in res.values())
+
+
+def test_get_alias_candidates_kinds_exclusive(rename_mapper):
+    # property: every candidate carries exactly one valid kind, names are
+    # unique per dataset, and the orthogonal flag never changes the kind.
+    queries = ['Mc249', 'McCB', 'McPV', 'McOld', 'APDN3', 'LPN', 'MTe07',
+               'Same1', 'Duo', 'McDirect']
+    for query in queries:
+        res = rename_mapper.get_alias_candidates(query, [MCNS, FW])
+        for outcome in res.values():
+            names = [c['name'] for c in outcome['candidates']]
+            assert len(names) == len(set(names)), (query, names)
+            for cand in outcome['candidates']:
+                assert cand['kind'] in CrossDatasetTypeMapper.ALIAS_KINDS
+                assert sum(k == cand['kind'] for k in CrossDatasetTypeMapper.ALIAS_KINDS) == 1
+
+
+def test_get_alias_candidates_hemisphere_suffix(rename_mapper):
+    res = rename_mapper.get_alias_candidates('Mc249_L', [MCNS, FW])
+    assert res[FW]['candidates'][0]['name'] == 'APDN3_L'
+    assert res[FW]['candidates'][0]['kind'] == 'renamed'
+
+
+# ---------------------------------------------------------------------------
 # Loading
 # ---------------------------------------------------------------------------
 

@@ -4,8 +4,7 @@ Every run tab shares the OutputPanel; after a successful run it renders a
 top-N preview of each table registered for that tool in
 ``TOOL_GUIDE_SPECS`` (ui/output_guide.py, entries flagged ``preview``).
 Find Homologs, for example, previews ``bodyid_results.csv``,
-``type_summary.csv``, ``type_level_results.csv`` and
-``morph_similarity.csv``.
+``type_summary.csv`` and ``type_level_results.csv``.
 
 `add_result_previews` renders those tables under the output panel so the
 primary results are always visible after a run.

@@ -907,6 +907,172 @@ def test_cache_coverage_fafb(tmp_path, monkeypatch):
     assert cache.coverage()["skeletons"] == 0
 
 
+# ---------------------------------------------------------------------------
+# load_flywire_skeletons_batch (raw cache -> healed bundle -> CAVE)
+# ---------------------------------------------------------------------------
+
+class _BundleGetStub:
+    """Bundle double resolving body ids to SWC text."""
+
+    def __init__(self, texts):
+        self._texts = {int(k): v for k, v in texts.items()}
+        self.closed = False
+
+    def get(self, bid):
+        return self._texts.get(int(bid))
+
+    def close(self):
+        self.closed = True
+
+
+class _RawCacheStub:
+    def __init__(self, neurons):
+        self._neurons = {int(k): v for k, v in neurons.items()}
+
+    def load_skeleton(self, bid, simplification=None):
+        return self._neurons.get(int(bid))
+
+
+class _CaveFetcherStub:
+    """CAVEDataFetcher double; skeletons is a class-level id -> neuron map."""
+
+    skeletons: dict = {}
+
+    def __init__(self, **kwargs):
+        self.called = []
+
+    def fetch_skeleton(self, bid, use_cache=True, denoise_twigs=None):
+        self.called.append(int(bid))
+        return self.skeletons.get(int(bid))
+
+
+class _PersistingRawCacheStub(_RawCacheStub):
+    def __init__(self, neurons):
+        super().__init__(neurons)
+        self.persisted = {}
+
+    def persist_skeletons(self, neurons, simplification=None):
+        self.persisted.update({int(k): simplification
+                               for k in neurons})
+        return len(neurons)
+
+
+def test_load_flywire_skeletons_batch_cache_then_bundle(tmp_path, monkeypatch):
+    tree_a = make_tree()
+    bundle = _BundleGetStub({2: make_swc_text(nid=2)})
+    raw_cache = _PersistingRawCacheStub({1: tree_a})
+    monkeypatch.setattr(M, "find_similar_raw_cache", lambda ds, **k: raw_cache)
+    monkeypatch.setattr(M, "_fafb_bundle", lambda ds, root: bundle)
+    logs = []
+    out = M.load_flywire_skeletons_batch(
+        "flywire_FAFB_v783", [1, 2], project_root=str(tmp_path),
+        log=logs.append, check_extrusions=False)
+    assert set(out) == {1, 2}
+    assert out[1] is tree_a
+    assert int(out[2].id) == 2          # parsed from the bundle SWC text
+    assert bundle.closed                # bundle handle always closed
+    # warm-up: the newly served bundle tree is cached into the raw store
+    assert raw_cache.persisted == {2: None}   # as-stored level
+    assert any("healed bundle resolved 1/1" in m for m in logs)
+
+
+def test_load_flywire_skeletons_batch_replaces_flagged_extrusions(
+        tmp_path, monkeypatch):
+    import fafb_utils
+
+    bundle = _BundleGetStub({7: make_swc_text(nid=7)})
+    monkeypatch.setattr(M, "find_similar_raw_cache",
+                        lambda ds, **k: _PersistingRawCacheStub({}))
+    monkeypatch.setattr(M, "_fafb_bundle", lambda ds, root: bundle)
+    monkeypatch.setattr(fafb_utils, "flag_extrusions", lambda *a, **k: [7])
+    statuses = {}
+    monkeypatch.setattr(fafb_utils, "set_extrusion_repair_status",
+                        lambda root, folder, s: statuses.update(s))
+    replacement = make_tree()
+    cave_ids = []
+    monkeypatch.setattr(
+        M, "_flywire_cave_skeletons",
+        lambda dataset, body_ids, project_root=None, log=None,
+        denoise_twigs=None: (cave_ids.extend(int(b) for b in body_ids),
+                             {7: replacement})[1])
+    out = M.load_flywire_skeletons_batch(
+        "flywire_FAFB_v783", [7], project_root=str(tmp_path),
+        check_extrusions=True)
+    assert out[7] is replacement        # flagged tree replaced via CAVE
+    assert cave_ids == [7]
+    assert statuses == {7: "api_repaired"}
+
+
+def test_load_flywire_skeletons_batch_respects_api_repaired(
+        tmp_path, monkeypatch):
+    import fafb_utils
+
+    bundle = _BundleGetStub({7: make_swc_text(nid=7)})
+    monkeypatch.setattr(M, "find_similar_raw_cache",
+                        lambda ds, **k: _PersistingRawCacheStub({}))
+    monkeypatch.setattr(M, "_fafb_bundle", lambda ds, root: bundle)
+    monkeypatch.setattr(fafb_utils, "flag_extrusions", lambda *a, **k: [7])
+    monkeypatch.setattr(
+        fafb_utils, "load_extrusion_repair_status",
+        lambda root, folder: {"7": "api_repaired"})
+
+    def no_cave(*a, **k):
+        raise AssertionError("an api_repaired tree must not be re-replaced")
+
+    monkeypatch.setattr(M, "_flywire_cave_skeletons", no_cave)
+    out = M.load_flywire_skeletons_batch(
+        "flywire_FAFB_v783", [7], project_root=str(tmp_path),
+        check_extrusions=True)
+    assert int(out[7].id) == 7          # cached CAVE-derived tree kept
+
+
+def test_load_flywire_skeletons_batch_cave_fallback(tmp_path, monkeypatch):
+    # No raw cache, no bundle: id 5 can only come from CAVE.
+    def no_cache(ds, **k):
+        raise FileNotFoundError("no cache")
+
+    def no_bundle(ds, root):
+        raise FileNotFoundError("no bundle")
+
+    monkeypatch.setattr(M, "find_similar_raw_cache", no_cache)
+    monkeypatch.setattr(M, "_fafb_bundle", no_bundle)
+    tree = make_tree()
+    monkeypatch.setattr(M, "_flywire_cave_skeletons",
+                        lambda dataset, body_ids, project_root=None, log=None,
+                        denoise_twigs=None: {5: tree})
+    out = M.load_flywire_skeletons_batch(
+        "flywire_BANC_v626", [5], project_root=str(tmp_path))
+    assert set(out) == {5} and out[5] is tree
+
+
+def test_flywire_cave_skeletons_requires_token(tmp_path, monkeypatch):
+    monkeypatch.setattr("utils.flywire_readiness.flywire_skeleton_readiness",
+                        lambda *a, **k: {"cave_token": False})
+
+    class _Boom:
+        def __init__(self, *a, **k):
+            raise AssertionError("CAVE fetcher must not run without a token")
+
+    monkeypatch.setattr("cave_data_fetcher.CAVEDataFetcher", _Boom)
+    logs = []
+    out = M._flywire_cave_skeletons(
+        "flywire_FAFB_v783", [7], project_root=str(tmp_path), log=logs.append)
+    assert out == {}
+    assert any("CAVE_TOKEN is not configured" in m for m in logs)
+
+
+def test_flywire_cave_skeletons_skeletonizes_via_fetcher(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr("utils.flywire_readiness.flywire_skeleton_readiness",
+                        lambda *a, **k: {"cave_token": True})
+    _CaveFetcherStub.skeletons = {5: make_tree()}
+    monkeypatch.setattr("cave_data_fetcher.CAVEDataFetcher", _CaveFetcherStub)
+    out = M._flywire_cave_skeletons(
+        "flywire_FAFB_v783", [5], project_root=str(tmp_path),
+        denoise_twigs=3000.0)
+    assert set(out) == {5} and out[5] is _CaveFetcherStub.skeletons[5]
+
+
 def test_append_vectors_branches(tmp_path, monkeypatch):
     import fcntl
     cache = _raw_cache(tmp_path)
@@ -1908,9 +2074,10 @@ def test_enrich_homolog_results_paths(tmp_path, monkeypatch):
     out = M.enrich_homolog_results(frame, "hemibrain:v1.2.1",
                                    "male-cns:v1.0",
                                    project_root=str(tmp_path), verbose=False)
-    assert "morph_cosine" in out.columns and "morph_pearson" in out.columns
-    assert not np.isnan(out["morph_cosine"].iloc[0])
-    assert np.isnan(out["morph_cosine"].iloc[1])  # target 99 has no vector
+    assert {"morph_v2_similarity",
+            "morph_nblast"} <= set(out.columns)
+    assert not np.isnan(out["morph_v2_similarity"].iloc[0])
+    assert np.isnan(out["morph_v2_similarity"].iloc[1])  # target 99 has no vector
     # empty frame / missing columns pass through untouched
     empty = pd.DataFrame()
     assert M.enrich_homolog_results(empty, "a", "b") is empty
@@ -1918,12 +2085,12 @@ def test_enrich_homolog_results_paths(tmp_path, monkeypatch):
     no_cols = pd.DataFrame({"a": [1]})
     assert M.enrich_homolog_results(no_cols, "a", "b") is no_cols
     # vector computation failure -> NaN columns, no rows dropped
-    monkeypatch.setattr(M, "find_similar_dataset_cache",
+    monkeypatch.setattr(M, "find_similar_dataset_cache_v2",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError()))
     out = M.enrich_homolog_results(frame, "hemibrain:v1.2.1",
                                    "male-cns:v1.0",
                                    project_root=str(tmp_path))
-    assert np.isnan(out["morph_cosine"]).all() and len(out) == 2
+    assert np.isnan(out["morph_v2_similarity"]).all() and len(out) == 2
 
 
 def test_soma_positions_table_variants(tmp_path):

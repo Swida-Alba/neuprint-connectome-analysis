@@ -30,7 +30,7 @@ Key Features:
 import os
 import warnings
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Union
 from collections import defaultdict
 import pandas as pd
 
@@ -195,6 +195,12 @@ class CrossDatasetTypeMapper:
         # that are not themselves a primary type are indexed.
         self._flywire_alt_to_primary: Dict[str, Dict[str, Set[str]]] = {}
 
+        # Per FlyWire mapping key, the dataset's own primary type names.
+        self._flywire_primaries: Dict[str, Set[str]] = {}
+
+        # Derived lookup for get_alias_candidates; rebuilt with the mappings.
+        self._alias_n_to_1_cache: Optional[Dict[str, TypeMappingConflict]] = None
+
         # Unsupported releases are reported once per mapper instance.  The
         # mapping file is release-specific, so an unknown release must not be
         # silently treated as the nearest supported release.
@@ -271,6 +277,7 @@ class CrossDatasetTypeMapper:
         tables only disable the rename resolution for that namespace.
         """
         self._flywire_alt_to_primary = {}
+        self._flywire_primaries = {}
         for key in FLYWIRE_MAPPING_KEYS:
             path = self._flywire_neuron_df_paths.get(key)
             if not path:
@@ -304,6 +311,9 @@ class CrossDatasetTypeMapper:
                 continue
 
             primaries = set(table['type'].dropna().astype(str).str.strip()) - {''}
+            # Primary types double as the authoritative "does this name exist
+            # in the dataset" check for alias candidates.
+            self._flywire_primaries[key] = primaries
             alt_to_primary: Dict[str, Set[str]] = {}
             for cell, primary in zip(table[alt_column], table['type']):
                 names = self._split_type_cell(cell)
@@ -399,7 +409,11 @@ class CrossDatasetTypeMapper:
         """Build internal type mapping dictionaries."""
         if self._neuron_df is None:
             return
-        
+
+        # Drop the alias-candidate lookup caches; they derive from the
+        # conflicts rebuilt below.
+        self._alias_n_to_1_cache = None
+
         df = self._neuron_df.copy()
         
         # Clean up: fill NaN with empty string, strip whitespace
@@ -1542,6 +1556,311 @@ class CrossDatasetTypeMapper:
             'n_to_1_count': n_to_1_count,
             'one_to_n_count': one_to_n_count,
         }
+
+    def build_user_warning_notes(
+        self,
+        type_names: List[Union[str, int]],
+        datasets: List[str],
+        max_examples: int = 15,
+    ) -> List[str]:
+        """Build user-facing warning notes for what auto type mapping changed.
+
+        Covers the three cases that can silently affect a run's results:
+
+        * expanded mappings - a queried type name is different in a target
+          dataset (e.g. male-cns SLP249 -> FAFB APDN3 via the additional
+          Type(S) annotations), so the target side was matched under the
+          mapped name;
+        * N-to-1 mappings - several types share one name across datasets;
+          they were NOT merged to avoid wrong aggregation;
+        * 1-to-N mappings - a type splits into several names in another
+          dataset; no automatic mapping was made for it.
+
+        Each note is one plain-text bullet.  When a category affects more
+        than ``max_examples`` types it is summarized with count and examples.
+        A final note asks the user to double check the automatic mappings.
+        Returns an empty list when the mapper is unavailable or nothing
+        applies.
+        """
+        if not self._loaded:
+            if not self.load():
+                return []
+        str_types = [
+            t for t in type_names
+            if isinstance(t, str) and t and '*' not in t
+        ]
+        if not str_types or not datasets:
+            return []
+
+        # O(1) conflict involvement lookups (a per-type scan over all
+        # conflicts would be too slow for result-type sized inputs).
+        n_to_1_conflicts = self.get_n_to_1_conflicts()
+        one_to_n_conflicts = self.get_1_to_n_conflicts()
+        n_to_1_by_source = {c.source_type: c for c in n_to_1_conflicts}
+        n_to_1_by_member: Dict[str, TypeMappingConflict] = {}
+        for conflict in n_to_1_conflicts:
+            for member_type in conflict.target_types:
+                n_to_1_by_member.setdefault(member_type, conflict)
+        one_to_n_by_source = {c.source_type: c for c in one_to_n_conflicts}
+
+        expanded: List[Tuple[str, Dict[str, str]]] = []
+        n_to_1: List[Tuple[str, TypeMappingConflict, bool]] = []
+        one_to_n: List[str] = []
+        seen_n_to_1: Set[int] = set()
+        seen_one_to_n: Set[str] = set()
+
+        for type_name in str_types:
+            base_name, _ = self._split_hemi_suffix(type_name)
+            mappings = self.resolve_type_across_datasets(base_name, datasets)
+            different = {
+                ds: mapped
+                for ds, mapped in mappings.items()
+                if mapped and mapped != base_name
+            }
+            if different:
+                expanded.append((type_name, different))
+
+            conflict = (
+                n_to_1_by_source.get(base_name)
+                or n_to_1_by_member.get(base_name)
+            )
+            if conflict is not None and id(conflict) not in seen_n_to_1:
+                seen_n_to_1.add(id(conflict))
+                n_to_1.append((base_name, conflict, base_name in conflict.target_types))
+
+            conflict = one_to_n_by_source.get(base_name)
+            if conflict is not None and base_name not in seen_one_to_n:
+                seen_one_to_n.add(base_name)
+                one_to_n.append(base_name)
+
+        notes: List[str] = []
+
+        if expanded:
+            if len(expanded) <= max_examples:
+                for type_name, different in expanded:
+                    parts = ', '.join(
+                        f"'{mapped}' ({self.get_dataset_full_name(ds)})"
+                        for ds, mapped in sorted(different.items())
+                    )
+                    notes.append(
+                        f"Auto type mapping expanded queried type '{type_name}' "
+                        f"to {parts}; the queried name may not exist there."
+                    )
+            else:
+                examples = '; '.join(
+                    f"'{type_name}' -> '{next(iter(sorted(different.values())))}'"
+                    for type_name, different in expanded[:max_examples]
+                )
+                notes.append(
+                    f"Auto type mapping expanded {len(expanded)} type names to "
+                    f"their mapped names in other datasets (examples: {examples}; ...)."
+                )
+
+        if n_to_1:
+            if len(n_to_1) <= max_examples:
+                for type_name, conflict, is_member in n_to_1:
+                    others = ', '.join(sorted(conflict.target_types))
+                    if is_member:
+                        notes.append(
+                            f"N-to-1 type mapping: '{type_name}' is one of {len(conflict.target_types)} "
+                            f"types ({others}) that all correspond to '{conflict.source_type}' in "
+                            f"{self.get_dataset_full_name(conflict.source_dataset)}; "
+                            "they were NOT merged to avoid wrong aggregation."
+                        )
+                    else:
+                        notes.append(
+                            f"N-to-1 type mapping: '{type_name}' corresponds to multiple types "
+                            f"({others}) in {self.get_dataset_full_name(conflict.target_dataset)}; "
+                            "only exact-name matches were used, so results may be incomplete."
+                        )
+            else:
+                members = sum(1 for _, _, is_member in n_to_1 if is_member)
+                examples = ', '.join(
+                    f"'{type_name}' ({conflict.source_type})"
+                    for type_name, conflict, _ in n_to_1[:max_examples]
+                )
+                notes.append(
+                    f"N-to-1 type mapping involved {len(n_to_1)} type groups "
+                    f"({members} queried types are one of several types sharing a "
+                    f"name across datasets; examples: {examples}; ...); those were "
+                    "NOT merged to avoid wrong aggregation."
+                )
+
+        if one_to_n:
+            if len(one_to_n) <= max_examples:
+                for type_name in one_to_n:
+                    conflict = one_to_n_by_source[type_name]
+                    split = ', '.join(sorted(conflict.target_types))
+                    notes.append(
+                        f"1-to-N type mapping: '{type_name}' splits into "
+                        f"{len(conflict.target_types)} types ({split}) in "
+                        f"{self.get_dataset_full_name(conflict.target_dataset)}; "
+                        "no automatic mapping was made for it."
+                    )
+            else:
+                notes.append(
+                    f"1-to-N type mapping affected {len(one_to_n)} types "
+                    f"(examples: {', '.join(one_to_n[:max_examples])}; ...); "
+                    "no automatic mapping was made for them."
+                )
+
+        if notes:
+            notes.append(
+                "These name mappings were applied automatically - please "
+                "double check them (against the datasets' type annotations or "
+                "the exported mapping files) before interpreting cross-dataset "
+                "results."
+            )
+        return notes
+
+    # Candidate kinds for get_alias_candidates.  Exactly one applies per
+    # candidate:
+    # - 'same name' vs the rest: identity is checked first.
+    # - 'renamed' vs 'splits into': the forward mapping is unique or many.
+    # - 'renamed' vs 'one of N': 'renamed' requires a unique reverse
+    #   mapping, 'one of N' requires the reverse to be refused (N-to-1).
+    # - 'splits into' vs 'one of N': forward conflicts only arise for
+    #   male-cns-namespace queries, reverse conflicts only for
+    #   non-male-cns queries - the query sits in one namespace.
+    ALIAS_KINDS = ('same name', 'renamed', 'splits into', 'one of N')
+
+    def _alias_aggregates(self, name: str, mapping_key: str) -> Optional[List[str]]:
+        """Sibling types a match by *name* also covers, if any.
+
+        Non-None exactly when the candidate's own reverse mapping is refused
+        (N-to-1): matching by this one name in ``mapping_key`` also matches
+        the other listed male-cns types.
+        """
+        conflict = self._n_to_1_by_source_cache().get(name)
+        if conflict is not None and self._get_type_mapping_key(conflict.source_dataset) == mapping_key:
+            return sorted(conflict.target_types)
+        return None
+
+    def _n_to_1_by_source_cache(self) -> Dict[str, TypeMappingConflict]:
+        cache = getattr(self, '_alias_n_to_1_cache', None)
+        if cache is None:
+            cache = {c.source_type: c for c in self.get_n_to_1_conflicts()}
+            self._alias_n_to_1_cache = cache
+        return cache
+
+    def get_alias_candidates(
+        self,
+        type_name: Union[str, int, None],
+        datasets: List[str],
+    ) -> Dict[str, Dict[str, any]]:
+        """Resolve one queried type name into per-dataset alias candidates.
+
+        Built for the neuron-index viewer's expanded search: the local query
+        found nothing, so show which names in which datasets correspond to
+        the query.  The result never merges datasets - every candidate stays
+        attributed to its dataset so callers can keep cross-dataset rows
+        strictly informational.
+
+        Returns ``{dataset: outcome_dict}`` where outcome_dict is::
+
+            {'outcome': 'matched', 'candidates': [
+                {'name': 'APDN3', 'kind': 'renamed',
+                 'aggregates': ['CL125', 'PLP080', 'SLP250']}, ...]}
+            # or
+            {'outcome': 'no counterpart known', 'candidates': []}
+            # or, for non-plain-name queries (bodyId / pattern / empty):
+            {'outcome': 'not applicable', 'candidates': []}
+
+        Kinds are mutually exclusive (see ALIAS_KINDS); 'aggregates' is an
+        orthogonal annotation naming the sibling types a match by this
+        candidate also covers (the candidate's reverse mapping is refused as
+        N-to-1).  A 'same name' candidate can carry it too when the name is
+        native in both datasets yet aggregates other male-cns types.
+        """
+        datasets = [str(ds) for ds in (datasets or [])]
+        unavailable = {
+            ds: {'outcome': 'mapper unavailable', 'candidates': []}
+            for ds in datasets
+        }
+        if not self._loaded:
+            if not self.load():
+                return unavailable
+        if not datasets:
+            return {}
+
+        not_applicable = {
+            ds: {'outcome': 'not applicable', 'candidates': []}
+            for ds in datasets
+        }
+        if not isinstance(type_name, str):
+            return not_applicable
+        query = type_name.strip()
+        if (
+            not query
+            or '*' in query
+            or query.isdigit()
+            or len(query) < 2
+        ):
+            return not_applicable
+
+        base_name, _ = self._split_hemi_suffix(query)
+        query_ns = self._detect_type_source(base_name)
+
+        one_to_n_by_source: Dict[str, List[TypeMappingConflict]] = {}
+        for conflict in self.get_1_to_n_conflicts():
+            one_to_n_by_source.setdefault(conflict.source_type, []).append(conflict)
+
+        outcomes: Dict[str, Dict[str, any]] = {}
+        for dataset in datasets:
+            d_key = self._get_type_mapping_key(dataset)
+            candidates: List[Dict[str, any]] = []
+            seen: Set[str] = set()
+
+            def _add(name: str, kind: str, aggregates: Optional[List[str]] = None):
+                if name and name not in seen:
+                    seen.add(name)
+                    candidates.append({
+                        'name': name,
+                        'kind': kind,
+                        'aggregates': aggregates,
+                    })
+
+            # A. identity: the queried name is native in this namespace.
+            #    FlyWire primaries come from the dataset's own type column,
+            #    so a name can be native even without a crosswalk entry.
+            if (
+                base_name in self._dataset_types.get(d_key, {})
+                or base_name in self._flywire_primaries.get(d_key, ())
+            ):
+                _add(base_name, 'same name',
+                     self._alias_aggregates(base_name, d_key))
+
+            # B. mapping-driven candidates (namespaces must differ; within
+            # one namespace the mapping value is the name itself).
+            if query_ns is not None and query_ns != d_key:
+                mapped = self.get_mapped_type(query, query_ns, dataset)
+                if mapped and mapped != base_name:
+                    _add(mapped, 'renamed',
+                         self._alias_aggregates(mapped, d_key))
+                elif mapped is None:
+                    if query_ns == 'male-cns:v1.0':
+                        # The query splits into several names here.
+                        for conflict in one_to_n_by_source.get(base_name, []):
+                            if self._get_type_mapping_key(conflict.target_dataset) == d_key:
+                                for target in sorted(conflict.target_types):
+                                    _add(target, 'splits into')
+                    else:
+                        # The reverse aggregation is refused: the candidates
+                        # are the group members (male-cns namespace only).
+                        conflict = self._n_to_1_by_source_cache().get(base_name)
+                        if (
+                            conflict is not None
+                            and self._get_type_mapping_key(conflict.source_dataset) == query_ns
+                            and d_key == 'male-cns:v1.0'
+                        ):
+                            for target in sorted(conflict.target_types):
+                                _add(target, 'one of N')
+
+            outcomes[dataset] = {
+                'outcome': 'matched' if candidates else 'no counterpart known',
+                'candidates': candidates,
+            }
+        return outcomes
     
     def get_canonical_type(self, type_name: str, source_dataset: Optional[str] = None) -> str:
         """

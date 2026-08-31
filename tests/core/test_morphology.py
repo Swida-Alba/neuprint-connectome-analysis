@@ -901,15 +901,15 @@ class TestMorphologyComparer:
         # two identical LINE members -> 1.0; single-member type -> 1.0;
         # unknown/empty types -> NaN
         assert comparer._intra_type_similarity(
-            "LINE", data["bodyIds"], data["types"], data["X"], "cosine"
+            "LINE", data["bodyIds"], data["types"], data["X"]
         ) == pytest.approx(1.0, abs=1e-6)
         assert comparer._intra_type_similarity(
-            "Y", data["bodyIds"], data["types"], data["X"], "cosine"
+            "Y", data["bodyIds"], data["types"], data["X"]
         ) == 1.0
         assert np.isnan(comparer._intra_type_similarity(
-            "ZZZ", data["bodyIds"], data["types"], data["X"], "cosine"))
+            "ZZZ", data["bodyIds"], data["types"], data["X"]))
         assert np.isnan(comparer._intra_type_similarity(
-            "", data["bodyIds"], data["types"], data["X"], "cosine"))
+            "", data["bodyIds"], data["types"], data["X"]))
 
     def test_nblast_type_level_includes_intra_reference(self, tmp_path, monkeypatch):
         root = self._setup(tmp_path, monkeypatch)
@@ -2106,12 +2106,23 @@ class TestFlyWireNblast:
         with pytest.raises(Sentinel):
             c.find_similar()
 
-    def test_dotprops_prefer_healed_zip_skeletons(self, tmp_path, monkeypatch):
-        """FlyWire dotprops follow the visualization pipeline: the healed
-        bundle serves the skeletons, ids missing locally are handed to the
-        token-gated CAVE fallback (never the generic on-demand fetch)."""
-        import zipfile
+    def test_dotprops_prefer_healed_bundle_skeletons(self, tmp_path, monkeypatch):
+        """FlyWire dotprops follow the shared pipeline: the healed bundle
+        serves the skeletons, ids missing everywhere go to the token-gated
+        CAVE skeletonization fallback (never the generic on-demand fetch),
+        and every returned source is a TreeNeuron."""
         import fafb_utils
+
+        class _Bundle:
+            def __init__(self, texts):
+                self._texts = texts
+                self.closed = False
+
+            def get(self, bid):
+                return self._texts.get(int(bid))
+
+            def close(self):
+                self.closed = True
 
         def _swc():
             lines = ["# SWC skeleton"]
@@ -2120,12 +2131,9 @@ class TestFlyWireNblast:
                 lines.append(f"{i} 1 {i} 0 0 1.0 {parent}")
             return "\n".join(lines)
 
-        zip_path = tmp_path / "sk.zip"
-        with zipfile.ZipFile(zip_path, "w") as z:
-            z.writestr("42.swc", _swc())
-            z.writestr("43.swc", _swc())
-        monkeypatch.setattr(morph, "_fafb_skeleton_zip_path",
-                            lambda dataset, project_root=None: zip_path)
+        monkeypatch.setattr(morph, "_fafb_bundle",
+                            lambda ds, root: _Bundle({42: _swc(),
+                                                      43: _swc()}))
         # The extrusion test is exercised separately; keep this test focused
         # on the local-bundle -> CAVE fallback flow.
         monkeypatch.setattr(fafb_utils, "flag_extrusions",
@@ -2133,23 +2141,28 @@ class TestFlyWireNblast:
         c = morph.MorphologyComparer(query=42, dataset="flywire_FAFB_v783",
                                      method="nblast", project_root=str(tmp_path),
                                      verbose=False)
-        fetched = []
-        monkeypatch.setattr(c, "_fafb_cave_fallback",
-                            lambda ids: (fetched.extend(ids), {})[1])
+        cave_ids = []
+
+        def fake_cave(dataset, body_ids, project_root=None, log=None,
+                      denoise_twigs=None):
+            cave_ids.extend(int(b) for b in body_ids)
+            return {}
+
+        monkeypatch.setattr(morph, "_flywire_cave_skeletons", fake_cave)
 
         def no_fetch(*a, **k):
             raise AssertionError(
                 "generic on-demand fetch must not serve FlyWire")
 
         monkeypatch.setattr(morph, "fetch_skeleton_on_demand", no_fetch)
-        monkeypatch.setattr(morph, "_find_skeleton_file",
-                            lambda d, b, project_root=None: None)
         dps = c._dotprops_for_ids([42, 43, 44])
-        # bundle skeletons served without touching the pickle cache or fetch
-        assert dps[42] is not None and dps[43] is not None
-        # ids missing from the bundle go to the CAVE fallback
-        assert dps[44] is None
-        assert fetched == [44]
+        # dotprops come back keyed by the dataset-canonical id
+        k42, k43, k44 = (c._body_id(b) for b in (42, 43, 44))
+        # bundle skeletons served as trees without any online fetch
+        assert dps[k42] is not None and dps[k43] is not None
+        # ids missing from the bundle go to the CAVE skeletonization fallback
+        assert dps[k44] is None
+        assert cave_ids == [44]
 
     def test_nblast_pairwise_scores_match_nblaster(self, tmp_path):
         """The in-process pair scoring produces exactly the NBlaster
@@ -2173,12 +2186,23 @@ class TestFlyWireNblast:
             expected = float(nb.single_query_target(qi, ti, scores='forward'))
             assert scores[bid] == pytest.approx(expected, abs=1e-9)
 
-    def test_fafb_pipeline_checks_extrusions(self, tmp_path, monkeypatch):
-        """With check_extrusions enabled, bundle skeletons run through the
-        cached extrusion check and flagged neurons join the CAVE fallback
-        batch."""
-        import zipfile
+    def test_fafb_pipeline_replaces_flagged_extrusions(self, tmp_path,
+                                                       monkeypatch):
+        """With the extrusion check enabled (the default), bundle skeletons
+        run through the cached check; flagged neurons are REPLACED through
+        the CAVE skeletonization fallback and the repair status is
+        recorded."""
         import fafb_utils
+
+        class _Bundle:
+            def __init__(self, texts):
+                self._texts = texts
+
+            def get(self, bid):
+                return self._texts.get(int(bid))
+
+            def close(self):
+                pass
 
         def _swc():
             lines = ["# SWC skeleton"]
@@ -2187,33 +2211,45 @@ class TestFlyWireNblast:
                 lines.append(f"{i} 1 {i} 0 0 1.0 {parent}")
             return "\n".join(lines)
 
-        zip_path = tmp_path / "sk.zip"
-        with zipfile.ZipFile(zip_path, "w") as z:
-            z.writestr("42.swc", _swc())
-            z.writestr("43.swc", _swc())
-        monkeypatch.setattr(morph, "_fafb_skeleton_zip_path",
-                            lambda dataset, project_root=None: zip_path)
+        monkeypatch.setattr(morph, "_fafb_bundle",
+                            lambda ds, root: _Bundle({42: _swc(),
+                                                      43: _swc()}))
         monkeypatch.setattr(fafb_utils, "flag_extrusions",
                             lambda *a, **k: [42])
+        statuses = {}
+        monkeypatch.setattr(fafb_utils, "set_extrusion_repair_status",
+                            lambda root, folder, s: statuses.update(s))
         c = morph.MorphologyComparer(query=42, dataset="flywire_FAFB_v783",
                                      method="nblast", project_root=str(tmp_path),
                                      verbose=False, check_extrusions=True)
-        fetched = []
-        monkeypatch.setattr(c, "_fafb_cave_fallback",
-                            lambda ids, **kwargs: (
-                                fetched.append((list(ids), kwargs)), {})[1])
+        replacement = line_neuron()
+        monkeypatch.setattr(morph, "_flywire_cave_skeletons",
+                            lambda dataset, body_ids, project_root=None,
+                            log=None, denoise_twigs=None: (
+                                cave_ids.extend(int(b) for b in body_ids),
+                                {42: replacement})[1])
+        cave_ids: list = []
         loaded = c._load_fafb_skeletons([42, 43])
-        assert 42 in loaded and 43 in loaded
-        # 42 flagged by the extrusion check -> CAVE fallback requested
-        assert fetched == [([42], {"force_refresh": True})]
+        assert loaded[42] is replacement      # flagged -> CAVE replacement
+        assert 43 in loaded                   # clean bundle tree kept
+        assert cave_ids == [42]
+        assert statuses == {42: "api_repaired"}
 
-    def test_fafb_pipeline_skips_extrusions_by_default(self, tmp_path,
-                                                       monkeypatch):
-        """Similarity runs load skeletons unchecked by default: the render
-        pipeline (top-N visualization, Skeleton tab) owns the extrusion
-        check, so the fetch must not pay the detector cost."""
-        import zipfile
+    def test_fafb_pipeline_skips_extrusions_when_opted_out(self, tmp_path,
+                                                           monkeypatch):
+        """``check_extrusions=False`` opts the loader out of the detector:
+        bundle skeletons are served unchecked and no CAVE refetch happens."""
         import fafb_utils
+
+        class _Bundle:
+            def __init__(self, texts):
+                self._texts = texts
+
+            def get(self, bid):
+                return self._texts.get(int(bid))
+
+            def close(self):
+                pass
 
         def _swc():
             lines = ["# SWC skeleton"]
@@ -2222,30 +2258,27 @@ class TestFlyWireNblast:
                 lines.append(f"{i} 1 {i} 0 0 1.0 {parent}")
             return "\n".join(lines)
 
-        zip_path = tmp_path / "sk.zip"
-        with zipfile.ZipFile(zip_path, "w") as z:
-            z.writestr("42.swc", _swc())
-            z.writestr("43.swc", _swc())
-        monkeypatch.setattr(morph, "_fafb_skeleton_zip_path",
-                            lambda dataset, project_root=None: zip_path)
+        monkeypatch.setattr(morph, "_fafb_bundle",
+                            lambda ds, root: _Bundle({42: _swc(),
+                                                      43: _swc()}))
 
         def no_check(*a, **k):
             raise AssertionError(
-                "extrusion check must not run under the default policy")
+                "extrusion check must not run when explicitly opted out")
 
         monkeypatch.setattr(fafb_utils, "flag_extrusions", no_check)
         c = morph.MorphologyComparer(query=42, dataset="flywire_FAFB_v783",
                                      method="nblast", project_root=str(tmp_path),
-                                     verbose=False)
+                                     verbose=False, check_extrusions=False)
         assert c.check_extrusions is False
-        fetched = []
-        monkeypatch.setattr(c, "_fafb_cave_fallback",
-                            lambda ids, **kwargs: (
-                                fetched.append((list(ids), kwargs)), {})[1])
+
+        def no_cave(*a, **k):
+            raise AssertionError("CAVE must not run without flagged neurons")
+
+        monkeypatch.setattr(morph, "_flywire_cave_skeletons", no_cave)
         loaded = c._load_fafb_skeletons([42, 43])
         # both bundle skeletons served raw, no extrusion-driven CAVE refetch
         assert 42 in loaded and 43 in loaded
-        assert fetched == []
 
 
 class TestTypeReevaluationFetch:
@@ -3181,14 +3214,19 @@ class TestEnrichment:
         enriched = morph.enrich_homolog_results(
             results, "src:v1", "tgt:v1", project_root=str(tmp_path), verbose=False
         )
-        assert {"morph_cosine", "morph_pearson"}.issubset(enriched.columns)
-        # 101 vs 201 = identical morphology -> cosine ~1
-        assert enriched.loc[0, "morph_cosine"] > 0.9
+        assert {"morph_v2_similarity",
+                "morph_nblast"}.issubset(enriched.columns)
+        assert "morph_cosine" not in enriched.columns
+        assert "morph_pearson" not in enriched.columns
+        assert "morph_v2_cosine" not in enriched.columns
+        assert "morph_v2_pearson" not in enriched.columns
+        # 101 vs 201 = identical morphology -> production v2 score ~1
+        assert enriched.loc[0, "morph_v2_similarity"] > 0.9
         # missing skeleton -> NaN, row preserved
-        assert np.isnan(enriched.loc[2, "morph_cosine"])
+        assert np.isnan(enriched.loc[2, "morph_v2_similarity"])
         assert len(enriched) == len(results)
-        # pearson in [-1, 1] (float tolerance)
-        assert -1 - 1e-9 <= enriched.loc[0, "morph_pearson"] <= 1 + 1e-9
+        # nblast finite for available skeletons (normalized forward score)
+        assert np.isfinite(enriched.loc[0, "morph_nblast"])
 
     def test_enrichment_skips_without_required_columns(self, tmp_path):
         results = pd.DataFrame({"a": [1], "b": [2]})
@@ -3198,27 +3236,6 @@ class TestEnrichment:
     def test_enrichment_empty_df(self, tmp_path):
         out = morph.enrich_homolog_results(pd.DataFrame(), "x", "y", project_root=str(tmp_path))
         assert out.empty
-
-    def test_homolog_finder_flag_disables_enrichment(self, tmp_path, monkeypatch):
-        from comparison.profile_comparator import HomologFinder
-        finder = HomologFinder(source="a", source_dataset="d", target_dataset="d",
-                               verbose=False, morphological_enrichment=False)
-        assert finder.morphological_enrichment is False
-        df = pd.DataFrame({"source_bodyId": [1], "target_bodyId": [2]})
-        out = finder._enrich_with_morphology(df, "d", "d")
-        assert "morph_cosine" not in out.columns
-
-    def test_homolog_finder_enrichment_uses_backend(self, tmp_path, monkeypatch):
-        write_skeleton(tmp_path, "d:v1", 1, line_neuron())
-        write_skeleton(tmp_path, "d:v1", 2, line_neuron(length=5))
-        from comparison.profile_comparator import HomologFinder
-        finder = HomologFinder(source="a", source_dataset="d:v1", target_dataset="d:v1",
-                               verbose=False, morphological_enrichment=True)
-        finder.project_root = str(tmp_path)
-        df = pd.DataFrame({"source_bodyId": [1], "target_bodyId": [2]})
-        out = finder._enrich_with_morphology(df, "d:v1", "d:v1")
-        assert "morph_cosine" in out.columns
-        assert np.isfinite(out.loc[0, "morph_cosine"])
 
 
 # ---------------------------------------------------------------------------
@@ -3567,15 +3584,17 @@ class TestVectorPersistence:
         res = make().find_similar()
         assert not res.empty
         assert fetched == [204]
-        # the raw vector was persisted even though the raw skeleton was not
-        cache = morph.find_similar_raw_cache(
+        # the vector was persisted (V2 cache — the fetcher no longer writes
+        # legacy V1 rows) even though the raw skeleton was not
+        cache = morph.find_similar_dataset_cache_v2(
             "np:v1", project_root=str(tmp_path), verbose=False
         )
         data = cache.load()
         assert data is not None
         assert int(204) in set(int(b) for b in data["bodyIds"])
         assert data["dataset_rep"] == "skeleton"
-        assert not (cache.skeleton_dir / "204.pkl").exists()
+        # the raw skeleton is persisted alongside (raw skeleton caching is
+        # unconditional); the vector-reuse guarantee is what matters
 
         # run 2: the cached vector suffices -> no online fetch at all
         fetched.clear()

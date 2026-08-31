@@ -488,3 +488,17 @@ class TestDatasetAwareSuggestions:
         assert dataset_aware_suggestions("AP", ["A", "B"], limit=1) == [
             ("APL", "type · A, B"),
         ]
+
+
+def test_clean_split_breaks_combined_cells_into_names():
+    """Combined additional_type(s) cells become individual suggestions."""
+    from ui.type_suggestions import _clean_split
+
+    assert _clean_split(['vDeltaB, vDeltaC', 'APDN3', None, '']) == [
+        'APDN3', 'vDeltaB', 'vDeltaC',
+    ]
+    assert _clean_split(['aMe12']) == ['aMe12']
+    assert _clean_split(['A, , B']) == ['A', 'B']
+    assert _clean_split([None, '']) == []
+    # whitespace around parts is stripped
+    assert _clean_split(['X,  Y ,Z']) == ['X', 'Y', 'Z']

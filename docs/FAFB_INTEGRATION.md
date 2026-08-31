@@ -152,9 +152,10 @@ vs.plot_neurons()
 ```
 
 **Key Features:**
-- **API Cache**: When `force_API_fetching=True`, skeletons fetched via API are cached locally in `cache/{dataset}/API_cache/skeletons/`. On subsequent runs, cached skeletons are loaded first before fetching new ones.
-- **Local ZIP Mode**: When `force_API_fetching=False` (default), only local ZIP data is used. The system will NOT check API cache - this ensures consistency with the downloaded dataset.
-- **Automatic Fallback**: If `force_API_fetching=False` and the local ZIP is missing or empty, the system will automatically fall back to API fetching as a last resort.
+- **Source priority (tube mode, caching on)**: prepared CAVE mesh cache → shared raw SWC cache (`.swc.zst`) → healed skeleton bundle → CAVE API. Prepared meshes are CAVE-derived (extrusion-free) and already at the render preparation level.
+- **Source priority (line mode)**: SWC-first — raw SWC cache → healed bundle → CAVE API — so every scene renders from reconstruction skeletons; mesh sources would have to be skeletonized in memory with different geometry.
+- **force_API_fetching=True**: routes every body straight to the CAVE API (meshes cached in the prepared mesh cache when caching is enabled).
+- **Automatic Fallback**: bodies missing from every local source fall through to the CAVE API automatically.
 - **Updated Data**: Use `force_API_fetching=True` to ensure you're using the most up-to-date neuron morphologies from the CAVE API.
 
 ### Fixing Skeleton Extrusion Issues
@@ -315,14 +316,19 @@ result = VisualizeSkeleton.detect_mesh_extrusions(
 ```
 
 **How Extrusion Fixes Work:**
-1. Neurons fetched via API are cached in `cache/{dataset}/API_cache/skeletons/`
-2. Extrusion check results are cached in `cache/{dataset}/extrusion_check_results.pkl`
-3. **VisualizeSkeleton** ALWAYS checks API cache first, even when `force_API_fetching=False`
+1. CAVE replacement meshes are cached in the prepared mesh cache
+   (`FlyWireMeshCache`); the legacy `cache/{dataset}/API_cache/skeletons/`
+   pickles are read only as a migration fallback
+2. Extrusion check results are cached per neuron in
+   `cache/{dataset}/extrusion_check_results.parquet`
+3. TreeNeuron sources (bundle / raw SWC cache) run the extrusion check every
+   render; flagged neurons are replaced through the CAVE API
 4. This allows you to selectively fix problematic neurons without re-downloading the entire 13GB ZIP
 5. Fixed neurons persist across sessions via the cache
 
 **Note on force_API_fetching Behavior:**
-- **VisualizeSkeleton**: Prioritizes API cache even when `force_API_fetching=False` (for extrusion fixes)
+- **VisualizeSkeleton**: Prioritizes prepared caches even when
+  `force_API_fetching=False`; `force_API_fetching=True` bypasses them
 - **FindNeuronConnection**: Uses API only when `force_API_fetching=True` (for consistency with local data)
 
 **Requirements:**
@@ -330,6 +336,32 @@ result = VisualizeSkeleton.detect_mesh_extrusions(
 - Set token in `config.json` (or the gitignored `config_local.json` fallback) or as environment variable `CAVE_TOKEN`
 
 **Note:** BANC dataset does not support `force_API_fetching` due to API access restrictions (requires community membership at brain-and-nerve-cord.org).
+
+## Find Similar (Morphology) on FAFB
+
+- **vector_v2** uses the skeleton-vector cache built from the healed bundle
+  (`find_similar/morphology/skeleton__vectors_v2.parquet`). The prepared-mesh
+  cache is the V1 counterpart and is not used by vector_v2 scoring.
+- **Skeleton loading follows the canonical FlyWire chain**
+  (`morphology.load_flywire_skeletons_batch`): raw `.swc.zst` cache → healed
+  bundle (newly served trees are cached into the raw store) → per-run
+  extrusion check with cached results (flagged neurons replaced through
+  CAVE) → token-gated CAVE skeletonization. The prepared mesh cache is
+  never consulted — scoring is TreeNeuron-native.
+- **NBLAST** scores the entire candidate pool from skeletons — the local raw
+  store first, healed-bundle fallback — so pool coverage does not depend on
+  vector-cache rows.
+- **NBLAST is not mirror-invariant**: contralateral same-type pairs score at
+  chance. Type-level means therefore aggregate ipsilateral pairs only,
+  classified via the neuron index's `hemisphere` column (`somaSide` on
+  NeuPrint datasets); `results.csv` keeps every pair row. The vector method
+  lateral-normalizes at vectorization and uses both sides.
+- **Dotprops are rebuilt per search in memory and never written to disk** —
+  only raw skeletons and vector rows persist, so a schema or parameter change
+  can never leave stale dotprops behind.
+- A vector cache written by an older schema version is detected (schema
+  version + lateral-normalization marker) and rebuilt automatically on the
+  next search; the ZCA whitener is refit when its fit version differs.
 
 ## Notes
 

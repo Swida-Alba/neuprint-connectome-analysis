@@ -1576,7 +1576,6 @@ def _finder_for_homologs(finder, monkeypatch, target_bodyids=(101, 102)):
     finder.source_dataset = DS_A
     finder.target_dataset = DS_B
     finder.use_auto_type_mapping = False
-    finder.morphological_enrichment = False
     lookup = {101: 'Cand', 102: ''}
     monkeypatch.setattr(
         finder, '_get_target_bodyids_and_types',
@@ -1593,6 +1592,8 @@ def test_find_homologs_end_to_end(finder, monkeypatch, tmp_path):
     assert set(df['target_bodyId']) == {101, 102}
     # identical synthetic partners -> perfect similarity
     assert df['rank_corr'].max() == pytest.approx(1.0)
+    # morphological enrichment is disabled: no morph columns on results
+    assert not {'morph_v2_similarity', 'morph_nblast'} & set(df.columns)
     # results saved under the default output dir
     assert list(tmp_path.iterdir())
 
@@ -1951,7 +1952,10 @@ def test_save_homolog_results_internal_full(finder, monkeypatch, tmp_path):
 
     ts = pd.read_csv(base / 'results' / 'type_summary.csv')
     assert 'avg_rank_corr' not in ts.columns
-    assert 'visualized' in ts.columns
+    # visualize_top_n alone does NOT claim visualization: without
+    # visualize_skeleton no scenes rendered, so the flag columns stay out.
+    assert 'visualized' not in ts.columns
+    assert 'visualization_rank' not in ts.columns
     assert out['query_profile'] is not None
     assert 'Cand' in out['match_profiles']
 
@@ -1993,7 +1997,30 @@ def test_save_homolog_results_internal_type_level_and_fallback(finder, monkeypat
     ts = pd.read_csv(tmp_path / 'type_folder' / 'results' / 'type_summary.csv')
     assert len(ts) == 1  # NaN row filtered
     assert ts.iloc[0]['target_type'] == 'Cand'
-    assert ts.iloc[0]['visualized']
+    # No scenes rendered (visualize_skeleton off): no visualized claims.
+    assert 'visualized' not in ts.columns
+
+    # Visualization rank follows the sorted type order, not the input index.
+    ranked_type_df = pd.DataFrame({
+        'source_neuron': ['Q', 'Q', 'Q'],
+        'target_type': ['Low', 'High', 'Mid'],
+        'rank_corr': [0.4, 0.9, 0.7],
+        'rank_union': [0.3, 0.8, 0.6],
+        'jaccard': [0.2, 0.9, 0.5],
+        'adjacency_score': [1, 3, 2],
+        'is_same_type': [False, False, False],
+    })
+    finder._save_homolog_results_internal(
+        results_df=ranked_type_df, query='Q', source_dataset=DS_A,
+        target_dataset=DS_B, output_dir=str(tmp_path), saveas='ranked_folder',
+        direction='both', include_partner_details=False, top_n_details=1,
+        params={}, visualize_top_n=2)
+    ranked = pd.read_csv(tmp_path / 'ranked_folder' / 'results' / 'type_summary.csv')
+    assert list(ranked['target_type']) == ['High', 'Mid', 'Low']
+    # Still no rendered scenes: the flag columns must stay absent even
+    # though visualize_top_n is set.
+    assert 'visualized' not in ranked.columns
+    assert 'visualization_rank' not in ranked.columns
 
     # fallback branch: neither target_type nor target column present
     bare_df = pd.DataFrame({'foo': [1], 'rank_corr': [0.5]})
@@ -2005,6 +2032,30 @@ def test_save_homolog_results_internal_type_level_and_fallback(finder, monkeypat
     # saveas=None -> auto-generated timestamped folder
     folders = [p for p in tmp_path.iterdir() if p.is_dir()]
     assert any(f.name.startswith(finder.output_folder_prefix) for f in folders)
+
+
+def test_type_summary_visualized_reflects_rendered_scenes(
+        finder, monkeypatch, tmp_path):
+    """`visualized` / `visualization_rank` come from the types the scenes
+    actually rendered (returned by _visualize_homolog_candidates), not from
+    the table's own row order; untyped targets stay out of type_summary."""
+    _finder_for_homologs(finder, monkeypatch)
+    results_df = _homolog_results_df()  # targets: 101 'Cand', 102 untyped
+    monkeypatch.setattr(
+        HomologFinder, '_visualize_homolog_candidates',
+        lambda self, **kwargs: ['Elsewhere', 'Cand'])
+    finder._save_homolog_results_internal(
+        results_df=results_df, query='Q', source_dataset=DS_A,
+        target_dataset=DS_B, output_dir=str(tmp_path), saveas='vis_folder',
+        direction='both', include_partner_details=False, top_n_details=1,
+        params={}, visualize_skeleton=True, visualize_top_n=2)
+    ts = pd.read_csv(tmp_path / 'vis_folder' / 'results' / 'type_summary.csv')
+    # the untyped target ('' type) is excluded from the aggregation
+    assert list(ts['target_type']) == ['Cand']
+    # 'Cand' was rendered (rank 2 of the returned scene order); the
+    # untyped row is gone, so no False rows remain.
+    assert list(ts['visualized']) == [True]
+    assert list(ts['visualization_rank']) == [2]
 
 
 # ---------------------------------------------------------------------------
@@ -2999,3 +3050,60 @@ def test_comparer_intra_inter_ensure_cache_and_profile_error(
     res = comp.compare_intra_inter_type()
     # bodyId 2 fails to extract -> only 1 profile -> no pairs
     assert res['intra_type'].empty and res['inter_type'].empty
+
+
+# ---------------------------------------------------------------------------
+# Coarse class-label backfill in dataset `type` columns (e.g. FAFB v783
+# writes `type='optic_lobes'` / `cell_class='optic_lobes'` on untyped
+# neurons) must not leak into the homolog type lookup.
+# ---------------------------------------------------------------------------
+
+def test_coarse_type_labels_detected_from_neuron_index(tmp_path):
+    from comparison.profile_comparator import HomologFinder
+    safe = "flywire_FAFB_v783"
+    idx_dir = tmp_path / "neuron_indexes" / safe
+    idx_dir.mkdir(parents=True)
+    pd.DataFrame({
+        "bodyId": ["1", "2", "3"],
+        "type": ["optic_lobes", "aMe12", "Optic"],
+        "cell_class": ["optic_lobes", "optic_lobes", "optic_lobes"],
+        "super_class": ["optic", "optic", "visual"],
+    }).to_parquet(idx_dir / "neuron_index.parquet")
+    finder = HomologFinder.__new__(HomologFinder)
+    coarse = finder._coarse_type_labels("flywire_FAFB_v783",
+                                        project_root=str(tmp_path))
+    # Only 'optic_lobes' is a backfill: row 1 carries it as both type and
+    # cell_class. Row 3's 'Optic' never equals one of its own class labels,
+    # and the super_class value 'optic' never appears as a type.
+    assert coarse == frozenset({"optic_lobes"})
+
+
+def test_build_bodyid_type_lookup_skips_coarse_labels(tmp_path, monkeypatch):
+    from comparison.profile_comparator import HomologFinder
+    finder = HomologFinder.__new__(HomologFinder)
+    monkeypatch.setattr(
+        HomologFinder, "_coarse_type_labels",
+        lambda self, ds, project_root=None: frozenset({"optic_lobes"}))
+    conn = pd.DataFrame({
+        "bodyId_pre": [1, 2, 3],
+        "bodyId_post": [10, 11, 12],
+        "type_pre": ["aMe12", "optic_lobes", "aMe12"],
+        "type_post": ["Mi15", "Mi15", "optic_lobes"],
+    })
+    lookup = finder._build_bodyid_type_lookup(conn, "flywire_FAFB_v783")
+    # bodyId 2 only had the coarse pre-type (skipped); bodyId 12 only had
+    # the coarse post-type (skipped).
+    assert lookup == {1: "aMe12", 3: "aMe12", 10: "Mi15", 11: "Mi15"}
+
+
+def test_build_bodyid_type_lookup_keeps_everything_without_dataset():
+    from comparison.profile_comparator import HomologFinder
+    finder = HomologFinder.__new__(HomologFinder)
+    conn = pd.DataFrame({
+        "bodyId_pre": [1],
+        "bodyId_post": [2],
+        "type_pre": ["optic_lobes"],
+        "type_post": ["Mi15"],
+    })
+    lookup = finder._build_bodyid_type_lookup(conn)
+    assert lookup == {1: "optic_lobes", 2: "Mi15"}

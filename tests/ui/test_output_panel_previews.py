@@ -37,7 +37,7 @@ def test_successful_run_reveals_previews(tmp_path):
     assert panel.previews_section.visible is True
     expansions = [child for child in panel.previews_container.default_slot.children
                   if isinstance(child, ui.expansion)]
-    assert len(expansions) == 4
+    assert len(expansions) == 3
 
 
 def test_failed_run_leaves_previews_hidden(tmp_path):

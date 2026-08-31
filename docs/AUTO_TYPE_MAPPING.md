@@ -67,7 +67,55 @@ Resolution rules:
 - Missing dataset tables only disable the rename resolution; the mapper
   still works from the male-cns crosswalk alone.
 
-### 3. Standardization Process
+### 3. User Warnings and Double-Check Recommendation
+
+Auto type mapping is applied automatically, so runs surface what it changed
+in two places — **please double check them before interpreting
+cross-dataset results**:
+
+1. **Console summary**: when source/target neurons are resolved, the run
+   prints the auto-mapped names plus explicit `N-to-1` / `1-to-N` warnings,
+   and ends with a reminder to double check the automatic mappings.
+2. **`user_warning_notes.txt`** in the run folder root (rendered in the run
+   guide's Warnings section). It is written when auto type mapping:
+   - **expanded** a queried type name to a different name in a target
+     dataset (e.g. `SLP249` → `APDN3` in FAFB, `MeVPLo2` → `MTe07`),
+   - hit an **N-to-1** mapping (several types share one name across
+     datasets — they are *not* merged to avoid wrong aggregation), or
+   - hit a **1-to-N** mapping (a type splits into several names in the
+     other dataset — no automatic mapping is made).
+
+   Example:
+
+   ```
+   - Auto type mapping expanded queried type 'SLP249' to 'APDN3'
+     (FlyWire FAFB v783); the queried name may not exist there.
+   - N-to-1 type mapping: 'SLP249' is one of 4 types (CL125, PLP080,
+     SLP249, SLP250) that all correspond to 'APDN3' in FlyWire FAFB v783;
+     they were NOT merged to avoid wrong aggregation.
+   - These name mappings were applied automatically - please double check
+     them (against the datasets' type annotations or the exported mapping
+     files) before interpreting cross-dataset results.
+   ```
+
+For cross-dataset comparisons the full applied mapping is additionally
+exported to `auto_type_mapping.csv` (and conflicts to
+`auto_type_mapping_conflicts.csv`) in the output folder.
+
+3. **See available neurons viewer (expanded search)**: when a search finds
+   no rows in the selected dataset, the viewer probes the auto type mapping
+   and the *cached* neuron indexes of the other datasets and shows a clearly
+   separated panel: the alias per dataset with its relation (`same name` /
+   `renamed` / `splits into` / `one of N`), an optional `a match also
+   covers: …` annotation when matching by the alias would aggregate sibling
+   types, neuron counts, and — for the selected dataset only — a
+   `Search '<alias>' here` action. Datasets where the mapper knows no
+   counterpart are listed explicitly. Cross-dataset rows are informational
+   only: they are never merged into the selected dataset's table or
+   selection (bodyIds from different datasets must not be mixed), and the
+   panel repeats the double-check recommendation.
+
+### 4. Standardization Process
 
 When comparing profiles from different datasets:
 

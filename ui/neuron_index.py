@@ -722,13 +722,40 @@ def _presorted_search_matches(
     if not ordered:
         return empty_candidates, empty_hits, empty_hits
     numeric = is_numeric_search(needle)
+
+    def _explode_combined_cells(column_frame):
+        """Split comma-joined cells into one searchable name per part.
+
+        FlyWire datasets pack several alternative type names into one
+        ``additional_type(s)`` cell (``'vDeltaB, vDeltaC, ...'``).  The
+        joined string is not a real neuron name, so match and report each
+        part individually — otherwise match groups (and any query value a
+        user selects from them) would carry the raw joined cell.
+        """
+        if not column_frame.height:
+            return column_frame
+        if not column_frame["search_value"].str.contains(",").any():
+            return column_frame
+        return (
+            column_frame
+            .with_columns(pl.col("search_value").str.split(","))
+            .explode("search_value")
+            .with_columns(pl.col("search_value").str.strip_chars())
+            .filter(pl.col("search_value") != "")
+            .with_columns(
+                pl.col("search_value").str.to_lowercase().alias("search_value_folded")
+            )
+        )
+
     claimed = None
     chunks = []
     hit_parts = []
     for priority, column in enumerate(ordered):
         if numeric and column != "bodyId":
             continue
-        column_frame = search_cache.filter(pl.col("search_column") == column)
+        column_frame = _explode_combined_cells(
+            search_cache.filter(pl.col("search_column") == column)
+        )
         if numeric:
             column_frame = column_frame.filter(
                 pl.col("search_value").str.contains(r"^\d+$")
@@ -2461,3 +2488,116 @@ def query_match_group_subtypes(
         "total_types": total_types,
         "truncated": total_types > int(limit),
     }
+
+
+# ---------------------------------------------------------------------------
+# Cross-dataset alias matches (expanded search for zero-hit viewer queries)
+# ---------------------------------------------------------------------------
+
+# Loaded indexes for alias lookups, keyed by (dataset, index mtime) so a
+# Settings-side force rebuild invalidates the cache naturally.
+_ALIAS_INDEX_CACHE: Dict[Tuple[str, int], "CachedNeuronIndex"] = {}
+
+
+def datasets_with_cached_indexes(cache_dir: Optional[Path] = None) -> List[str]:
+    """Datasets from the static list that have a local neuron index."""
+    from .config import DATASETS
+
+    return [
+        dataset
+        for dataset in DATASETS
+        if neuron_index_path(dataset, cache_dir).is_file()
+    ]
+
+
+def count_type_in_index(index: "CachedNeuronIndex", type_name: str) -> Optional[int]:
+    """Exact neuron count for one ``type`` value in a cached index."""
+    if index is None or "type" not in index.frame.columns:
+        return None
+    import polars as pl
+
+    return int(index.frame.filter(pl.col("type") == type_name).height)
+
+
+def _load_alias_index(dataset: str) -> Optional["CachedNeuronIndex"]:
+    """Load (and memoize) the cached index used for alias counting."""
+    path = neuron_index_path(dataset)
+    if not path.is_file():
+        return None
+    key = (dataset, path.stat().st_mtime_ns)
+    cached = _ALIAS_INDEX_CACHE.get(key)
+    if cached is None:
+        try:
+            cached = load_cached_neuron_index(dataset)
+        except Exception:
+            return None
+        _ALIAS_INDEX_CACHE[key] = cached
+    return cached
+
+
+def collect_alias_matches(
+    dataset: str,
+    search: str,
+    datasets: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Expand a zero-hit viewer search into cross-dataset alias matches.
+
+    The search name is resolved through the cross-dataset type mapper into
+    per-dataset alias candidates (kind + orthogonal aggregation annotation,
+    see ``CrossDatasetTypeMapper.get_alias_candidates``), then each alias is
+    counted in that dataset's cached neuron index.  Only locally cached
+    indexes are consulted — nothing is fetched.
+
+    The result is strictly informational: callers must never merge these
+    rows into the selected dataset's table or selection, because the bodyIds
+    belong to a different dataset.
+    """
+    search = str(search or "").strip()
+    if not search or search.isdigit() or "*" in search or len(search) < 2:
+        return []
+    try:
+        from comparison.cross_dataset_type_mapper import get_type_mapper
+
+        mapper = get_type_mapper()
+    except Exception:
+        return []
+    if mapper is None or not getattr(mapper, "_loaded", False):
+        return []
+
+    if datasets is None:
+        datasets = datasets_with_cached_indexes()
+    datasets = [ds for ds in datasets if neuron_index_path(ds).is_file()]
+    if not datasets:
+        return []
+    try:
+        outcomes = mapper.get_alias_candidates(search, datasets)
+    except Exception:
+        return []
+
+    matches: List[Dict[str, Any]] = []
+    for ds in datasets:
+        info = outcomes.get(ds) or {}
+        outcome = info.get("outcome")
+        if outcome in (None, "not applicable", "mapper unavailable"):
+            continue
+        entry: Dict[str, Any] = {
+            "dataset": ds,
+            "is_selected": ds == dataset,
+            "outcome": outcome,
+            "candidates": [],
+        }
+        if outcome == "matched":
+            index = _load_alias_index(ds)
+            if index is None:
+                continue
+            for cand in info.get("candidates", []):
+                entry["candidates"].append({
+                    "name": cand["name"],
+                    "kind": cand["kind"],
+                    "aggregates": cand.get("aggregates"),
+                    "count": count_type_in_index(index, cand["name"]),
+                })
+        matches.append(entry)
+
+    matches.sort(key=lambda entry: not entry["is_selected"])
+    return matches

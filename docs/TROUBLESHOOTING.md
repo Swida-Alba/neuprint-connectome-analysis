@@ -396,6 +396,26 @@ Visualization might fail or be incomplete.
 
 ---
 
+### NBLAST Search Shows Fewer Types or Smaller n_bodyids Than Expected
+
+**Symptom:** With `method=nblast`, some candidate types are missing from
+`type_summary.csv` (present in an earlier vector run), and `n_bodyids` is
+smaller than the type's scored member count. The log contains
+`NBLAST: N contralateral pair rows excluded from type means`.
+
+**Explanation:** This is intentional. NBLAST matches arbors in absolute
+coordinates, so contralateral (mirror) same-type pairs score at chance —
+benchmark median −0.03 vs 0.89 ipsilateral. Type means aggregate
+ipsilateral pairs only; types whose only NBLAST evidence is contralateral
+are omitted from the ranking. Every pair row (including contralateral
+ones) stays in `results.csv` for inspection.
+
+**Solution:** None needed. To rank types using mirror-twin evidence as
+well, run the same search with `method=vector_v2` — it lateral-normalizes
+at vectorization and aggregates both sides.
+
+---
+
 ## 3D Visualization Issues
 
 ### WebDriver Export Errors

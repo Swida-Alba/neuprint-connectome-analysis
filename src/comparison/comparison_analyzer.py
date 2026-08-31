@@ -536,6 +536,37 @@ class ComparisonAnalyzer:
         
         if summary['mapped_count'] > 0 or summary['n_to_1_count'] > 0 or summary['one_to_n_count'] > 0:
             self._log(f"  → Check auto_type_mapping.csv and auto_type_mapping_conflicts.csv in output folder")
+            self._write_user_warning_notes_for_mapping(mapper, str_types, dataset_names)
+
+    def _write_user_warning_notes_for_mapping(self, mapper, type_names, dataset_names):
+        """Write auto-type-mapping caveats to user_warning_notes.txt.
+
+        The run guide renders this file, so expanded (renamed) type
+        mappings and N-to-1 / 1-to-N conflicts surface next to the results
+        with a recommendation to double check them.
+        """
+        try:
+            notes = mapper.build_user_warning_notes(type_names, dataset_names)
+        except Exception as e:
+            self._log(f"  Warning: could not build auto type mapping notes: {e}")
+            return None
+        if not notes:
+            return None
+        try:
+            os.makedirs(self.parameters.full_output_path, exist_ok=True)
+            notes_path = os.path.join(self.parameters.full_output_path, 'user_warning_notes.txt')
+            with open(notes_path, 'w', encoding='utf-8') as f:
+                f.write('User warning notes\n')
+                f.write('==================\n\n')
+                f.write('Auto type mapping changed how some neuron type names '
+                        'were matched across datasets:\n\n')
+                for note in notes:
+                    f.write(f'- {note}\n')
+            self._log(f"  ⚠️ Wrote {notes_path} - please double check the automatic mappings")
+            return notes_path
+        except Exception as e:
+            self._log(f"  Warning: could not write user_warning_notes.txt: {e}")
+            return None
 
     def _generate_mode_specific_note(self) -> str:
         """Generate HTML note specific to the comparison mode used."""

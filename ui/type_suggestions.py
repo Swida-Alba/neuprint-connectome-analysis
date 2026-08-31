@@ -99,6 +99,26 @@ def _clean(values) -> List[str]:
     return sorted(out)
 
 
+def _clean_split(values) -> List[str]:
+    """Like :func:`_clean`, but also splits comma-joined cells.
+
+    Datasets such as FlyWire FAFB store several alternative type names in
+    one ``additional_type(s)`` cell (``'vDeltaB, vDeltaC, ...'``).  A
+    combined cell is never a real neuron name, so every part becomes its
+    own suggestion entry instead of offering the raw joined string.
+    """
+    expanded: List[str] = []
+    for v in values:
+        if v is None:
+            continue
+        s = str(v)
+        if "," in s:
+            expanded.extend(part.strip() for part in s.split(","))
+        else:
+            expanded.append(s)
+    return _clean(expanded)
+
+
 def _index_pools(folder: str) -> Optional[Dict[str, List[Entry]]]:
     """Pools from neuron_indexes/<folder>/neuron_index.parquet (None when absent)."""
     index = _INDEX_DIR / folder / "neuron_index.parquet"
@@ -125,7 +145,7 @@ def _index_pools(folder: str) -> Optional[Dict[str, List[Entry]]]:
             if col not in cols:
                 continue
             values = frame[col].drop_nulls().to_list()
-            pools[col] = [(v, col) for v in _clean(values)]
+            pools[col] = [(v, col) for v in _clean_split(values)]
         # Auto-suggestion expands beyond the canonical type column only into
         # type/class taxonomy fields.  The viewer still displays every
         # retained string field and searches it when explicitly requested.
@@ -133,7 +153,7 @@ def _index_pools(folder: str) -> Optional[Dict[str, List[Entry]]]:
             if col not in cols:
                 continue
             values = frame[col].cast(pl.Utf8, strict=False).to_list()
-            pools[col] = [(v, col) for v in _clean(values)]
+            pools[col] = [(v, col) for v in _clean_split(values)]
         # bodyId pool: string-form ids, hint = the corresponding instance.
         if "bodyId" in cols:
             bid_col = frame["bodyId"].cast(pl.Utf8, strict=False)
@@ -208,12 +228,12 @@ def _table_pools(folder: str) -> Optional[Dict[str, List[Entry]]]:
             for col in _TYPE_COLUMNS:
                 if col in cols:
                     values = frame[col].cast(pl.Utf8, strict=False).to_list()
-                    pools[col] = [(v, col) for v in _clean(values)]
+                    pools[col] = [(v, col) for v in _clean_split(values)]
             for col in priority_metadata_columns(frame.columns):
                 if col in pools or col in ("bodyId", "type", "instance"):
                     continue
                 values = frame[col].cast(pl.Utf8, strict=False).to_list()
-                pools[col] = [(v, col) for v in _clean(values)]
+                pools[col] = [(v, col) for v in _clean_split(values)]
             if "bodyId" in cols:
                 body_ids = frame["bodyId"].cast(pl.Utf8, strict=False).to_list()
                 inst_series = (

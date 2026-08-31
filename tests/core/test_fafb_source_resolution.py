@@ -1,7 +1,9 @@
 """Tests for `VisualizeSkeleton._resolve_fafb_sources`.
 
-Covers the per-body SWC-first priority:
-    healed ZIP -> raw SWC cache -> prepared CAVE mesh cache -> CAVE API
+Covers the per-body render priority:
+    tube mode:  prepared CAVE mesh cache -> raw SWC cache -> healed ZIP
+                -> CAVE API
+    line mode:  raw SWC cache -> healed ZIP -> CAVE API (SWC-first)
 and the strict `use_cache=False` policy (cache sources skipped, extrusion
 parquet check cache untouched).
 """
@@ -120,7 +122,7 @@ class RecordingResolver:
 
 
 class TestSourcePriority:
-    def test_zip_then_raw_then_mesh_then_cave(self):
+    def test_mesh_then_raw_then_zip_then_cave(self):
         resolver = RecordingResolver(
             zip_hits={"1": make_tree("1")},
             raw_hits={"2": make_tree("2")},
@@ -133,19 +135,28 @@ class TestSourcePriority:
                            "4": "cave"}
         assert set(skeleton_cache) == {"1", "2"}
         assert set(mesh_cache) == {"3", "4"}
-        # Each layer only saw the bodies the previous ones missed.
-        assert resolver.calls["raw"] == [["2", "3", "4"]]
-        assert resolver.calls["mesh"] == [["3", "4"]]
+        # Tube mode priority: the prepared mesh cache wins, then the raw
+        # SWC cache, then the healed bundle; CAVE serves the rest.
+        assert resolver.calls["mesh"] == [["1", "2", "3", "4"]]
+        assert resolver.calls["raw"] == [["1", "2", "4"]]
+        assert resolver.calls["zip"] == [["1", "4"]]
         assert resolver.calls["api"][0][0] == ["4"]
         assert resolver.calls["api"][0][1]["cache_prepared"] is True
 
-    def test_zip_absent_falls_through_to_raw_cache(self):
-        resolver = RecordingResolver(raw_hits={"7": make_tree("7")})
+    def test_raw_cache_before_bundle_when_mesh_absent(self):
+        """Without a prepared mesh hit, the raw SWC cache precedes the
+        healed bundle (pipeline priority), and both stay SWC sources."""
+        resolver = RecordingResolver(
+            zip_hits={"7": make_tree("7")},
+            raw_hits={"7": make_tree("7")},
+        )
         sources, skeleton_cache, _ = resolver.resolve([7])
 
         assert sources == {"7": "raw_cache"}
         assert set(skeleton_cache) == {"7"}
-        assert resolver.calls["zip"] == [["7"]]
+        assert resolver.calls["mesh"] == [["7"]]
+        assert resolver.calls["raw"] == [["7"]]
+        assert resolver.calls["zip"] == []
 
     def test_every_local_miss_falls_through_to_cave(self):
         resolver = RecordingResolver(api_hits={"9": make_mesh("9")})

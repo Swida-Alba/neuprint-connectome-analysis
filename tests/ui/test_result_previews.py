@@ -28,7 +28,6 @@ def test_preview_views_come_from_the_registry():
         "results/bodyid_results.csv",
         "results/type_summary.csv",
         "results/type_level_results.csv",
-        "results/morph_similarity.csv",
     ]
     assert all(p.endswith(".csv") for p in homolog_patterns)
     # Tools without tabular results register no previews.

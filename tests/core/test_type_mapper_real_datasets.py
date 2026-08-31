@@ -315,3 +315,164 @@ def test_global_type_mapper_singleton_resolves_renames(mapper, monkeypatch):
     monkeypatch.setattr(mapper_module, '_global_type_mapper', mapper)
     assert get_type_mapper() is mapper
     assert get_type_mapper().get_mapped_type('SLP249', MCNS, FW) == 'APDN3'
+
+
+# ---------------------------------------------------------------------------
+# User warning notes (expanded / N-to-1 / 1-to-N)
+# ---------------------------------------------------------------------------
+
+def test_build_user_warning_notes_slp249_rename(mapper):
+    notes = mapper.build_user_warning_notes(['SLP249'], [MCNS, FW])
+    # expanded to the current FAFB primary name...
+    assert any(
+        'expanded' in n and "'SLP249'" in n and "'APDN3'" in n for n in notes)
+    # ...and flagged N-to-1: FAFB APDN3 also collects CL125/SLP250/PLP080,
+    # so the reverse (FAFB -> male-cns) aggregation is refused.
+    n_to_1 = [n for n in notes if 'N-to-1' in n]
+    assert n_to_1 and all(t in n_to_1[0] for t in ('CL125', 'PLP080', 'SLP250'))
+    assert sum('double check' in n.lower() for n in notes) == 1
+
+
+def test_build_user_warning_notes_apdn3_n_to_1(mapper):
+    # FAFB APDN3 aggregates four male-cns types: flagged, never merged
+    notes = mapper.build_user_warning_notes(['APDN3'], [FW, MCNS])
+    n_to_1 = [n for n in notes if 'N-to-1' in n]
+    assert n_to_1, notes
+    assert all(t in n_to_1[0] for t in ('CL125', 'PLP080', 'SLP249', 'SLP250'))
+    assert any('double check' in n.lower() for n in notes)
+
+
+def test_build_user_warning_notes_known_rename_batch(mapper):
+    # A queried batch mixes renames (expanded) and clean types; every
+    # expected rename is reported and the advice line is present once.
+    notes = mapper.build_user_warning_notes(
+        ['SLP249', 'MDN', 'IPC', 'aMe12'], [MCNS, FW])
+    joined = '\n'.join(notes)
+    for old, new in (('SLP249', 'APDN3'), ('MDN', 'DNp50'), ('IPC', 'm_NSC_DILP')):
+        assert f"'{old}'" in joined and f"'{new}'" in joined
+    assert sum('double check' in n.lower() for n in notes) == 1
+
+
+# ---------------------------------------------------------------------------
+# Alias candidates (expanded viewer search) on real data
+# ---------------------------------------------------------------------------
+
+def _candidate(res, dataset, name):
+    for cand in res[dataset]['candidates']:
+        if cand['name'] == name:
+            return cand
+    return None
+
+
+def test_get_alias_candidates_slp249_real(mapper):
+    res = mapper.get_alias_candidates('SLP249', [MCNS, FW])
+    assert res[MCNS]['outcome'] == 'matched'
+    assert _candidate(res, MCNS, 'SLP249')['kind'] == 'same name'
+    assert res[FW]['outcome'] == 'matched'
+    renamed = _candidate(res, FW, 'APDN3')
+    assert renamed['kind'] == 'renamed'
+    # orthogonal aggregation annotation: FAFB APDN3 also covers the other
+    # three male-cns types that were renamed into it.
+    assert renamed['aggregates'] == ['CL125', 'PLP080', 'SLP249', 'SLP250']
+
+
+def test_get_alias_candidates_apdn3_real(mapper):
+    res = mapper.get_alias_candidates(
+        'APDN3', [MCNS, FW, BANC])
+    # native in both FlyWire datasets, with the aggregation annotation on
+    # the FAFB candidate (BANC keeps its own 1:1 annotation-free identity).
+    fafb = _candidate(res, FW, 'APDN3')
+    assert fafb['kind'] == 'same name'
+    assert fafb['aggregates'] == ['CL125', 'PLP080', 'SLP249', 'SLP250']
+    banc = _candidate(res, BANC, 'APDN3')
+    assert banc['kind'] == 'same name'
+    assert banc['aggregates'] is None
+    # male-cns side: the refused reverse aggregation exposes the group.
+    mcns = res[MCNS]
+    assert mcns['outcome'] == 'matched'
+    assert [c['name'] for c in mcns['candidates']] == [
+        'CL125', 'PLP080', 'SLP249', 'SLP250']
+    assert all(c['kind'] == 'one of N' for c in mcns['candidates'])
+
+
+def test_get_alias_candidates_namespace_independence_real(mapper):
+    res = mapper.get_alias_candidates('MDN', [MCNS, FW, BANC])
+    assert _candidate(res, MCNS, 'MDN')['kind'] == 'same name'
+    renamed = _candidate(res, FW, 'DNp50')
+    assert renamed['kind'] == 'renamed'
+    assert renamed['aggregates'] is None  # unique reverse (only male-cns MDN)
+    assert _candidate(res, BANC, 'MDN')['kind'] == 'same name'
+
+    # BANC renamed DNge036 -> DNfl042 while FAFB keeps it natively.
+    res_d = mapper.get_alias_candidates('DNge036', [MCNS, FW, BANC])
+    assert _candidate(res_d, FW, 'DNge036')['kind'] == 'same name'
+    assert _candidate(res_d, BANC, 'DNfl042')['kind'] == 'renamed'
+
+
+def test_get_alias_candidates_vs_splits_real(mapper):
+    # male-cns 'VS' lists eight FAFB types in one crosswalk cell: the
+    # candidates are the split targets, never a joined name.
+    res = mapper.get_alias_candidates('VS', [MCNS, FW])
+    fw_names = [c['name'] for c in res[FW]['candidates']]
+    assert fw_names == [f'VS{i}' for i in range(1, 9)]
+    assert all(c['kind'] == 'splits into' for c in res[FW]['candidates'])
+    assert res[MCNS]['candidates'] == [
+        {'name': 'VS', 'kind': 'same name', 'aggregates': None},
+    ]
+
+
+def test_get_alias_candidates_unknown_real(mapper):
+    res = mapper.get_alias_candidates('NoRealType123', [MCNS, FW, BANC])
+    assert all(
+        res[ds]['outcome'] == 'no counterpart known'
+        for ds in (MCNS, FW, BANC)
+    )
+
+
+def test_get_alias_candidates_kinds_exclusive_real(mapper):
+    # property over a broad real-type batch: one valid kind per candidate,
+    # unique names per dataset, aggregates never present on 'one of N' /
+    # 'splits into' candidates (it is a candidate-side annotation).
+    queries = [
+        'SLP249', 'APDN3', 'MDN', 'DNp50', 'IPC', 'm_NSC_DILP', 'LPN',
+        'MTe07', 'MeVPLo2', 'aMe12', 'VS', 'DNge036', 'DNfl042', 'TuBu03',
+        'TuBu04', 'FS4A', 'FS4B', 'CL125', 'SLP250', 'PLP080', 'aMe12_L',
+    ]
+    for query in queries:
+        res = mapper.get_alias_candidates(query, [MCNS, FW, BANC])
+        for dataset, outcome in res.items():
+            names = [c['name'] for c in outcome['candidates']]
+            assert len(names) == len(set(names)), (query, dataset, names)
+            for cand in outcome['candidates']:
+                assert cand['kind'] in CrossDatasetTypeMapper.ALIAS_KINDS, (
+                    query, dataset, cand)
+                if cand['kind'] in ('one of N', 'splits into'):
+                    assert cand['aggregates'] is None, (query, dataset, cand)
+
+
+def test_alias_counts_match_expected_real(mapper):
+    # the annotation lists real sibling types: SLP249 itself stays findable
+    # in male-cns while FAFB APDN3 counts its four neurons.
+    res = mapper.get_alias_candidates('SLP249', [MCNS, FW])
+    assert 'SLP249' in res[MCNS]['candidates'][0]['name']
+    assert res[FW]['candidates'][0]['name'] == 'APDN3'
+
+
+def test_get_alias_candidates_combined_cell_name_real(mapper):
+    # male-cns 'vDeltaB' is native here; in FAFB the old name 'vDeltaB' was
+    # split into vDelta/vDeltaA (it now only survives inside combined
+    # additional_type(s) cells) -> 'splits into' with both targets.
+    res = mapper.get_alias_candidates('vDeltaB', [MCNS, FW])
+    assert _candidate(res, MCNS, 'vDeltaB')['kind'] == 'same name'
+    split_names = [c['name'] for c in res[FW]['candidates']]
+    assert split_names == ['vDelta', 'vDeltaA']
+    assert all(c['kind'] == 'splits into' for c in res[FW]['candidates'])
+    assert all(c['aggregates'] is None for c in res[FW]['candidates'])
+
+    # a literal comma-joined query is not a name: honest outcome everywhere.
+    joined = mapper.get_alias_candidates(
+        'vDeltaB, vDeltaC', [MCNS, FW])
+    assert all(
+        joined[ds]['outcome'] == 'no counterpart known'
+        for ds in (MCNS, FW)
+    )

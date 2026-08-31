@@ -235,11 +235,14 @@ def get_fafb_skeleton_parquet(data_dir):
 # These helpers expose that pipeline so every consumer (e.g. NBLAST
 # dotprops building) follows the same behavior.
 #
-# Enforcement point: only VisualizeSkeleton's render pipeline (top-N result
-# visualization, Skeleton tab) runs the check by default. The similarity
-# loader (``MorphologyComparer._load_fafb_skeletons``) opts out unless
-# ``check_extrusions`` is enabled, so it does not pay the detector cost for
-# neurons it never displays.
+# Enforcement point: both the similarity loader
+# (``MorphologyComparer._load_fafb_skeletons`` via
+# ``morphology.load_flywire_skeletons_batch``) and VisualizeSkeleton's
+# render pipeline run the check by default, per run and scoped to the
+# neurons they actually load/display; ``flag_extrusions`` caches each
+# neuron's result in ``extrusion_check_results.parquet``, so only the first
+# sighting pays the detector cost, and flagged neurons are replaced through
+# the CAVE API (``check_extrusions=False`` opts the loader out).
 
 EXTRUSION_CHECK_FILENAME = "extrusion_check_results.parquet"
 EXTRUSION_CACHE_SCHEMA_VERSION = 2

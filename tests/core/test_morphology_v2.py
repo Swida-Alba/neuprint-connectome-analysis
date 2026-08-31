@@ -471,14 +471,14 @@ class TestComparerV2Wiring:
         c = morph.MorphologyComparer(query="aMe4", dataset="male-cns:v1.0",
                                      method="vector_v2")
         assert c._is_v2
-        # topology block removed in schema v4: two-block weights
-        assert c._v2_weights == {"shape": 0.3, "spatial": 0.7, "roi": 0.2}
+        # topology block removed in schema v4, ROI block removed from
+        # scoring (ROI evidence is candidate-selection only): two blocks
+        assert c._v2_weights == {"shape": 0.3, "spatial": 0.7}
 
     def test_unknown_weight_key_ignored(self):
         c = morph.MorphologyComparer(
             query=1, dataset="hemibrain:v1.2.1", method="vector_v2",
-            v2_block_weights={"shape": 0.8, "topology": 0.5, "bogus": 9.0},
-            v2_roi_weight=0.0)
+            v2_block_weights={"shape": 0.8, "topology": 0.5, "bogus": 9.0})
         # "topology" is no longer a known block key and is dropped
         assert c._v2_weights["shape"] == 0.8
         assert "topology" not in c._v2_weights
@@ -487,7 +487,7 @@ class TestComparerV2Wiring:
     def test_weight_override(self):
         c = morph.MorphologyComparer(
             query=1, dataset="hemibrain:v1.2.1", method="vector_v2",
-            v2_block_weights={"shape": 0.8, "bogus": 9.0}, v2_roi_weight=0.0)
+            v2_block_weights={"shape": 0.8, "bogus": 9.0})
         assert c._v2_weights["shape"] == 0.8
         assert c._v2_weights["spatial"] == 0.7
         assert "bogus" not in c._v2_weights
@@ -516,28 +516,30 @@ class TestComparerV2Wiring:
             morph.MorphologyComparer(query=1, dataset="hemibrain:v1.2.1",
                                      method="vector3")
 
-    def test_nblast_scorer_delegates_to_metric(self):
-        # NBLAST keeps the plain metric dispatcher (no block weighting).
+    def test_nblast_mode_scores_with_v2_blocks(self):
+        # metric is a retired no-op: both methods score through the V2
+        # block-weighted scorer (weights renormalize to plain cosine here).
         c = morph.MorphologyComparer(query=1, dataset="hemibrain:v1.2.1",
                                      method="nblast", metric="pearson")
         q = np.array([1.0, 2.0, 3.0])
         m = np.array([[1.0, 2.0, 3.0], [3.0, 2.0, 1.0]])
         np.testing.assert_allclose(
             c._similarity_matrix(q, m),
-            morph.similarity_matrix(q, m, "pearson"))
+            morph.cosine_similarity_matrix(q, m), rtol=1e-9)
 
-    def test_extra_subset_slicing(self):
+    def test_pool_subset_slicing(self):
         c = morph.MorphologyComparer(query=1, dataset="hemibrain:v1.2.1",
                                      method="vector_v2")
-        q_block = np.array([1.0, 0.0])
-        m_block = np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
-        c._v2_extra_blocks = [("roi", 0.2, q_block, m_block)]
+        hist = np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+        c._v2_spatial_overlap = {"members": hist[[0]], "centroid": hist[0],
+                                 "pool": hist}
         mask = np.array([True, False, True])
-        sliced = c._slice_extra_blocks(mask)
-        assert sliced[0][3].shape == (2, 2)
+        sliced = c._slice_spatial_overlap(mask)
+        assert sliced["pool"].shape == (2, 2)
+        np.testing.assert_allclose(sliced["pool"], hist[[0, 2]])
         idx = np.array([0, 2])
-        assert c._slice_extra_blocks(idx)[0][3].shape == (2, 2)
-        assert c._slice_extra_blocks(None)[0][3].shape == (3, 2)
+        assert c._slice_spatial_overlap(idx)["pool"].shape == (2, 2)
+        assert c._slice_spatial_overlap(None)["pool"].shape == (3, 2)
 
 
 # ---------------------------------------------------------------------------

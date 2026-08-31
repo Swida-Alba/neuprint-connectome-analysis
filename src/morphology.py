@@ -215,7 +215,6 @@ SPATIAL_HIST_SLICE = (V2_SPATIAL_SLICE[0] + len(SPATIAL_ELLIPSOID_FEATURES),
 # Spatial-heavy 3:7 (unbiased-sample weight sweep 2026-08-30: +0.016 MRR
 # over 5:5, Wilcoxon p = 0.039, AP@50 peak).
 DEFAULT_V2_BLOCK_WEIGHTS = {"shape": 0.30, "spatial": 0.70}
-DEFAULT_V2_ROI_WEIGHT = 0.2
 
 # Two-pass type reevaluation (vector_v2): after the first scoring pass, the
 # remaining (screen-ranked) members of the top-ranked candidate types join
@@ -230,7 +229,7 @@ DEFAULT_EXPAND_PER_TYPE = 10
 # this the V2 comparison falls back to z-scored per-block cosine.
 MIN_ROWS_FOR_WHITENING = 64
 
-VECTOR_CACHE_V2_VERSION = 4   # 4 = Laplacian topology block removed; +8 shape extras (sx_) +16 spatial profile dims (rp_/md_)
+VECTOR_CACHE_V2_VERSION = 5   # 5 = bbox_xy_ratio capped at 1e6 (planar arbors with zero y-span produced 1e13-scale features that dominated the population stats); 4 = topology block removed, +8 sx_* +16 spatial profile dims (rp_/md_)
 
 # Bump when the whitening fit changes so persisted matrices are refit.
 WHITEN_FIT_VERSION = 3
@@ -539,7 +538,8 @@ def compute_morphometrics(neuron) -> Dict[str, float]:
         "strahler_mean": float(strahler.mean()) if n else 0.0,
         "leaf_density": n_leaf / cable if cable > 0 else 0.0,
         "branch_density": n_branch / cable if cable > 0 else 0.0,
-        "bbox_xy_ratio": float(bbox[0]) / max(float(bbox[1]), 1e-9),
+        "bbox_xy_ratio": min(float(bbox[0]) / max(float(bbox[1]), 1e-9),
+                       1e6),  # degenerate flat arbors: bounded, not astronomical
         "path_ratio": (float(path_len.max()) if n else 0.0) / max(bbox_diag, 1e-9),
         "edge_cv": edge_std / max(mean_edge, 1e-9),
     }
@@ -965,7 +965,8 @@ def compute_mesh_morphometrics(mesh) -> Dict[str, float]:
         "strahler_mean": 0.0,
         "leaf_density": area / max(bbox_diag**2, 1e-9),  # surface compactness
         "branch_density": len(faces) / max(area, 1e-9),  # face density
-        "bbox_xy_ratio": float(bbox[0]) / max(float(bbox[1]), 1e-9),
+        "bbox_xy_ratio": min(float(bbox[0]) / max(float(bbox[1]), 1e-9),
+                       1e6),  # degenerate flat arbors: bounded, not astronomical
         "path_ratio": float(radii.max()) / max(bbox_diag, 1e-9) if n else 0.0,
         "edge_cv": (float(edge_lens.std()) / max(float(edge_lens.mean()), 1e-9))
         if edge_lens.size else 0.0,
@@ -1406,6 +1407,210 @@ def _bundle_tree_neuron(bundle, body_id: int):
     return nrn
 
 
+def _flywire_cave_skeletons(dataset: str, body_ids,
+                            project_root: Optional[str] = None,
+                            log=None, denoise_twigs: Optional[float] = None
+                            ) -> Dict[int, object]:
+    """Token-gated CAVE fallback: mesh -> wavefront skeletonize -> cache.
+
+    Returns ``{int(body_id): TreeNeuron}`` for the ids that resolved. Only
+    the skeletonized tree is cached (canonical raw ``.swc.zst``); the raw
+    mesh itself is not cached here, so the morphology chain never depends on
+    the prepared mesh cache.
+    """
+    root = Path(project_root) if project_root else Path(__file__).parent.parent
+    say = log or (lambda _message: None)
+    ids = sorted({int(b) for b in body_ids})
+    if not ids:
+        return {}
+    try:
+        from utils.flywire_readiness import flywire_skeleton_readiness
+        cave_token = bool(
+            flywire_skeleton_readiness(dataset, root).get("cave_token"))
+    except Exception:
+        cave_token = False
+    if not cave_token:
+        say(f"FlyWire skeletons: {len(ids)} body id(s) unavailable locally "
+            "and CAVE_TOKEN is not configured: "
+            f"{ids[:5]}{'...' if len(ids) > 5 else ''}")
+        return {}
+    from cave_data_fetcher import CAVEDataFetcher
+    fetcher = CAVEDataFetcher(
+        dataset=_dataset_folder(dataset), project_root=str(root),
+        verbose=False,
+    )
+    out: Dict[int, object] = {}
+    for bid in ids:
+        try:
+            neuron = fetcher.fetch_skeleton(
+                body_id_to_api_int(bid), use_cache=True,
+                denoise_twigs=denoise_twigs)
+        except Exception as exc:
+            neuron = None
+            say(f"FlyWire skeletons: CAVE fetch failed for {bid}: {exc}")
+        if neuron is not None:
+            out[bid] = neuron
+    unresolved = [b for b in ids if b not in out]
+    if unresolved:
+        say(f"FlyWire skeletons: {len(unresolved)} body id(s) unavailable "
+            f"from cache, bundle, and CAVE: "
+            f"{unresolved[:5]}{'...' if len(unresolved) > 5 else ''}")
+    return out
+
+
+def load_flywire_skeletons_batch(dataset: str, body_ids,
+                                 project_root: Optional[str] = None,
+                                 log=None, check_extrusions: bool = True,
+                                 denoise_twigs: Optional[float] = None
+                                 ) -> Dict[int, object]:
+    """Load FlyWire-family raw skeletons through the canonical pipeline.
+
+    FAFB priority per body id (BANC has no bundle and no extrusion
+    detector; it resolves through the raw cache and CAVE only):
+
+        1. the shared raw skeleton cache
+           (``cache/{dataset}/skeletons/raw_skeletons``),
+        2. the healed FAFB skeleton bundle (offline full-dataset source);
+           newly served trees are cached into the raw store as-is
+           (level 0) so later runs are file-served,
+        3. the extrusion check on the tree sources — per run, with results
+           cached in ``extrusion_check_results.parquet``; flagged neurons
+           are REPLACED through the CAVE API (ids already recorded as
+           ``api_repaired`` keep their cached CAVE-derived tree),
+        4. the token-gated CAVE fallback for everything still missing:
+           the CAVE mesh is skeletonized (wavefront) into a TreeNeuron and
+           cached into the raw store.
+
+    The prepared mesh cache is never consulted: the morphology comparison
+    is TreeNeuron-native (vector_v2 vectorization and NBLAST dotprops),
+    and this loader guarantees every returned neuron is a skeleton.
+
+    NeuPrint datasets are not handled here (they use
+    :func:`fetch_skeleton_on_demand`). Returns ``{int(body_id): neuron}``
+    for every id that resolved; ids unavailable everywhere are absent.
+    """
+    ids = sorted({int(b) for b in body_ids})
+    if not ids:
+        return {}
+    root = Path(project_root) if project_root else Path(__file__).parent.parent
+    say = log or (lambda _message: None)
+    fafb = is_fafb_dataset(dataset)
+
+    loaded: Dict[int, object] = {}
+
+    # 1. Shared raw cache.
+    try:
+        raw_cache = find_similar_raw_cache(
+            dataset, project_root=str(root), verbose=False)
+    except Exception:
+        raw_cache = None
+    missing: List[int] = []
+    if raw_cache is not None:
+        for bid in ids:
+            try:
+                neuron = raw_cache.load_skeleton(bid)
+            except Exception:
+                neuron = None
+            if neuron is None:
+                missing.append(bid)
+            else:
+                loaded[bid] = neuron
+    else:
+        missing = list(ids)
+
+    # 2. Healed FAFB bundle (offline, full dataset), with warm-up
+    #    persistence so later runs are served from the raw store.
+    if missing and fafb:
+        try:
+            bundle = _fafb_bundle(dataset, str(root))
+        except Exception:
+            bundle = None
+        if bundle is not None:
+            still_missing: List[int] = []
+            bundle_sourced: Dict[int, object] = {}
+            try:
+                for bid in missing:
+                    neuron = _bundle_tree_neuron(bundle, bid)
+                    if neuron is None:
+                        still_missing.append(bid)
+                    else:
+                        loaded[bid] = neuron
+                        bundle_sourced[bid] = neuron
+            finally:
+                try:
+                    bundle.close()
+                except Exception:
+                    pass
+            if bundle_sourced and raw_cache is not None:
+                try:
+                    raw_cache.persist_skeletons(
+                        bundle_sourced, simplification=None)
+                    say(f"FlyWire skeletons: cached {len(bundle_sourced)} "
+                        "healed-bundle tree(s) into the raw .swc.zst store.")
+                except Exception as exc:
+                    say(f"FlyWire skeletons: raw-cache warm-up write "
+                        f"failed ({exc}); serving from the bundle only.")
+            bundle_hits = len(missing) - len(still_missing)
+            say(f"FlyWire skeletons: healed bundle resolved {bundle_hits}/"
+                f"{len(missing)} body id(s); {len(still_missing)} left for "
+                "the CAVE fallback.")
+            missing = still_missing
+
+    # 3. Extrusion check on the tree sources (per run; results cached in
+    #    extrusion_check_results.parquet). Flagged neurons are replaced
+    #    through CAVE; ids already recorded as api_repaired keep their
+    #    cached CAVE-derived tree without another network round-trip.
+    if check_extrusions and fafb and loaded:
+        from fafb_utils import (
+            EXTRUSION_REPAIR_API_FAILED,
+            EXTRUSION_REPAIR_API_REPAIRED,
+            flag_extrusions,
+            load_extrusion_repair_status,
+            set_extrusion_repair_status,
+        )
+        folder = _dataset_folder(dataset)
+        try:
+            repair_status = load_extrusion_repair_status(str(root), folder)
+        except Exception:
+            repair_status = {}
+        try:
+            flagged = flag_extrusions(str(root), folder, loaded, log=say)
+        except Exception as exc:
+            flagged = []
+            say(f"FlyWire skeletons: extrusion check failed ({exc}); "
+                "serving the local trees unchecked.")
+        to_replace = sorted(
+            b for b in flagged
+            if b in loaded
+            and repair_status.get(str(b)) != EXTRUSION_REPAIR_API_REPAIRED)
+        if to_replace:
+            say(f"FlyWire skeletons: replacing {len(to_replace)} "
+                "extrusion-flagged neuron(s) through the CAVE API.")
+            replaced = _flywire_cave_skeletons(
+                dataset, to_replace, str(root), log=say,
+                denoise_twigs=denoise_twigs)
+            updates = {}
+            for bid in to_replace:
+                if bid in replaced:
+                    loaded[bid] = replaced[bid]
+                    updates[bid] = EXTRUSION_REPAIR_API_REPAIRED
+                else:
+                    # Keep the flagged local tree; status stays retryable.
+                    updates[bid] = EXTRUSION_REPAIR_API_FAILED
+            try:
+                set_extrusion_repair_status(str(root), folder, updates)
+            except Exception as exc:
+                say(f"FlyWire skeletons: could not save extrusion repair "
+                    f"status: {exc}")
+
+    # 4. Token-gated CAVE fallback for everything still missing.
+    if missing:
+        replaced = _flywire_cave_skeletons(
+            dataset, missing, str(root), log=say, denoise_twigs=denoise_twigs)
+        loaded.update(replaced)
+    return loaded
+
+
 def _import_visualizer():
     """Lazily import the VisualizeSkeleton class (heavy module; never loaded
     unless a run actually renders). Returns None when unavailable."""
@@ -1806,19 +2011,17 @@ def _mirror_spatial_block(block: np.ndarray) -> np.ndarray:
 
 def v2_similarity_matrix(query: np.ndarray, matrix: np.ndarray,
                          block_weights: Dict[str, float],
-                         extra_blocks: Optional[List[Tuple[str, float, np.ndarray, np.ndarray]]] = None,
                          spatial_overlap: Optional[Dict[str, np.ndarray]] = None,
                          query_index: Optional[int] = None
                          ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     """Block-weighted V2 similarity of one query against matrix rows.
 
-    Fixed blocks (shape / spatial) are column slices of the full V2 schema;
-    ``extra_blocks`` carries run-composed blocks as
-    ``(name, weight, query_block, candidate_matrix)`` — the ROI-expansion
-    block, whose width depends on the dataset's ROI count. Each block
-    contributes ``weight * cosine_block`` over the rows where the block is
-    defined on both sides; the total renormalizes by the weights actually
-    used per row.
+    Fixed blocks (shape / spatial) are column slices of the full V2 schema.
+    Each block contributes ``weight * cosine_block`` over the rows where the
+    block is defined on both sides; the total renormalizes by the weights
+    actually used per row. (The former runtime-composed ROI-expansion
+    ``extra_blocks`` were removed — ROI evidence is a candidate-selection
+    signal only.)
 
     The spatial block additionally blends a **mass-overlap term**
     (50/50): ``sum(min(q_hist, candidate_hist))`` over the RAW Hellinger
@@ -1863,11 +2066,6 @@ def v2_similarity_matrix(query: np.ndarray, matrix: np.ndarray,
         if weight <= 0 or a >= b_eff:
             continue
         _accumulate(name, weight, q[a:b_eff], m[:, a:b_eff])
-    for name, weight, q_block, m_block in (extra_blocks or []):
-        weight = float(weight)
-        if weight <= 0 or not len(m_block):
-            continue
-        _accumulate(name, weight, q_block, m_block)
     result = np.divide(total, np.maximum(total_w, 1e-12),
                        out=np.zeros(n), where=total_w > 1e-12)
     return result, per_block
@@ -3383,6 +3581,11 @@ class SkeletonVectorCacheV2(SkeletonVectorCache):
         try:
             meta = self._load_meta() or {}
             meta["spatial_bounds"] = bounds.tolist()
+            # Stamp the schema identity: a bounds-only meta (no version /
+            # lateral-normalization marker) reads as schema-stale on the
+            # next load and would force a needless mid-search rebuild.
+            meta.setdefault("version", self._cache_version())
+            meta["lateral_normalize"] = True
             self.meta_path.parent.mkdir(parents=True, exist_ok=True)
             self.meta_path.write_text(json.dumps(meta, indent=2))
         except OSError:
@@ -3608,7 +3811,7 @@ class SkeletonVectorCacheV2(SkeletonVectorCache):
                         project_root=str(self.project_root),
                         persist=True, level=VECTOR_BASIS_RAW,
                         raw_cache=self,
-                        vector_cache=self._v1_counterpart_cache(),
+                        vector_cache=None,
                     )
 
         files = self._discover_skeleton_files()
@@ -3745,24 +3948,6 @@ class SkeletonVectorCacheV2(SkeletonVectorCache):
                   f"({len(ok_rows)} new) -> {self.parquet_path}")
         return {"rows": len(df), "new": len(ok_rows), "fetched": 0}
 
-    def _v1_counterpart_cache(self) -> SkeletonVectorCache:
-        """The V1 cache sharing this dataset's skeleton store.
-
-        Online fetches vectorize into the V1 cache (it stays warm for the
-        default method); the V2 schema is always computed locally from the
-        shared raw files, never from the fetcher's V1 pipeline.
-        """
-        try:
-            if self.mesh_only:
-                return find_similar_flywire_mesh_cache(
-                    self.dataset, project_root=str(self.project_root),
-                    n_workers=self.n_workers, verbose=False)
-            return find_similar_raw_cache(
-                self.dataset, project_root=str(self.project_root),
-                n_workers=self.n_workers, verbose=False)
-        except Exception:
-            return self
-
 
 def find_similar_dataset_cache_v2(
         dataset: str,
@@ -3896,6 +4081,7 @@ def _datasets_share_population(dataset: str, other: str,
     reconstruction (e.g. male-cns v0.9/v1.0) share their neurons, so the
     older release's population stats are a valid baseline for the newer.
     """
+
     def _ids(ds: str):
         p = root / "neuron_indexes" / _dataset_folder(ds) / "neuron_index.parquet"
         if not p.exists():
@@ -4911,7 +5097,10 @@ def fetch_skeletons_on_demand_batch(
             # fetched skeleton set and exposes the previously invisible
             # post-fetch wait.
             vector_stats = {"cache_error": None}
-            if persist or not flywire:
+            if vector_cache is not None and (persist or not flywire):
+                # vector_cache=None (V1 vector path retired): the caller
+                # vectorizes under the target schema locally, so the fetcher
+                # must not write legacy rows into a cache it was not given.
                 vector_stats = cache_fetched_skeleton_vectors(
                     dataset,
                     fetched_by_id,
@@ -5338,11 +5527,10 @@ class MorphologyComparer:
         min_weight: int = 3,
         min_shared_partners: int = 2,
         roi_filter: Optional[List[str]] = None,
-        # V2 (method="vector_v2") knobs: per-block score weights over the
-        # fixed schema blocks and the weight of the runtime-composed
-        # ROI-expansion block (NeuPrint datasets only; ignored elsewhere).
+        # V2 (method="vector_v2") knob: per-block score weights over the
+        # fixed schema blocks. ROI evidence is a candidate-selection signal
+        # only and deliberately does not participate in scoring.
         v2_block_weights: Optional[Dict[str, float]] = None,
-        v2_roi_weight: float = DEFAULT_V2_ROI_WEIGHT,
         # Two-pass type reevaluation: after the first scoring pass, the
         # remaining members of the top `expand_top_types` candidate types
         # join the pool (up to `expand_per_type` screen-ranked members per
@@ -5368,7 +5556,7 @@ class MorphologyComparer:
         # (top-N results visualization, Skeleton tab). Similarity runs load
         # skeletons unchecked by default because the detector dominates the
         # FAFB fetch cost while extrusions are a small fraction of each tree.
-        check_extrusions: bool = False,
+        check_extrusions: bool = True,
         project_root: Optional[str] = None,
     ):
         self.query = query
@@ -5384,6 +5572,8 @@ class MorphologyComparer:
         self.candidate_source = str(candidate_source).lower()
         # Lazily-built ROI profile store for 'roi'/'combined' screens.
         self._roi_store: Optional[RoiProfileStore] = None
+        # Lazy bodyId->somaSide map (ipsi/contra NBLAST aggregation).
+        self._soma_sides: Optional[Dict[int, str]] = None
         self.min_weight = int(min_weight)
         self.min_shared_partners = int(min_shared_partners)
         self.roi_filter = list(roi_filter) if roi_filter else None
@@ -5408,9 +5598,6 @@ class MorphologyComparer:
         for name, value in (v2_block_weights or {}).items():
             if name in weights:
                 weights[name] = float(value)
-        if self.method == "vector_v2" and DEFAULT_V2_ROI_WEIGHT:
-            weights.setdefault("roi", 0.0)
-            weights["roi"] = float(v2_roi_weight)
         self._v2_weights = weights
         self.expand_top_types = int(expand_top_types)
         self.expand_per_type = int(expand_per_type)
@@ -5424,8 +5611,6 @@ class MorphologyComparer:
         # Run-scoped V2 state: extra (ROI-expansion) blocks aligned to the
         # scoring pool, set by ``_prepare_v2_scoring``; the V1 counterpart
         # cache that online fetches warm with V1 vectors.
-        self._v2_extra_blocks: Optional[List[Tuple[str, float, np.ndarray, np.ndarray]]] = None
-        self._fetch_vector_cache_obj: Optional[SkeletonVectorCache] = None
         # V2 run state: raw Hellinger histograms for the spatial-overlap
         # term — per query member, the pooled query centroid, and the pool.
         self._v2_spatial_overlap: Optional[Dict[str, np.ndarray]] = None
@@ -5475,71 +5660,32 @@ class MorphologyComparer:
 
     # ------------------------------------------------------------ V2 scoring
     def _similarity_matrix(self, query: np.ndarray, matrix: np.ndarray,
-                           extra_subset=None, query_index: Optional[int] = None) -> np.ndarray:
-        """Metric dispatcher: V1 metric, or the whitened block-weighted V2
-        score. ``extra_subset`` (bool mask or index array) selects which
-        pool rows the run-composed ROI-expansion blocks must be sliced to."""
-        if self._is_v2:
-            total, _ = self._similarity_matrix_with_blocks(
-                query, matrix, extra_subset=extra_subset,
-                query_index=query_index)
-            return total
-        return similarity_matrix(query, matrix, self.metric)
+                           pool_subset=None, query_index: Optional[int] = None) -> np.ndarray:
+        """Whitened block-weighted V2 score. ``pool_subset`` (bool mask or
+        index array) selects which pool rows the run-composed spatial
+        mass-overlap histograms must be sliced to."""
+        total, _ = self._similarity_matrix_with_blocks(
+            query, matrix, pool_subset=pool_subset, query_index=query_index)
+        return total
 
     def _similarity_matrix_with_blocks(self, query: np.ndarray,
-                                       matrix: np.ndarray, extra_subset=None,
+                                       matrix: np.ndarray, pool_subset=None,
                                        query_index: Optional[int] = None):
         """As ``_similarity_matrix`` but also returns per-block scores."""
-        if self._is_v2:
-            return v2_similarity_matrix(
-                query, matrix, self._v2_weights,
-                self._slice_extra_blocks(extra_subset),
-                spatial_overlap=self._slice_spatial_overlap(extra_subset),
-                query_index=query_index)
-        return similarity_matrix(query, matrix, self.metric), {}
+        total, per_block = v2_similarity_matrix(
+            query, matrix, self._v2_weights,
+            spatial_overlap=self._slice_spatial_overlap(pool_subset),
+            query_index=query_index)
+        return total, per_block
 
     def _pairwise_similarity(self, matrix: np.ndarray) -> np.ndarray:
-        if self._is_v2:
-            return v2_pairwise_matrix(matrix, self._v2_weights)
-        return pairwise_similarity_matrix(matrix, self.metric)
-
-    def _slice_extra_blocks(self, subset):
-        """Extra blocks sliced to the rows a scoring call selected.
-
-        Extra blocks (the ROI-expansion matrix) are aligned to the FULL
-        scoring pool; ``X_c[keep]``-style subsetting must slice them
-        identically or query/candidate rows would misalign."""
-        extras = self._v2_extra_blocks
-        if not extras:
-            return None
-        if subset is None:
-            return extras
-        sliced = []
-        for name, weight, q_block, m_block in extras:
-            if isinstance(subset, np.ndarray) and subset.dtype == bool:
-                sliced.append((name, weight, q_block, m_block[subset]))
-            else:
-                sliced.append((name, weight, q_block,
-                               m_block[np.asarray(subset, dtype=int)]))
-        return sliced
+        return v2_pairwise_matrix(matrix, self._v2_weights)
 
     def _vector_dim_for(self, cache_data: Optional[dict]) -> int:
         """Vector width of this run's cache (124 for V1, 256 for V2)."""
         if cache_data is not None and getattr(cache_data.get("X"), "ndim", 0) == 2:
             return int(cache_data["X"].shape[1])
         return VECTOR_V2_DIM if self._is_v2 else VECTOR_DIM
-
-    def _fetch_vector_cache(self) -> SkeletonVectorCache:
-        """V1 counterpart cache warming during V2 online fetches.
-
-        The batch fetcher vectorizes into the V1 cache (kept warm for the
-        default method); V2 rows are always computed locally from the shared
-        raw files, never written by the fetcher's V1 pipeline."""
-        if self._fetch_vector_cache_obj is None:
-            self._fetch_vector_cache_obj = find_similar_dataset_cache(
-                self.dataset, project_root=str(self.project_root),
-                n_workers=self.n_workers, verbose=False)
-        return self._fetch_vector_cache_obj
 
     def _maybe_roi_store(self) -> Optional[RoiProfileStore]:
         """The ROI store for the V2 expansion block, when it is cheaply
@@ -5561,12 +5707,14 @@ class MorphologyComparer:
                             X_q: np.ndarray, X_c: np.ndarray,
                             mask_q: np.ndarray, mask_c: np.ndarray,
                             query_ids: List, pool_ids: List) -> None:
-        """Whiten the standardized snapshot and compose the ROI block.
+        """Whiten the standardized snapshot and build the spatial overlap.
 
         Runs once per search, after standardization and before any scoring:
         applies the population ZCA whitener to the query/candidate rows (and
         the cache snapshot, so intra-type fallbacks live in the same space),
-        then aligns the Hellinger pre/post expansion block to the pool.
+        then aligns the Hellinger pre/post mass-overlap term to the pool.
+        ROI evidence deliberately does NOT participate in scoring — it is a
+        candidate-selection signal only (see ``_roi_candidates``).
         """
         W = (cache_data or {}).get("whiten")
         if W is None or not getattr(W, "size", 0):
@@ -5578,37 +5726,8 @@ class MorphologyComparer:
         if mask_c.any():
             X_c[mask_c] = apply_whitening(W, X_c[mask_c])
 
-        self._v2_extra_blocks = None
         self._v2_spatial_overlap = self._build_spatial_overlap(
             cache_data, query_ids, pool_ids)
-        if float(self._v2_weights.get("roi", 0.0)) <= 0:
-            return
-        store = self._maybe_roi_store()
-        if store is None:
-            self._log("V2: no ROI store available; scoring without the "
-                      "ROI-expansion block.")
-            return
-        try:
-            found_ids, block = store.expansion_rows(list(query_ids) + list(pool_ids))
-        except Exception:
-            return
-        if not len(found_ids):
-            return
-        row_of = {int(b): i for i, b in enumerate(found_ids)}
-        width = block.shape[1]
-        q_block = np.zeros((len(query_ids), width))
-        for i, bid in enumerate(query_ids):
-            row = row_of.get(int(self._body_id(bid)))
-            if row is not None:
-                q_block[i] = block[row]
-        q_centroid = q_block.mean(axis=0)
-        c_block = np.zeros((len(pool_ids), width))
-        for i, bid in enumerate(pool_ids):
-            row = row_of.get(int(self._body_id(bid)))
-            if row is not None:
-                c_block[i] = block[row]
-        self._v2_extra_blocks = [("roi", float(self._v2_weights["roi"]),
-                                  q_centroid, c_block)]
 
     # ------------------------------------------------------ candidate source
     def _is_flywire(self) -> bool:
@@ -5757,13 +5876,15 @@ class MorphologyComparer:
             self.level = self._resolve_level(query_df)
             self._log(f"Level auto-resolved to: {self.level} "
                       f"({'type-to-type' if self.level == 'type' else 'bodyId-to-bodyId'})")
-        cache = (find_similar_dataset_cache_v2(
+        # The V2 skeleton-vector cache is the single search population for
+        # both methods: vector_v2 scores it directly, and NBLAST needs
+        # skeletons (the FlyWire local mesh cache cannot serve dotprops,
+        # and the V1 vector path is retired). Its raw-skeleton store is
+        # backed by the raw skeleton store / healed bundle.
+        cache = find_similar_dataset_cache_v2(
             self.dataset, project_root=str(self.project_root),
             n_workers=self.n_workers, verbose=self.verbose,
-        ) if self._is_v2 else find_similar_dataset_cache(
-            self.dataset, project_root=str(self.project_root),
-            n_workers=self.n_workers, verbose=self.verbose,
-        ))
+        )
 
         if source in CANDIDATE_SCREEN_SOURCES:
             bodyid_df, type_df = self._profile_first_search(query_df, cache,
@@ -5826,10 +5947,8 @@ class MorphologyComparer:
                     level=VECTOR_BASIS_RAW,
                     max_threads=min(NEUPRINT_FETCH_MAX_THREADS,
                                     max(1, int(self.n_workers))),
-                    raw_cache=(self._fetch_vector_cache() if self._is_v2
-                               else cache),
-                    vector_cache=(self._fetch_vector_cache() if self._is_v2
-                                  else cache),
+                    raw_cache=cache,
+                    vector_cache=None,
                 )
                 # Keep the vector-mode contract even for integrations that
                 # override the batch fetch seam and return neurons without
@@ -6240,16 +6359,17 @@ class MorphologyComparer:
                           or done % max(1, total // 10) == 0):
                 self._log(f"Step 4/6 — {message}")
 
-        fetch_cache = self._fetch_vector_cache() if self._is_v2 else cache
+        fetch_cache = cache
         fetched_all: Dict[int, object] = {}
         if missing_ids:
             if self._is_v2 and is_fafb_dataset(self.dataset):
                 # FAFB: the healed skeleton bundle is LOCAL — fetch through
-                # the fast bundle loader (extrusion check off by default;
-                # rendering performs it for displayed neurons) instead
-                # of the generic batch fetcher's per-neuron CAVE path, which
-                # takes minutes per skeleton on this dataset. Persisted raw
-                # SWCs land in the shared skeleton store for reuse.
+                # the shared FlyWire loader (raw cache / bundle -> per-run
+                # extrusion check with CAVE replacement -> CAVE
+                # skeletonization) instead of the generic batch fetcher's
+                # per-neuron CAVE mesh path, which takes minutes per
+                # skeleton on this dataset and returns meshes a skeleton
+                # cache cannot store.
                 loaded = self._load_fafb_skeletons(missing_ids)
                 fetched = {int(b): n for b, n in (loaded or {}).items()
                            if n is not None}
@@ -6258,9 +6378,8 @@ class MorphologyComparer:
                     # mesh-native and cache themselves in the prepared-mesh
                     # namespace); each tree at its OWN recorded level.
                     # The V2 cache owns the shared raw-skeleton store
-                    # (raw_only); _fetch_vector_cache() is the mesh-native
-                    # V1 counterpart on FlyWire and silently drops
-                    # skeleton-rep neurons.
+                    # (raw_only) — the only skeleton-capable target here
+                    # (the mesh cache drops skeleton-rep neurons).
                     skeleton_only = {b: n for b, n in fetched.items()
                                      if _neuron_rep(n) == "skeleton"}
                     if skeleton_only:
@@ -6286,7 +6405,7 @@ class MorphologyComparer:
                     # (a 124-dim fetcher row must never land in the V2
                     # parquet).
                     raw_cache=fetch_cache,
-                    vector_cache=fetch_cache,
+                    vector_cache=None,
                 )
 
         query_neurons = {
@@ -6434,23 +6553,9 @@ class MorphologyComparer:
 
         using_cache_stats = False
         if mask_q.any() or mask_c.any():
-            mu = sd = None
             if (meta_mu is not None
                     and len(cache_data["bodyIds"]) >= MIN_POPULATION_STATS_SKELETONS):
                 mu, sd, using_cache_stats = meta_mu, meta_sd, True
-            if mu is None and not self._is_v2:
-                # V1 fallback: sample-based population statistics. The V2
-                # schema has its own whitening path instead (a V1-dim stats
-                # file would mis-slice the 256-dim vectors).
-                mu, sd = population_stats(
-                    self.dataset, str(self.project_root), cache=cache
-                )
-            if mu is None:
-                # Last resort: pool-computed statistics.
-                all_rows = np.vstack([X_q[mask_q], X_c[mask_c]])
-                mu = all_rows.mean(axis=0)
-                sd = all_rows.std(axis=0)
-                sd = np.where(sd <= 0, 1.0, sd)
 
             cache_q = (np.array([self._body_id(b) in cache_ids for b in query_ids])
                        & mask_q)
@@ -6462,17 +6567,26 @@ class MorphologyComparer:
                 X_q[mask_q & ~cache_q] = (X_q[mask_q & ~cache_q] - mu) / sd
                 X_c[mask_c & ~cache_c] = (X_c[mask_c & ~cache_c] - mu) / sd
             else:
-                # Cache rows carry the cache's own standardization: restore
-                # the raw vectors first so every row gets the same transform.
+                # Pool-computed statistics. Cache rows carry the cache's own
+                # standardization: restore them to raw FIRST, then compute
+                # mu/sd over the restored (all-raw) rows, so every row is
+                # z-scored in one consistent frame. Computing the stats
+                # before the restore mixed frames — with degenerate features
+                # the meta-standardized and raw magnitudes differ by orders
+                # of magnitude and every score was poisoned.
                 if meta_mu is not None:
                     X_q[cache_q] = X_q[cache_q] * meta_sd + meta_mu
                     X_c[cache_c] = X_c[cache_c] * meta_sd + meta_mu
+                all_rows = np.vstack([X_q[mask_q], X_c[mask_c]])
+                mu = all_rows.mean(axis=0)
+                sd = all_rows.std(axis=0)
+                sd = np.where(sd <= 0, 1.0, sd)
                 X_q[mask_q] = (X_q[mask_q] - mu) / sd
                 X_c[mask_c] = (X_c[mask_c] - mu) / sd
 
-        if self._is_v2:
-            # Whiten the standardized snapshot and compose the optional
-            # ROI-expansion block BEFORE any scoring sees the vectors.
+        # Whiten the standardized snapshot BEFORE any scoring sees the
+        # vectors (both methods: the snapshot is always the V2 schema).
+        if mask_q.any() or mask_c.any():
             self._prepare_v2_scoring(cache_data, X_q, X_c, mask_q, mask_c,
                                      query_ids, pool_ids)
 
@@ -6485,7 +6599,7 @@ class MorphologyComparer:
             self._progress(5, PROFILE_FIRST_TOTAL_STEPS,
                            self._scoring_step_label())
             scores[keep] = self._similarity_matrix(
-                q_vec, X_c[keep], extra_subset=keep)
+                q_vec, X_c[keep], pool_subset=keep)
 
         query_type = ""
         if len(query_df):
@@ -6521,14 +6635,13 @@ class MorphologyComparer:
                 ),
                 [query_type for _ in query_ok],
                 X_q[query_ok],
-                self.metric,
             )
         elif using_cache_stats and cache_data is not None and len(cache_data["bodyIds"]):
             # BodyId queries still use the complete cached type population so
             # their same-type rows retain the established reference value.
             intra = self._intra_type_similarity(
                 query_type, cache_data["bodyIds"], cache_data["types"],
-                cache_data["X"], self.metric,
+                cache_data["X"],
             )
         if not np.isfinite(intra) and query_type and mask_q.any():
             ok = np.where(mask_q)[0]
@@ -6540,7 +6653,7 @@ class MorphologyComparer:
                 ),
                 [str(query_df["type"].iloc[i]).strip() if i < len(query_df) else ""
                  for i in ok],
-                X_q[ok], self.metric,
+                X_q[ok],
             )
 
         # NBLAST (method="nblast"): score every scored candidate against the
@@ -6548,10 +6661,16 @@ class MorphologyComparer:
         # instead of the vector prefilter (which only ordered the pool).
         nblast_scores: Dict[int, float] = {}
         if self.method == "nblast":
+            # NBLAST needs skeletons, not vectors: score the WHOLE pool.
+            # The keep mask only bounds the vector scorer — on FlyWire the
+            # V1 mesh snapshot covers a small fraction of the pool, so
+            # gating on it would silently leave most candidates unscored
+            # (NaN). Unresolvable skeletons return None from
+            # _dotprops_for_ids and are dropped there.
             nblast_scores = self._compute_nblast_scores(
                 query_df,
                 scored_pool_ids=[self._body_id(pool_ids[i])
-                                 for i in np.flatnonzero(keep)],
+                                 for i in range(len(pool_ids))],
                 neurons={**query_neurons, **pool_neurons},
             )
 
@@ -6585,7 +6704,7 @@ class MorphologyComparer:
                     q_scores[candidate_indices], q_blocks = \
                         self._similarity_matrix_with_blocks(
                             X_q[query_i], X_c[candidate_indices],
-                            extra_subset=candidate_indices,
+                            pool_subset=candidate_indices,
                             query_index=query_i
                         )
                 for candidate_i in range(len(pool_ids)):
@@ -6699,7 +6818,7 @@ class MorphologyComparer:
                 for t, ids in scored.items()
             }
         type_df = self._aggregate_type_rows(
-            rows,
+            self._drop_contra_nblast_rows(rows),
             query_type=query_type,
             intra=intra,
             query_type_count=query_type_count,
@@ -6832,7 +6951,7 @@ class MorphologyComparer:
     def _slice_spatial_overlap(self, subset
                                ) -> Optional[Dict[str, np.ndarray]]:
         """Spatial-overlap pool matrix sliced to the rows a scoring call
-        selected (same alignment rule as ``_slice_extra_blocks``)."""
+        selected."""
         so = self._v2_spatial_overlap
         if so is None:
             return None
@@ -6941,18 +7060,17 @@ class MorphologyComparer:
             f"types ({len(missing)} to fetch)...")
         self._progress(5, PROFILE_FIRST_TOTAL_STEPS,
                        f"Reevaluating top types (+{len(new_ids)} members)")
-        fetch_cache = self._fetch_vector_cache()
+        fetch_cache = cache
         fetched_all: Dict[int, object] = {}
         if missing:
             if is_fafb_dataset(self.dataset):
                 # FAFB: the healed skeleton bundle is LOCAL — fetch through
-                # the FAFB loader instead of the generic batch fetcher,
-                # which is mesh-native on this dataset; its MeshNeurons are
-                # dropped by the representation guard below, so expansion
-                # members never scored. Extrusion checking stays off by
-                # default here (the render pipeline checks what it
-                # displays); skeleton trees persist like the profile-first
-                # fetch does.
+                # the shared FlyWire loader instead of the generic batch
+                # fetcher, which is mesh-native on this dataset and would
+                # leave expansion members unscored. The loader owns
+                # persistence (as-stored level) and the per-run extrusion
+                # check; the re-persist below stays as a best-effort top-up
+                # for trees the loader could not write itself.
                 loaded = self._load_fafb_skeletons(missing)
                 fetched = {
                     int(b): n for b, n in (loaded or {}).items()
@@ -6964,10 +7082,10 @@ class MorphologyComparer:
                         if _neuron_rep(n) == "skeleton"
                     }
                     if skeleton_only:
-                        # The V2 cache owns the shared raw-skeleton store;
-                        # _fetch_vector_cache() is the mesh-native V1
-                        # counterpart on FlyWire and silently drops
-                        # skeleton-rep neurons.
+                        # The V2 cache owns the shared raw-skeleton store
+                        # (raw_only) — the only skeleton-capable target
+                        # here (the mesh cache drops skeleton-rep
+                        # neurons).
                         cache.persist_skeletons(
                             skeleton_only, simplification=None)
                 fetched_all = {
@@ -6981,7 +7099,7 @@ class MorphologyComparer:
                     persist=True, level=VECTOR_BASIS_RAW,
                     max_threads=min(NEUPRINT_FETCH_MAX_THREADS,
                                     max(1, int(self.n_workers))),
-                    raw_cache=fetch_cache, vector_cache=fetch_cache,
+                    raw_cache=fetch_cache, vector_cache=None,
                 )
 
         order: List[int] = []
@@ -7047,8 +7165,8 @@ class MorphologyComparer:
         if W is not None and getattr(W, "size", 0):
             X_new = apply_whitening(W, X_new)
 
-        # Extend the ROI-expansion block and the spatial-overlap histograms
-        # to cover the new candidates.
+        # Extend the spatial-overlap histograms to cover the new
+        # candidates.
         new_idx = np.arange(pool_len, pool_len + len(order))
         if self._v2_spatial_overlap is not None:
             hist_lo, hist_hi = SPATIAL_HIST_SLICE
@@ -7063,26 +7181,6 @@ class MorphologyComparer:
             self._v2_spatial_overlap = {
                 "members": so["members"], "centroid": so["centroid"],
                 "pool": np.vstack([so["pool"], new_h])}
-        if self._v2_extra_blocks:
-            block_store = self._maybe_roi_store()
-            found = np.array([], dtype=np.int64)
-            blk = np.zeros((0, 0))
-            if block_store is not None:
-                try:
-                    found, blk = block_store.expansion_rows(order)
-                except Exception:
-                    found, blk = np.array([], dtype=np.int64), np.zeros((0, 0))
-            row_of = {int(b): i for i, b in enumerate(found.tolist())}
-            width = self._v2_extra_blocks[0][3].shape[1]
-            extended = np.zeros((len(order), width))
-            for k, bid in enumerate(order):
-                r = row_of.get(int(bid))
-                if r is not None:
-                    extended[k] = blk[r]
-            name, weight, q_block, c_block = self._v2_extra_blocks[0]
-            self._v2_extra_blocks = [
-                (name, weight, q_block, np.vstack([c_block, extended]))]
-
         query_indices = [i for i, ok in enumerate(mask_q) if ok]
         id_to_type = dict(id_to_type)
         added_rows = 0
@@ -7091,7 +7189,7 @@ class MorphologyComparer:
             raw_q_type = query_df["type"].iloc[query_i]
             q_type = "" if pd.isna(raw_q_type) else str(raw_q_type).strip()
             totals, blocks = self._similarity_matrix_with_blocks(
-                X_q[query_i], X_new, extra_subset=new_idx, query_index=query_i)
+                X_q[query_i], X_new, pool_subset=new_idx, query_index=query_i)
             for k, bid in enumerate(order):
                 if bid in scored_ids:
                     continue
@@ -7160,58 +7258,15 @@ class MorphologyComparer:
                     pbar.update(1)
         finally:
             pbar.close()
-        return nblast_scores
-
-    def _nblast_refine(self, results: pd.DataFrame, query_df: pd.DataFrame,
-                       cache: SkeletonVectorCache,
-                       neurons: Optional[Dict[int, "navis.TreeNeuron"]] = None) -> pd.DataFrame:
-        """Replace vector scores with NBLAST scores for the fetched candidates."""
-        self._progress(5, PROFILE_FIRST_TOTAL_STEPS, "Refining scores with NBLAST")
-        query_ids = set(self._body_ids(query_df["bodyId"].tolist()))
-        # Type-level results also contain intra-type rows whose target
-        # is another query member.  They are reference pairs, not candidates
-        # for refinement; keep their vector similarity below.
-        cand_ids = [
-            self._body_id(b) for b, s in zip(results["target_bodyId"],
-                                             results["similarity"])
-            if self._body_id(b) not in query_ids and pd.notna(s)
-        ]
-        query_dp = self._dotprops_for_ids(
-            self._body_ids(query_df["bodyId"].tolist()), neurons=neurons
-        )
-        if not query_dp:
-            self._log("NBLAST: query dotprops unavailable; keeping vector scores.")
-            return results
-        cand_dp = self._dotprops_for_ids(cand_ids, neurons=neurons)
-        cand_dp = {b: dp for b, dp in cand_dp.items() if dp is not None}
-        if not cand_dp:
-            self._log("NBLAST: no candidate dotprops; keeping vector scores.")
-            return results
-        nblast_scores = self._nblast_pairwise(
-            query_dp, cand_dp, desc="NBLAST scoring")
-        results = results.copy()
-        # In type mode, ``results`` also contains the vector-based ordered
-        # intra-type pairs.  They are not in the candidate NBLAST map because
-        # query members are deliberately excluded from that candidate set;
-        # preserve their already-computed intra similarity instead of turning
-        # those rows into NaN during refinement.
-        results["similarity"] = results.apply(
-            lambda row: nblast_scores.get(
-                self._body_id(row["target_bodyId"]), row["similarity"]
-            ) if bool(row.get("is_same_type", False))
-            else nblast_scores.get(self._body_id(row["target_bodyId"]), np.nan),
-            axis=1,
-        )
-        results = results.sort_values(
-            ["similarity", "target_bodyId"], ascending=[False, True]
-        ).reset_index(drop=True)
-        results["rank"] = np.arange(1, len(results) + 1)
-        return results
+        # Canonical id keys: _dotprops_for_ids keys its dict by plain ints,
+        # while every consumer looks scores up by the dataset-canonical id
+        # (string bodyIds on FlyWire — an int key would silently miss ALL
+        # lookups there).
+        return {self._body_id(b): v for b, v in nblast_scores.items()}
 
     # ------------------------------------------------------------------ vector
     def _intra_type_similarity(self, type_name: str, body_ids: np.ndarray,
-                              types: List[str], X: np.ndarray,
-                              metric: str) -> float:
+                              types: List[str], X: np.ndarray) -> float:
         """Mean pairwise similarity among a type's members (vector-based).
 
         1.0 for a single member (trivially identical); NaN when the type has
@@ -7332,6 +7387,63 @@ class MorphologyComparer:
                 row["candidate_source"] = candidate_source
             rows.append(row)
         return rows
+
+    def _soma_side_map(self) -> Dict[int, str]:
+        """bodyId -> 'L' | 'R' | '' for ipsi/contra classification.
+
+        Delegates to the shared index reader (``somaSide`` on NeuPrint
+        datasets, ``hemisphere`` on FlyWire), memoized per run. Neurons the
+        index does not side (midline/unknown) map to '' so they are never
+        side-filtered. Best-effort: any read failure means no filtering.
+        """
+        if self._soma_sides is not None:
+            return self._soma_sides
+        raw = _dataset_soma_side_map(self.dataset, str(self.project_root))
+        sides = {bid: {"left": "L", "right": "R"}.get(name, "")
+                 for bid, name in raw.items()}
+        self._soma_sides = sides
+        return sides
+
+    def _drop_contra_nblast_rows(
+            self, rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
+        """Rows pairing opposite known sides, dropped for NBLAST type means.
+
+        The morphology benchmark measured NBLAST contralateral same-type
+        pairs at chance (median score -0.03 vs 0.89 ipsilateral; partner
+        RR 0.13 vs 0.84) — mirror arbors sit far apart in its absolute-
+        coordinate matching. Type means over both sides therefore dilute
+        the ipsilateral evidence with noise, so ``method="nblast"``
+        aggregations exclude contralateral pairs. vector_v2 is
+        mirror-invariant by lateral normalization and keeps them. Rows with
+        an unknown or midline side on either end are always kept.
+        """
+        if self.method != "nblast" or not rows:
+            return rows
+        sides = self._soma_side_map()
+        if not sides:
+            return rows
+
+        def _side_of(value) -> str:
+            try:
+                # Index keys are plain ints; canonical bodyIds on FlyWire
+                # are numeric strings.
+                return sides.get(int(self._body_id(value)), "")
+            except (TypeError, ValueError):
+                return ""
+
+        out: List[Dict[str, object]] = []
+        dropped = 0
+        for row in rows:
+            s = _side_of(row.get("source_bodyId"))
+            t = _side_of(row.get("target_bodyId"))
+            if s in ("L", "R") and t in ("L", "R") and s != t:
+                dropped += 1
+                continue
+            out.append(row)
+        if dropped:
+            self._log(f"NBLAST: {dropped} contralateral pair rows excluded "
+                      "from type means (mirror scores unreliable).")
+        return out
 
     def _aggregate_type_rows(
         self,
@@ -7553,7 +7665,6 @@ class MorphologyComparer:
             if W is not None and getattr(W, "size", 0):
                 data["X"] = apply_whitening(W, X)
                 X = data["X"]
-            self._v2_extra_blocks = None
             self._v2_spatial_overlap = None
         query_ids = self._body_ids(query_df["bodyId"].tolist())
         query_ids_set = set(query_ids)
@@ -7566,7 +7677,7 @@ class MorphologyComparer:
         # Cache-direct type searches use every cached member of the queried
         # type; the type index below supplies the authoritative member count
         # even if a legacy query resolver returned only one member.
-        intra = self._intra_type_similarity(q_type, body_ids, types, X, self.metric)
+        intra = self._intra_type_similarity(q_type, body_ids, types, X)
         type_map, _ = _load_neuron_type_map(
             self.dataset, str(self.project_root)
         )
@@ -7625,7 +7736,7 @@ class MorphologyComparer:
                     continue
                 scores = self._similarity_matrix(q_vec, X)
                 row_intra = self._intra_type_similarity(
-                    qrow["type"], body_ids, types, X, self.metric
+                    qrow["type"], body_ids, types, X
                 )
                 for i, bid in enumerate(body_ids):
                     bid = self._body_id(bid)
@@ -7683,8 +7794,7 @@ class MorphologyComparer:
             if q_vec is not None:
                 scores = self._similarity_matrix(q_vec, X)
                 type_df = self._aggregate_by_type(
-                    body_ids, types, scores, query_type=q_type,
-                    metric=self.metric, X=X,
+                    body_ids, types, scores, query_type=q_type, X=X,
                 )
         return bodyid_df, type_df
 
@@ -7695,7 +7805,7 @@ class MorphologyComparer:
         return X[idx[0]]
 
     def _aggregate_by_type(self, body_ids: np.ndarray, types: List[str], scores: np.ndarray,
-                           query_type: str = "", metric: str = "cosine",
+                           query_type: str = "",
                            X: Optional[np.ndarray] = None) -> pd.DataFrame:
         """Aggregate bodyId scores to type level (mean of member scores).
 
@@ -7712,7 +7822,7 @@ class MorphologyComparer:
         for t, vals in agg.items():
             intra = float("nan")
             if X is not None and t == query_type:
-                intra = self._intra_type_similarity(t, body_ids, types, X, metric)
+                intra = self._intra_type_similarity(t, body_ids, types, X)
             rows.append({
                 "target_type": t,
                 "similarity": float(np.mean(vals)),
@@ -7748,7 +7858,7 @@ class MorphologyComparer:
             )
             if q_vec is None:
                 continue
-            s = similarity_matrix(q_vec, X, "cosine")
+            s = self._similarity_matrix(q_vec, X)
             scores = np.maximum(scores, s)
         prefilter_idx = np.where(candidate_mask)[0]
         prefilter_idx = prefilter_idx[np.argsort(-scores[prefilter_idx])][: self.candidate_cap]
@@ -7799,10 +7909,9 @@ class MorphologyComparer:
                 body_ids[query_mask],
                 [query_type for _ in range(int(query_mask.sum()))],
                 X[query_mask],
-                "cosine",
             )
         else:
-            intra = self._intra_type_similarity(query_type, body_ids, types, X, "cosine")
+            intra = self._intra_type_similarity(query_type, body_ids, types, X)
 
         type_map, _ = _load_neuron_type_map(
             self.dataset, str(self.project_root)
@@ -7847,8 +7956,11 @@ class MorphologyComparer:
 
         # --- type rows (per-type NBLAST means + intra reference) ---
         if self.level == "type":
+            # Contralateral pair rows stay in results.csv (complete record)
+            # but are excluded from the type means: NBLAST mirror scores are
+            # unreliable (benchmark: chance-level), unlike vector_v2.
             type_df = self._aggregate_type_rows(
-                rows,
+                self._drop_contra_nblast_rows(rows),
                 query_type=query_type,
                 intra=intra,
                 query_type_count=(query_type_count or int(query_mask.sum())),
@@ -7898,206 +8010,22 @@ class MorphologyComparer:
     def _load_fafb_skeletons(self, body_ids: List[int],
                              check_extrusions: Optional[bool] = None
                              ) -> Dict[int, object]:
-        """Load FAFB sources following the visualization pipeline:
+        """Load FAFB skeletons through the shared FlyWire pipeline.
 
-        1. local first: extrusion-fixed skeletons cached under
-           ``cache/{dataset}/API_cache/skeletons/``,
-        2. the healed skeleton bundle (``{bodyId}.swc``),
-        3. extrusion test on the bundle skeletons (results cached) — only
-           when ``check_extrusions`` is enabled; the default similarity run
-           loads skeletons unchecked because the render pipeline (top-N
-           results visualization, Skeleton tab) performs the check and the
-           CAVE repair for the neurons it actually displays,
-        4. online fallback via the CAVE API (token-gated) for ids missing
-           locally or flagged by the extrusion test. CAVE replacements are
-           prepared ``MeshNeuron`` objects cached as ``.pkl.zst`` files; when
-           CAVE cannot repair a flagged tree, a safe local extrusion branch
-           cut is attempted in memory and never written to the raw SWC cache.
+        Priority: shared raw ``.swc.zst`` cache -> healed skeleton bundle
+        (newly served trees are cached into the raw store) -> per-run
+        extrusion check with cached results (flagged neurons are replaced
+        through the CAVE API) -> token-gated CAVE skeletonization for
+        everything still missing. Every returned neuron is a TreeNeuron;
+        the prepared mesh cache is never consulted.
+
+        Kept as a method so callers and tests can override the seam.
         """
-        ids = sorted({int(b) for b in body_ids})
-        if not ids:
-            return {}
-        root = self.project_root
-        folder = _dataset_folder(self.dataset)
-        loaded: Dict[int, object] = {}
         check = self.check_extrusions if check_extrusions is None \
             else bool(check_extrusions)
-
-        # 1. Local first: the API skeleton cache holds previously fetched
-        #    (extrusion-fixed) skeletons and takes priority over the bundle,
-        #    exactly like the visualization pipeline.
-        api_dir = root / "cache" / folder / "API_cache" / "skeletons"
-        zip_ids: List[int] = []
-        for bid in ids:
-            nrn = None
-            api_pkl = api_dir / f"{bid}.pkl"
-            if api_pkl.exists():
-                try:
-                    with open(api_pkl, "rb") as f:
-                        nrn = pickle.load(f)
-                except Exception:
-                    nrn = None
-            if nrn is not None:
-                loaded[bid] = nrn
-            else:
-                zip_ids.append(bid)
-
-        # 2. The healed skeleton bundle (.zst first; ZIP fallback with lazy
-        #    per-skeleton conversion).
-        if zip_ids:
-            try:
-                bundle = _fafb_bundle(self.dataset, str(root))
-            except Exception:
-                bundle = None
-            if bundle is not None:
-                try:
-                    for bid in zip_ids:
-                        nrn = _bundle_tree_neuron(bundle, bid)
-                        if nrn is not None:
-                            loaded[bid] = nrn
-                finally:
-                    bundle.close()
-            else:
-                zip_path = _fafb_skeleton_zip_path(self.dataset, str(root))
-                if zip_path is not None:
-                    import zipfile
-                    with zipfile.ZipFile(zip_path, "r") as z:
-                        for bid in zip_ids:
-                            nrn = _read_fafb_zip_skeleton(z, bid)
-                            if nrn is not None:
-                                loaded[bid] = nrn
-
-        # 3. Extrusion test on the bundle-sourced skeletons (cached per
-        #    neuron; unchecked ids are analyzed in a parallel batch). Off by
-        #    default for similarity runs: the render pipeline owns the check
-        #    for the neurons it displays.
-        extrusion_ids: List[int] = []
-        if check:
-            from fafb_utils import flag_extrusions
-
-            zip_loaded = {b: loaded[b] for b in zip_ids if b in loaded}
-            extrusion_ids = flag_extrusions(
-                str(root), folder, zip_loaded,
-                verbose=self.verbose, log=self._log,
-                n_workers=self.n_workers,
-            )
-
-        missing = [b for b in ids if b not in loaded]
-        extrusion_ids = sorted(set(extrusion_ids))
-        # 4. Online fallback (token-gated; matches the visualization
-        #    pipeline's CAVE_TOKEN check). Missing neurons may reuse a
-        #    prepared mesh cache. Extrusion replacements must bypass that
-        #    cache so an old prepared copy cannot mask the repair.
-        if missing:
-            self._log(f"FAFB: {len(missing)} skeleton(s) missing locally; "
-                      "trying the CAVE API fallback.")
-            loaded.update(self._fafb_cave_fallback(missing))
-        if extrusion_ids:
-            from fafb_utils import repair_extruded_skeleton
-
-            self._log(
-                f"FAFB: refreshing {len(extrusion_ids)} extrusion-affected "
-                "mesh(es) from the CAVE API.")
-            cave_fixed = self._fafb_cave_fallback(
-                extrusion_ids, force_refresh=True)
-            cave_fixed = {
-                int(body_id): neuron
-                for body_id, neuron in cave_fixed.items()
-            }
-            loaded.update(cave_fixed)
-            repair_statuses = {
-                int(body_id): "api_repaired" for body_id in cave_fixed
-            }
-
-            # If CAVE returned only a partial batch (or was unavailable),
-            # prune a diagnosed local branch instead of silently retaining
-            # the known-bad source.  Repairs stay transient and are not
-            # written into the raw SWC cache.
-            for body_id in extrusion_ids:
-                body_id = int(body_id)
-                if body_id in cave_fixed:
-                    continue
-                if body_id not in loaded:
-                    repair_statuses[body_id] = "api_failed"
-                    continue
-                repaired, repair_stats = repair_extruded_skeleton(loaded[body_id])
-                if repair_stats.get("repaired"):
-                    loaded[body_id] = repaired
-                    repair_statuses[body_id] = "local_fallback"
-                    self._log(
-                        f"FAFB: CAVE fetch failed for {body_id}; pruned "
-                        f"{repair_stats['removed_nodes']} extrusion node(s) "
-                        "locally.")
-                else:
-                    self._log(
-                        f"FAFB: CAVE fetch failed for {body_id}; no safe "
-                        "local branch cut was available.")
-                    repair_statuses[body_id] = "api_failed"
-
-            # Keep detection and repair outcomes together. A local fallback
-            # remains flagged, so a subsequent run retries the CAVE request
-            # without re-running the expensive extrusion detector.
-            try:
-                from fafb_utils import set_extrusion_repair_status
-
-                set_extrusion_repair_status(
-                    str(root), folder, repair_statuses)
-            except Exception as exc:
-                self._log(f"FAFB: could not save extrusion repair status: {exc}")
-        return loaded
-
-    def _fafb_cave_fallback(
-            self, body_ids: List[int], force_refresh: bool = False
-            ) -> Dict[int, object]:
-        """Fetch FAFB meshes through CAVE (token-gated).
-
-        CAVE fallback remains mesh-native. NBLAST callers can still use local
-        healed SWC skeletons; a CAVE mesh is not silently skeletonized just
-        to satisfy that separate backend. ``force_refresh=True`` is reserved
-        for replacing extrusion-affected local data and bypasses the
-        prepared-mesh cache read while still writing the repaired mesh cache.
-        """
-        from utils.flywire_readiness import flywire_skeleton_readiness
-
-        status = flywire_skeleton_readiness(self.dataset, self.project_root)
-        if not status.get("cave_token"):
-            self._log("FAFB API fallback skipped: CAVE_TOKEN is not "
-                      "configured; using local skeleton data only.")
-            return {}
-        from cave_data_fetcher import CAVEDataFetcher
-
-        pbar = tqdm(total=len(body_ids), desc="Fetching meshes (CAVE)",
-                    unit="neuron", disable=not self.verbose, leave=False,
-                    file=sys.stdout)
-        out: Dict[int, navis.MeshNeuron] = {}
-        try:
-            fetcher = CAVEDataFetcher(
-                dataset=_dataset_folder(self.dataset),
-                project_root=str(self.project_root),
-                verbose=False,
-            )
-            soma_positions = _load_flywire_soma_positions(
-                self.dataset, self.project_root, body_ids)
-            neurons = fetcher.fetch_fafb_meshes(
-                [int(b) for b in body_ids], use_cache=True,
-                simplify_mesh=FLYWIRE_MESH_CACHE_SIMPLIFICATION,
-                soma_simplification=FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION,
-                soma_radius=FLYWIRE_MESH_CACHE_SOMA_RADIUS,
-                soma_positions=soma_positions,
-                force_refresh=force_refresh,
-            )
-            for n in neurons:
-                bid = getattr(n, "id", None)
-                if bid is not None:
-                    out[int(bid)] = n
-                pbar.update(1)
-                pbar.set_postfix_str(str(bid))
-        except Exception as exc:
-            self._log(f"FAFB API fallback failed ({exc}); keeping local "
-                      "skeleton data only.")
-        finally:
-            pbar.close()
-        return out
+        return load_flywire_skeletons_batch(
+            self.dataset, body_ids, project_root=str(self.project_root),
+            log=self._log, check_extrusions=check)
 
     def _dotprops_for_ids(self, body_ids: List[int],
                           neurons: Optional[Dict[int, "navis.TreeNeuron"]] = None,
@@ -8109,9 +8037,11 @@ class MorphologyComparer:
         fetches) so they are not re-fetched; anything missing is resolved
         through the shared raw cache and batched online fetch (raw skeletons
         are always persisted as compressed SWC). For
-        FlyWire datasets the raw sources follow the healed-skeleton pipeline
-        (local API cache / healed bundle -> extrusion check -> token-gated
-        CAVE fallback); visualization simp90 pickles are never used."""
+        FlyWire datasets the raw sources follow the shared pipeline in
+        ``load_flywire_skeletons_batch`` (raw cache / healed bundle ->
+        per-run extrusion check with CAVE replacement -> token-gated CAVE
+        skeletonization); the loader owns FlyWire persistence, so no
+        re-persist happens here."""
         out: Dict[int, Optional[navis.core.dotprop.Dotprops]] = {}
         local_neurons: Dict[int, object] = {
             int(bid): neuron for bid, neuron in (neurons or {}).items()
@@ -8125,22 +8055,14 @@ class MorphologyComparer:
 
         # Keep raw vector rows and raw skeleton persistence in the same cache
         # transaction. This makes an NBLAST-first run useful to a later
-        # vector-mode or visualization run.
+        # vector-mode or visualization run. FlyWire is excluded: the shared
+        # loader already persists at the stored level, and a second write at
+        # a different simplification level would churn the same files.
         def _cache_raw_neurons(mapping: Dict[int, object]) -> None:
-            rows = []
-            for bid, neuron in mapping.items():
-                try:
-                    if _neuron_rep(neuron) != "skeleton":
-                        continue
-                    _, vec = vectorize_neuron(neuron)
-                    rows.append((int(bid), vec, "skeleton"))
-                except Exception:
-                    continue
-            if rows:
-                try:
-                    raw_cache.append_vectors(rows, vector_basis=VECTOR_BASIS_RAW)
-                except Exception:
-                    pass
+            if self._is_flywire():
+                return
+            # Raw skeleton persistence only: V1 vector rows are retired, and
+            # the V2 schema is always computed by the caller's cache.
             try:
                 raw_cache.persist_skeletons(mapping)
             except Exception:
@@ -8163,7 +8085,6 @@ class MorphologyComparer:
                 [int(b) for b in body_ids if int(b) not in local_neurons]
             )
             local_neurons.update(fetched)
-            _cache_raw_neurons(fetched)
         else:
             # Resolve raw-cache hits first, then issue one combined NeuPrint
             # fetch for all remaining dotprops. This covers cache-direct
@@ -8202,9 +8123,9 @@ class MorphologyComparer:
                 pbar.set_postfix_str(f"{bid}")
                 nrn = local_neurons.get(bid)
                 if nrn is None:
-                    # The FAFB pipeline (API cache -> healed bundle ->
-                    # extrusion check -> CAVE fallback) already ran for this
-                    # id; there is no other source to try.
+                    # The FlyWire pipeline (raw cache / healed bundle ->
+                    # extrusion check -> CAVE skeletonization) already ran
+                    # for this id; there is no other source to try.
                     out[bid] = None
                     continue
                 try:
@@ -8217,7 +8138,10 @@ class MorphologyComparer:
                     out[bid] = None
         finally:
             pbar.close()
-        return out
+        # Canonical keys: consumers look dotprops up by dataset-canonical id
+        # (string bodyIds on FlyWire), not the raw-cache int keys — an int
+        # key silently misses EVERY lookup there.
+        return {self._body_id(b): dp for b, dp in out.items()}
 
     # ------------------------------------------------------------------ save
     def _save_results(self, results: pd.DataFrame, bodyid_df: pd.DataFrame,
@@ -8259,13 +8183,13 @@ class MorphologyComparer:
             "visualize_by": self.visualize_by,
             "cache_raw_skeletons": self.cache_fetched_skeletons,
             "raw_skeleton_cache": str(
-                find_similar_dataset_cache(
+                find_similar_dataset_cache_v2(
                     self.dataset, project_root=str(self.project_root),
                     verbose=False,
                 ).skeleton_dir
             ),
             "raw_vector_cache": str(
-                find_similar_dataset_cache(
+                find_similar_dataset_cache_v2(
                     self.dataset, project_root=str(self.project_root),
                     verbose=False,
                 ).parquet_path
@@ -8529,7 +8453,7 @@ class MorphologyComparer:
         shows only a sample of the type.
         """
         try:
-            data = find_similar_dataset_cache(
+            data = find_similar_dataset_cache_v2(
                 self.dataset, project_root=str(self.project_root),
                 n_workers=self.n_workers, verbose=False,
             ).load()
@@ -8564,19 +8488,552 @@ class MorphologyComparer:
 # Homolog results enrichment (post-search, vector-based)
 # =============================================================================
 
+RENDER_ARTIFACTS_SAMPLE = 200
+_RENDER_V2_ARTIFACTS: Dict[Tuple[str, str], dict] = {}
+
+
+def _dataset_soma_side_map(dataset: str,
+                           project_root: Optional[str] = None
+                           ) -> Dict[int, str]:
+    """bodyId -> 'left' | 'right' | '' from the dataset's neuron index.
+
+    Reads ``somaSide`` (NeuPrint) or ``hemisphere`` (FlyWire) once per call
+    and normalizes both vocabularies. Midline and unknown values map to ''
+    so those neurons are never side-filtered. Best-effort: any read failure
+    means no side information.
+    """
+    sides: Dict[int, str] = {}
+    try:
+        import polars as pl
+        p = (Path(project_root if project_root
+                  else Path(__file__).resolve().parents[1])
+             / "neuron_indexes" / _dataset_folder(dataset)
+             / "neuron_index.parquet")
+        if p.exists():
+            schema = pl.read_parquet_schema(p)
+            col = ("somaSide" if "somaSide" in schema
+                   else "hemisphere" if "hemisphere" in schema else "")
+            if col:
+                df = pl.read_parquet(p, columns=["bodyId", col])
+                norm = {"l": "left", "left": "left",
+                        "r": "right", "right": "right"}
+                for bid, s in zip(df["bodyId"].to_list(), df[col].to_list()):
+                    try:
+                        sides[int(bid)] = norm.get(
+                            str(s or "").strip().lower(), "")
+                    except (TypeError, ValueError):
+                        continue
+    except Exception:
+        sides = {}
+    return sides
+
+
+def render_v2_artifacts(dataset: str, project_root: Optional[str] = None,
+                        verbose: bool = False) -> Optional[dict]:
+    """Population vector_v2 artifacts (bounds, μ/σ, ZCA whitener) for the
+    dataset's RENDER space.
+
+    The homolog enrichment scores transformed overlay neurons in the target
+    scene's render space. The native cache artifacts (``meta_v2.json``) do
+    not describe that frame: the transform rescales coordinates, so
+    histograms binned against the native bbox clip into boundary bins and
+    the lateral-normalization midline is wrong by the transform offset.
+    This derives the render frame ONCE per dataset — transform a sample of
+    the cached native population through the same
+    ``transform_neurons_to_space`` pipeline, take the transformed point
+    bbox (+2 % padding) as bounds, vectorize the transformed neurons
+    against those bounds, and fit μ/σ + truncated ZCA whitener on the
+    sample — then persists it in ``meta_v2_render.json`` /
+    ``whiten_v2_render.npz`` beside the native cache artifacts.
+
+    Returns ``{bounds, mean, std, whiten, space}`` or ``None`` when the
+    dataset has no render transform (native == render — the native
+    artifacts already describe the frame) or no usable cached skeletons.
+    Memoized per process; the sidecar makes restarts free.
+    """
+    root = Path(project_root) if project_root \
+        else Path(__file__).resolve().parents[1]
+    try:
+        from visualize_skeleton import (dataset_native_space,
+                                        dataset_render_space)
+        native_space = dataset_native_space(dataset)
+        render_space = dataset_render_space(dataset)
+    except Exception:
+        return None
+    if native_space == render_space:
+        return None   # identity transform: the native artifacts ARE the frame
+    key = (dataset, render_space, str(Path(root).resolve()))
+    if key in _RENDER_V2_ARTIFACTS:
+        return _RENDER_V2_ARTIFACTS[key]
+
+    morph_dir = (Path(root) / "cache" / _dataset_folder(dataset)
+                 / "find_similar" / "morphology")
+    meta_path = morph_dir / "meta_v2_render.json"
+    whiten_path = morph_dir / "whiten_v2_render.npz"
+
+    def _load_sidecar() -> Optional[dict]:
+        if not meta_path.exists():
+            return None
+        try:
+            meta = json.loads(meta_path.read_text())
+        except Exception:
+            return None
+        if meta.get("render_space") != render_space:
+            return None
+        bounds = (np.asarray(meta.get("spatial_bounds"), dtype=float)
+                  if meta.get("spatial_bounds") is not None else None)
+        mean = (np.asarray(meta.get("mean"), dtype=float)
+                if meta.get("mean") is not None else None)
+        std = (np.asarray(meta.get("std"), dtype=float)
+               if meta.get("std") is not None else None)
+        W = None
+        if whiten_path.exists():
+            try:
+                z = np.load(whiten_path)
+                if int(z["fit_version"]) == WHITEN_FIT_VERSION:
+                    W = np.asarray(z["W"], dtype=float)
+            except Exception:
+                W = None
+        if W is None or W.shape != (VECTOR_V2_DIM, VECTOR_V2_DIM):
+            W = np.eye(VECTOR_V2_DIM)
+        if (bounds is None or bounds.shape != (2, 3) or mean is None
+                or std is None or mean.shape != (VECTOR_V2_DIM,)):
+            return None
+        return {"bounds": bounds, "mean": mean, "std": std, "whiten": W,
+                "space": render_space}
+
+    artifacts = _load_sidecar()
+    if artifacts is None:
+        # Derive: transform a sample of the cached native population.
+        try:
+            cache_v2 = find_similar_dataset_cache_v2(
+                dataset, project_root=str(root), verbose=False)
+            files = cache_v2._discover_skeleton_files()
+        except Exception:
+            return None
+        if not files:
+            return None
+        if len(files) > RENDER_ARTIFACTS_SAMPLE:
+            rng = np.random.default_rng(0)
+            files = [files[i] for i in
+                     rng.choice(len(files), RENDER_ARTIFACTS_SAMPLE,
+                                replace=False)]
+        from visualize_skeleton import transform_neurons_to_space
+        transformed = []
+        for path in files:
+            try:
+                neuron = _load_cached_skeleton_file(path)
+                if neuron is None:
+                    continue
+                xf = transform_neurons_to_space(
+                    [neuron], native_space, render_space,
+                    validate_bounds=False)
+                if xf and xf[0] is not None:
+                    transformed.append(xf[0])
+            except Exception:
+                continue
+        if len(transformed) < 2:
+            return None
+        lo = np.full(3, np.inf)
+        hi = np.full(3, -np.inf)
+        for neuron in transformed:
+            pts = _neuron_points(neuron)
+            if len(pts):
+                lo = np.minimum(lo, pts.min(axis=0))
+                hi = np.maximum(hi, pts.max(axis=0))
+        if not np.isfinite(lo).all():
+            return None
+        pad = 0.02 * np.maximum(hi - lo, 0.0)
+        bounds = np.vstack([lo - pad, hi + pad])
+        rows = []
+        for neuron in transformed:
+            try:
+                _, vec = vectorize_neuron_v2(
+                    neuron, spatial_bounds=bounds, lateral_normalize=True)
+                rows.append(np.asarray(vec, dtype=float))
+            except Exception:
+                continue
+        if len(rows) < 2:
+            return None
+        X = np.vstack(rows)
+        mean = X.mean(axis=0)
+        std = np.where(X.std(axis=0) <= 0, 1.0, X.std(axis=0))
+        X_std = (X - mean) / std
+        if len(X_std) >= MIN_ROWS_FOR_WHITENING:
+            W = fit_zca_whitener(X_std)
+        else:
+            W = np.eye(VECTOR_V2_DIM)
+        artifacts = {"bounds": bounds, "mean": mean, "std": std,
+                     "whiten": W, "space": render_space}
+        if verbose:
+            print(f"[morphology] render-space artifacts derived for "
+                  f"{dataset} ({render_space}; {len(X)} sampled neurons)",
+                  flush=True)
+        try:
+            morph_dir.mkdir(parents=True, exist_ok=True)
+            meta_out = {
+                "render_space": render_space,
+                "native_space": native_space,
+                "sample_rows": int(len(X)),
+                "spatial_bounds": bounds.tolist(),
+                "mean": mean.tolist(),
+                "std": std.tolist(),
+            }
+            meta_path.write_text(json.dumps(meta_out, indent=2))
+            with open(whiten_path, "wb") as fh:
+                np.savez(fh, W=W, fit_version=WHITEN_FIT_VERSION)
+        except Exception:
+            pass
+    _RENDER_V2_ARTIFACTS[key] = artifacts
+    if verbose:
+        print(f"[morphology] render-space artifacts ready for {dataset} "
+              f"({render_space})", flush=True)
+    return artifacts
+
+
+def compute_morph_similarity_vs_queries(
+    query_neurons,
+    target_bids,
+    target_dataset: str,
+    project_root: Optional[str] = None,
+    compute_nblast: bool = True,
+    verbose: bool = False,
+    query_bids: Optional[List[int]] = None,
+    source_dataset: Optional[str] = None,
+) -> pd.DataFrame:
+    """Pairwise morphological similarity of transformed query neurons vs
+    target neurons, in the target scene's render space.
+
+    Both sides are compared in the SAME frame: the query neurons arrive
+    already transformed (``query_transformed_*`` overlay neurons), and the
+    target raw skeletons are transformed from their native space into the
+    render space here (e.g. male-cns raw voxels -> JRCFIB2022M).
+
+    Scores per (source_bodyId, target_bodyId) pair:
+      - ``morph_v2_similarity``: THE production vector_v2 score — per-block
+        cosine (shape/spatial, ``DEFAULT_V2_BLOCK_WEIGHTS``) on the
+        standardized + ZCA-whitened 256-dim features, identical to the
+        Find Similar cache-direct scorer (spatial bounds from the target
+        dataset's cache meta, lateral normalization on). Replaces the
+        former raw ``morph_v2_cosine`` / ``morph_v2_pearson`` columns,
+        whose full-vector cosine/Pearson on unstandardized features was
+        magnitude-dominated and incomparably inflated.
+      - ``morph_nblast``: forward, normalized NBLAST (navis NBlaster, k=20
+        dotprops in microns).
+
+    Failure-isolated per neuron: unavailable skeletons yield NaN; no
+    exception escapes.
+    """
+    import navis
+
+    rows = []
+    if not query_neurons or not target_bids:
+        return pd.DataFrame()
+
+    root = project_root or str(Path(__file__).resolve().parents[1])
+    try:
+        from visualize_skeleton import (
+            dataset_native_space, dataset_render_space,
+            transform_neurons_to_space,
+        )
+        have_xform = True
+    except Exception:
+        have_xform = False
+
+    # Unknown datasets (test fixtures, custom sets) -> identity transform.
+    try:
+        native_space = dataset_native_space(target_dataset)
+        render_space = dataset_render_space(target_dataset)
+    except ValueError:
+        native_space = render_space = ''
+
+    raw_target_cache = None
+    try:
+        raw_target_cache = find_similar_raw_cache(
+            target_dataset, project_root=root, verbose=False)
+    except Exception:
+        raw_target_cache = None
+
+    def _render_target(bid: int):
+        if raw_target_cache is None:
+            return None
+        n = raw_target_cache.load_skeleton(int(bid))
+        if n is None:
+            return None
+        if have_xform and native_space != render_space:
+            try:
+                xf = transform_neurons_to_space(
+                    [n], native_space, render_space, validate_bounds=False)
+                return xf[0] if xf else None
+            except Exception:
+                return None
+        return n
+
+    from navis.nbl.nblast_funcs import NBlaster
+    nb = NBlaster(use_alpha=False, normalized=True, progress=False)
+
+    # Ipsilateral/contralateral classification: soma (or root) x relative
+    # to the render template's midline (x-mid of the template bounding box).
+    space_midline = {
+        'FLYWIRE': (192200.0 + 853686.0) / 2.0,
+        'JRCFIB2022M': 752704.0 / 2.0,
+        'JRCFIB2018F': 275456.0 / 2.0,
+        'MANC': (49184.0 + 342752.0) / 2.0,
+    }
+    midline_x = space_midline.get(render_space)
+
+    def _soma_x(n) -> Optional[float]:
+        # soma may be a Somaholder, a node-id ndarray, or missing entirely
+        soma = getattr(n, 'soma', None)
+        if soma is not None:
+            try:
+                return float(soma.x)
+            except (AttributeError, TypeError, ValueError):
+                pass
+            try:
+                rid = int(np.asarray(soma).ravel()[0])
+                row = n.nodes[n.nodes.node_id == rid]
+                if len(row):
+                    return float(row['x'].iloc[0])
+            except Exception:
+                pass
+        try:  # root node position as last resort
+            rid = n.root[0]
+            row = n.nodes[n.nodes.node_id == rid]
+            return float(row['x'].iloc[0])
+        except Exception:
+            return None
+
+    def _side(n) -> str:
+        x = _soma_x(n)
+        if x is None:
+            return 'unknown'
+        mid = midline_x
+        if mid is None:  # unknown space: mid of the population x envelope
+            xs = [_soma_x(o) for o in list(query_neurons) ]
+            xs = [v for v in xs if v is not None]
+            mid = (min(xs) + max(xs)) / 2.0 if xs else None
+        if mid is None:
+            return 'unknown'
+        return 'right' if x >= mid else 'left'
+
+    q_vecs = {}
+    q_dps = {}
+    q_sides: Dict[int, str] = {}
+
+    # Key pairs by the query's SOURCE bodyId (explicit list preferred; the
+    # cached SWC round-trip rewrites neuron .id, so .id is only a fallback).
+    if query_bids and len(query_bids) == len(query_neurons):
+        qids = [int(b) for b in query_bids]
+    else:
+        qids = []
+        for q in query_neurons:
+            try:
+                qids.append(int(getattr(q, 'id', None)
+                                or getattr(q, 'bodyId', None) or 0))
+            except (TypeError, ValueError):
+                qids.append(0)
+
+    # Side classification: the neuron index (somaSide / hemisphere) is the
+    # primary source of truth; the geometric render midline is only the
+    # fallback for neurons the index does not list.
+    side_maps: Dict[str, Dict[int, str]] = {}
+
+    def _index_side(ds: str, bid) -> str:
+        try:
+            key = int(bid)
+        except (TypeError, ValueError):
+            return ''
+        m = side_maps.get(ds)
+        if m is None:
+            m = side_maps[ds] = _dataset_soma_side_map(ds, str(root))
+        # the shared reader already returns 'left' / 'right' / ''
+        return m.get(key, '')
+
+    q_vecs = {}
+    q_dps = {}
+    # Production scoring context. The scored neurons live in the target
+    # scene's render space, so the population artifacts (bounds, μ/σ, ZCA
+    # whitener) must describe THAT frame: cross-space runs use dedicated
+    # render-space artifacts derived from a transformed population sample;
+    # identity spaces (native == render, or unknown datasets) use the
+    # native cache artifacts directly — exact Find Similar parity.
+    native_cache_data = None
+    try:
+        native_cache_data = find_similar_dataset_cache_v2(
+            target_dataset, project_root=root, verbose=False).load()
+    except Exception:
+        native_cache_data = None
+
+    def _native_artifacts():
+        meta = (native_cache_data or {}).get('meta') or {}
+        bounds = meta.get('spatial_bounds')
+        bounds = (np.asarray(bounds, dtype=float)
+                  if isinstance(bounds, list) and len(bounds) == 2
+                  else None)
+        mean = np.asarray(meta.get('mean'), dtype=float) \
+            if meta.get('mean') is not None else None
+        std = np.asarray(meta.get('std'), dtype=float) \
+            if meta.get('std') is not None else None
+        whiten = (native_cache_data or {}).get('whiten')
+        return bounds, mean, std, whiten
+
+    same_frame = (not have_xform) or native_space == render_space
+    if same_frame:
+        v2_bounds, v2_mean, v2_std, v2_whiten = _native_artifacts()
+    else:
+        art = render_v2_artifacts(target_dataset, project_root=root,
+                                  verbose=verbose)
+        if art is not None:
+            v2_bounds = art['bounds']
+            v2_mean = art['mean']
+            v2_std = art['std']
+            v2_whiten = art['whiten']
+        else:
+            if verbose:
+                print('[morphology] render-space artifacts unavailable; '
+                      'scoring with native cache artifacts (degraded '
+                      'spatial block).')
+            v2_bounds, v2_mean, v2_std, v2_whiten = _native_artifacts()
+
+    native_rows: Dict[int, int] = {}
+    if native_cache_data is not None:
+        try:
+            native_rows = {int(b): i for i, b in
+                           enumerate(native_cache_data['bodyIds'])}
+        except (TypeError, ValueError):
+            native_rows = {}
+
+    def _v2_similarity(qv: np.ndarray, tv: np.ndarray) -> float:
+        """Production vector_v2 score for two RAW 256-dim feature vectors."""
+        X = np.vstack([np.asarray(qv, dtype=float),
+                       np.asarray(tv, dtype=float)])
+        if (v2_mean is not None and v2_std is not None
+                and v2_mean.shape == (X.shape[1],)
+                and v2_std.shape == (X.shape[1],)):
+            X = (X - v2_mean) / np.where(v2_std <= 0, 1.0, v2_std)
+            if v2_whiten is not None and v2_whiten.shape == (X.shape[1],) * 2:
+                X = apply_whitening(v2_whiten, X)
+        else:
+            # No cache population stats (unknown dataset): plain block
+            # cosine on the raw vectors — closest computable proxy; do NOT
+            # center (a pooled z-score degenerates for identical pairs).
+            pass
+        return float(v2_similarity_matrix(
+            X[0], X[1].reshape(1, -1), dict(DEFAULT_V2_BLOCK_WEIGHTS))[0])
+
+    q_vecs = {}
+    q_dps = {}
+    for qbid, q in zip(qids, query_neurons):
+        if qbid in q_vecs:
+            continue
+        try:
+            _, vec = vectorize_neuron_v2(q, spatial_bounds=v2_bounds,
+                                         lateral_normalize=True)
+            q_vecs[qbid] = np.asarray(vec, dtype=float)
+        except Exception:
+            pass
+        try:
+            q_dps[qbid] = navis.make_dotprops(
+                navis.NeuronList([q])[0] / 1000.0, k=20)
+        except Exception:
+            pass
+        q_sides[qbid] = ((_index_side(source_dataset, qbid)
+                          if source_dataset else '')
+                         or _side(q))
+
+    out_rows = []
+    t_vecs = {}
+    t_dps = {}
+    for tb in target_bids:
+        tb = int(tb)
+        try:
+            tn = _render_target(tb)
+        except Exception:
+            tn = None
+        if tn is None:
+            continue
+        t_side = _index_side(target_dataset, tb) or _side(tn)
+        if compute_nblast and tb not in t_dps:
+            try:
+                t_dps[tb] = navis.make_dotprops(
+                    navis.NeuronList([tn])[0] / 1000.0, k=20)
+            except Exception:
+                pass
+        if tb not in t_vecs:
+            # Identity space: the cached raw row IS the native-space vector —
+            # exact Find Similar parity without re-vectorizing.
+            if (same_frame and native_cache_data is not None
+                    and native_cache_data.get('raw') is not None):
+                try:
+                    row_i = native_rows.get(tb)
+                    if row_i is not None:
+                        t_vecs[tb] = np.asarray(
+                            native_cache_data['raw'][row_i], dtype=float)
+                except Exception:
+                    pass
+        if tb not in t_vecs:
+            try:
+                _, vec = vectorize_neuron_v2(tn, spatial_bounds=v2_bounds,
+                                             lateral_normalize=True)
+                t_vecs[tb] = np.asarray(vec, dtype=float)
+            except Exception:
+                pass
+        for qbid, qv in q_vecs.items():
+            tv = t_vecs.get(tb)
+            q_side = q_sides.get(qbid, 'unknown')
+            row = {'source_bodyId': qbid, 'target_bodyId': tb,
+                   'query_side': q_sides.get(qbid, 'unknown'),
+                   'target_side': t_side,
+                   'pair_side': ('ipsi' if q_side == t_side and t_side != 'unknown'
+                                 else 'contra' if t_side != 'unknown' and q_side != 'unknown'
+                                 else 'unknown'),
+                   'morph_v2_similarity': np.nan,
+                   'morph_nblast': np.nan}
+            if tv is not None and len(qv) == len(tv):
+                try:
+                    row['morph_v2_similarity'] = _v2_similarity(qv, tv)
+                except Exception:
+                    pass
+            if compute_nblast:
+                qi = q_dps.get(qbid)
+                ti = t_dps.get(tb)
+                if qi is not None and ti is not None:
+                    try:
+                        q_idx = nb.append(qi, self_hit=nb.calc_self_hit(qi))
+                        t_idx = nb.append(ti, self_hit=nb.calc_self_hit(ti))
+                        v = float(nb.single_query_target(q_idx, t_idx,
+                                                         scores='forward'))
+                        if np.isfinite(v):
+                            row['morph_nblast'] = v
+                    except Exception:
+                        pass
+            out_rows.append(row)
+    return pd.DataFrame(out_rows)
+
+
 def enrich_homolog_results(
     results_df: pd.DataFrame,
     source_dataset: str,
     target_dataset: str,
     project_root: Optional[str] = None,
     verbose: bool = True,
+    query_neurons=None,
+    compute_nblast: bool = True,
 ) -> pd.DataFrame:
-    """Attach vector-based morphological similarity to homolog results.
+    """Attach morphological similarity to homolog results.
 
-    Runs only on the final ranked result rows (never during candidate search
-    or ranking). Adds ``morph_cosine`` and ``morph_pearson`` columns; NaN
-    where either side has no cached/available skeleton. No rows are dropped
-    or re-ranked, and no server fetching happens.
+    Computes, per (source_bodyId, target_bodyId) row, the similarity of the
+    TRANSFORMED query neurons (``query_transformed_*`` overlay neurons, in
+    the target render space) against the target neuron:
+    ``morph_v2_similarity`` (the production vector_v2 score — standardized +
+    ZCA-whitened per-block cosine, identical to Find Similar) and
+    ``morph_nblast`` (forward, normalized NBLAST). Replaces the removed
+    ``morph_cosine`` / ``morph_pearson`` and raw ``morph_v2_cosine`` /
+    ``morph_v2_pearson`` columns, which lacked a consistent cross-dataset
+    frame and were magnitude-inflated. Runs only on the final ranked result
+    rows; NaN where skeletons are unavailable; no rows are dropped or
+    re-ranked.
     """
     if results_df is None or results_df.empty:
         return results_df
@@ -8584,49 +9041,138 @@ def enrich_homolog_results(
     if not needed.issubset(results_df.columns):
         return results_df
 
-    def _vectors(
-        dataset: str, bids: List[Union[int, str]]
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        cache = find_similar_dataset_cache(
-            dataset, project_root=project_root, verbose=verbose
-        )
-        X, ok, _ = cache.vectors_for(bids, compute_missing=True)
-        return X, ok
-
-    src_ids = [
-        _canonical_dataset_body_id(source_dataset, b)
-        for b in results_df["source_bodyId"].tolist()
-    ]
-    tgt_ids = [
-        _canonical_dataset_body_id(target_dataset, b)
-        for b in results_df["target_bodyId"].tolist()
-    ]
-    # Keep the public result frame aligned with the same dataset-aware
-    # representation used by the vector cache lookup.  NeuPrint retains its
-    # historical integer output; FlyWire/FAFB/BANC results are strings.
     results_df = results_df.copy()
-    results_df["source_bodyId"] = src_ids
-    results_df["target_bodyId"] = tgt_ids
-    try:
-        src_X, src_ok = _vectors(source_dataset, src_ids)
-        tgt_X, tgt_ok = _vectors(target_dataset, tgt_ids)
-    except Exception:
+
+    # Resolve the transformed query neurons when not supplied.
+    if not query_neurons:
+        try:
+            from visualize_skeleton import (
+                dataset_native_space, dataset_render_space,
+                transform_neurons_to_space,
+            )
+            src_ids = [int(b) for b in
+                       results_df['source_bodyId'].dropna().unique().tolist()]
+            raw_cache = find_similar_raw_cache(
+                source_dataset, project_root=project_root, verbose=False)
+            raw_src = [raw_cache.load_skeleton(int(b)) for b in src_ids]
+            raw_src = [n for n in raw_src if n is not None]
+            try:
+                s_space = dataset_native_space(source_dataset)
+                t_space = dataset_render_space(target_dataset)
+            except ValueError:
+                s_space = t_space = ''
+            query_neurons = (transform_neurons_to_space(
+                raw_src, s_space, t_space, validate_bounds=False)
+                if s_space != t_space else list(raw_src))
+        except Exception:
+            query_neurons = None
+    if not query_neurons:
+        # Fallback: no transformed query available (unknown/bridge-less
+        # spaces). Use the per-dataset vector-cache vectors for both sides —
+        # the old enrichment behavior — under the new column names. NBLAST
+        # needs skeletons in one shared space, so it stays NaN here.
         if verbose:
-            print("[morphology] Enrichment skipped (vector computation failed).")
-        results_df["morph_cosine"] = np.nan
-        results_df["morph_pearson"] = np.nan
+            print('[morphology] Transformed query unavailable; using cached '
+                  'dataset vectors.')
+        try:
+            whiten_cache = {}
+            for ds in {source_dataset, target_dataset}:
+                try:
+                    wd = find_similar_dataset_cache_v2(
+                        ds, project_root=project_root, verbose=False).load()
+                    whiten_cache[ds] = (wd or {}).get('whiten')
+                except Exception:
+                    whiten_cache[ds] = None
+            src_ids = [
+                _canonical_dataset_body_id(source_dataset, b)
+                for b in results_df['source_bodyId'].tolist()
+            ]
+            tgt_ids = [
+                _canonical_dataset_body_id(target_dataset, b)
+                for b in results_df['target_bodyId'].tolist()
+            ]
+            results_df['source_bodyId'] = src_ids
+            results_df['target_bodyId'] = tgt_ids
+            src_X, src_ok, _ = find_similar_dataset_cache_v2(
+                source_dataset, project_root=project_root,
+                verbose=verbose).vectors_for(src_ids, compute_missing=True)
+            tgt_X, tgt_ok, _ = find_similar_dataset_cache_v2(
+                target_dataset, project_root=project_root,
+                verbose=verbose).vectors_for(tgt_ids, compute_missing=True)
+            cos = np.full(len(results_df), np.nan)
+            for i in range(len(results_df)):
+                if not (src_ok[i] and tgt_ok[i]):
+                    continue
+                # Production vector_v2 score: whiten each side with its own
+                # dataset's cached whitener, then per-block weighted cosine.
+                sw = whiten_cache[source_dataset]
+                tw = whiten_cache[target_dataset]
+                try:
+                    s_w = apply_whitening(sw, src_X[i].reshape(1, -1))[0]
+                    t_w = apply_whitening(tw, tgt_X[i].reshape(1, -1))[0]
+                    cos[i] = float(v2_similarity_matrix(
+                        s_w, t_w.reshape(1, -1),
+                        dict(DEFAULT_V2_BLOCK_WEIGHTS))[0])
+                except Exception:
+                    continue
+            results_df['morph_v2_similarity'] = cos
+            results_df['morph_nblast'] = np.nan
+            return results_df
+        except Exception:
+            if verbose:
+                print('[morphology] Vector fallback failed.')
+        for col in ('morph_v2_similarity', 'morph_nblast'):
+            results_df[col] = np.nan
         return results_df
 
-    cos = np.full(len(results_df), np.nan)
-    pears = np.full(len(results_df), np.nan)
-    for i in range(len(results_df)):
-        if not (src_ok[i] and tgt_ok[i]):
-            continue
-        q = src_X[i]
-        t = tgt_X[i]
-        cos[i] = float(similarity_matrix(q, t.reshape(1, -1), "cosine")[0])
-        pears[i] = float(similarity_matrix(q, t.reshape(1, -1), "pearson")[0])
+    target_bids = [int(b) for b in
+                   results_df['target_bodyId'].dropna().unique().tolist()]
+    src_unique = [int(b) for b in
+                  results_df['source_bodyId'].dropna().unique().tolist()]
+    try:
+        pair_df = compute_morph_similarity_vs_queries(
+            query_neurons, target_bids, target_dataset,
+            project_root=project_root, compute_nblast=compute_nblast,
+            verbose=verbose, query_bids=src_unique,
+            source_dataset=source_dataset)
+    except Exception:
+        if verbose:
+            print('[morphology] Enrichment skipped (pair scoring failed).')
+        for col in ('morph_v2_similarity', 'morph_nblast'):
+            results_df[col] = np.nan
+        return results_df
 
-    results_df["morph_cosine"] = cos
-    results_df["morph_pearson"] = pears
+    if pair_df.empty:
+        for col in ('morph_v2_similarity', 'morph_nblast'):
+            results_df[col] = np.nan
+        return results_df
+
+    pair_key = {}
+    for r in pair_df.itertuples():
+        try:
+            pair_key[(int(r.source_bodyId), int(r.target_bodyId))] = r
+        except (TypeError, ValueError):
+            continue
+
+    def _pair_val(sb, tb, col):
+        try:
+            r = pair_key.get((int(sb), int(tb)))
+            v = float(getattr(r, col)) if r is not None else np.nan
+            return v if np.isfinite(v) else np.nan
+        except (TypeError, ValueError):
+            return np.nan
+
+    for col in ('morph_v2_similarity', 'morph_nblast'):
+        results_df[col] = [
+            _pair_val(sb, tb, col)
+            for sb, tb in zip(results_df['source_bodyId'],
+                              results_df['target_bodyId'])
+        ]
+    side_key = {(int(r.source_bodyId), int(r.target_bodyId)): r.pair_side
+                for r in pair_df.itertuples()}
+    results_df['pair_side'] = [
+        side_key.get((int(sb), int(tb)))
+        for sb, tb in zip(results_df['source_bodyId'],
+                          results_df['target_bodyId'])
+    ]
     return results_df

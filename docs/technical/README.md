@@ -106,6 +106,17 @@ Support for negative connection values (inhibitory connections).
 ### [Source Path Attribute](./SOURCE_PATH_ATTRIBUTE.md)
 Documentation of source_path attribute for tracking data provenance.
 
+### [Vector v2 Similarity — Calculation Pipeline](./VECTOR_V2_PIPELINE.md)
+Stage-by-stage specification of the production `vector_v2` morphology score.
+
+**Covers**:
+- 256-dim feature layout (shape + spatial blocks, exact column slices)
+- Lateral normalization and mirror invariance
+- Persisted μ/σ standardization and truncated ZCA whitening
+- Block-weighted cosine scoring (3:7), optional mass-overlap / ROI blocks
+- Cache lifecycle: when the population stats change (and when they don't)
+- Benchmark evidence and code reference map
+
 ---
 
 ## Performance Analysis

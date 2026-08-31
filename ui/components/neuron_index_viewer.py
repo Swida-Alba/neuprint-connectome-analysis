@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Callable, List
@@ -11,6 +12,7 @@ from nicegui import ui
 
 from ..config import PROJECT_ROOT
 from ..neuron_index import (
+    collect_alias_matches,
     load_cached_neuron_index,
     neuron_index_path,
     query_match_group_subtypes,
@@ -28,6 +30,36 @@ MATCH_GROUP_PAGE_SIZE = 50
 # delayed table update. Cover the maximum scroll-settle plus notification
 # lifetime so that these events can never start a second focus animation.
 FOCUS_DEDUP_SECONDS = 3.2
+
+_ALIAS_MAPPER_PREWARM_STARTED = False
+
+
+def _prewarm_alias_mapper() -> None:
+    """Load the cross-dataset type mapper in a background thread, once.
+
+    The alias panel uses it for zero-hit searches.  Loading it lazily at
+    the first zero-hit search would freeze that refresh for seconds (the
+    male-cns + FAFB + BANC tables are read and indexed), so the viewer
+    starts the load as soon as an index is displayed.
+    """
+    global _ALIAS_MAPPER_PREWARM_STARTED
+    if _ALIAS_MAPPER_PREWARM_STARTED:
+        return
+    _ALIAS_MAPPER_PREWARM_STARTED = True
+
+    def _load() -> None:
+        try:
+            from comparison.cross_dataset_type_mapper import get_type_mapper
+
+            get_type_mapper()
+        except Exception:
+            # A failed prewarm only delays the expansion to the first
+            # zero-hit search, where collect_alias_matches retries.
+            pass
+
+    threading.Thread(
+        target=_load, daemon=True, name="drocat-alias-mapper-prewarm"
+    ).start()
 
 
 def _normalized_focus_keys(keys) -> tuple[str, ...]:
@@ -181,6 +213,10 @@ def _render_index(
         with content:
             ui.label("The cached neuron index is empty.").classes("text-body2 drocat-warn")
         return
+
+    # The alias panel needs the type mapper; start its one-time load now so
+    # a later zero-hit search does not stall on it.
+    _prewarm_alias_mapper()
 
     if header_meta is not None:
         with header_meta:
@@ -1288,6 +1324,86 @@ def _render_index(
                     )
 
         state = {"page": initial.page, "page_size": 50}
+
+        # Expanded cross-dataset search panel: shown only when the local
+        # query returns zero rows. Content is strictly informational —
+        # other-dataset rows are never merged into this table or selection.
+        with ui.element("section").classes(
+            "w-full drocat-neuron-alias-panel"
+        ) as alias_section:
+            alias_container = ui.element("div").classes("w-full")
+        alias_section.set_visibility(False)
+
+        def _search_local_alias(name: str) -> None:
+            """Refill the local search with an alias found in this dataset."""
+            if str(search_input.value or "").strip() == name:
+                refresh(reset_page=True)
+            else:
+                search_input.set_value(name)
+
+        def render_alias_matches() -> None:
+            try:
+                matches = collect_alias_matches(
+                    dataset, str(search_input.value or "").strip()
+                )
+            except Exception:
+                alias_section.set_visibility(False)
+                return
+            useful = any(
+                entry["outcome"] == "matched" and entry["candidates"]
+                for entry in matches
+            )
+            alias_section.set_visibility(useful)
+            if not useful:
+                alias_container.clear()
+                return
+            alias_container.clear()
+            with alias_container:
+                ui.separator()
+                with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                    ui.icon("travel_explore", color="warning").classes("text-lg")
+                    ui.label(
+                        "No rows here. Cross-dataset matches via auto type "
+                        "mapping — informational only, please double check."
+                    ).classes("text-subtitle2 font-bold")
+                for entry in matches:
+                    if entry["outcome"] != "matched" or not entry["candidates"]:
+                        continue
+                    with ui.row().classes(
+                        "w-full items-start gap-2 flex-wrap drocat-neuron-alias-row"
+                    ):
+                        ui.badge(
+                            entry["dataset"]
+                            + (" (this dataset)" if entry["is_selected"] else "")
+                        ).props("outline")
+                        for cand in entry["candidates"]:
+                            text = f"'{cand['name']}' — {cand['kind']}"
+                            if cand.get("aggregates"):
+                                text += (
+                                    "; a match also covers: "
+                                    + ", ".join(cand["aggregates"])
+                                )
+                            if cand.get("count") is not None:
+                                text += f" ({cand['count']:,} neurons)"
+                            ui.label(text).classes("text-caption")
+                            if entry["is_selected"]:
+                                ui.button(
+                                    f"Search '{cand['name']}' here",
+                                    icon="search",
+                                ).props("flat dense").on_click(
+                                    lambda _e=None, name=cand["name"]:
+                                    _search_local_alias(name)
+                                )
+                unknown = [
+                    entry["dataset"]
+                    for entry in matches
+                    if entry["outcome"] != "matched"
+                ]
+                if unknown:
+                    ui.label(
+                        "No known counterpart in: " + ", ".join(unknown)
+                    ).classes("text-caption drocat-muted")
+
         # A QTable gesture may emit both a value-click and a selection event.
         # Coalesce those duplicate events by their exact anchor while still
         # allowing a different matched entry to be selected immediately.
@@ -1496,6 +1612,10 @@ def _render_index(
             page_info.text = "0 matching rows"
         page_info.update()
         no_results.set_visibility(result.total == 0)
+        if result.total == 0:
+            render_alias_matches()
+        else:
+            alias_section.set_visibility(False)
 
     def reset_and_refresh(_event=None):
         refresh(reset_page=True)
