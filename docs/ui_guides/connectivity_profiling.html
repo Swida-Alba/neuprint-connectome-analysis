@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Connectivity Profiling - DROCAT Instructions</title>
+  <title>Connectivity · Comparison - DROCAT Instructions</title>
   <link rel="stylesheet" href="guide.css">
 </head>
 <body>
@@ -12,12 +12,12 @@
     <a class="back" href="README.html">&larr; Back to guides</a>
     <span class="tag">Connectome</span>
   </header>
-  <h1>Connectivity Profiling</h1>
+  <h1>Comparison <span class="tag">Connectivity tab</span></h1>
   <p class="lede">
     Compare connectivity profiles of neuron types (or bodyIds / custom groups)
     using identical metrics — Jaccard, weighted Jaccard, cosine, raw rank
-    correlation and rank-correlation union (same metric set as the Find
-    Homologs tab) — within one dataset or across several datasets at once.
+    correlation and rank-correlation union (same metric set as the sibling
+    Find Similar sub-tab) — within one dataset or across several datasets at once.
   </p>
 
   <h2>Quick start</h2>
@@ -25,7 +25,7 @@
     <li>Enter 2+ neurons (e.g. <code>aMe12</code>, <code>aMe10</code>,
       <code>aMe9</code>).</li>
     <li>Pick one or more datasets (two or more enables the cross-dataset mode).</li>
-    <li>Click <b>Run Profiling</b>; open <b>report.html</b> in the output folder
+    <li>Click <b>Run Comparison</b>; open <b>report.html</b> in the output folder
       for the overall summary of all heatmaps.</li>
   </ol>
 
@@ -72,7 +72,7 @@
   <p>Let A and B be two connectivity profiles (a dict of partner type →
     weight, restricted to top-K partners per direction), and let ρ denote the
     Spearman rank correlation of two weight vectors. The metrics are the same
-    set used by the Homolog Finding tab; rank correlations are raw (−1 to 1)
+    set used by the Find Similar sub-tab; rank correlations are raw (−1 to 1)
     and there is no normalized 0–1 variant and no <code>combined</code> score.
     The <code>overall</code> matrix averages upstream and downstream
     connectivity.</p>

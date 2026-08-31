@@ -99,19 +99,21 @@
     config file falls back to the built-in default.</p>
   <table>
     <tr><th>Group</th><th>Examples</th><th>Wired into</th></tr>
-    <tr><td>Dataset &amp; Search</td><td>Default Dataset, Homolog Target Dataset, Search Columns, Filter By</td><td>Dataset selectors in every tool tab, pathfinding and search tabs</td></tr>
-    <tr><td>Connection Thresholds</td><td>Min Synapse Count, Min Connection Ratio, Min Traversal Probability, Visualization Edge Limit</td><td>Find Path, Find Shortest, Network, Cross-Dataset, Profiling, Find Homologs, Find Similar</td></tr>
-    <tr><td>Cache &amp; Data</td><td>Connection Cache (Use Cache), Cache Only, Skeleton Cache (Cache Neurons), Cache Synapses, Auto Type Mapping</td><td>Pathfinding tabs, similarity/homolog searches, skeleton rendering</td></tr>
+    <tr><td>Dataset &amp; Search</td><td>Default Dataset, Similar-Search Target Dataset, Search Columns, Filter By</td><td>Dataset selectors in every tool tab, pathfinding and search tabs</td></tr>
+    <tr><td>Connection Thresholds</td><td>Min Synapse Count, Min Connection Ratio, Min Traversal Probability, Visualization Edge Limit</td><td>Find Path, Find Shortest, Network, Cross-Dataset, Connectivity (Find Similar + Comparison), Morphology</td></tr>
+    <tr><td>Cache &amp; Data</td><td>Connection Cache (Use Cache), Cache Only, Skeleton Cache (Cache Neurons), Cache Synapses, Auto Type Mapping</td><td>Pathfinding tabs, similarity searches, skeleton rendering</td></tr>
     <tr><td>Pathfinding &amp; Output</td><td>Skip BodyId-Level Export, Output Format, Run Guide Format, Network Layout, Algorithm, Show Figure, Max Intermediate Layers</td><td>Pathfinding, Cross-Dataset and export surfaces</td></tr>
     <tr><td>3D Skeleton Rendering</td><td>Skeleton Mode, Simplification Method, Show Soma, Legend Mode, Background, Brain Mesh, Export Views</td><td>Visualization → Skeleton tab and the Advanced Visualization editor in analysis tabs</td></tr>
-    <tr><td>Similarity &amp; Homolog Search</td><td>Top N/K/M, Similarity Metric, Fast Search, Vector Pre-filtering, Candidate Cap/Source, NeuronBridge controls</td><td>Find Similar, Find Homologs, NeuronBridge tabs</td></tr>
+    <tr><td>Similarity &amp; Comparison Search</td><td>Top N/K/M, Similarity Metric, Fast Search, Vector Pre-filtering, Candidate Cap/Source, NeuronBridge controls</td><td>Connectivity (Find Similar), Morphology (Find Similar), NeuronBridge tabs</td></tr>
   </table>
   <div class="callout tip">
-    <b>Cache Neurons auto-flip</b>
-    Without a saved Skeleton Cache override, the skeleton surfaces keep their
-    dataset-aware behavior: Cache Neurons flips automatically (for example on
-    for FlyWire, off for NeuPrint fast/artistic tube renders). Saving a value
-    in Default Settings pins the checkbox and disables that auto-flip.
+    <b>Skeleton Cache default</b>
+    Fetched skeletons persist as portable <code>.swc.zst</code> files in the
+    shared dataset cache, so <b>Cache Neurons is on by default</b> on every
+    skeleton surface (Visualization → Skeleton and the analysis tabs'
+    visualization editors). Turning it off for a session is fine; saving a
+    value in Default Settings pins the checkbox and disables the automatic
+    on-default.
   </div>
   <div class="callout info">
     <b>Run Guide Format</b> (Pathfinding &amp; Output group) controls the

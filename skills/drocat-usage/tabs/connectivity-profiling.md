@@ -1,8 +1,8 @@
-# Connectivity Profiling (connectivity_profiling)
+# Connectivity · Comparison (connectivity_profiling)
 
-Reproduce the **Connectivity Profiling** UI tab as a direct backend call. Builds
-connectivity profiles for a query set and compares them across one or more
-datasets.
+Reproduce the **Connectivity tab → Comparison sub-tab** as a direct backend
+call. Builds connectivity profiles for a query set and compares them across
+one or more datasets.
 
 ## Backend contract
 

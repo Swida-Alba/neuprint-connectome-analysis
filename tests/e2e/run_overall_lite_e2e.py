@@ -389,25 +389,27 @@ def similar_morphology_specs() -> list:
 
 
 def similar_connectivity_specs() -> list:
-    """Scenario 8b: connectivity similar neurons of aMe12 in FAFB v783."""
+    """Scenario 8b: connectivity similar neurons of aMe12 in FAFB v783.
+
+    Runs through the Find Similar backend (HomologFinder) with
+    target_dataset == source_dataset, matching the unified
+    Connectivity → Find Similar sub-tab."""
     params = {
-        "source": "aMe12",
+        "source": ["aMe12"],
         "source_dataset": DATASET_FAFB,
         "target_dataset": DATASET_FAFB,
         "output_dir": out("similar_connectivity"),
         "top_n": 10,
         "top_k": 15,
-        "min_shared_partners": 2,
-        "vector_prune_fraction": 0.05,
+        "top_m": 5,
         "similarity_metric": "rank_union",
         "vector_prefiltering": True,
         "include_untyped_partners": True,
         "use_cache": True,
         "saveas": "",
         "min_synapse_threshold": 3,
+        "use_auto_type_mapping": False,
         "ensure_cache_complete": False,
-        "morphological_enrichment": True,
-        "output_folder_prefix": "similar-connectivity",
         "visualize_skeleton": False,
         "visualize_top_n": 0,
         "visualization_settings": {},
@@ -415,10 +417,10 @@ def similar_connectivity_specs() -> list:
     }
     return [{
         "variant": "aMe12_fafb_connectivity",
-        "tool_name": "find_similar_profile",
-        "method": "find_homologs_fast",
+        "tool_name": "find_homologs",
+        "method": "find_homologs_multi",
         "constructor_params": params,
-        "method_params": None,
+        "method_params": {"use_fast": True},
         "timeout": 1500,
     }]
 

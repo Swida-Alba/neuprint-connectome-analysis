@@ -1,6 +1,6 @@
 ---
 name: drocat-usage
-description: Layer-1 tab-matched direct analyses for DROCAT v4.5.0. Run, explain, debug, and safely execute the exact backend tools each UI tab drives, without reopening the NiceGUI UI. Use when an agent needs to reproduce a specific UI tab's scientific analysis end-to-end — pathfinding (complete/shortest/network), connectivity profiling, homolog finding, similar-neuron search, cross-dataset comparison, NeuronBridge (lines/neurons/co-labeling), FlyLight download, 3D skeleton / path visualization, or dataset & cache management — from a direct Python call using the tab's own parameters.
+description: Layer-1 tab-matched direct analyses for DROCAT v4.5.0. Run, explain, debug, and safely execute the exact backend tools each UI tab drives, without reopening the NiceGUI UI. Use when an agent needs to reproduce a specific UI tab's scientific analysis end-to-end — pathfinding (complete/shortest/network), Connectivity tab (find similar via connectivity profiles, profile comparison), Morphology tab (find similar via skeleton shape), cross-dataset comparison, NeuronBridge (lines/neurons/co-labeling), FlyLight download, 3D skeleton / path visualization, or dataset & cache management — from a direct Python call using the tab's own parameters.
 ---
 
 # DROCAT Direct Analysis — Layer 1 (Tab-Matched)
@@ -92,9 +92,10 @@ expected outputs, and a runnable launcher command.
 | Complete Paths | [find-path.md](tabs/find-path.md) | `find_path` → `FindNeuronConnection.FindAllPath` |
 | Shortest Paths | [find-shortest.md](tabs/find-shortest.md) | `find_shortest` → `FindNeuronConnection.FindShortestPath` |
 | Find Network | [network.md](tabs/network.md) | `find_network` → `FindNeuronConnection.FindNetwork` |
-| Connectivity Profiling | [connectivity-profiling.md](tabs/connectivity-profiling.md) | `connectivity_profiling` → `ConnectivityProfileComparer.run` |
-| Homolog Finding | [find-homologs.md](tabs/find-homologs.md) | `find_homologs` → `HomologFinder.find_homologs_fast` / `find_homologs` |
-| Similar Neurons | [find-similar.md](tabs/find-similar.md) | `find_similar_morphology` → `MorphologyComparer.find_similar`; `find_similar_profile` → `HomologFinder.find_homologs_fast` / `find_novel_homologs` |
+| Connectivity · Comparison | [connectivity-profiling.md](tabs/connectivity-profiling.md) | `connectivity_profiling` → `ConnectivityProfileComparer.run` |
+| Connectivity · Find Similar | [find-homologs.md](tabs/find-homologs.md) | `find_homologs` → `HomologFinder.find_homologs_multi` (cross-dataset homologs; Target = Source for intra-dataset similar search) |
+| Morphology · Find Similar | [find-similar.md](tabs/find-similar.md) | `find_similar_morphology` → `MorphologyComparer.find_similar` |
+| Morphology · Comparison | [morphology-comparison.md](tabs/morphology-comparison.md) | `morphology_comparison` → `MorphologyProfileComparer.run` |
 | Cross-Dataset Comparison | [inter-dataset.md](tabs/inter-dataset.md) | `inter_dataset` → `ComparisonParameters` + `ComparisonAnalyzer.run_comparison` |
 | Find Driver Lines | [nb-find-lines.md](tabs/nb-find-lines.md) | `nb_find_lines` → `NeuronBridgeFinder.find_lines_batch` |
 | Find EM Neurons | [nb-find-neuron.md](tabs/nb-find-neuron.md) | `nb_find_neuron` → `NeuronBridgeFinder.find_neurons_batch` |

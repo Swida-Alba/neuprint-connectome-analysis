@@ -20,11 +20,11 @@ from nicegui.page import page  # noqa: E402
 import ui.history_store as hs  # noqa: E402
 import ui.line_history_store as lhs  # noqa: E402
 from ui.components.output_panel import OutputPanel  # noqa: E402
-from ui.tabs.connectivity_profiling import (  # noqa: E402
-    create_connectivity_profiling_tab,
+from ui.tabs.connectivity import (  # noqa: E402
+    create_connectivity_tab,
 )
-from ui.tabs.find_homologs import create_find_homologs_tab  # noqa: E402
 from ui.tabs.flylight import create_flylight_tab  # noqa: E402
+from ui.tabs.morphology import create_morphology_tab  # noqa: E402
 from ui.tabs.nb_colabel import create_nb_colabel_tab  # noqa: E402
 from ui.tabs.nb_find_neuron import create_nb_find_neuron_tab  # noqa: E402
 
@@ -98,52 +98,85 @@ def _click_run(client, label):
         asyncio.run(result)
 
 
-class TestProfilingHistory:
-    def test_profiling_records_query_with_selected_datasets(
+class TestComparisonHistory:
+    def test_comparison_records_query_with_selected_datasets(
         self, isolated_history, monkeypatch
     ):
         captured = _mock_output_panel_run(monkeypatch)
-        client = Client(page("/history-profiling"))
+        client = Client(page("/history-comparison"))
         with client:
-            create_connectivity_profiling_tab()
+            create_connectivity_tab()
         _chip_input(client, "Neurons to Compare").add_values(["aMe12", "aMe10"])
-        _click_run(client, "Run Profiling")
+        _click_run(client, "Run Comparison")
 
         assert captured and captured[0][0] == "connectivity_profiling"
         assert isolated_history.recent() == ["aMe12", "aMe10"]
         assert isolated_history.datasets_of("aMe12") == ["male-cns:v1.0"]
         assert isolated_history.datasets_of("aMe10") == ["male-cns:v1.0"]
 
-    def test_profiling_failed_run_leaves_history_untouched(
+    def test_comparison_failed_run_leaves_history_untouched(
         self, isolated_history, monkeypatch
     ):
         _mock_output_panel_run(monkeypatch, returncode=1)
-        client = Client(page("/history-profiling-fail"))
+        client = Client(page("/history-comparison-fail"))
         with client:
-            create_connectivity_profiling_tab()
+            create_connectivity_tab()
         _chip_input(client, "Neurons to Compare").add_values(["aMe12"])
-        _click_run(client, "Run Profiling")
+        _click_run(client, "Run Comparison")
 
         assert isolated_history.recent() == []
 
 
-class TestHomologsHistory:
-    def test_homologs_records_each_source_with_source_dataset(
+class TestSimilarHistory:
+    def test_similar_records_each_source_with_source_dataset(
         self, isolated_history, monkeypatch
     ):
         captured = _mock_output_panel_run(monkeypatch)
-        client = Client(page("/history-homologs"))
+        client = Client(page("/history-similar"))
         with client:
-            create_find_homologs_tab()
+            create_connectivity_tab()
         _chip_input(client, "Source Neuron(s) (type or bodyId)").add_values(
             ["aMe12", "aMe10"]
         )
-        _click_run(client, "Find Homologs")
+        _click_run(client, "Find Similar Neurons")
 
         assert captured and captured[0][0] == "find_homologs"
         assert set(isolated_history.recent()) == {"aMe12", "aMe10"}
         recorded = isolated_history.datasets_of("aMe12")
         assert recorded and recorded == isolated_history.datasets_of("aMe10")
+
+
+class TestMorphologyComparisonHistory:
+    def test_comparison_records_query_with_dataset(
+        self, isolated_history, monkeypatch
+    ):
+        captured = _mock_output_panel_run(monkeypatch)
+        client = Client(page("/history-morph-comparison"))
+        with client:
+            create_morphology_tab()
+        _chip_input(client, "Neurons to Compare").add_values(
+            ["aMe12", "aMe10"]
+        )
+        _click_run(client, "Run Comparison")
+
+        assert captured and captured[0][0] == "morphology_comparison"
+        assert isolated_history.recent() == ["aMe12", "aMe10"]
+        recorded = isolated_history.datasets_of("aMe12")
+        assert recorded and recorded == isolated_history.datasets_of("aMe10")
+
+    def test_comparison_failed_run_leaves_history_untouched(
+        self, isolated_history, monkeypatch
+    ):
+        _mock_output_panel_run(monkeypatch, returncode=1)
+        client = Client(page("/history-morph-comparison-fail"))
+        with client:
+            create_morphology_tab()
+        _chip_input(client, "Neurons to Compare").add_values(
+            ["aMe12", "aMe10"]
+        )
+        _click_run(client, "Run Comparison")
+
+        assert isolated_history.recent() == []
 
 
 class TestColabelHistory:

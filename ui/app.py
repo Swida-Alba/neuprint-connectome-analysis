@@ -117,9 +117,8 @@ from ui.tabs import (
     create_inter_dataset_tab,
     create_skeleton_tab,
     create_net_viz_tab,
-    create_find_homologs_tab,
-    create_find_similar_tab,
-    create_connectivity_profiling_tab,
+    create_connectivity_tab,
+    create_morphology_tab,
     create_nb_find_lines_tab,
     create_nb_find_neuron_tab,
     create_nb_colabel_tab,
@@ -2356,9 +2355,8 @@ def main_page():
             ("Visualization", "visualization", 2, [
                 ("Skeleton", "view_in_ar"), ("Net-Viz", "account_tree"),
             ]),
-            ("Similarity", "similarity", 3, [
-                ("Homolog", "compare"), ("Morphology", "science"),
-                ("Connectivity", "analytics"),
+            ("Similarity", "similarity", 2, [
+                ("Connectivity", "analytics"), ("Morphology", "science"),
             ]),
             ("NeuronBridge", "nb", 3, [
                 ("Find Lines", "biotech"), ("Find Neurons", "search"),
@@ -2408,12 +2406,10 @@ def main_page():
             with ui.tab_panel("Net-Viz").classes("p-0"):
                 create_net_viz_tab()
             # Similarity
-            with ui.tab_panel("Homolog").classes("p-0"):
-                create_find_homologs_tab()
-            with ui.tab_panel("Morphology").classes("p-0"):
-                create_find_similar_tab()
             with ui.tab_panel("Connectivity").classes("p-0"):
-                create_connectivity_profiling_tab()
+                create_connectivity_tab()
+            with ui.tab_panel("Morphology").classes("p-0"):
+                create_morphology_tab()
             # NeuronBridge
             with ui.tab_panel("Find Lines").classes("p-0"):
                 create_nb_find_lines_tab()

@@ -2,6 +2,8 @@
 
 ## Overview
 
+> **UI location:** Connectivity tab → **Comparison** sub-tab (run folders keep the `profiling_` prefix).
+
 The `ConnectivityProfiling.py` script compares connectivity profiles within one dataset or across multiple selected datasets, enabling analysis of neural circuit similarity patterns. It supports comparison at multiple levels (bodyId, type) with interactive heatmap visualization.
 
 ## Key Features
@@ -158,7 +160,7 @@ comparer = ConnectivityProfileComparer(
 
 Output folder is auto-generated as: `{output_dir}/profiling_{query_name}_{timestamp}/`
 
-In the UI, the Profiling tab's **Output Directory** is passed directly to the
+In the UI (Connectivity tab → Comparison sub-tab), the **Output Directory** is passed directly to the
 backend and to the output-file browser. It inherits the Settings default unless
 the tab has its own saved override.
 | `TOP_K` | Top K partners per direction | `15` |

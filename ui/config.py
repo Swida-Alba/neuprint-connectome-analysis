@@ -358,9 +358,10 @@ DEFAULTS = {
     "network_layout": "distributed",
     "use_cache": True,
     "cache_only": False,
-    # Cache defaults (Settings -> Default Settings). The connection cache
-    # stays on by default; the skeleton (Cache Neurons) cache stays off.
-    "cache_neurons": False,
+    # Cache defaults (Settings -> Default Settings). Connection and
+    # skeleton caches both stay on by default: fetched skeletons persist as
+    # portable .swc.zst files in the shared cache, so every tab benefits.
+    "cache_neurons": True,
     "cache_synapses": True,
     "auto_type_mapping": True,
     "skip_bodyId": True,
@@ -403,7 +404,6 @@ DEFAULTS = {
     # Find Similar Neurons (morphological mode)
     "morph_level": "auto",
     "morph_method": "vector_v2",
-    "morph_metric": "cosine",
     "candidate_source": "auto",
     "candidate_cap": 500,
     "morph_visualize_top_n": 10,
@@ -485,10 +485,9 @@ def is_valid_synapse_size(value) -> bool:
         return False
     return 1 <= int(match.group(1)) <= 12
 
-# Morphology similarity options (Find Similar tab)
+# Morphology similarity options (Morphology tab, Find Similar sub-tab)
 MORPH_LEVEL_OPTIONS = ["auto", "bodyid", "type"]
 MORPH_METHOD_OPTIONS = ["vector_v2", "nblast"]
-MORPH_METRIC_OPTIONS = ["cosine", "pearson"]
 CANDIDATE_SOURCE_OPTIONS = ["auto", "roi", "combined", "profile", "cache"]
 
 # Simplification pipelines (NeuPrint tube rendering)
@@ -509,7 +508,7 @@ DEFAULT_SETTING_GROUPS = [
     ("cache", "Cache & Data"),
     ("pathfinding_output", "Pathfinding & Output"),
     ("skeleton_render", "3D Skeleton Rendering"),
-    ("similarity", "Similarity & Homolog Search"),
+    ("similarity", "Similarity & Comparison Search"),
 ]
 
 DEFAULT_SETTING_SPECS = {
@@ -522,11 +521,11 @@ DEFAULT_SETTING_SPECS = {
         "hint": "Dataset preselected in every tool tab until changed.",
     },
     "default_target_dataset": {
-        "label": "Default Homolog Target Dataset",
+        "label": "Default Similar-Search Target Dataset",
         "group": "dataset_search",
         "kind": "select",
         "options": DATASETS,
-        "hint": "Target dataset preselected in Homolog Finding.",
+        "hint": "Target dataset preselected in Connectivity → Find Similar.",
     },
     "search_columns": {
         "label": "Search Columns",
@@ -551,7 +550,8 @@ DEFAULT_SETTING_SPECS = {
         "max": 100,
         "step": 1,
         "hint": "Default minimum synapses for a connection to be included "
-                "(pathfinding, network, skeleton tab, profiling, homologs).",
+                "(pathfinding, network, skeleton tab, comparison, "
+                "similar search).",
     },
     "min_ratio": {
         "label": "Min Connection Ratio",
@@ -597,7 +597,8 @@ DEFAULT_SETTING_SPECS = {
         "label": "Skeleton Cache (Cache Neurons)",
         "group": "cache",
         "kind": "bool",
-        "hint": "Cache fetched skeletons locally for faster repeat renders. "
+        "hint": "Cache fetched skeletons as portable .swc.zst files in the "
+                "shared cache for faster repeat renders (default on). "
                 "Saving a value here disables the dataset-aware auto-flip.",
     },
     "cache_synapses": {
@@ -756,7 +757,7 @@ DEFAULT_SETTING_SPECS = {
         "hint": "Use the median pre→post distance for every synapse marker "
                 "so all markers share one size.",
     },
-    # --- Similarity & Homolog Search ----------------------------------------
+    # --- Similarity & Comparison Search --------------------------------------
     "top_n": {
         "label": "Top N Candidates",
         "group": "similarity",
@@ -838,13 +839,6 @@ DEFAULT_SETTING_SPECS = {
         "kind": "select",
         "options": MORPH_METHOD_OPTIONS,
         "hint": "'vector': fast morphometrics. 'nblast': canonical NBLAST.",
-    },
-    "morph_metric": {
-        "label": "Morphology Metric",
-        "group": "similarity",
-        "kind": "select",
-        "options": MORPH_METRIC_OPTIONS,
-        "hint": "Similarity on standardized vectors: cosine or Pearson.",
     },
     "match_algorithm": {
         "label": "NeuronBridge Algorithm",

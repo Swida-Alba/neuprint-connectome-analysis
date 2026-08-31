@@ -507,24 +507,29 @@ class TestRunner:
         assert "include_untyped_partners" in params
         assert "expand_untyped_2hop" not in params
 
-    def test_homologs_tab_no_longer_has_loose_search_controls(self):
+    def test_similarity_tabs_have_no_loose_search_controls(self):
         """The loose-search knobs (Min Shared Partners, Candidate Prune %)
-        were relocated to the Similar tab; the Find Homologs tab must not
-        expose them anymore."""
+        belonged to the removed connectivity-similarity mode; neither the
+        Connectivity nor the Morphology tab exposes them anymore."""
         from nicegui import Client
         from nicegui.page import page
-        from ui.tabs.find_homologs import create_find_homologs_tab
+        from ui.tabs.connectivity import create_connectivity_tab
+        from ui.tabs.morphology import create_morphology_tab
 
-        client = Client(page("/homologs-no-loose-controls"))
-        with client:
-            create_find_homologs_tab()
-        labels = [
-            getattr(el, "_props", {}).get("label")
-            for el in client.elements.values()
-            if getattr(el, "_props", {}).get("label")
-        ]
-        assert "Min Shared Partners" not in labels
-        assert "Candidate Prune %" not in labels
+        for factory, url in (
+            (create_connectivity_tab, "/similar-no-loose-controls"),
+            (create_morphology_tab, "/morphology-no-loose-controls"),
+        ):
+            client = Client(page(url))
+            with client:
+                factory()
+            labels = [
+                getattr(el, "_props", {}).get("label")
+                for el in client.elements.values()
+                if getattr(el, "_props", {}).get("label")
+            ]
+            assert "Min Shared Partners" not in labels
+            assert "Candidate Prune %" not in labels
 
     def test_homologs_sort_by_defaults_to_jaccard(self):
         """The candidate-ranking control is labeled 'Sort By' and defaults to
@@ -535,11 +540,11 @@ class TestRunner:
         from nicegui import Client
         from nicegui.page import page
         from ui.config import DEFAULTS
-        from ui.tabs.find_homologs import create_find_homologs_tab
+        from ui.tabs.connectivity import create_connectivity_tab
 
-        client = Client(page("/homologs-sort-by"))
+        client = Client(page("/similar-sort-by"))
         with client:
-            create_find_homologs_tab()
+            create_connectivity_tab()
         by_label = {}
         for el in client.elements.values():
             label = getattr(el, "_props", {}).get("label")
@@ -550,17 +555,19 @@ class TestRunner:
         assert DEFAULTS["similarity_metric"] == "jaccard"
         assert "Similarity Metric" not in by_label
 
-    def test_similar_tab_has_both_modes_and_loose_knobs(self):
-        """The Similar tab renders both modes (morphological similarity and
-        connection profile similarity) and hosts the relocated loose knobs."""
+    def test_morphology_tab_has_find_similar_and_comparison(self):
+        """The Morphology tab renders the Find Similar sub-tab (morphological
+        search) and the Comparison sub-tab (intra-dataset N×N comparison
+        form); the connectivity-similarity mode and its loose knobs are
+        gone."""
         from nicegui import Client
         from nicegui.page import page
         from ui.config import DEFAULTS
-        from ui.tabs.find_similar import create_find_similar_tab
+        from ui.tabs.morphology import create_morphology_tab
 
-        client = Client(page("/similar-tab-structure"))
+        client = Client(page("/morphology-tab-structure"))
         with client:
-            create_find_similar_tab()
+            create_morphology_tab()
 
         labels = [
             getattr(el, "_props", {}).get("label")
@@ -572,36 +579,32 @@ class TestRunner:
             for el in client.elements.values()
             if getattr(el, "text", "")
         ]
-        # morphological mode controls (the legacy cosine/Pearson "Metric"
-        # selector was removed: vector_v2 scoring is per-block whitened
-        # cosine and NBLAST carries its own score)
-        for label in ("Query Neuron(s)", "Level", "Method",
+        # morphological Find Similar controls (the legacy cosine/Pearson
+        # "Metric" selector was removed: vector_v2 scoring is per-block
+        # whitened cosine and NBLAST carries its own score)
+        for label in ("Query Neuron(s)", "Level",
                       "Candidate Cap", "Candidate Source",
-                      "ROI Filter", "Visualize Top N Types / Neurons", "Visualize By"):
+                      "ROI Filter", "Visualize Top N Types / Neurons",
+                      "Visualize By"):
             assert label in labels, f"missing morphological control: {label}"
         assert "Download All Skeletons" not in labels
-        # connection-profile mode controls (relocated loose knobs)
-        for label in ("Query Neuron (type or bodyId)", "Min Shared Partners",
-                      "Candidate Prune %", "Top K Partners",
-                      "Visualize Top Candidates", "Visualize Top N Candidates"):
-            assert label in labels or label in texts, f"missing profile control: {label}"
+        # removed connection-profile controls
+        for gone in ("Min Shared Partners", "Candidate Prune %",
+                     "Visualize Top Candidates", "Visualize Top N Candidates",
+                     "Top N Candidates", "Query Neuron (type or bodyId)"):
+            assert gone not in labels and gone not in texts, gone
 
-        # The two top-N inputs must keep distinct defaults (regression: the
-        # profile panel used to shadow the morphological one via a shared
-        # closure variable, so "Top N Results" was always ignored).
         by_label = {
             getattr(el, "_props", {}).get("label"): el
             for el in client.elements.values()
             if getattr(el, "_props", {}).get("label")
         }
-        assert by_label["Top N Candidates"].value == DEFAULTS["top_n"]
         # level auto-follows the query kind (type -> type, bodyId -> bodyId)
         assert by_label["Level"].value == DEFAULTS["morph_level"] == "auto"
         # the two size knobs: candidate cap for the pool, top-N for rendering
         assert by_label["Candidate Cap"].value == DEFAULTS["candidate_cap"] == 500
         # 3D visualization defaults: enabled with 6 top types, grouped by type
         assert by_label["Visualize Top N Types / Neurons"].value == DEFAULTS["morph_visualize_top_n"]
-        assert by_label["Visualize Top N Candidates"].value == 5
         assert by_label["Visualize By"].value == DEFAULTS["morph_visualize_by"]
         # Analysis panels now default to the fast pipeline (0.90 removal).
         assert by_label["Mesh Simplification"].value == 0.90
@@ -610,18 +613,14 @@ class TestRunner:
             for el in client.elements.values()
         )
 
-        # The two similarity modes are independent, outlined buttons rather
-        # than one segmented toggle, so each remains easy to target and read.
+        # The two sub-tabs are independent, outlined buttons rather than one
+        # segmented toggle, so each remains easy to target and read.
         mode_buttons = {
             getattr(el, "text", ""): el
             for el in client.elements.values()
-            if getattr(el, "text", "") in {
-                "Morphological similarity", "Connectivity similarity",
-            }
+            if getattr(el, "text", "") in {"Find Similar", "Comparison"}
         }
-        assert set(mode_buttons) == {
-            "Morphological similarity", "Connectivity similarity",
-        }
+        assert set(mode_buttons) == {"Find Similar", "Comparison"}
         assert len(mode_buttons) == 2
         # vector-cache action row
         assert any(
@@ -629,16 +628,85 @@ class TestRunner:
             for el in client.elements.values()
         )
 
+        # Comparison sub-tab: real form with its own dataset card, neuron
+        # list, method selector, and run button.
+        for label in ("Neurons to Compare", "Max Members per Type",
+                      "Max Total Neurons", "Advanced Visualization"):
+            assert label in labels, f"missing Comparison control: {label}"
+        assert labels.count("Method") == 2  # Find Similar + Comparison
+        assert "Run Comparison" in texts
+        assert "Find Similar Neurons" in texts
+        assert not any("Coming in a future update" in text for text in texts)
+
+    def test_connectivity_tab_hosts_find_similar_and_comparison(self):
+        """The Connectivity tab hosts the Find Similar (homolog engine) and
+        Comparison sub-tabs; the removed connectivity-similarity knobs are
+        gone and Sort By keeps its jaccard default."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.config import DEFAULTS
+        from ui.tabs.connectivity import create_connectivity_tab
+
+        client = Client(page("/connectivity-tab-structure"))
+        with client:
+            create_connectivity_tab()
+
+        labels = [
+            getattr(el, "_props", {}).get("label")
+            for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label")
+        ]
+        texts = [
+            getattr(el, "text", "")
+            for el in client.elements.values()
+            if getattr(el, "text", "")
+        ]
+        # Find Similar (homolog engine) controls
+        for label in ("Source Dataset", "Target Dataset",
+                      "Source Neuron(s) (type or bodyId)",
+                      "Top N Candidates", "Top K Partners", "Min Types (M)",
+                      "Sort By", "Min Synapse Threshold",
+                      "Auto Type Mapping", "Visualize Top N Candidates"):
+            assert label in labels or label in texts, \
+                f"missing Find Similar control: {label}"
+        # Comparison controls
+        for label in ("Datasets to compare (select one or more)",
+                      "Neurons to Compare", "Aggregation Level",
+                      "BodyId-Level Computation"):
+            assert label in labels, f"missing Comparison control: {label}"
+        # removed connectivity-similarity controls
+        for gone in ("Min Shared Partners", "Candidate Prune %",
+                     "Similarity Metric", "Visualize Top Candidates"):
+            assert gone not in labels and gone not in texts, gone
+
+        by_label = {
+            getattr(el, "_props", {}).get("label"): el
+            for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label")
+        }
+        assert by_label["Top N Candidates"].value == DEFAULTS["top_n"]
+        assert by_label["Sort By"].value == DEFAULTS["similarity_metric"]
+        assert by_label["Visualize Top N Candidates"].value == 5
+
+        # The two sub-tabs are independent, outlined buttons.
+        mode_buttons = {
+            getattr(el, "text", ""): el
+            for el in client.elements.values()
+            if getattr(el, "text", "") in {"Find Similar", "Comparison"}
+        }
+        assert set(mode_buttons) == {"Find Similar", "Comparison"}
+        assert len(mode_buttons) == 2
+
     def test_analysis_visualization_simplification_uses_analysis_default(self):
         """The advanced panel displays the same analysis default that
         the analysis backend will use, without overwriting custom values."""
         from nicegui import Client
         from nicegui.page import page
-        from ui.tabs.find_similar import create_find_similar_tab
+        from ui.tabs.morphology import create_morphology_tab
 
         client = Client(page("/similar-visualization-simplification"))
         with client:
-            create_find_similar_tab()
+            create_morphology_tab()
 
         default_control = next(
             el for el in client.elements.values()
@@ -651,7 +719,7 @@ class TestRunner:
             ancestor = el
             while ancestor is not None:
                 if getattr(ancestor, "_props", {}).get("id", "") == \
-                        "card-findsimilar-morphology-dataset":
+                        "card-morphology-findsimilar-dataset":
                     dataset = el
                     break
                 parent_slot = getattr(ancestor, "parent_slot", None)
@@ -659,10 +727,7 @@ class TestRunner:
             if dataset is not None:
                 break
         assert dataset is not None
-        # Both modes have an advanced visualization editor.  The first
-        # occurrence belongs to the initially visible morphological panel;
-        # the profile panel has an independent editor later in the element
-        # tree.
+        # The Find Similar sub-tab has one advanced visualization editor.
         mesh = next(
             el for el in client.elements.values()
             if getattr(el, "_props", {}).get("label") == "Mesh Simplification"
@@ -702,11 +767,13 @@ class TestRunner:
         assert default_control.enabled is True
 
     def test_similar_tools_generate_runner_scripts(self):
-        """The runner generates scripts for both Similar tools."""
+        """The runner generates scripts for both similarity tools."""
         from ui.runner import ScriptRunner, TOOL_REGISTRY
 
         assert "find_similar_morphology" in TOOL_REGISTRY
-        assert "find_similar_profile" in TOOL_REGISTRY
+        assert "morphology_comparison" in TOOL_REGISTRY
+        assert "find_homologs" in TOOL_REGISTRY
+        assert "find_similar_profile" not in TOOL_REGISTRY
 
         sr = ScriptRunner()
         morph_script = sr._generate_script(
@@ -723,24 +790,38 @@ class TestRunner:
         assert "visualize_top_n=6" in morph_script
         assert "visualize_by='type'" in morph_script
 
-        profile_script = sr._generate_script(
-            "find_similar_profile",
-            {"source": "aMe12", "source_dataset": "male-cns:v1.0",
-             "target_dataset": "male-cns:v1.0",
-             "min_shared_partners": 1, "vector_prune_fraction": 1.0,
+        similar_script = sr._generate_script(
+            "find_homologs",
+            {"source": ["aMe12"], "source_dataset": "male-cns:v1.0",
+             "target_dataset": "male-cns:v1.0", "top_n": 100,
+             "use_auto_type_mapping": True,
              "visualize_skeleton": True, "visualize_top_n": 5,
-             "visualization_settings": {"brain_mesh": "template"},
-             "output_folder_prefix": "similar-connectivity"},
-            "find_homologs_fast",
+             "visualization_settings": {"brain_mesh": "template"}},
+            "find_homologs_multi",
+            {"use_fast": True},
+        )
+        assert "from comparison.profile_comparator import HomologFinder" in similar_script
+        assert "finder.find_homologs_multi(" in similar_script
+        assert "method_params" in similar_script
+        assert "use_auto_type_mapping=True" in similar_script
+        assert "visualize_skeleton=True" in similar_script
+        assert "visualize_top_n=5" in similar_script
+        assert "visualization_settings={'brain_mesh': 'template'}" in similar_script
+
+        comparison_script = sr._generate_script(
+            "morphology_comparison",
+            {"dataset": "male-cns:v1.0", "query": ["aMe12", "aMe10"],
+             "method": "vector_v2", "max_members_per_type": 25,
+             "max_total_neurons": 200, "output_dir": "/tmp/morph_cmp",
+             "generate_heatmaps": True, "show_figures": False},
+            "run",
             None,
         )
-        assert "from comparison.profile_comparator import HomologFinder" in profile_script
-        assert "finder.find_homologs_fast()" in profile_script
-        assert "min_shared_partners=1" in profile_script
-        assert "visualize_skeleton=True" in profile_script
-        assert "visualize_top_n=5" in profile_script
-        assert "visualization_settings={'brain_mesh': 'template'}" in profile_script
-        assert "output_folder_prefix='similar-connectivity'" in profile_script
+        assert "from morphology_comparison import MorphologyProfileComparer" \
+            in comparison_script
+        assert "comparer.run()" in comparison_script
+        assert "max_members_per_type=25" in comparison_script
+        assert "query=['aMe12', 'aMe10']" in comparison_script
 
     def test_homologs_empty_saveas_uses_auto_folder(self, tmp_path):
         """UI sends saveas='' when blank; results must land in a per-run
@@ -2819,8 +2900,8 @@ class TestDatasetService:
 
         monkeypatch.setattr(cfg_mod, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
 
-        # Without an override the FlyWire-aware auto-flip turns Cache
-        # Neurons on (initial built-in value is False).
+        # Without an override the auto-flip keeps Cache Neurons on (the
+        # built-in default is already True; the flip is the pin guarantee).
         client = Client(page("/cache-flip-auto"))
         with client:
             auto = skeleton_visualization_settings(
@@ -3211,15 +3292,15 @@ class TestDatasetService:
 class TestTabs:
     def test_all_tab_functions_exist(self):
         from ui.tabs import (
-            create_find_path_tab, create_find_shortest_tab, create_connectivity_profiling_tab,
-            create_find_homologs_tab, create_find_similar_tab, create_inter_dataset_tab,
+            create_find_path_tab, create_find_shortest_tab, create_connectivity_tab,
+            create_morphology_tab, create_inter_dataset_tab,
             create_nb_find_lines_tab, create_nb_find_neuron_tab, create_nb_colabel_tab,
             create_skeleton_tab, create_net_viz_tab, create_network_tab,
             create_visualization_tab, create_settings_tab,
         )
         assert all(callable(f) for f in [
-            create_find_path_tab, create_find_shortest_tab, create_connectivity_profiling_tab,
-            create_find_homologs_tab, create_find_similar_tab, create_inter_dataset_tab,
+            create_find_path_tab, create_find_shortest_tab, create_connectivity_tab,
+            create_morphology_tab, create_inter_dataset_tab,
             create_nb_find_lines_tab, create_nb_find_neuron_tab, create_nb_colabel_tab,
             create_skeleton_tab, create_net_viz_tab, create_network_tab,
             create_visualization_tab, create_settings_tab,
@@ -3273,8 +3354,7 @@ class TestTabs:
             "Complete Paths": "connection", "Shortest Paths": "connection",
             "Network": "connection", "Cross-Dataset": "connection",
             "Skeleton": "visualization", "Net-Viz": "visualization",
-            "Homolog": "similarity", "Morphology": "similarity",
-            "Connectivity": "similarity",
+            "Connectivity": "similarity", "Morphology": "similarity",
             "Find Lines": "nb", "Find Neurons": "nb", "Co-Labeling": "nb",
             "Downloader": "flylight",
         }
@@ -3956,24 +4036,26 @@ class TestTabs:
         from nicegui import Client
         from nicegui.page import page
         from ui.tabs.network import create_network_tab
-        from ui.tabs.find_homologs import create_find_homologs_tab
-        from ui.tabs.find_similar import create_find_similar_tab
-        from ui.tabs.connectivity_profiling import create_connectivity_profiling_tab
+        from ui.tabs.connectivity import create_connectivity_tab
+        from ui.tabs.morphology import create_morphology_tab
 
         controls = [
             ("/layout-network", create_network_tab,
              ("card-network-dataset", "card-network-neurons"), 1),
-            ("/layout-findhomologs", create_find_homologs_tab,
-             ("card-findhomologs-datasets", "card-findhomologs-neurons"), 1),
-            ("/layout-findsimilar", create_find_similar_tab,
+            ("/layout-connectivity", create_connectivity_tab,
              (
-                 "card-findsimilar-morphology-dataset",
-                 "card-findsimilar-morphology-neurons",
-                 "card-findsimilar-profile-dataset",
-                 "card-findsimilar-profile-neurons",
+                 "card-connectivity-similar-datasets",
+                 "card-connectivity-similar-neurons",
+                 "card-connectivity-comparison-datasets",
+                 "card-connectivity-comparison-neurons",
              ), 2),
-            ("/layout-profiling", create_connectivity_profiling_tab,
-             ("card-profiling-datasets", "card-profiling-neurons"), 1),
+            ("/layout-morphology", create_morphology_tab,
+             (
+                 "card-morphology-findsimilar-dataset",
+                 "card-morphology-findsimilar-neurons",
+                 "card-morphology-comparison-dataset",
+                 "card-morphology-comparison-neurons",
+             ), 2),
         ]
         for name, builder, card_ids, expected_fixed_inputs in controls:
             client = Client(page(name))
@@ -4054,45 +4136,35 @@ class TestTabs:
                 ancestor = parent_slot.parent if parent_slot is not None else None
             assert storage_id in ancestor_ids
 
-    def test_connectivity_similarity_is_intra_dataset_only(self):
-        """The connectivity-similarity UI exposes one shared dataset."""
+    def test_connectivity_find_similar_uses_single_source_and_target(self):
+        """Find Similar exposes one source and one target dataset; Target =
+        Source gives the intra-dataset search, so no separate connectivity
+        mode exists anymore."""
         from nicegui import Client
         from nicegui.page import page
-        from ui.tabs.find_similar import create_find_similar_tab
+        from ui.tabs.connectivity import create_connectivity_tab
 
-        client = Client(page("/similar-connectivity-intra-dataset"))
+        client = Client(page("/similar-source-target"))
         with client:
-            create_find_similar_tab()
+            create_connectivity_tab()
 
-        profile_card = next(
-            el for el in client.elements.values()
-            if getattr(el, "_props", {}).get("id") ==
-            "card-findsimilar-profile-dataset"
-        )
-        profile_selectors = []
-        for el in client.elements.values():
-            if getattr(el, "_props", {}).get("label") != "Dataset":
-                continue
-            ancestor = el
-            ancestor_ids = []
-            while ancestor is not None:
-                ancestor_ids.append(
-                    getattr(ancestor, "_props", {}).get("id", "")
-                )
-                parent_slot = getattr(ancestor, "parent_slot", None)
-                ancestor = parent_slot.parent if parent_slot is not None else None
-            if getattr(profile_card, "_props", {}).get("id") in ancestor_ids:
-                profile_selectors.append(el)
-
-        assert len(profile_selectors) == 1
-        assert profile_selectors[0]._props.get("multiple") is not True
         labels = [
             getattr(el, "_props", {}).get("label")
             for el in client.elements.values()
             if getattr(el, "_props", {}).get("label")
         ]
-        assert "Source Dataset" not in labels
-        assert "Target Dataset" not in labels
+        assert labels.count("Source Dataset") == 1
+        assert labels.count("Target Dataset") == 1
+        source = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Source Dataset"
+        )
+        target = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Target Dataset"
+        )
+        assert source._props.get("multiple") is not True
+        assert target._props.get("multiple") is not True
 
     def test_restructured_tabs_have_independent_block_cards(self):
         """Tabs reviewed for card separation must expose their logical
@@ -4410,17 +4482,17 @@ class TestTabs:
                         "card-network-hemisphere"):
             assert card_id in ids, card_id
 
-    def test_profiling_tab_custom_group_aggregation(self):
-        """The profiling tab offers a custom-group aggregation level: selecting
-        it reveals the LabelMapper preset selector that feeds
+    def test_comparison_tab_custom_group_aggregation(self):
+        """The Comparison sub-tab offers a custom-group aggregation level:
+        selecting it reveals the LabelMapper preset selector that feeds
         custom_mapping_file into ConnectivityProfileComparer."""
         from nicegui import Client
         from nicegui.page import page
-        from ui.tabs.connectivity_profiling import create_connectivity_profiling_tab
+        from ui.tabs.connectivity import create_connectivity_tab
 
-        client = Client(page("/profiling-custom-groups"))
+        client = Client(page("/comparison-custom-groups"))
         with client:
-            create_connectivity_profiling_tab()
+            create_connectivity_tab()
 
         elements = list(client.elements.values())
         agg = [

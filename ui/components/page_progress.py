@@ -64,11 +64,11 @@ TOOL_PROGRESS_STEPS: Dict[str, Sequence[str]] = {
         "Score morphological similarity",
         "Save results and visualization",
     ),
-    "find_similar_profile": (
-        "Build source profiles",
-        "Build target profiles",
-        "Compare and score candidate profiles",
-        "Save profile-similarity results",
+    "morphology_comparison": (
+        "Resolve query neurons and members",
+        "Load and vectorize skeletons",
+        "Compute similarity matrices",
+        "Save matrices, heatmaps, and report",
     ),
     "inter_dataset": (
         "Resolve datasets and thresholds",
@@ -127,27 +127,12 @@ METHOD_PROGRESS_STEPS: Dict[Tuple[str, str], Sequence[str]] = {
         "Compare and score candidates",
         "Save homolog results",
     ),
-    # HomologFinder.find_homologs() and the profile-similarity tab's
-    # find_novel_homologs() share the four-stage profile workflow.
+    # HomologFinder.find_homologs() shares the four-stage profile workflow.
     ("find_homologs", "find_homologs"): (
         "Build source profiles",
         "Build target profiles",
         "Compare and score candidates",
         "Save homolog results",
-    ),
-    ("find_similar_profile", "find_homologs_fast"): (
-        "Load connection data",
-        "Build source profiles",
-        "Discover candidate neurons",
-        "Build target profiles",
-        "Compare and score candidates",
-        "Save profile-similarity results",
-    ),
-    ("find_similar_profile", "find_novel_homologs"): (
-        "Build source profiles",
-        "Build target profiles",
-        "Compare and score candidate profiles",
-        "Save profile-similarity results",
     ),
     ("find_similar_morphology", "cache"): (
         "Resolve query neuron",

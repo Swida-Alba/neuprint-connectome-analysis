@@ -144,7 +144,7 @@ cd drocat
 ```
 
 For agent-driven analysis *without* the UI, use the checked-in skills:
-[`drocat-usage`](../skills/drocat-usage/SKILL.md) (Layer 1, one recipe per UI tab)
+[`drocat-usage`](../skills/drocat-usage/SKILL.md) (Layer 1, a recipe for every analysis panel)
 and [`drocat-backend`](../skills/drocat-backend/SKILL.md) (Layer 2, backend
 module composition).
 
@@ -197,7 +197,7 @@ Do not manually copy the skills or fetch them from a URL. The repository ships t
 analysis skills, so an installed agent has them automatically:
 
 - [`drocat-usage`](../skills/drocat-usage/SKILL.md) — Layer 1, tab-matched direct
-  script analyses (one recipe per UI tab) via the `drocat-4.5.0` environment.
+  script analyses (a recipe for every analysis panel) via the `drocat-4.5.0` environment.
 - [`drocat-backend`](../skills/drocat-backend/SKILL.md) — Layer 2, flexible
   composition of backend modules and function blocks.
 

@@ -15,7 +15,6 @@ comparer = MorphologyComparer(
     dataset="male-cns:v0.9",            # non-BANC only
     level="auto",                       # "auto" | "type" | "bodyid"
     method="vector_v2",                 # "vector_v2" | "nblast"
-    metric="cosine",                    # vector similarity metric
     candidate_cap=500,                  # screen candidates entering comparison
     candidate_source="auto",            # "auto" | "roi" | "combined" | "profile" | "cache"
     visualize_top_n=0,                  # >0 to render top-N skeletons
@@ -55,9 +54,11 @@ eigensolver caused an intermittent vectorization cost lottery (median
 0.3 s, tail to ~400 s/neuron) while its 10% weight measurably changed
 nothing in the user-facing ranking (production-run analysis, l-LNv +
 aMe12 2026-08-29: dropping it leaves top-10 type overlap 9-10/10,
-Spearman >= 0.96). On NeuPrint datasets a 288-dim ROI-expansion block
-(Hellinger pre/post fractions over the primary ROIs) is composed at runtime
-and scored with weight `v2_roi_weight=0.2`; FAFB/FlyWire runs omit it.
+Spearman >= 0.96). ROI-distribution similarity is a candidate-SELECTION signal only
+(`candidate_source=roi`/`combined`, reported per row as `roi_similarity`);
+the former runtime-composed ROI-expansion scoring block (`v2_roi_weight`)
+was removed — scoring is shape/spatial only, matching the benchmarked
+configuration on every dataset.
 
 Scoring is per-block cosine with weights `v2_block_weights` (default
 shape 0.30 / spatial 0.70; effective .300/.700 after renormalization —
@@ -75,10 +76,12 @@ by their shape prefix.
 **Spatial block**: right-hemisphere arbors are reflected onto the left at
 vectorization time (lateral normalization, cache schema v2), so type-level
 aggregation can no longer average L and R positions into a midline blur.
-The spatial block score blends its cosine (50/50) with a **mass-overlap
-term** — the min-sum intersection of the query's and the candidate's raw
-Hellinger histograms — so a neuron with a proportionally similar but much
-smaller overlap in the query's region scores lower.
+In ROI/connectivity-screen-first runs the spatial block score blends its
+cosine (50/50) with a **mass-overlap term** — the min-sum intersection of
+the query's and the candidate's raw Hellinger histograms — so a neuron
+with a proportionally similar but much smaller overlap in the query's
+region scores lower. The term is OFF in cache-direct runs (factorial:
+-0.007 MRR).
 
 **NBLAST (`method="nblast"`)**: NBLAST scores are computed BEFORE the type
 aggregation, so `type_summary.csv` reflects NBLAST (the former flow
@@ -86,7 +89,14 @@ refined only the bodyId table, leaving the type list showing vector
 scores). Candidates whose dotprops cannot be built keep their vector
 prefilter score (same-type reference rows always do); when refinement is
 skipped entirely the run logs a loud warning and records
-`nblast_applied: false` in README.txt.
+`nblast_applied: false` in README.txt. NBLAST is not mirror-invariant
+(contralateral same-type pairs score at chance), so NBLAST type means
+aggregate IPSILATERAL pairs only; contralateral rows stay in results.csv,
+and types with exclusively contralateral evidence are omitted from the
+type ranking. The vector method lateral-normalizes and uses both sides.
+NBLAST on FlyWire/FAFB scores the whole candidate pool from the healed
+bundle skeletons and runs against the V2 skeleton-vector cache (never the
+mesh cache).
 
 **Two-pass type reevaluation** (`expand_top_types=20`, `expand_per_type=10`,
 `0` disables): after the first scoring pass, the remaining members of the
@@ -99,9 +109,8 @@ or max under `type_agg="max"`) is multiplied by `sqrt(type_coverage)`
 exclusion; sparse types are damped, fully covered types pass through
 untouched. Columns `type_coverage`, `similarity_raw`, and `similarity_max`
 document the treatment in type_summary.csv; the bodyId-level results.csv
-carries `type_coverage` per row. Per-block score columns (`sim_shape`,
-`sim_spatial`, `sim_roi`) are written to results.csv and
-averaged into type_summary.csv.
+carries `type_coverage` per row. Per-block score columns (`sim_shape`, `sim_spatial`) are written to
+results.csv and averaged into type_summary.csv.
 
 **Connectivity-profile evidence backfill**: the `profile_similarity` column
 is populated even when the ROI screen discovered the pool — first from the
@@ -116,13 +125,15 @@ keeps separate files (`find_similar/morphology/skeleton__vectors_v2.parquet`,
 V2 vectors use the **simp90 basis**: locally stored skeletons are re-leveled to
 the canonical 90% level before vectorization, so the whole local population is
 usable offline. The V1 counterpart cache stays warm during online fetches.
-Block weights and basis are recorded in the run README.
+Block weights and basis are recorded in the run README. The legacy V1
+vector path is retired: both methods read the V2 skeleton-vector cache,
+online fetches no longer warm a V1 counterpart, and NBLAST dotprops are
+rebuilt per search in memory (never persisted).
 
 ```python
 comparer = MorphologyComparer(
     query="aMe4", dataset="male-cns:v1.0", method="vector_v2",
     v2_block_weights={"shape": 0.3, "spatial": 0.7},
-    v2_roi_weight=0.2,                  # 0 disables the ROI block
 )
 ```
 
@@ -143,6 +154,13 @@ vecs = cache.vectors_for(body_ids, compute_missing=True)
 - `find_similar_raw_cache(dataset, ...)` — the raw skeleton cache helper.
 - `find_similar_dataset_cache(dataset, ...)` — dataset-level cache helper.
 - `find_similar_flywire_mesh_cache(...)` — FlyWire mesh cache helper.
+- `load_flywire_skeletons_batch(dataset, body_ids, ...)` — canonical
+  FlyWire/FAFB raw-skeleton loader: local raw cache → healed FAFB bundle
+  (newly served trees are cached into the raw store) → per-run extrusion
+  check with cached results (flagged neurons replaced through CAVE) →
+  token-gated CAVE skeletonization (mesh → wavefront tree, cached as
+  `.swc.zst`). The prepared mesh cache is never consulted — morphology
+  scoring is TreeNeuron-native.
 
 ## Notes
 

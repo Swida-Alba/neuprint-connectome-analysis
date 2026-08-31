@@ -2,6 +2,8 @@
 
 ## Overview
 
+> **UI location:** Connectivity tab → **Find Similar** sub-tab (Target = Source for the intra-dataset search).
+
 The `HomologFinder` module provides connectivity profile-based homolog discovery across connectome datasets. It identifies neurons with similar connectivity patterns, which often indicates they are the same cell type in different animals or brain regions.
 
 **Key Architecture**: HomologFinder is built entirely on top of `ConnectivityProfiler`. All profile building uses the **1-hop/2-hop hybrid approach** with **top-k/top-m dynamic expansion**.
@@ -104,9 +106,11 @@ results = finder.find_homologs_fast(
 ### Output Files (Always Saved)
 
 When `output_dir` is set, you always get:
-- `bodyid_results.csv` - Sorted by source_bodyId, then rank_corr
-- `type_summary.csv` - Aggregated type-level summary with avg/best/std
-- `homolog_results.csv` - Legacy format (sorted by rank_corr only)
+- `bodyid_results.csv` - Sorted by source_bodyId, then rank_union
+- `type_summary.csv` - Aggregated type-level summary (avg_ metric means)
+- `homolog_results.csv` - Legacy format (sorted by the run's metric)
+- `type_level_results.csv` - Pooled type-level ranking (top N per source type)
+- `source_status_summary.json` - Source connectivity status breakdown
 
 ## Skeleton Visualization
 
@@ -325,11 +329,22 @@ Type-mean aggregated FROM the bodyId-level results (a bodyId-level
 aggregation view, not a type-level profile comparison):
 
 ```
-| query | source_dataset | target_dataset | source_type | target_type | avg_rank_corr | best_rank_corr | std_rank_corr | n_bodyid_comparisons |
-| ----- | -------------- | -------------- | ----------- | ----------- | ------------- | -------------- | ------------- | -------------------- |
-| Mi1   | hemibrain      | flywire_FAFB   | Mi1         | Mi1         | 0.89          | 0.92           | 0.03          | 12                   |
-| Mi1   | hemibrain      | flywire_FAFB   | Mi1         | Mi4         | 0.65          | 0.71           | 0.08          | 12                   |
+| query | source_dataset | target_dataset | source_type | target_type | n_bodyid_comparisons | avg_jaccard | avg_rank_union |
+| ----- | -------------- | -------------- | ----------- | ----------- | -------------------- | ----------- | -------------- |
+| Mi1   | hemibrain      | flywire_FAFB   | Mi1         | Mi1         | 12                   | 0.72        | 0.65           |
+| Mi1   | hemibrain      | flywire_FAFB   | Mi1         | Mi4         | 12                   | 0.41        | 0.30           |
 ```
+
+Targets that never resolved to a real cell type (untyped neurons whose
+`type` column carries a coarse class label, e.g. FAFB `optic_lobes`) are
+excluded from this table. `target_type_members` in
+`type_level_results.csv` exposes the candidate type's member count so
+hemilineage-scale annotations (e.g. Mi15, ~1000 members) are visible.
+
+When scenes were rendered, `type_summary.csv` also carries `visualized`
+(the type appears in a rendered scene) and `visualization_rank` (its order
+across the rendered scenes — type-level scene first, then the bodyId-level
+scene).
 
 ### Output layout notes
 
@@ -341,6 +356,15 @@ aggregation view, not a type-level profile comparison):
   `visualization/source_neurons/` renders the transformed query in the
   target template (layer label `query_transformed_{neuron name}`), and the
   `bodyId_level/` / `type_level/` scenes include the same overlay layer.
+- Individual per-neuron profile exports are disabled by default
+  (`individual_profiles=False`); the batch scene HTML/PNG and the overlay
+  layer cover the visual output.
+- Morphological similarity of results against the transformed query neurons
+  (the former `morph_v2_similarity`/`morph_nblast` columns and
+  `results/morph_similarity.csv`) is **disabled** — cross-dataset scores
+  were weak discriminators and the per-run computation was expensive. The
+  library function `morphology.enrich_homolog_results` remains available
+  for standalone use.
 - The `type_level/` scene is driven by the pooled all-adjacency
   `type_level_results.csv` (real type-level ranking, `rank` order), not the
   bodyId-mean `type_summary.csv`. Each listed type renders with its FULL
@@ -350,14 +374,16 @@ aggregation view, not a type-level profile comparison):
 
 True type-level homolog ranking: pooled all-adjacency type profiles (every
 connection of each type's neurons, no top-k truncation) scored against every
-typed target type. One row per source×target type with `jaccard`,
-`weighted_jaccard`, `cosine`, `rank_corr`, `rank_union` and a 1-based `rank`
-per source type (1 = best under the run's metric). This is a separate
-computation from `type_summary.csv`, not a re-aggregation of bodyId scores.
+typed target type. One row per source×target type with `target_type_members`
+(the candidate type's member count — very large counts indicate coarse or
+hemilineage-scale annotations, e.g. Mi15), `jaccard`, `weighted_jaccard`,
+`cosine`, `rank_union` and a 1-based `rank` per source type (1 = best under
+the run's metric). This is a separate computation from `type_summary.csv`,
+not a re-aggregation of bodyId scores.
 
 ### homolog_results.csv (Legacy Format)
 
-Sorted by `rank_corr` only (for backward compatibility).
+Sorted by the run's similarity metric (for backward compatibility).
 
 ## Result Saving
 
@@ -368,20 +394,21 @@ When `output_dir` is set, results are automatically saved with **both bodyId-lev
 ├── README.txt                    # Parameters and summary
 ├── results/
 │   ├── bodyid_results.csv        # BodyId-level comparisons
-│   │                              # Sorted by: source_bodyId, then rank_corr
+│   │                              # Sorted by: source_bodyId, then rank_union
 │   │                              # Columns: source_bodyId, source_type, 
 │   │                              #          target_bodyId, target_type,
-│   │                              #          rank_corr, jaccard, cosine,
+│   │                              #          rank_union, jaccard, cosine,
 │   │                              #          source_status, target_status,
 │   │                              #          adjacency_score, ...
 │   ├── type_summary.csv          # Type-mean from bodyId level
 │   │                              # Columns: source_type, target_type,
-│   │                              #          avg_rank_corr, best_rank_corr,
-│   │                              #          std_rank_corr, n_bodyid_comparisons
+│   │                              #          n_bodyid_comparisons,
+│   │                              #          avg_jaccard, avg_rank_union
 │   │                              # Sorted by: similarity_metric (descending)
+│   ├── type_level_results.csv    # Pooled type-level ranking (top N per source type)
 │   ├── source_status_summary.json # ConnectivityStatus breakdown
 │   │                              # Tracks skipped (NONE) and warned (RARE) sources
-│   ├── homolog_results.csv       # Legacy format (sorted by rank_corr only)
+│   ├── homolog_results.csv       # Legacy format (sorted by the run's metric)
 │   └── shuffle_test.json         # Shuffle test stats (if run_shuffle_test=True)
 ├── profiles/
 │   ├── query/                    # Query neuron profile

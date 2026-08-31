@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Homolog Finding - DROCAT Instructions</title>
+  <title>Connectivity · Find Similar - DROCAT Instructions</title>
   <link rel="stylesheet" href="guide.css">
 </head>
 <body>
@@ -12,19 +12,24 @@
     <a class="back" href="README.html">&larr; Back to guides</a>
     <span class="tag">Connectome</span>
   </header>
-  <h1>Homolog Finding</h1>
+  <h1>Find Similar <span class="tag">Connectivity tab</span></h1>
   <p class="lede">
-    Find potential cross-dataset homologs of a source neuron via connectivity
-    profile similarity, e.g. <code>aMe12</code> in <code>male-cns</code> →
-    candidates in <code>hemibrain</code>.
+    Find neurons similar to a source neuron via connectivity profile
+    similarity. With different <b>Source</b> and <b>Target</b> datasets this
+    is the cross-dataset <b>homolog search</b> (e.g. <code>aMe12</code> in
+    <code>male-cns</code> → candidates in <code>hemibrain</code>); setting
+    <b>Target = Source</b> gives the within-dataset (intra-dataset)
+    similar-neuron search. Both run the same engine
+    (<code>HomologFinder</code>).
   </p>
 
   <h2>Quick start</h2>
   <ol>
     <li>Enter one or more <b>Source Neurons</b> (types or bodyIds). Each
       input is searched independently and receives its own output folder.</li>
-    <li>Choose <b>Source Dataset</b> and <b>Target Dataset</b>.</li>
-    <li>Click <b>Find Homologs</b> (Fast Search is on by default).</li>
+    <li>Choose <b>Source Dataset</b> and <b>Target Dataset</b> (set Target =
+      Source for a within-dataset search).</li>
+    <li>Click <b>Find Similar Neurons</b> (Fast Search is on by default).</li>
   </ol>
 
   <h2>Inputs &amp; examples</h2>
@@ -42,7 +47,7 @@
     <tr><td>Top K Partners</td><td>15</td><td>Partners per direction in the profile</td></tr>
     <tr><td>Min Types (M)</td><td>5</td><td>Minimum unique partner types</td></tr>
     <tr><td>Min Synapse Threshold</td><td>3</td><td>Connection weight cutoff</td></tr>
-    <tr><td>Sort By</td><td>cosine</td><td>Ordering metric for the candidate list (top-N cut) — jaccard, cosine, rank_corr, rank_union. Sorting only: ALL metrics are always computed (same backend as Connectivity Profiling).</td></tr>
+    <tr><td>Sort By</td><td>cosine</td><td>Ordering metric for the candidate list (top-N cut) — jaccard, cosine, rank_corr, rank_union. Sorting only: ALL metrics are always computed (same metric set as the sibling Comparison sub-tab).</td></tr>
   </table>
 
   <h2>Similarity metric formulas</h2>
@@ -75,9 +80,11 @@
     <li><b>2-Hop Expansion</b>: include untyped partners via 2-hop typed
       partners.</li>
     <li><b>Visualize Candidates</b>: render the queried neuron plus the top-N
-      matches as 3D skeletons. For cross-dataset searches, the query is shown
-      in the source-dataset visualization and matches in the target-dataset
-      visualization.</li>
+      matches as 3D skeletons. For cross-dataset searches, the query is
+      transformed into the target brain and rendered inside the target scenes
+      as the <code>query_transformed_*</code> overlay layer (a standalone
+      source-dataset scene is only drawn as a fallback when the transform is
+      unavailable).</li>
     <li>Analysis visualizations default to <b>Skeleton Mode = line</b> for
       speed. For high-quality morphology, use <b>Visualization → Skeleton</b>,
       or select <b>tube</b> with the <b>fine</b> method and 95% simplification
@@ -90,8 +97,9 @@
 
   <h2>Loose search (more candidates)</h2>
   <p>The loose-search knobs (<b>Min Shared Partners</b>, <b>Candidate
-    Prune %</b>) now live on the <a href="find_similar.html">Similar
-    tab</a> (connection-profile mode). The backend parameters
+    Prune %</b>), formerly exposed by the removed "Connectivity similarity"
+    mode of the old Find Similar tab, are no longer in the UI — the default
+    discovery settings cover the intra-dataset search. The backend parameters
     (<code>min_shared_partners</code>, <code>vector_prune_fraction</code>)
     remain supported programmatically: lower the shared-partner threshold
     (1 = any shared partner) and raise the prune fraction (1.0 = keep all
@@ -109,6 +117,7 @@
     homolog_results.csv          # full ranked results (all metrics)
     bodyid_results.csv           # bodyId-level results
     type_summary.csv             # type-level summary
+    type_level_results.csv       # pooled type-level ranking (top N per source type)
     source_status_summary.json   # per-source-neuron status
   profiles/
     query/{type}.csv, query/source_bodyids.csv

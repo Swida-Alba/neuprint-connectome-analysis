@@ -1,11 +1,12 @@
 """UI regression tests for subcaller skeleton-visualization defaults.
 
-Similarity (morphological + connection-profile panels) and NeuronBridge
-analysis panels default to line mode with the fast pipeline, while the
-dedicated Skeleton tab keeps its independent tube/fast configuration.
-Explicit tube overrides on the shared component are preserved, and the
-FlyWire branch of the cache-default logic keeps the prepared mesh cache
-enabled even when line mode disables the NeuPrint method selector.
+Similarity (Morphology and Connectivity Find Similar sub-tabs) and
+NeuronBridge analysis panels default to line mode with the fast pipeline,
+while the dedicated Skeleton tab keeps its independent tube/fast
+configuration. Fetched skeletons cache by default (portable .swc.zst
+shared cache), and the FlyWire branch of the cache-default logic keeps the
+prepared mesh cache enabled even when line mode disables the NeuPrint
+method selector.
 """
 
 import sys
@@ -23,7 +24,8 @@ import ui.config as _cfg  # noqa: E402
 from ui.components.skeleton_visualization_settings import (  # noqa: E402
     skeleton_visualization_settings,
 )
-from ui.tabs.find_similar import create_find_similar_tab  # noqa: E402
+from ui.tabs.connectivity import create_connectivity_tab  # noqa: E402
+from ui.tabs.morphology import create_morphology_tab  # noqa: E402
 from ui.tabs.nb_find_neuron import create_nb_find_neuron_tab  # noqa: E402
 from ui.tabs.visualization import create_skeleton_tab  # noqa: E402
 
@@ -58,24 +60,27 @@ def _build(factory, url):
 
 
 def test_similarity_panels_default_to_line_with_fast_pipeline():
-    """Both Similarity editors start in line mode with the fast method."""
-    client, by_label = _build(
-        create_find_similar_tab, "/similar-subcaller-line-defaults")
+    """Both Find Similar editors start in line mode with the fast method."""
+    for factory, url in (
+        (create_morphology_tab, "/morphology-subcaller-line-defaults"),
+        (create_connectivity_tab, "/connectivity-subcaller-line-defaults"),
+    ):
+        client, _by_label = _build(factory, url)
 
-    modes = [
-        element.value for element in client.elements.values()
-        if getattr(element, "_props", {}).get("label") == "Skeleton Mode"
-    ]
-    methods = [
-        element for element in client.elements.values()
-        if getattr(element, "_props", {}).get("label") == "Simplification Method"
-    ]
-    # Morphological panel + connection-profile panel.
-    assert len(modes) == 2
-    assert modes == ["line", "line"]
-    assert [method.value for method in methods] == ["fast", "fast"]
-    # Line mode bypasses the pipeline selector.
-    assert all(method.enabled is False for method in methods)
+        modes = [
+            element.value for element in client.elements.values()
+            if getattr(element, "_props", {}).get("label") == "Skeleton Mode"
+        ]
+        methods = [
+            element for element in client.elements.values()
+            if getattr(element, "_props", {}).get("label") == "Simplification Method"
+        ]
+        # Each tab carries exactly one editor (Find Similar sub-tab).
+        assert len(modes) == 1
+        assert modes == ["line"]
+        assert [method.value for method in methods] == ["fast"]
+        # Line mode bypasses the pipeline selector.
+        assert all(method.enabled is False for method in methods)
 
 
 def test_neuronbridge_panel_defaults_to_line_with_fast_pipeline():
@@ -142,9 +147,9 @@ def test_flywire_tube_keeps_method_selector_enabled():
     assert by_label["Simplification Method"].enabled is True
 
 
-def test_neuprint_fast_pipeline_disables_cache_by_default():
-    """NeuPrint fast renders start uncached (strict use_cache policy);
-    the fine pipeline keeps the shared raw cache default."""
+def test_neuprint_fast_pipeline_caches_by_default():
+    """Fetched skeletons persist as portable .swc.zst files in the shared
+    cache, so even NeuPrint fast renders start with Cache Neurons on."""
     client, by_label = _build(
         lambda: skeleton_visualization_settings(
             default_skeleton_mode="tube",
@@ -154,4 +159,4 @@ def test_neuprint_fast_pipeline_disables_cache_by_default():
     )
 
     assert by_label["Simplification Method"].value == "fast"
-    assert _checkbox_by_text(client, "Cache Neurons").value is False
+    assert _checkbox_by_text(client, "Cache Neurons").value is True

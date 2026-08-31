@@ -73,24 +73,24 @@ class TestPreviewRegistry:
                 assert view["description"], (tool_name, view)
 
     def test_homolog_preview_files_are_described(self):
-        """All four previewed homolog views exist as guide spec entries, so
+        """All previewed homolog views exist as guide spec entries, so
         exported run guides describe them instead of the generic fallback."""
         patterns = {entry["pattern"]
                     for entry in guide.TOOL_GUIDE_SPECS["find_homologs"]["files"]}
         assert "results/type_level_results.csv" in patterns
-        assert "results/morph_similarity.csv" in patterns
         previewed = {view["pattern"]
                      for view in guide.preview_views("find_homologs")}
         assert previewed == {
             "results/bodyid_results.csv",
             "results/type_summary.csv",
             "results/type_level_results.csv",
-            "results/morph_similarity.csv",
         }
 
-    def test_similarity_profile_shares_homolog_previews(self):
-        assert (guide.preview_views("find_similar_profile")
-                == guide.preview_views("find_homologs"))
+    def test_similarity_profile_spec_removed_with_mode(self):
+        """The connectivity-similarity mode was folded into Connectivity →
+        Find Similar, so its dedicated tool spec is gone."""
+        assert "find_similar_profile" not in guide.TOOL_GUIDE_SPECS
+        assert "find_similar_profile" not in TOOL_REGISTRY
 
     def test_image_only_tool_has_no_previews(self):
         assert guide.preview_views("flylight_download") == []

@@ -25,10 +25,10 @@ vp = VisualizePath(path_file="/abs/output/paths/path_data.csv",
 vp.visualize()
 ```
 
-## Morphology → profile → 3D skeleton (find_similar chained to visualization)
+## Morphology → connectivity find-similar → 3D skeleton (chained tabs)
 
 ```python
-# Step 1: morphological similarity (tab: find-similar)
+# Step 1: morphological similarity (Morphology tab → Find Similar)
 from morphology import MorphologyComparer
 comparer = MorphologyComparer(dataset="male-cns:v0.9", query="aMe12",
                               output_dir="/abs/output/similar_morph",
@@ -36,11 +36,12 @@ comparer = MorphologyComparer(dataset="male-cns:v0.9", query="aMe12",
                               visualize_top_n=5, verbose=True)
 results = comparer.find_similar()
 
-# Step 2: connectivity-profile similarity, using morphology candidates to enrich
+# Step 2: connectivity-profile similar search (Connectivity tab → Find Similar,
+# Target = Source for the intra-dataset search)
 from comparison.profile_comparator import HomologFinder
 finder = HomologFinder(source_dataset="male-cns:v0.9", target_dataset="male-cns:v0.9",
                        source="aMe12", output_dir="/abs/output/similar_profile",
-                       morphological_enrichment=True, use_cache=True, verbose=True)
+                       use_cache=True, verbose=True)
 finder.find_homologs_fast()
 
 # Step 3: render top candidates (tab: visualization)

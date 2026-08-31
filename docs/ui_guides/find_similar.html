@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Find Similar Neurons - DROCAT Instructions</title>
+  <title>Morphology · Find Similar - DROCAT Instructions</title>
   <link rel="stylesheet" href="guide.css">
 </head>
 <body>
@@ -12,28 +12,31 @@
     <a class="back" href="README.html">&larr; Back to guides</a>
     <span class="tag">Connectome</span>
   </header>
-  <h1>Find Similar Neurons</h1>
+  <h1>Find Similar Neurons <span class="tag">Morphology tab</span></h1>
   <p>Search for neurons similar to a query by <b>morphology</b> (skeleton
-    shape) or by <b>connection profile</b> (synaptic partner structure).
-    A mode toggle switches between the two search families.</p>
+    shape) within one dataset. This is the <b>Find Similar</b> sub-tab of the
+    <a href="morphology.html">Morphology</a> tab; it is
+    <b>intra-dataset only</b>. For connectivity-based similar search
+    (including cross-dataset homolog search), use the
+    <a href="find_homologs.html">Connectivity tab's Find Similar sub-tab</a>.</p>
 
   <h2>Morphological similarity</h2>
-  <p>Two methods are available. Find Similar uses raw skeletons only. Raw
-    skeletons are shared at <code>cache/{dataset}/skeletons/raw_skeletons/</code>;
+  <p>Two methods are available. Find Similar uses raw skeletons only. Raw    skeletons are shared at <code>cache/{dataset}/skeletons/raw_skeletons/</code>;
     Find Similar's vector parquet remains under
     <code>cache/{dataset}/find_similar/</code>. The visualization simp90 cache
     is never used for comparison.</p>
   <table>
     <tr><th>Method</th><th>Cost</th><th>Notes</th></tr>
     <tr><td><b>Vector</b> (recommended)</td><td>&lt;10 ms per query</td>
-      <td>Each neuron is reduced to ~24 morphometrics plus a 100-dim shape
-        block: a persistence vector for raw skeletons. Scores are cosine /
-        Pearson on z-scored vectors. Raw vector rows are cached at
-        <code>find_similar/morphology/skeleton_vectors.parquet</code>; if a
+      <td>Each neuron is reduced to a 256-dim shape + spatial feature
+        vector. Scores are per-block cosine (0.30/0.70) on standardized +
+        ZCA-whitened vectors, cached at
+        <code>find_similar/morphology/skeleton__vectors_v2.parquet</code>; if a
         row is missing it is fetched online and vectorized.</td></tr>
     <tr><td><b>NBLAST</b></td><td>~5–15 s for 100 prefiltered candidates</td>
       <td>Canonical Costa et al. 2016 pairwise score via navis on raw
-        skeletons only. Dotprops are rebuilt per query and not persisted.</td></tr>
+        skeletons only. Dotprops are rebuilt per query and never cached —
+        no dotprops file is ever written to disk.</td></tr>
   </table>
   <p>Dotprops were benchmarked on the 8,839-node raw aMe12 skeleton: building
     them with <code>k=20</code> took about 28 ms, while a compressed serialized
@@ -131,64 +134,35 @@
     connectivity-expanded search z-scores the pool vectors with
     pool-computed statistics so cosine scores stay scale-fair.</p>
 
-  <h2>Connection profile similarity</h2>
-  <p>The relocated "find similar" search from Homolog Finding: query-vs-all
-    <b>within one dataset</b> (source and target dataset are the same),
-    ranked by connectivity
-    profile similarity. Same backend (<code>HomologFinder</code>) and the same
-    loose-search knobs:</p>
-  <ul>
-    <li><b>Min Shared Partners</b> (default 2): shared partners required for a
-      candidate; 1 = loosest discovery.</li>
-    <li><b>Candidate Prune %</b> (default 5): top N% of cosine-positive
-      candidates kept after vector pre-filtering; 100 = keep all (loosest).</li>
-    <li><b>Fast Search</b> (default on): adjacency expansion; switch off for
-      the comprehensive query-vs-all search.</li>
-  </ul>
-  <p>Results are additionally enriched with vector-based morphological
-    similarity columns (<code>morph_cosine</code>, <code>morph_pearson</code>)
-    computed from the final ranked rows only.</p>
-
-  <h2>Similarity score formulas (connectivity)</h2>
-  <p>Let A and B be the two connectivity profiles (each a dict of partner
-    type → weight, restricted to the top-K partners per direction), and let
-    ρ denote the Spearman rank correlation of two weight vectors. All
-    metrics are always computed for every pair; the <b>Sort By</b> metric only
-    selects the ranking cutoff. Rank correlations are reported raw (−1 to 1);
-    there is no normalized 0–1 variant and no <code>combined</code> score.</p>
-  <table>
-    <tr><th>Score</th><th>Formula</th><th>Range</th></tr>
-    <tr><td><code>jaccard</code></td><td>|A ∩ B| / |A ∪ B| (partner-type sets)</td><td>0–1</td></tr>
-    <tr><td><code>weighted_jaccard</code></td><td>Σ min(w_a, w_b) / Σ max(w_a, w_b) over the partner-type union</td><td>0–1</td></tr>
-    <tr><td><code>cosine</code></td><td>(A·B) / (‖A‖·‖B‖) over the union (missing partners = 0)</td><td>0–1</td></tr>
-    <tr><td><code>rank_corr</code></td><td>ρ = Spearman(<code>w_a</code>, <code>w_b</code>) on <b>shared</b> partners (NaN if &lt; 3 shared)</td><td>−1 to 1</td></tr>
-    <tr><td><code>rank_union</code></td><td>ρ computed over the <b>union</b> of both partner sets (missing = 0)</td><td>−1 to 1</td></tr>
-    <tr><td><code>shared_type_count</code></td><td>|A ∩ B|</td><td>integer</td></tr>
-    <tr><td><code>union_type_count</code></td><td>|A ∪ B|</td><td>integer</td></tr>
-    <tr><td><code>adjacency_score</code></td><td>shared-partner (synaptic-contact) count used for adjacency expansion</td><td>integer</td></tr>
-    <tr><td><code>morph_cosine</code></td><td>(A·B) / (‖A‖·‖B‖) on z-scored morphology vectors (enrichment)</td><td>0–1</td></tr>
-    <tr><td><code>morph_pearson</code></td><td>cosine of the mean-centered morphology vectors (enrichment)</td><td>−1 to 1</td></tr>
-  </table>
-  <p>The <b>direction</b> of a direction-aware comparison (<code>upstream</code>,
-    <code>downstream</code>) is computed per direction and then averaged for
-    <code>both</code>; rank metrics use the <code>min_partners</code>
-    threshold (default 5) and return <code>NaN</code> when the partner set is
-    too small to correlate.</p>
-
   <h2>Similarity score formulas (morphology)</h2>
   <p>The three evidence columns are computed independently and are never
     mixed across candidate sources; the primary <code>similarity</code>
     column is the morphology score only.</p>
   <table>
     <tr><th>Score</th><th>Formula</th><th>Range</th></tr>
-    <tr><td><code>similarity</code></td><td><b>vector</b>: cosine or Pearson of z-scored vectors (see <code>metric</code>); <b>NBLAST</b>: normalized pair score</td><td>0–1</td></tr>
-    <tr><td><code>roi_similarity</code></td><td>cosine of input/output synapse-distribution vectors over the primary ROIs, mirrored across the midline</td><td>0–1</td></tr>
+    <tr><td><code>similarity</code></td><td><b>vector_v2</b>: per-block cosine (shape/spatial, 0.30/0.70) on standardized + ZCA-whitened vectors; <b>NBLAST</b>: normalized pair score</td><td>0–1</td></tr>
+    <tr><td><code>roi_similarity</code></td><td>ROI-distribution <b>screen</b> score (candidate selection only, never in the morphology score): cosine of input/output synapse-distribution vectors over the primary ROIs, mirrored across the midline</td><td>0–1</td></tr>
     <tr><td><code>profile_similarity</code></td><td>shared-count / max-shared-count (normalized shared-partner count)</td><td>0–1</td></tr>
     <tr><td><code>intra_type_similarity</code></td><td>mean pairwise similarity of the type's members (the intra-type reference)</td><td>0–1</td></tr>
   </table>
   <p>For the vector method, each neuron is reduced to ~24 morphometrics plus
     a 100-dim persistence block; the pool is z-scored with pool-computed
     statistics so cosine scores stay scale-fair.</p>
+
+  <h3>Contralateral (mirror) handling</h3>
+  <p>NBLAST matches arbors in absolute coordinates, so a neuron and its
+    mirror twin sit far apart: contralateral same-type pairs score at
+    chance (benchmark median &minus;0.03 vs 0.89 ipsilateral; partner
+    reciprocal rank 0.13 vs 0.84). <b>NBLAST type means therefore use
+    ipsilateral pairs only</b>: rows pairing opposite known sides
+    (<code>somaSide</code>, or <code>hemisphere</code> on FlyWire) are
+    excluded from <code>type_summary.csv</code>, while
+    <code>results.csv</code> keeps every pair row for inspection. Types
+    whose only NBLAST evidence is contralateral are omitted from the type
+    ranking, and <code>n_bodyids</code> counts ipsilateral plus
+    unknown-side members. The vector method is unaffected — it
+    lateral-normalizes at vectorization, so mirror twins are legitimate
+    evidence and both sides are aggregated.</p>
 
   <h2>Intra-type reference data</h2>
   <p>Every search reports the query's intra-type similarity alongside the
@@ -200,7 +174,8 @@
       type's cohesion (mean score of its members against the query vector)
       and <code>intra_type_similarity</code> is the mean pairwise similarity
       of the type's members — the intra-type reference every other row is
-      ranked against. <code>n_bodyids</code> gives the member count.</li>
+      ranked against. <code>n_bodyids</code> gives the member count
+      (NBLAST: ipsilateral plus unknown-side members).</li>
     <li><b>bodyId queries</b> tag same-type hits with
       <code>is_same_type=True</code> and carry the query type's
       <code>intra_type_similarity</code> on every result row.</li>
@@ -214,20 +189,13 @@
     reference, not a guaranteed winner.</p>
 
   <h2>3D visualization of the found neurons</h2>
-  <p>Both similarity modes can render the query and found neurons as interactive 3D
+  <p>Find Similar can render the query and found neurons as interactive 3D
     skeleton views (same engine as the 3D Skeleton tab and the NeuronBridge
-    FindNeuron visualization). Each mode has its own visualization list and
-    settings, so morphological results and connectivity results are never
-    mixed.</p>
+    FindNeuron visualization).</p>
   <ul>
-    <li><b>Morphological — Visualize Top N Types / Neurons</b> (default 10;
+    <li><b>Visualize Top N Types / Neurons</b> (default 10;
       0 = disabled): number of top morphology result types/rows to render.</li>
-    <li><b>Connectivity — Visualize Top N Candidates</b> (default 5;
-      0 = disabled): number of top connectivity-similar candidates to render.
-      The query is included as the first reference layer, so the scene contains
-      query + top-N candidates.</li>
-    <li><b>Visualize By</b> (default <code>type</code>) applies independently
-      within each mode:
+    <li><b>Visualize By</b> (default <code>type</code>):
       <code>type</code> renders one layer per top type, containing all of
       its member skeletons found in the results (type-level queries resolve
       members from the vector cache, bounded by <b>BodyIds / Type</b>);
@@ -242,12 +210,9 @@
   <p>When multiple queries are entered, the tab runs them sequentially and
     saves each query in its own run folder. Morphological output is saved next
     to its results in
-    <code>{run_folder}/plot-3d_{ABBREV}_{dataset_folder}/</code>. Connectivity output is saved
-    in separate <code>visualization/bodyId_level/</code>,
-    <code>visualization/type_level/</code>, and
-    <code>visualization/source_neurons/</code> folders. Each scene starts with
-    a query reference layer, followed by up to the requested top-N result
-    layers. Each layer is colored per type and labeled
+    <code>{run_folder}/plot-3d_{ABBREV}_{dataset_folder}/</code>. Each scene
+    starts with a query reference layer, followed by up to the requested top-N
+    result layers. Each layer is colored per type and labeled
     <code>r{rank}_{type}_x{N}</code> (rank = similarity rank of the type,
     N = member count). The intra-type reference row is never rendered. The
     interactive HTML files are listed in the output panel; a visualization
@@ -256,16 +221,8 @@
   <h2>Output</h2>
   <p>Each run is saved in its own timestamped folder with two always-written
     result tables:</p>
-  <pre><code>morphological: {output_dir}/similar-morphology_flywire_FAFB_v783_aMe12_20260815_143601/
-                 results.csv, type_summary.csv, README.txt
-profile:       {output_dir}/similar-connectivity_FAFB_to_FAFB_aMe12_20260815_143654/
-                 README.txt
-                 results/
-                   homolog_results.csv, bodyid_results.csv, type_summary.csv
-                   intra_type_results.csv          # same-dataset searches
-                   source_status_summary.json
-                 profiles/query/..., profiles/matches/...
-                 overlaps/{source}_vs_{target}.csv</code></pre>
+  <pre><code>{output_dir}/similar-morphology_flywire_FAFB_v783_aMe12_20260815_143601/
+  results.csv, type_summary.csv, README.txt</code></pre>
   <ul>
     <li><b>results.csv</b> always holds <b>bodyId-level</b> similarities
       (ranked <code>target_bodyId</code> rows), whatever the query kind.

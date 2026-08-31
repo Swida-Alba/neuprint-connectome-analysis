@@ -24,7 +24,7 @@ vp = VisualizePath(path_file="/abs/output/paths/path_data.csv",
 connections, graph = vp.visualize()
 ```
 
-## Cache → morphology → profile → skeleton (the Similar/Profiling pipeline)
+## Cache → morphology → connectivity find-similar → skeleton (the Similarity pipeline)
 
 ```python
 # 1. coana: ensure the connection cache for the dataset
@@ -40,11 +40,11 @@ comparer = MorphologyComparer(query="aMe12", dataset="male-cns:v0.9",
                               output_dir="/abs/output/similar_morph", use_cache=True)
 results = comparer.find_similar()
 
-# 3. profile: enrich with connectivity-profile similarity
+# 3. connectivity find-similar (HomologFinder, Target = Source for intra-dataset)
 from comparison.profile_comparator import HomologFinder
 finder = HomologFinder(source="aMe12", source_dataset="male-cns:v0.9",
                        target_dataset="male-cns:v0.9", output_dir="/abs/output/similar_profile",
-                       morphological_enrichment=True, use_cache=True, verbose=True)
+                       use_cache=True, verbose=True)
 finder.find_homologs_fast()
 
 # 4. skeleton: render top candidates

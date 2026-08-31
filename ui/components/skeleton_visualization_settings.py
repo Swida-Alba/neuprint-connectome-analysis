@@ -28,7 +28,6 @@ from .common import (
     select_input,
 )
 from .palette_picker import color_swatch_picker, palette_editor
-from ..dataset_service import is_flywire_dataset
 from visualization_options import default_analysis_skeleton_mesh_simplification
 
 
@@ -39,15 +38,6 @@ def _default_analysis_simplification(
         str(dataset_value or ""), pipeline,
     )
 
-
-def _contains_flywire_dataset(dataset_value: Any) -> bool:
-    """Return whether one or more selected datasets are FlyWire/FAFB."""
-
-    if isinstance(dataset_value, (list, tuple, set)):
-        dataset_names = dataset_value
-    else:
-        dataset_names = [dataset_value]
-    return any(is_flywire_dataset(str(name or "")) for name in dataset_names)
 
 
 @dataclass
@@ -379,7 +369,8 @@ def skeleton_visualization_settings(
             fields["cache_neurons"] = checkbox_input(
                 "Cache Neurons",
                 get_user_default("cache_neurons"),
-                hint="Cache fetched skeletons for faster repeat renders.",
+                hint="Cache fetched skeletons as portable .swc.zst files in "
+                     "the shared cache for faster repeat renders.",
             )
             cache_default_state = {"user_changed": False, "updating": False}
 
@@ -485,9 +476,6 @@ def skeleton_visualization_settings(
 
         def refresh_simplification_controls(_event=None):
             is_line = fields["skeleton_mode"].value == "line"
-            is_flywire = _contains_flywire_dataset(
-                dataset_provider() if dataset_provider else None
-            )
             fields["neuprint_skeleton_pipeline"].set_enabled(not is_line)
             fields["use_default_simplification"].set_enabled(not is_line)
             fields["skeleton_mesh_simplification"].set_enabled(
@@ -497,15 +485,11 @@ def skeleton_visualization_settings(
                 not cache_default_state["user_changed"]
                 and not has_user_default("cache_neurons")
             ):
-                pipeline = str(
-                    fields["neuprint_skeleton_pipeline"].value or "fast"
-                ).strip().lower()
-                # FAFB's method selector is active for tube renders, while
-                # the prepared mesh cache remains the default source policy.
-                default_cache = (
-                    True if is_flywire
-                    else pipeline not in {"fast", "artistic"}
-                )
+                # Fetched skeletons persist as portable .swc.zst files in
+                # the shared cache, so caching is the default source policy
+                # for every dataset and render pipeline (FlyWire's prepared
+                # mesh cache remains the default source policy there).
+                default_cache = True
                 if fields["cache_neurons"].value != default_cache:
                     cache_default_state["updating"] = True
                     try:

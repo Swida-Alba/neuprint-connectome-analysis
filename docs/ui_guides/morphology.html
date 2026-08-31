@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Morphology - DROCAT Instructions</title>
+  <link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<main class="guide">
+  <header class="guide-top">
+    <a class="back" href="README.html">&larr; Back to guides</a>
+    <span class="tag">Connectome</span>
+  </header>
+  <h1>Morphology</h1>
+  <p class="lede">
+    The Morphology tab holds the skeleton-based similarity workflows, switched
+    with the buttons at the top of the panel:
+  </p>
+  <ul>
+    <li><b>Find Similar</b> — query-vs-all <b>morphological</b> similarity
+      search within one dataset (Vector or NBLAST method).
+      <a href="find_similar.html">Find Similar guide</a></li>
+    <li><b>Comparison</b> — N×N morphology comparison of already-identified
+      neurons within one dataset (type-level + bodyId-level matrices,
+      heatmaps, report).
+      <a href="morphology_comparison.html">Comparison guide</a></li>
+  </ul>
+
+  <div class="callout warning">
+    <b>Cross-dataset vs intra-dataset:</b> morphological search and comparison
+    are <b>intra-dataset only</b> — skeletons are scored in one dataset's
+    coordinate space, and the vector caches are per-dataset. Cross-dataset
+    workflows belong in the <a href="connectivity.html">Connectivity</a> tab.
+  </div>
+
+  <h2>Which sub-tab do I need?</h2>
+  <table>
+    <tr><th>Goal</th><th>Sub-tab</th></tr>
+    <tr><td>Find neurons with similar skeleton shape to a query</td><td><b>Find Similar</b></td></tr>
+    <tr><td>Compare shapes of 2+ known neurons (same dataset)</td><td><b>Comparison</b></td></tr>
+  </table>
+
+  <h2>Output</h2>
+  <p>Find Similar saves each run in its own timestamped folder
+    (<code>similar-morphology_{dataset}_{query}_{timestamp}</code>) under the
+    selected output directory and writes the exported run guide
+    (<code>_UserGuide_please_read_me.html</code>) next to the results. See the
+    <a href="find_similar.html">Find Similar guide</a> for the full file tree
+    and scoring details.</p>
+</main>
+</body>
+</html>

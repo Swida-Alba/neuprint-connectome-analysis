@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Morphology · Comparison - DROCAT Instructions</title>
+  <link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<main class="guide">
+  <header class="guide-top">
+    <a class="back" href="README.html">&larr; Back to guides</a>
+    <span class="tag">Connectome</span>
+  </header>
+  <h1>Comparison <span class="tag">Morphology tab</span></h1>
+  <p class="lede">
+    Compare the morphology of already-identified neurons <b>within one
+    dataset</b>: enter 2+ neurons (types, bodyIds, or patterns) and get the
+    N×N similarity matrix at the bodyId level plus a type-level aggregation,
+    with interactive heatmaps and a summary report.
+  </p>
+
+  <div class="callout warning">
+    <b>Intra-dataset only.</b> Skeletons are scored in one dataset's
+    coordinate space against that dataset's caches. Cross-dataset workflows
+    belong to the <a href="connectivity.html">Connectivity</a> tab.
+  </div>
+
+  <h2>Quick start</h2>
+  <ol>
+    <li>Pick the <b>Dataset</b> (BANC is unavailable — no skeletons).</li>
+    <li>Enter <b>2+ neurons</b>: exact types, bodyIds, or patterns
+      (e.g. <code>aMe.*</code>).</li>
+    <li>Click <b>Run Comparison</b>; open <code>report.html</code> in the
+      output folder.</li>
+  </ol>
+
+  <h2>How the comparison works</h2>
+  <ul>
+    <li>Each queried <b>type is one row</b> of the matrices; its members
+      supply the pairwise scores. bodyId inputs resolve to their type.</li>
+    <li><b>BodyId-level matrix</b>: every individual pair.</li>
+    <li><b>Type-level matrix</b>: each entry is the mean over the
+      cross-member bodyId pairs; the <b>diagonal is the type's intra-type
+      cohesion</b> (mean pairwise among its own members, 1.0 for a
+      single-member type).</li>
+  </ul>
+
+  <h2>Methods</h2>
+  <table>
+    <tr><th>Method</th><th>Cost</th><th>Notes</th></tr>
+    <tr><td><b>Vector (spatial)</b> — default</td><td>Fast (cached vectors)</td>
+      <td>The Find Similar production score: per-block cosine (shape/spatial
+        0.30/0.70) on standardized + ZCA-whitened vectors from the dataset's
+        vector cache. Missing members are <b>fetched online by default</b> —
+        NeuPrint raw SWC via the shared batch fetch, FAFB via the healed
+        bundle → CAVE fallback — and persist into the shared skeleton +
+        vector caches. Mirror twins are legitimate evidence (lateral
+        normalization).</td></tr>
+    <tr><td><b>NBLAST</b></td><td>Slow — capped at <b>30 total
+      neurons</b></td>
+      <td>Canonical normalized NBLAST on raw-skeleton dotprops; both
+        orientations of every pair are scored and averaged. Type means
+        exclude contralateral pairs (mirror arbors score at chance); the
+        bodyId matrix keeps every pair.</td></tr>
+  </table>
+
+  <h2>Parameters</h2>
+  <table>
+    <tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr>
+    <tr><td>Max Members per Type</td><td>25</td><td>Members sampled per type
+      for the pairwise scores (large types are truncated; the exact member
+      list is written to <code>members.csv</code>)</td></tr>
+    <tr><td>Max Total Neurons</td><td>200</td><td>Safety cap on the
+      vectorized population (NBLAST is always limited to 30 total)</td></tr>
+    <tr><td>Fetch Missing Skeletons Online</td><td>on</td><td>Pull
+      skeletons for cache misses through the API into the shared cache
+      (turn off for a strictly offline comparison)</td></tr>
+    <tr><td>Generate Heatmaps</td><td>on</td><td>Interactive (VisPath)
+      heatmaps for both levels</td></tr>
+  </table>
+
+  <h2>Output</h2>
+  <pre><code>{output_dir}/morphology_comparison_MCNS_aMe12_aMe10_20260901_120000/
+  parameters.json
+  README.txt
+  members.csv                              # compared population + status
+  type_level/type_similarity_{method}.csv   # type×type matrix
+  bodyid_level/bodyid_similarity_{method}.csv  # bodyId×bodyId matrix
+  visualization/heatmap_type_{method}.html
+  visualization/heatmap_bodyid_{method}.html
+  report.html</code></pre>
+  <p>Neurons that stay unavailable even after the online fetch (no
+    skeleton at the source) are reported in <code>members.csv</code>
+    (<code>no vector</code> / <code>no dotprops</code>) and carry empty
+    matrix cells instead of silently biasing the averages.</p>
+
+  <div class="callout info">
+    <b>Exported run guide:</b> every successful run also writes
+    <code>_UserGuide_please_read_me.html</code> into the run folder — a
+    self-contained explanation of every output file, every table column, and
+    any warnings recorded for the run. Format (html / txt / markdown /
+    disabled) is set in Settings → Default Settings → Run Guide Format.
+  </div>
+</main>
+</body>
+</html>

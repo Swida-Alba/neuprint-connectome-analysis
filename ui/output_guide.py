@@ -168,21 +168,6 @@ COLUMN_GLOSSARY = {
         "reference other rows are ranked against.", "0-1"),
     "method": ("Similarity method used (vector / nblast).", "text"),
     "metric": ("Distance metric used (cosine / pearson).", "text"),
-    "morph_v2_similarity": (
-        "Production vector_v2 morphology score (when enrichment ran): "
-        "per-block cosine (shape/spatial, 0.30/0.70 weights) on the "
-        "standardized + ZCA-whitened 256-dim vector — identical to the "
-        "Find Similar scorer.", "0-1"),
-    "morph_nblast": (
-        "Forward normalized NBLAST pair score (k=20 dotprops, microns) "
-        "when enrichment ran.", "-1 to 1"),
-    "level": ("Row granularity in morph_similarity.csv: 'bodyId' for "
-              "per-neuron rows, 'type' for per-type aggregate rows.", "text"),
-    "pair_side": ("Hemisphere pairing of the NBLAST comparison: "
-                  "'ipsi' (same-side) or 'contra' (crossed).", "text"),
-    "n_contra": ("Number of contralateral NBLAST scores aggregated "
-                 "(NBLAST type means keep contra only).", "integer"),
-    "n_ipsi": ("Number of ipsilateral NBLAST scores behind the row.", "integer"),
     "adjacency_score": (
         "Direct adjacency (shared-partner / synaptic-contact) score between "
         "the pair.", "number"),
@@ -196,7 +181,6 @@ COLUMN_GLOSSARY = {
                        "$\\lvert A \\cap B\\rvert / \\lvert B\\rvert$.", "0-1"),
     "overlap_avg": ("Mean of overlap_a_in_b and overlap_b_in_a.", "0-1"),
     # --- Type-level aggregates --------------------------------------------------
-    "avg_rank_corr": ("Mean rank_corr over all bodyId pairs of the type pair.", "-1 to 1"),
     "avg_jaccard": ("Mean jaccard over all bodyId pairs of the type pair.", "0-1"),
     "avg_rank_union": ("Mean rank_union over all bodyId pairs of the type pair.", "-1 to 1"),
     "avg_cosine": ("Mean cosine over all bodyId pairs of the type pair.", "0-1"),
@@ -205,6 +189,9 @@ COLUMN_GLOSSARY = {
     "avg_union_type_count": ("Mean union partner-type count.", "number"),
     "n_bodyid_comparisons": ("Number of bodyId-vs-bodyId comparisons aggregated.", "integer"),
     "n_bodyids": ("Number of bodyIds of the candidate type.", "integer"),
+    "target_type_members": ("Member count of the candidate type in the target "
+                            "dataset; very large counts indicate coarse or "
+                            "hemilineage-scale annotations (e.g. Mi15).", "integer"),
     "n_complete_sources": ("Source bodyIds with complete profiles.", "integer"),
     "n_incomplete_sources": ("Source bodyIds with incomplete profiles.", "integer"),
     "source_dataset": ("Dataset of the query/source neurons.", "text"),
@@ -584,7 +571,7 @@ _HOMOLOG_FILES = [
     {"pattern": "results/homolog_results.csv",
      "description": "Full type-level results with all similarity columns, "
                     "sorted by the chosen metric.",
-     "columns": _HOMOLOG_RESULT_COLUMNS + ["morph_v2_similarity", "morph_nblast"]},
+     "columns": _HOMOLOG_RESULT_COLUMNS},
     {"pattern": "results/bodyid_results.csv",
      "description": "BodyId-level results (sorted by source, then metric).",
      "preview": True,
@@ -603,7 +590,7 @@ _HOMOLOG_FILES = [
      "preview_title": "Type-mean (from bodyId level)",
      "columns": [
          "query", "source_dataset", "target_dataset", "source_type",
-         "target_type", "avg_rank_corr", "n_bodyid_comparisons",
+         "target_type", "n_bodyid_comparisons",
          "avg_jaccard", "avg_rank_union", "avg_cosine",
          "avg_adjacency_score", "avg_shared_type_count",
          "avg_union_type_count", "n_complete_sources",
@@ -615,19 +602,9 @@ _HOMOLOG_FILES = [
      "preview": True,
      "preview_title": "Type-level homologs (pooled profiles)",
      "columns": [
-         "source_type", "target_type", "is_same_type", "target_dataset",
-         "jaccard", "weighted_jaccard", "cosine", "rank_union", "rank_corr",
-         "rank", "morph_v2_similarity", "morph_nblast"]},
-    {"pattern": "results/morph_similarity.csv",
-     "description": "Morphological similarity of the visualized set against "
-                    "the transformed query neurons — per-neuron rows plus "
-                    "per-type aggregate rows (level column).",
-     "preview": True,
-     "preview_title": "Morphology vs transformed query",
-     "columns": [
-         "level", "query", "source_bodyId", "target_bodyId", "target_type",
-         "pair_side", "n_contra", "n_ipsi",
-         "morph_v2_similarity", "morph_nblast"]},
+         "source_type", "target_type", "target_type_members", "is_same_type",
+         "target_dataset", "jaccard", "weighted_jaccard", "cosine",
+         "rank_union", "rank"]},
     {"pattern": "results/source_status_summary.json",
      "description": "Per-source-neuron status (resolved bodyIds, candidate "
                     "counts)."},
@@ -735,15 +712,10 @@ TOOL_GUIDE_SPECS = {
         ],
     },
     "find_homologs": {
-        "title": "Homolog Finding",
-        "summary": "Potential homologs across (or within) datasets, found by "
-                   "connectivity-profile similarity.",
-        "files": _HOMOLOG_FILES,
-    },
-    "find_similar_profile": {
-        "title": "Connection Profile Similarity",
-        "summary": "Connectivity-similar neurons within one dataset (same "
-                   "engine as Homolog Finding).",
+        "title": "Connectivity · Find Similar",
+        "summary": "Similar neurons found by connectivity-profile similarity, "
+                   "across datasets (homolog search) or within one dataset "
+                   "when Target = Source.",
         "files": _HOMOLOG_FILES,
     },
     "find_similar_morphology": {
@@ -773,7 +745,7 @@ TOOL_GUIDE_SPECS = {
         ],
     },
     "connectivity_profiling": {
-        "title": "Connectivity Profiling",
+        "title": "Connectivity · Comparison",
         "summary": "Connectivity profiles and their pairwise similarity "
                    "within and across datasets.",
         "files": [
@@ -823,6 +795,43 @@ TOOL_GUIDE_SPECS = {
              "description": "Type-aggregated connectivity profiles."},
             {"pattern": "profiles/*/individual/*_profile.json",
              "description": "Individual bodyId connectivity profiles."},
+        ],
+    },
+    "morphology_comparison": {
+        "title": "Morphology · Comparison",
+        "summary": "Intra-dataset N×N morphology comparison of 2+ queried "
+                   "neurons (type-level and bodyId-level matrices).",
+        "files": [
+            {"pattern": "report.html",
+             "description": "Summary report: parameters, compared neurons, "
+                            "and both similarity matrices with links to the "
+                            "interactive heatmaps."},
+            {"pattern": "parameters.json",
+             "description": "All analysis parameters (query, dataset, "
+                            "method, member/total caps)."},
+            {"pattern": "README.txt",
+             "description": "Human-readable summary with the output "
+                            "structure."},
+            {"pattern": "members.csv",
+             "description": "Resolved comparison population: one row per "
+                            "queried neuron with its type and availability "
+                            "status.",
+             "preview": True,
+             "preview_title": "Compared neurons",
+             "columns": ["type", "bodyId", "instance", "status"]},
+            {"pattern": "type_level/type_similarity_*.csv",
+             "description": "Type×type similarity matrix. Each entry is the "
+                            "mean over the cross-member bodyId pairs; the "
+                            "diagonal is the type's intra-type cohesion.",
+             "matrix": "rows/columns = neuron types, values = mean "
+                       "morphological similarity"},
+            {"pattern": "bodyid_level/bodyid_similarity_*.csv",
+             "description": "BodyId-to-bodyId similarity matrix (every "
+                            "individual pair).",
+             "matrix": "rows/columns = bodyIds, values = morphological "
+                       "similarity"},
+            {"pattern": "visualization/heatmap_*.html",
+             "description": "Interactive heatmaps for both levels."},
         ],
     },
     "inter_dataset": {

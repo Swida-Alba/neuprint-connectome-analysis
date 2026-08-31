@@ -427,8 +427,8 @@ The `show_top_n_paths` parameter limits output to the highest-probability paths.
 
 These metrics score a pair of connectivity profiles (a dict of
 partner-type → weight, restricted to the top-K partners per direction). They
-are the same six metrics used by **Homolog Finding**, **Similar
-Neurons → Connectivity similarity**, and **Connectivity Profiling** tabs,
+are the same six metrics used by the **Connectivity → Find Similar** and
+**Connectivity → Comparison** tabs,
 and are computed for every pair regardless of the chosen sort metric.
 In the tables below `A` and `B` are the two profiles' partner-type sets, `w_a`/`w_b`
 are the partner weights, and `ρ` is the Spearman rank correlation of two
@@ -452,16 +452,24 @@ weight vectors.
   `confidence` labels are no longer produced.
 - For a direction-aware comparison (`upstream`/`downstream`), the metric is
   computed per direction and averaged for `both`.
-- The morphology enrichment columns are `morph_cosine = (A·B)/(‖A‖·‖B‖)`
-  and `morph_pearson`, the cosine of the mean-centered morphology vectors,
-  both computed on z-scored vectors.
+- Homolog finding no longer computes morphology enrichment — the former
+  `morph_v2_similarity`/`morph_nblast` result columns are removed
+  (cross-dataset scores were weak discriminators and the per-run
+  computation was expensive). `morphology.enrich_homolog_results` remains
+  available for standalone use; `morph_v2_similarity` there is the
+  production vector_v2 score (standardized + ZCA-whitened per-block
+  cosine, shape/spatial 0.30/0.70), identical to the Morphology → Find
+  Similar scorer
+  (it had replaced the removed `morph_cosine`/`morph_pearson` columns,
+  whose plain full-vector cosine/Pearson on unstandardized features was
+  magnitude-dominated).
 
 ## Morphological Similarity Metrics
 
 | Metric                | Formula | Range |
 | --------------------- | ------- | ----- |
-| `similarity`          | vector method: cosine or Pearson of z-scored vectors; NBLAST: normalized pair score | 0–1 |
-| `roi_similarity`      | cosine of input/output synapse-distribution vectors over the primary ROIs, mirrored across the midline | 0–1 |
+| `similarity`          | vector_v2: per-block cosine (shape/spatial 0.30/0.70) on standardized + ZCA-whitened vectors; NBLAST: normalized pair score | 0–1 |
+| `roi_similarity`      | ROI-distribution **screen** score (candidate selection only, never in the morphology score): cosine of input/output synapse-distribution vectors over the primary ROIs, mirrored across the midline | 0–1 |
 | `profile_similarity`  | shared-count / max-shared-count (normalized shared-partner count) | 0–1 |
 | `intra_type_similarity` | mean pairwise similarity of the type's members (the intra-type reference) | 0–1 |
 
@@ -477,7 +485,39 @@ cosine on z-scored (and ZCA-whitened) vectors with block weights — default
 shape 0.30 / spatial 0.70, effective .300/.700 after
 renormalization — so
 cosine scores stay scale-fair and region-fair regardless of the local
-population.
+population. The full stage-by-stage pipeline (feature layout, lateral
+normalization, ZCA truncation details, cache lifecycle of the persisted
+μ/σ/whitener, optional mass-overlap term) is specified in
+[Vector v2 Similarity — Calculation Pipeline](../technical/VECTOR_V2_PIPELINE.md).
+
+**ROI evidence is selection-only.** The former runtime-composed
+ROI-expansion scoring block (weight 0.20, NeuPrint screen-first runs) was
+removed: scoring is shape/spatial only, exactly the configuration the
+morphology benchmark validated. ROI-distribution similarity continues to
+drive candidate-pool selection (`candidate_source=roi`/`combined`) and is
+reported per row as `roi_similarity`.
+
+**Retired V1 legacy.** The legacy cosine/Pearson `metric` option applied
+only to the retired V1 vector path; vector_v2 and NBLAST scores are
+unaffected by it, and the Morphology → Find Similar UI no longer exposes it.
+
+**Contralateral (mirror) pairs.** NBLAST matches arbors in absolute
+coordinates, so contralateral same-type pairs score at chance (morphology
+benchmark: median −0.03 vs 0.89 ipsilateral; partner reciprocal rank 0.13
+vs 0.84). NBLAST type means therefore aggregate **ipsilateral pairs
+only**: rows pairing opposite known sides (`somaSide` on NeuPrint
+datasets, `hemisphere` on FlyWire) are excluded from `type_summary.csv`
+(kept in `results.csv` for inspection), types with exclusively
+contralateral evidence are omitted from the type ranking, and
+`n_bodyids` counts ipsilateral plus unknown-side members. vector_v2
+lateral-normalizes at vectorization (mirror twins become near-identical
+vectors), so its type means use both sides and are unchanged.
+
+**Dotprops are never cached.** NBLAST dotprops (`navis.make_dotprops`,
+k=20) are rebuilt per search from the persisted raw skeletons and live in
+memory only — no dotprops file is written to disk, so a schema, dataset,
+or parameter change can never leave stale dotprops behind. Only raw
+skeletons and vector rows persist.
 
 ---
 

@@ -21,11 +21,11 @@ def test_dataset_selector_disables_banc_options():
 
 
 def test_morphology_tab_shows_persistent_banc_warning_when_selected():
-    from ui.tabs.find_similar import create_find_similar_tab
+    from ui.tabs.morphology import create_morphology_tab
 
     client = Client(page("/similar-banc-warning"))
     with client:
-        create_find_similar_tab()
+        create_morphology_tab()
 
     morph_selector = next(
         element
@@ -49,11 +49,11 @@ def test_morphology_tab_shows_persistent_banc_warning_when_selected():
 def test_morphology_tab_warns_when_dataset_is_not_male_cns():
     """Morphological similarity is tuned for male-cns:v1.0; the tab says so
     whenever another dataset is selected."""
-    from ui.tabs.find_similar import create_find_similar_tab
+    from ui.tabs.morphology import create_morphology_tab
 
     client = Client(page("/similar-best-dataset-warning"))
     with client:
-        create_find_similar_tab()
+        create_morphology_tab()
 
     morph_selector = next(
         element

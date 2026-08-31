@@ -3,9 +3,10 @@
 Module `src/comparison/profile_comparator.py`. Three main classes:
 
 - `ConnectivityProfileComparer` — build/compare connectivity profiles for a query
-  set (drives the Connectivity Profiling tab).
-- `HomologFinder` — cross-dataset homolog discovery by connectivity-profile
-  similarity (drives Homolog Finding and the profile half of Similar Neurons).
+  set (drives the Connectivity tab → Comparison sub-tab).
+- `HomologFinder` — homolog discovery by connectivity-profile similarity,
+  cross-dataset or intra-dataset (Target = Source; drives the Connectivity
+  tab → Find Similar sub-tab).
 - `ProfileComparator` — lower-level comparator producing `ComparisonResult` and
   using `DEFAULT_SCORE_WEIGHTS`.
 
@@ -56,7 +57,6 @@ finder = HomologFinder(
     use_cache=True,
     saveas="",
     ensure_cache_complete=False,
-    morphological_enrichment=False,     # True in the profile-half of Similar Neurons
     output_folder_prefix="",
     visualize_skeleton=False,
     visualize_top_n=0,
@@ -89,8 +89,9 @@ type-similarity helper on `ProfileComparator`.
 
 ## Notes
 
-- `morphological_enrichment=True` (used by the Similar Neurons tab) feeds
-  morphology candidates into the profile search.
+- Morphology enrichment of homolog results (the former
+  `morph_v2_similarity`/`morph_nblast` columns) is disabled; results carry
+  connectivity scores only.
 - `vector_prefiltering=True` speeds large searches via vector screens.
 - `find_homologs_fast` is the reproducible first pass; escalate to `find_homologs`
   only when the fast adjacency search is insufficient.

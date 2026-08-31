@@ -669,7 +669,9 @@ def create_skeleton_tab():
                 with ui.row().classes("gap-4"):
                     cache_neurons = checkbox_input(
                         "Cache Neurons", get_user_default("cache_neurons"),
-                        hint="Cache fetched skeletons locally for faster repeat renders.",
+                        hint="Cache fetched skeletons as portable .swc.zst "
+                             "files in the shared cache for faster repeat "
+                             "renders.",
                     )
                     cache_default_state = {"user_changed": False, "updating": False}
 
@@ -823,13 +825,10 @@ def create_skeleton_tab():
                 not cache_default_state["user_changed"]
                 and not has_user_default("cache_neurons")
             ):
-                # FAFB's method selector starts at ``fast`` and remains
-                # selectable; its fast/fine default follows the selected
-                # method while cache eligibility is handled independently.
-                default_cache = (
-                    True if is_flywire_dataset(str(dataset.value or ""))
-                    else pipeline not in {"fast", "artistic"}
-                )
+                # Fetched skeletons persist as portable .swc.zst files in
+                # the shared cache, so caching is the default source policy
+                # for every dataset and render pipeline.
+                default_cache = True
                 if cache_neurons.value != default_cache:
                     cache_default_state["updating"] = True
                     try:
