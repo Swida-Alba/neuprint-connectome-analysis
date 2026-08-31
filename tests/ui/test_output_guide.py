@@ -62,6 +62,40 @@ class TestSpecIntegrity:
             assert entry[0], f"empty description for {column}"
 
 
+class TestPreviewRegistry:
+    """The preview flags feed the UI Output panel's result previews."""
+
+    def test_every_tool_yields_valid_preview_views(self):
+        for tool_name in TOOL_REGISTRY:
+            for view in guide.preview_views(tool_name):
+                assert view["pattern"].endswith(".csv"), (tool_name, view)
+                assert view["title"], (tool_name, view)
+                assert view["description"], (tool_name, view)
+
+    def test_homolog_preview_files_are_described(self):
+        """All four previewed homolog views exist as guide spec entries, so
+        exported run guides describe them instead of the generic fallback."""
+        patterns = {entry["pattern"]
+                    for entry in guide.TOOL_GUIDE_SPECS["find_homologs"]["files"]}
+        assert "results/type_level_results.csv" in patterns
+        assert "results/morph_similarity.csv" in patterns
+        previewed = {view["pattern"]
+                     for view in guide.preview_views("find_homologs")}
+        assert previewed == {
+            "results/bodyid_results.csv",
+            "results/type_summary.csv",
+            "results/type_level_results.csv",
+            "results/morph_similarity.csv",
+        }
+
+    def test_similarity_profile_shares_homolog_previews(self):
+        assert (guide.preview_views("find_similar_profile")
+                == guide.preview_views("find_homologs"))
+
+    def test_image_only_tool_has_no_previews(self):
+        assert guide.preview_views("flylight_download") == []
+
+
 class TestAssemble:
     def test_files_matched_to_spec_entries(self, tmp_path):
         run = _make_pathfinding_folder(tmp_path)

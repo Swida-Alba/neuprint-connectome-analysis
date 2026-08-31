@@ -13,6 +13,7 @@ import re
 from ..runner import open_folder, open_file
 from .free_log import FreeLog
 from .page_progress import PageProgress
+from .result_previews import add_result_previews
 
 
 # Label of a tqdm-style progress bar, e.g. "Building target profiles:" from
@@ -173,6 +174,8 @@ class OutputPanel:
         self.log_area: Optional[FreeLog] = None
         self.copy_log_button: Optional[ui.button] = None
         self.files_container = None
+        self.previews_section = None
+        self.previews_container = None
         self.status_label: Optional[ui.badge] = None
         self.progress_bar = None
         self.progress_label: Optional[ui.label] = None
@@ -276,6 +279,18 @@ class OutputPanel:
             self.files_container = ui.column().classes("w-full gap-2")
             with self.files_container:
                 ui.label("No output files yet.").classes("drocat-empty")
+            # Result previews sit directly under the output files. The
+            # section stays hidden until a completed run registers previews
+            # for its tool (tools without tabular results never show it).
+            ui.separator()
+            self.previews_section = ui.column().classes("w-full gap-2")
+            with self.previews_section:
+                ui.label("Result Previews").classes("drocat-mini-label")
+                self.previews_container = ui.column().classes("w-full")
+                with self.previews_container:
+                    ui.label("Available after a completed run.").classes(
+                        "drocat-empty")
+            self.previews_section.set_visibility(False)
 
     def log(self, message: str, level: str = "stdout"):
         """Add a log message to the panel."""
@@ -488,7 +503,7 @@ class OutputPanel:
             self._poll_timer = ui.timer(
                 1.5, lambda: self._poll_output_files(runner, output_dir)
             )
-            return await runner.run(
+            result = await runner.run(
                 tool_name,
                 constructor_params,
                 method_name,
@@ -497,6 +512,8 @@ class OutputPanel:
                 progress_callback=self._runner_progress,
                 output_dir=output_dir,
             )
+            self._show_result_previews(result, tool_name)
+            return result
         except Exception as exc:  # noqa: BLE001
             import traceback
             self.log(
@@ -511,6 +528,30 @@ class OutputPanel:
         """Forward generic subprocess lifecycle phases to the page tracker."""
         if self.page_progress is not None:
             self.page_progress.update_phase(phase, label)
+
+    def _show_result_previews(self, result: dict, tool_name: str) -> None:
+        """Render the tool's registered result-table previews after a run.
+
+        Only successful runs with a real output folder replace the preview
+        section; failed or cancelled runs leave it hidden. Rendering is
+        guarded so a preview problem can never turn a successful run into
+        an error result.
+        """
+        folder = result.get("output_folder")
+        if (
+            result.get("returncode") != 0
+            or result.get("cancelled")
+            or not folder
+            or self.previews_container is None
+        ):
+            return
+        try:
+            rendered = add_result_previews(
+                folder, self.previews_container, tool_name)
+            if self.previews_section is not None:
+                self.previews_section.set_visibility(bool(rendered))
+        except Exception:  # noqa: BLE001 — the run result must survive this
+            pass
 
     def show_files(self, files: List[dict], output_dir: Optional[str] = None):
         """Display output files mirroring the output folder structure.
@@ -607,5 +648,12 @@ class OutputPanel:
             self.files_container.clear()
             with self.files_container:
                 ui.label("No output files yet.").classes("drocat-empty")
+        if self.previews_container is not None:
+            self.previews_container.clear()
+            with self.previews_container:
+                ui.label("Available after a completed run.").classes(
+                    "drocat-empty")
+        if self.previews_section is not None:
+            self.previews_section.set_visibility(False)
         if self.page_progress:
             self.page_progress.reset()

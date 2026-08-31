@@ -7,7 +7,6 @@ from ..components.common import (
     checkbox_input, dir_input, section_header, param_grid, tool_page,
 )
 from ..components.output_panel import OutputPanel
-from ..components.result_previews import add_result_previews
 from ..components.skeleton_visualization_settings import skeleton_visualization_settings
 from ..runner import ScriptRunner
 from ..type_suggestions import dataset_suggestions
@@ -128,7 +127,6 @@ def create_find_homologs_tab():
 
     with results_col:
         output_panel.create(run_label="Find Homologs", run_icon="play_arrow")
-        previews_container = ui.column().classes("w-full")
 
     async def run_homologs():
         source_vals = source_input.get_value()[1]
@@ -206,10 +204,6 @@ def create_find_homologs_tab():
                     list(files),
                     result.get("output_folder") or output_dir.value,
                 )
-            add_result_previews(
-                result.get("output_folder") or output_dir.value,
-                previews_container,
-            )
         finally:
             output_panel.set_running(False)
 

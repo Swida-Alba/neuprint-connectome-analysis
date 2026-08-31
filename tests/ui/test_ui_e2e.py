@@ -572,8 +572,10 @@ class TestRunner:
             for el in client.elements.values()
             if getattr(el, "text", "")
         ]
-        # morphological mode controls
-        for label in ("Query Neuron(s)", "Level", "Method", "Metric",
+        # morphological mode controls (the legacy cosine/Pearson "Metric"
+        # selector was removed: vector_v2 scoring is per-block whitened
+        # cosine and NBLAST carries its own score)
+        for label in ("Query Neuron(s)", "Level", "Method",
                       "Candidate Cap", "Candidate Source",
                       "ROI Filter", "Visualize Top N Types / Neurons", "Visualize By"):
             assert label in labels, f"missing morphological control: {label}"

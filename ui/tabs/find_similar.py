@@ -9,7 +9,6 @@ from ..config import (
     DEFAULTS,
     MORPH_LEVEL_OPTIONS,
     MORPH_METHOD_OPTIONS,
-    MORPH_METRIC_OPTIONS,
     PROJECT_ROOT,
     SIMILARITY_METRICS,
     SRC_DIR,
@@ -21,7 +20,6 @@ from ..components.common import (
     apply_filter_mode,
 )
 from ..components.output_panel import OutputPanel
-from ..components.result_previews import add_result_previews
 from ..components.skeleton_visualization_settings import skeleton_visualization_settings
 from ..runner import ScriptRunner
 from ..type_suggestions import dataset_suggestions
@@ -42,7 +40,6 @@ MORPH_METHODS = {
 def create_find_similar_tab():
     runner = ScriptRunner()
     output_panel = OutputPanel("Similarity Output")
-    profile_previews_container = None
     dataset = None
     source_dataset = None
 
@@ -131,20 +128,9 @@ def create_find_similar_tab():
                              "discrimination. 'NBLAST': canonical NBLAST "
                              "(slower; runs on vector-prefiltered candidates).",
                     )
-                    metric = select_input(
-                        "Metric", MORPH_METRIC_OPTIONS, get_user_default("morph_metric"),
-                        hint="Similarity on standardized vectors: cosine or "
-                             "Pearson. Applies to the 'Vector (spatial)' method "
-                             "(per block) only.",
-                    )
-
-                    def sync_metric_state():
-                        # NBLAST has its own scoring, so the vector metric is
-                        # irrelevant (and ignored) when method=NBLAST.
-                        metric.set_enabled(method.value != "nblast")
-
-                    method.on_value_change(lambda _e: sync_metric_state())
-                    sync_metric_state()
+                    # The legacy cosine/Pearson metric selector was removed:
+                    # vector_v2 scoring is per-block whitened cosine, and
+                    # NBLAST carries its own normalized score.
                 with param_grid(2):
                     candidate_source = select_input(
                         "Candidate Source", CANDIDATE_SOURCE_OPTIONS,
@@ -478,7 +464,6 @@ def create_find_similar_tab():
 
     with results_col:
         output_panel.create(run_label="Run Similarity Search", run_icon="play_arrow")
-        profile_previews_container = ui.column().classes("w-full")
 
     def _unique_queries(values):
         """Return the entered queries in order, without duplicate chips."""
@@ -539,7 +524,6 @@ def create_find_similar_tab():
             "dataset": dataset.value,
             "level": level.value,
             "method": method.value,
-            "metric": metric.value,
             "candidate_cap": int(candidate_cap.value),
             "candidate_source": candidate_source.value,
             "roi_filter": None if roi_filter.value == "All ROIs" else [roi_filter.value],
@@ -695,11 +679,6 @@ def create_find_similar_tab():
                     files,
                     profile_output_dir.value if len(sources) > 1
                     else last_output_folder or profile_output_dir.value,
-                )
-            if profile_previews_container is not None:
-                add_result_previews(
-                    last_output_folder or profile_output_dir.value,
-                    profile_previews_container,
                 )
         finally:
             output_panel.set_running(False)

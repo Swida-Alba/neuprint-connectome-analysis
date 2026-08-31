@@ -116,6 +116,14 @@ COLUMN_GLOSSARY = {
     "weak_target": ("Target profile has fewer than the minimum partner types.", "boolean"),
     "source_partner_count": ("Number of partners in the source profile.", "integer"),
     "target_partner_count": ("Number of partners in the target profile.", "integer"),
+    "visualized": (
+        "Whether the type row is included in the requested top-N visualization set.",
+        "boolean",
+    ),
+    "visualization_rank": (
+        "One-based rank in the sorted type-level visualization order.",
+        "integer",
+    ),
     "in_a": ("Partner is present in profile A (query).", "boolean"),
     "in_b": ("Partner is present in profile B (candidate).", "boolean"),
     "rank": ("Row rank (1 = best).", "integer"),
@@ -160,13 +168,21 @@ COLUMN_GLOSSARY = {
         "reference other rows are ranked against.", "0-1"),
     "method": ("Similarity method used (vector / nblast).", "text"),
     "metric": ("Distance metric used (cosine / pearson).", "text"),
-    "morph_cosine": (
-        "Morphology vector cosine similarity (when enrichment ran): "
-        "$(A \\cdot B) / (\\lVert A \\rVert \\cdot \\lVert B \\rVert)$ "
-        "on z-scored vectors.", "0-1"),
-    "morph_pearson": (
-        "Morphology vector Pearson correlation (when enrichment ran); "
-        "= cosine of the mean-centered vectors ($\\rho$).", "-1 to 1"),
+    "morph_v2_similarity": (
+        "Production vector_v2 morphology score (when enrichment ran): "
+        "per-block cosine (shape/spatial, 0.30/0.70 weights) on the "
+        "standardized + ZCA-whitened 256-dim vector — identical to the "
+        "Find Similar scorer.", "0-1"),
+    "morph_nblast": (
+        "Forward normalized NBLAST pair score (k=20 dotprops, microns) "
+        "when enrichment ran.", "-1 to 1"),
+    "level": ("Row granularity in morph_similarity.csv: 'bodyId' for "
+              "per-neuron rows, 'type' for per-type aggregate rows.", "text"),
+    "pair_side": ("Hemisphere pairing of the NBLAST comparison: "
+                  "'ipsi' (same-side) or 'contra' (crossed).", "text"),
+    "n_contra": ("Number of contralateral NBLAST scores aggregated "
+                 "(NBLAST type means keep contra only).", "integer"),
+    "n_ipsi": ("Number of ipsilateral NBLAST scores behind the row.", "integer"),
     "adjacency_score": (
         "Direct adjacency (shared-partner / synaptic-contact) score between "
         "the pair.", "number"),
@@ -424,10 +440,14 @@ _FIND_NETWORK = {
     "files": [
         {"pattern": "data_details/connection_type.csv",
          "description": "Direct connections aggregated by type pair.",
+         "preview": True,
+         "preview_title": "Connections by type pair",
          "columns": _CONNECTION_TYPE_COLUMNS},
         {"pattern": "data_details/neurons.csv",
          "description": "The resolved neuron set. Key columns: bodyId, "
-                        "instance, type, pre, post — " + _NEURON_TABLE_NOTE},
+                        "instance, type, pre, post — " + _NEURON_TABLE_NOTE,
+         "preview": True,
+         "preview_title": "Resolved neuron set"},
         {"pattern": "data_details/parameters.csv",
          "description": "Run parameters as a table."},
         {"pattern": "parameters.txt",
@@ -456,18 +476,26 @@ _FIND_NETWORK = {
 _PATHFINDING_FILES = [
     {"pattern": "*_allpaths_type.csv",
      "description": "Primary path table (type-level, UI default).",
+     "preview": True,
+     "preview_title": "Path table (type-level)",
      "columns": _PATH_COLUMNS},
     {"pattern": "*_allpaths_bodyId_paths.csv",
      "description": "BodyId-level path table (written when Skip BodyId is "
                     "off). Same score columns plus bodyId-level endpoints.",
+     "preview": True,
+     "preview_title": "Path table (bodyId-level)",
      "columns": _PATH_COLUMNS},
     {"pattern": "source_neurons.csv",
      "description": "Resolved source neurons. Key columns: isInPath, bodyId, "
                     "instance, type, pre, post — " + _NEURON_TABLE_NOTE,
+     "preview": True,
+     "preview_title": "Source neurons",
      "columns": ["isInPath"]},
     {"pattern": "target_neurons.csv",
      "description": "Resolved target neurons. Key columns: Checked, Layer, "
                     "bodyId, instance, type — " + _NEURON_TABLE_NOTE,
+     "preview": True,
+     "preview_title": "Target neurons",
      "columns": ["Checked", "Layer"]},
     {"pattern": "all_attributes.json",
      "description": "Serialized run attributes (machine-readable)."},
@@ -556,9 +584,11 @@ _HOMOLOG_FILES = [
     {"pattern": "results/homolog_results.csv",
      "description": "Full type-level results with all similarity columns, "
                     "sorted by the chosen metric.",
-     "columns": _HOMOLOG_RESULT_COLUMNS + ["morph_cosine", "morph_pearson"]},
+     "columns": _HOMOLOG_RESULT_COLUMNS + ["morph_v2_similarity", "morph_nblast"]},
     {"pattern": "results/bodyid_results.csv",
      "description": "BodyId-level results (sorted by source, then metric).",
+     "preview": True,
+     "preview_title": "BodyId-level homologs",
      "columns": [
          "source_bodyId", "source_type", "target_bodyId", "target_type",
          "rank_union", "jaccard",
@@ -569,6 +599,8 @@ _HOMOLOG_FILES = [
     {"pattern": "results/type_summary.csv",
      "description": "Aggregated results at the neuron type level "
                     "(sorted by avg_jaccard, descending).",
+     "preview": True,
+     "preview_title": "Type-mean (from bodyId level)",
      "columns": [
          "query", "source_dataset", "target_dataset", "source_type",
          "target_type", "avg_rank_corr", "n_bodyid_comparisons",
@@ -576,6 +608,26 @@ _HOMOLOG_FILES = [
          "avg_adjacency_score", "avg_shared_type_count",
          "avg_union_type_count", "n_complete_sources",
          "n_incomplete_sources", "visualized", "visualization_rank"]},
+    {"pattern": "results/type_level_results.csv",
+     "description": "True type-level homolog ranking — pooled all-adjacency "
+                    "type profiles scored against every typed target type "
+                    "(top N per source type under the run's metric).",
+     "preview": True,
+     "preview_title": "Type-level homologs (pooled profiles)",
+     "columns": [
+         "source_type", "target_type", "is_same_type", "target_dataset",
+         "jaccard", "weighted_jaccard", "cosine", "rank_union", "rank_corr",
+         "rank", "morph_v2_similarity", "morph_nblast"]},
+    {"pattern": "results/morph_similarity.csv",
+     "description": "Morphological similarity of the visualized set against "
+                    "the transformed query neurons — per-neuron rows plus "
+                    "per-type aggregate rows (level column).",
+     "preview": True,
+     "preview_title": "Morphology vs transformed query",
+     "columns": [
+         "level", "query", "source_bodyId", "target_bodyId", "target_type",
+         "pair_side", "n_contra", "n_ipsi",
+         "morph_v2_similarity", "morph_nblast"]},
     {"pattern": "results/source_status_summary.json",
      "description": "Per-source-neuron status (resolved bodyIds, candidate "
                     "counts)."},
@@ -630,11 +682,15 @@ TOOL_GUIDE_SPECS = {
              "description": "Merged neuron metadata table for all layers. "
                             "Key columns: viz_layer, bodyId, instance, type, "
                             "pre, post — " + _NEURON_TABLE_NOTE,
+             "preview": True,
+             "preview_title": "Neuron info",
              "columns": ["viz_layer"]},
             {"pattern": "viz_layer_info.csv",
              "description": "Reusable layer-map CSV with one-based layers, "
                             "resolved neuron identifiers, and effective neuron, "
                             "synapse, pre-site, and post-site colors.",
+             "preview": True,
+             "preview_title": "Layer map",
              "columns": ["layer", "neuron", "color"]},
             {"pattern": "*_synapses.*",
              "description": "Merged synapse data. In paired (connector) mode "
@@ -697,6 +753,8 @@ TOOL_GUIDE_SPECS = {
         "files": [
             {"pattern": "results.csv",
              "description": "BodyId-level similarity results.",
+             "preview": True,
+             "preview_title": "Similarity results",
              "columns": [
                  "rank", "source_bodyId", "source_type", "target_bodyId",
                  "target_type", "target_instance", "profile_similarity",
@@ -704,6 +762,8 @@ TOOL_GUIDE_SPECS = {
                  "intra_type_similarity", "method", "metric"]},
             {"pattern": "type_summary.csv",
              "description": "Type-level summary.",
+             "preview": True,
+             "preview_title": "Type-level summary",
              "columns": [
                  "rank", "target_type", "similarity", "n_bodyids",
                  "profile_similarity", "roi_similarity", "is_intra_type",
@@ -748,6 +808,8 @@ TOOL_GUIDE_SPECS = {
             {"pattern": "cross_dataset/mapping_summary.csv",
              "description": "Resolved type names per dataset with same-name "
                             "flags.",
+             "preview": True,
+             "preview_title": "Cross-dataset type mapping",
              "columns": ["anchor", "same name"]},
             {"pattern": "cross_dataset/all_types/results/similarity_*.csv",
              "description": "N×M similarity matrices comparing the queried "
@@ -780,6 +842,8 @@ TOOL_GUIDE_SPECS = {
                             "datasets (incl. auto type mapping)."},
             {"pattern": "dataset_metadata_comparison.csv",
              "description": "Per-dataset metadata comparison.",
+             "preview": True,
+             "preview_title": "Dataset metadata comparison",
              "columns": [
                  "dataset", "total_neurons", "typed_neurons",
                  "untyped_neurons", "type_coverage_pct", "total_presynaptic",
@@ -808,7 +872,9 @@ TOOL_GUIDE_SPECS = {
              "columns": ["edge_key", "source", "target", "threshold",
                          "conservation"]},
             {"pattern": "comparison_results/unified_summary.csv",
-             "description": "Run summary of the unified comparison."},
+             "description": "Run summary of the unified comparison.",
+             "preview": True,
+             "preview_title": "Unified comparison summary"},
             {"pattern": "comparison_results/unique_to_*.csv",
              "description": "Edges unique to one dataset."},
             {"pattern": "comparison_results/top_edges_comparison.csv",
@@ -844,6 +910,8 @@ TOOL_GUIDE_SPECS = {
                             "findings, overlap matrices, path counts)."},
             {"pattern": "similarity_matrices/similarity_threshold_*.csv",
              "description": "Cross-dataset similarity rows per threshold.",
+             "preview": True,
+             "preview_title": "Cross-dataset similarity per threshold",
              "columns": [
                  "dataset_1", "dataset_2", "jaccard_similarity",
                  "ruzicka_similarity", "pearson_correlation", "edges_in_d1",
@@ -869,9 +937,13 @@ TOOL_GUIDE_SPECS = {
         "files": [
             {"pattern": "*_lines.csv",
              "description": "All matched driver lines with scores.",
+             "preview": True,
+             "preview_title": "Matched driver lines",
              "columns": ["line", "score", "match_type", "library"]},
             {"pattern": "line_summary.csv",
              "description": "Summary statistics per line.",
+             "preview": True,
+             "preview_title": "Line summary",
              "columns": ["line", "n_neurons", "n_types", "mean_score",
                          "max_score"]},
             {"pattern": "gal4_lexa_summary.csv",
@@ -896,6 +968,8 @@ TOOL_GUIDE_SPECS = {
         "files": [
             {"pattern": "all_neurons.csv",
              "description": "Combined matched neurons across all datasets.",
+             "preview": True,
+             "preview_title": "Matched EM neurons",
              "columns": ["bodyId", "dataset", "instance", "type", "status",
                          "score", "image_id", "lm_sample", "match_type",
                          "library", "source_line"]},
@@ -906,6 +980,8 @@ TOOL_GUIDE_SPECS = {
                          "score"]},
             {"pattern": "*_types.csv",
              "description": "Per-dataset type aggregates of the matches.",
+             "preview": True,
+             "preview_title": "Type aggregates",
              "columns": ["type", "labeled_N", "max_score", "median_score",
                          "Q3_score", "Q1_score", "avg_score",
                          "typed_N_in_dataset"]},
@@ -933,11 +1009,15 @@ TOOL_GUIDE_SPECS = {
             {"pattern": "expression_matrix.csv",
              "description": "Type × line score matrix (types prefixed with "
                             "dataset abbreviations).",
+             "preview": True,
+             "preview_title": "Expression matrix",
              "matrix": "rows = neuron types, columns = driver lines, "
                        "values = max NeuronBridge score"},
             {"pattern": "expression_matrix_merged.csv",
              "description": "Same matrix with types merged across datasets "
                             "(max score aggregation).",
+             "preview": True,
+             "preview_title": "Merged expression matrix",
              "matrix": "rows = merged types, columns = driver lines, "
                        "values = max score"},
             {"pattern": "expression_matrix*.html",
@@ -973,6 +1053,8 @@ TOOL_GUIDE_SPECS = {
              "columns": ["type", "dataset"]},
             {"pattern": "line_summary.csv",
              "description": "Summary statistics per line.",
+             "preview": True,
+             "preview_title": "Line summary",
              "columns": ["line", "n_neurons", "n_types", "mean_score",
                          "max_score", "n_neurons_HMS", "n_types_HMS",
                          "n_neurons_MS", "n_types_MS", "Qf",
@@ -1014,6 +1096,28 @@ TOOL_GUIDE_SPECS = {
         ],
     },
 }
+
+
+def preview_views(tool_name: str) -> list:
+    """Result-table previews for *tool_name*, in spec order.
+
+    Returns the ``TOOL_GUIDE_SPECS`` file entries flagged ``preview: True``
+    as dicts with ``pattern``, ``title`` and ``description`` keys. The UI
+    Output panel renders a top-N table preview for each after a successful
+    run; tools without flagged entries (e.g. image downloads) get none.
+    """
+    spec = TOOL_GUIDE_SPECS.get(tool_name) or {}
+    views = []
+    for file_spec in spec.get("files", []):
+        if not file_spec.get("preview"):
+            continue
+        views.append({
+            "pattern": file_spec["pattern"],
+            "title": file_spec.get("preview_title")
+                     or Path(file_spec["pattern"]).name,
+            "description": file_spec.get("description", ""),
+        })
+    return views
 
 
 # =============================================================================
