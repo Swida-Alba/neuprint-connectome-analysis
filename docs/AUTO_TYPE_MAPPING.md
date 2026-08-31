@@ -25,13 +25,47 @@ The `CrossDatasetTypeMapper` class builds mappings from the male-cns `neuron_df`
 ### 2. Type Mapping Source
 
 The mapper uses the male-cns neuron DataFrame located at:
-`datasets/male-cns_v0_9/male-cns_v0_9_allneurons_neuron_df.csv`
+`datasets/male-cns_v1_0/male-cns_v1_0_allneurons_neuron_df.csv`
 
 Key columns used:
 - `type`: male-cns type name
 - `flywireType`: corresponding type in flywire (FAFB/BANC)
 - `hemibrainType`: corresponding type in hemibrain
 - `mancType`: corresponding type in MANC
+
+These crosswalk columns may list several names in one cell, separated by
+`,`; each name is used individually (a male-cns type pointing at several
+flywire types becomes a 1-to-N conflict instead of a bogus joined name).
+
+#### Renamed FlyWire types (additional Type(S) columns)
+
+FlyWire datasets publish an extra additional-type column that records type
+renames between releases:
+
+- FAFB v783: `additional_type(s)` in
+  `datasets/flywire_FAFB_v783/flywire_FAFB_v783_allneurons_neuron_df.csv`
+- BANC v626: `Alternative Cell Type(s)` in
+  `datasets/flywire_BANC_v626/flywire_BANC_v626_allneurons_neuron_df.csv`
+
+When a male-cns `flywireType` value is **no longer a primary `type`** in the
+target dataset but appears in that column, the mapping resolves to the
+current primary name. Example: male-cns `SLP249` has `flywireType = SLP249`,
+but in FAFB v783 those neurons are typed `APDN3` and `SLP249` survives only
+in `additional_type(s)` — so the auto mapping resolves
+`male-cns SLP249 → FAFB APDN3`.
+
+Resolution rules:
+
+- The old name resolves to the **single** primary type listing it (rename).
+- If **several** primary types list the old name (a split, e.g. FAFB
+  `AOTU008` → `AOTU008a/b/c/d`), no automatic mapping is made and a
+  `TypeMappingConflict` is recorded instead.
+- Names that are already a primary type pass through unchanged.
+- FAFB and BANC resolve independently: a name FAFB renamed may still be
+  primary in BANC (e.g. `MDN` → `DNp50` in FAFB, still `MDN` in BANC), so
+  each keeps its own mapping namespace.
+- Missing dataset tables only disable the rename resolution; the mapper
+  still works from the male-cns crosswalk alone.
 
 ### 3. Standardization Process
 
@@ -91,7 +125,10 @@ from comparison.cross_dataset_type_mapper import CrossDatasetTypeMapper
 mapper = CrossDatasetTypeMapper(
     workspace_path='/path/to/workspace',  # Optional
     neuron_df_path=None,  # Optional, uses default location if None
-    verbose=True
+    verbose=True,
+    # Optional: explicit FAFB/BANC neuron tables for rename resolution;
+    # a None value disables it for that namespace
+    flywire_neuron_df_paths=None,
 )
 
 # Load mappings (called automatically when needed)

@@ -8,8 +8,18 @@ The mapping is bodyId-based: each neuron in male-cns has its own type AND the
 corresponding type name in other datasets. This allows for accurate cross-dataset
 comparison even when type names differ.
 
+FlyWire datasets also publish an extra additional-type column (FAFB:
+``additional_type(s)``, BANC: ``Alternative Cell Type(s)``) that records type
+renames: neurons whose type changed name keep the old name there while the
+primary ``type`` column holds the current one. When a male-cns ``flywireType``
+value is no longer a primary type in the target dataset but appears in that
+column, the mapping resolves to the current primary name (e.g. male-cns
+SLP249 -> FAFB APDN3). Crosswalk cells and additional-type cells may both list
+several names separated by ','; each name is split out before mapping.
+
 Key Features:
 - Auto-loads type mappings from male-cns_v1_0_allneurons_neuron_df.csv
+- Resolves renamed flywire types via the FlyWire additional Type(S) columns
 - Handles 1-to-1, N-to-1, and 1-to-N type relationships
 - Warns about N-to-1 aggregations that should be avoided
 - Priority-based resolution: male-cns > flywire > manc > hemibrain > optic-lobe
@@ -64,6 +74,27 @@ DATASET_TO_TYPE_COL = {
     'hemibrain:v1.2.1': 'hemibrainType',
     'hemibrain_v1_2_1': 'hemibrainType',
     # optic-lobe not in male-cns mapping
+}
+
+# FlyWire schema namespaces kept in the type mappings.  FAFB and BANC share
+# the male-cns ``flywireType`` crosswalk column, but each dataset renames
+# types independently through its own additional-type column, so their
+# resolved names can differ and they keep separate mapping entries.
+FLYWIRE_MAPPING_KEYS = ('flywire_FAFB_v783', 'flywire_BANC_v626')
+
+# Per FlyWire namespace: which neuron table carries the primary ``type``
+# column and which additional-type column records renamed types.
+FLYWIRE_TYPE_SOURCES = {
+    'flywire_FAFB_v783': {
+        'dataset_dir': 'flywire_FAFB_v783',
+        'neuron_df': 'flywire_FAFB_v783_allneurons_neuron_df.csv',
+        'alt_column': 'additional_type(s)',
+    },
+    'flywire_BANC_v626': {
+        'dataset_dir': 'flywire_BANC_v626',
+        'neuron_df': 'flywire_BANC_v626_allneurons_neuron_df.csv',
+        'alt_column': 'Alternative Cell Type(s)',
+    },
 }
 
 
@@ -122,39 +153,53 @@ class CrossDatasetTypeMapper:
         workspace_path: Optional[str] = None,
         neuron_df_path: Optional[str] = None,
         verbose: bool = True,
+        flywire_neuron_df_paths: Optional[Dict[str, Optional[str]]] = None,
     ):
         """
         Initialize CrossDatasetTypeMapper.
-        
+
         Args:
             workspace_path: Path to the project workspace (containing datasets/ folder).
                            If None, will try to auto-detect from file location.
             neuron_df_path: Explicit path to the male-cns neuron_df file.
                            If provided, overrides workspace_path detection.
             verbose: Print loading and warning messages.
+            flywire_neuron_df_paths: Optional per-FlyWire-namespace override for the
+                           neuron tables used to resolve renamed types (see
+                           FLYWIRE_TYPE_SOURCES).  A ``None`` value disables the
+                           additional-type resolution for that namespace.  When not
+                           provided, the tables are looked up under
+                           ``<workspace_path>/datasets/`` (only if a workspace path
+                           is known; mappers built from an explicit ``neuron_df_path``
+                           without a workspace stay hermetic).
         """
         self.verbose = verbose
         self._neuron_df: Optional[pd.DataFrame] = None
         self._loaded = False
-        
+
         # Type mappings: {source_dataset: {source_type: {target_dataset: target_type}}}
         self._type_mappings: Dict[str, Dict[str, Dict[str, str]]] = {}
-        
+
         # Reverse mappings for lookup
         self._reverse_mappings: Dict[str, Dict[str, str]] = {}  # {dataset: {type: canonical_type}}
-        
+
         # Conflict tracking
         self._conflicts: List[TypeMappingConflict] = []
         self._n_to_1_types: Dict[str, Set[str]] = defaultdict(set)  # {target_type: {source_types}}
-        
+
         # Dataset types index: {dataset: {type: set(bodyIds)}}
         self._dataset_types: Dict[str, Dict[str, Set[str]]] = defaultdict(lambda: defaultdict(set))
+
+        # Additional-type resolution tables, keyed by FlyWire mapping key:
+        # {key: {additional_name: {candidate primary names}}}.  Only names
+        # that are not themselves a primary type are indexed.
+        self._flywire_alt_to_primary: Dict[str, Dict[str, Set[str]]] = {}
 
         # Unsupported releases are reported once per mapper instance.  The
         # mapping file is release-specific, so an unknown release must not be
         # silently treated as the nearest supported release.
         self._unsupported_dataset_warnings: Set[str] = set()
-        
+
         # Determine path to neuron_df
         if neuron_df_path:
             self._neuron_df_path = neuron_df_path
@@ -162,15 +207,33 @@ class CrossDatasetTypeMapper:
             if workspace_path is None:
                 # Try to auto-detect from this file's location
                 workspace_path = str(Path(__file__).parent.parent.parent)
-            
+
             self._neuron_df_path = os.path.join(
-                workspace_path, 
-                'datasets', 
-                'male-cns_v1_0', 
+                workspace_path,
+                'datasets',
+                'male-cns_v1_0',
                 'male-cns_v1_0_allneurons_neuron_df.csv'
             )
-        
+
         self._workspace_path = workspace_path
+
+        overrides = flywire_neuron_df_paths or {}
+        self._flywire_neuron_df_paths: Dict[str, Optional[str]] = {}
+        for key in FLYWIRE_MAPPING_KEYS:
+            if key in overrides:
+                self._flywire_neuron_df_paths[key] = overrides[key]
+            elif self._workspace_path:
+                source = FLYWIRE_TYPE_SOURCES[key]
+                self._flywire_neuron_df_paths[key] = os.path.join(
+                    self._workspace_path,
+                    'datasets',
+                    source['dataset_dir'],
+                    source['neuron_df'],
+                )
+            else:
+                # Hermetic mapper (explicit neuron_df_path, no workspace):
+                # no dataset tables to resolve renames against.
+                self._flywire_neuron_df_paths[key] = None
 
     @staticmethod
     def _split_hemi_suffix(type_name: str) -> Tuple[str, str]:
@@ -184,6 +247,101 @@ class CrossDatasetTypeMapper:
             if type_name.endswith(suffix):
                 return type_name[:-2], suffix
         return type_name, ''
+
+    @staticmethod
+    def _split_type_cell(value) -> List[str]:
+        """Split a multi-name cell like ``'A, B,C'`` into clean type names.
+
+        Crosswalk columns (flywireType/hemibrainType/mancType) and the
+        FlyWire additional-type columns may list several names separated by
+        commas; each name is used individually.
+        """
+        if not isinstance(value, str):
+            return []
+        return [name.strip() for name in value.split(',') if name.strip()]
+
+    def _load_flywire_type_tables(self):
+        """Index primary and additional types from the FAFB/BANC neuron tables.
+
+        For each FlyWire namespace this builds ``additional name ->
+        {primary names}`` from rows whose additional Type(S) column lists a
+        name that is not itself a primary type anywhere in the dataset.
+        Those entries are the type renames (e.g. FAFB SLP249 -> APDN3) that
+        male-cns ``flywireType`` crosswalk values can resolve to.  Missing
+        tables only disable the rename resolution for that namespace.
+        """
+        self._flywire_alt_to_primary = {}
+        for key in FLYWIRE_MAPPING_KEYS:
+            path = self._flywire_neuron_df_paths.get(key)
+            if not path:
+                continue
+            if not os.path.exists(path):
+                self._log(
+                    f"FlyWire neuron table not found for {key} "
+                    f"({os.path.basename(path)}); renamed types (additional "
+                    "Type(S)) will not be resolved for it.",
+                    level='warn',
+                )
+                continue
+
+            alt_column = FLYWIRE_TYPE_SOURCES[key]['alt_column']
+            try:
+                table = pd.read_csv(
+                    path,
+                    usecols=lambda c, col=alt_column: c in ('type', col),
+                    low_memory=False,
+                )
+            except Exception as e:
+                self._log(f"Could not read {path}: {e}", level='warn')
+                continue
+
+            if 'type' not in table.columns or alt_column not in table.columns:
+                self._log(
+                    f"{os.path.basename(path)} lacks a 'type' or "
+                    f"'{alt_column}' column; skipping rename resolution.",
+                    level='warn',
+                )
+                continue
+
+            primaries = set(table['type'].dropna().astype(str).str.strip()) - {''}
+            alt_to_primary: Dict[str, Set[str]] = {}
+            for cell, primary in zip(table[alt_column], table['type']):
+                names = self._split_type_cell(cell)
+                if not names or not isinstance(primary, str):
+                    continue
+                primary = primary.strip()
+                if not primary:
+                    continue
+                for name in names:
+                    if name in primaries:
+                        # A primary type keeps its own identity; the
+                        # additional listing is just an alias.
+                        continue
+                    alt_to_primary.setdefault(name, set()).add(primary)
+
+            self._flywire_alt_to_primary[key] = alt_to_primary
+            unambiguous = sum(1 for v in alt_to_primary.values() if len(v) == 1)
+            self._log(
+                f"Indexed {len(primaries):,} primary types and "
+                f"{len(alt_to_primary):,} additional-only types "
+                f"({unambiguous:,} unambiguous renames) from "
+                f"{os.path.basename(path)}")
+
+    def _resolve_flywire_names(self, names: List[str], mapping_key: str) -> Set[str]:
+        """Resolve crosswalk type names against one FlyWire namespace.
+
+        Names that are already a primary type pass through unchanged; names
+        that only exist in the additional Type(S) column resolve to the
+        current primary name(s) (one candidate -> rename, several -> the
+        split candidates); unknown names pass through unchanged.
+        """
+        alt_to_primary = self._flywire_alt_to_primary.get(mapping_key)
+        if not alt_to_primary:
+            return set(names)
+        resolved: Set[str] = set()
+        for name in names:
+            resolved.update(alt_to_primary.get(name) or (name,))
+        return resolved
     
     def _log(self, message: str, level: str = 'info'):
         """Print message if verbose mode enabled."""
@@ -220,7 +378,12 @@ class CrossDatasetTypeMapper:
                 dtype={'bodyId': str},
                 low_memory=False,
             )
-            
+
+            # Load the FlyWire primary/additional type tables used to
+            # resolve renamed types (best effort: missing tables only
+            # disable that resolution).
+            self._load_flywire_type_tables()
+
             # Build mappings
             self._build_type_mappings()
             self._loaded = True
@@ -247,53 +410,58 @@ class CrossDatasetTypeMapper:
         # Build per-row mappings
         # Each row represents one bodyId with its type in each dataset
         male_cns_types = set()
-        flywire_types = set()
         hemibrain_types = set()
         manc_types = set()
-        
+
+        # FlyWire mappings are built per namespace (FAFB and BANC resolve
+        # renames independently through their additional Type(S) columns).
+        mcns_to_flywire: Dict[str, Dict[str, Set[str]]] = {
+            key: defaultdict(set) for key in FLYWIRE_MAPPING_KEYS
+        }
+        flywire_to_mcns: Dict[str, Dict[str, Set[str]]] = {
+            key: defaultdict(set) for key in FLYWIRE_MAPPING_KEYS
+        }
+
         # Track: mcns_type -> {flywire_types}, etc.
-        mcns_to_flywire: Dict[str, Set[str]] = defaultdict(set)
         mcns_to_hemibrain: Dict[str, Set[str]] = defaultdict(set)
         mcns_to_manc: Dict[str, Set[str]] = defaultdict(set)
-        
+
         # Reverse mappings
-        flywire_to_mcns: Dict[str, Set[str]] = defaultdict(set)
         hemibrain_to_mcns: Dict[str, Set[str]] = defaultdict(set)
         manc_to_mcns: Dict[str, Set[str]] = defaultdict(set)
-        
+
         for _, row in df.iterrows():
             mcns_type = row.get('type', '')
-            flywire_type = row.get('flywireType', '')
-            hemibrain_type = row.get('hemibrainType', '')
-            manc_type = row.get('mancType', '')
             body_id = row.get('bodyId', '')
-            
+
             # Skip empty types
             if not mcns_type:
                 continue
-            
+
             male_cns_types.add(mcns_type)
             self._dataset_types['male-cns:v1.0'][mcns_type].add(body_id)
-            
-            if flywire_type:
-                flywire_types.add(flywire_type)
-                mcns_to_flywire[mcns_type].add(flywire_type)
-                flywire_to_mcns[flywire_type].add(mcns_type)
-                self._dataset_types['flywire_FAFB_v783'][flywire_type].add(body_id)
-                self._dataset_types['flywire_BANC_v626'][flywire_type].add(body_id)
-            
-            if hemibrain_type:
+
+            # Crosswalk cells may carry several names separated by ',';
+            # resolve each name against each FlyWire namespace.
+            fw_names = self._split_type_cell(row.get('flywireType', ''))
+            for fw_key in FLYWIRE_MAPPING_KEYS:
+                for fw_type in self._resolve_flywire_names(fw_names, fw_key):
+                    mcns_to_flywire[fw_key][mcns_type].add(fw_type)
+                    flywire_to_mcns[fw_key][fw_type].add(mcns_type)
+                    self._dataset_types[fw_key][fw_type].add(body_id)
+
+            for hemibrain_type in self._split_type_cell(row.get('hemibrainType', '')):
                 hemibrain_types.add(hemibrain_type)
                 mcns_to_hemibrain[mcns_type].add(hemibrain_type)
                 hemibrain_to_mcns[hemibrain_type].add(mcns_type)
                 self._dataset_types['hemibrain:v1.2.1'][hemibrain_type].add(body_id)
-            
-            if manc_type:
-                manc_types.add(manc_type)
-                mcns_to_manc[mcns_type].add(manc_type)
-                manc_to_mcns[manc_type].add(mcns_type)
-                self._dataset_types['manc:v1.0'][manc_type].add(body_id)
-                self._dataset_types['manc:v1.2.1'][manc_type].add(body_id)
+
+            for manc_name in self._split_type_cell(row.get('mancType', '')):
+                manc_types.add(manc_name)
+                mcns_to_manc[mcns_type].add(manc_name)
+                manc_to_mcns[manc_name].add(mcns_type)
+                self._dataset_types['manc:v1.0'][manc_name].add(body_id)
+                self._dataset_types['manc:v1.2.1'][manc_name].add(body_id)
         
         # Build final mappings (only 1-to-1 or 1-to-N that we can handle)
         self._type_mappings = {
@@ -308,23 +476,24 @@ class CrossDatasetTypeMapper:
         # Process male-cns to other datasets
         for mcns_type in male_cns_types:
             self._type_mappings['male-cns:v1.0'][mcns_type] = {}
-            
-            # Flywire mapping
-            fw_types = mcns_to_flywire.get(mcns_type, set())
-            if len(fw_types) == 1:
-                fw_type = next(iter(fw_types))
-                self._type_mappings['male-cns:v1.0'][mcns_type]['flywire_FAFB_v783'] = fw_type
-                self._type_mappings['male-cns:v1.0'][mcns_type]['flywire_BANC_v626'] = fw_type
-            elif len(fw_types) > 1:
-                # N-to-1 from male-cns perspective (one mcns type maps to multiple flywire types)
-                # This means the mcns type is a superset - we can still use it but warn
-                self._conflicts.append(TypeMappingConflict(
-                    source_dataset='male-cns:v1.0',
-                    target_dataset='flywire_FAFB_v783',
-                    source_type=mcns_type,
-                    target_types=fw_types,
-                    relationship='1-to-N',
-                ))
+
+            # FlyWire mappings, resolved per namespace
+            for fw_key in FLYWIRE_MAPPING_KEYS:
+                fw_types = mcns_to_flywire[fw_key].get(mcns_type, set())
+                if len(fw_types) == 1:
+                    self._type_mappings['male-cns:v1.0'][mcns_type][fw_key] = next(iter(fw_types))
+                elif len(fw_types) > 1:
+                    # N-to-1 from male-cns perspective (one mcns type maps to
+                    # multiple types in this FlyWire namespace): the mcns
+                    # type is a superset - record a conflict instead of
+                    # guessing one target name.
+                    self._conflicts.append(TypeMappingConflict(
+                        source_dataset='male-cns:v1.0',
+                        target_dataset=fw_key,
+                        source_type=mcns_type,
+                        target_types=fw_types,
+                        relationship='1-to-N',
+                    ))
             
             # Hemibrain mapping
             hb_types = mcns_to_hemibrain.get(mcns_type, set())
@@ -356,36 +525,39 @@ class CrossDatasetTypeMapper:
                 ))
         
         # Process reverse mappings (flywire/hemibrain/manc to male-cns)
-        for fw_type in flywire_types:
-            mcns_types = flywire_to_mcns.get(fw_type, set())
-            if len(mcns_types) == 1:
-                mcns_type = next(iter(mcns_types))
-                self._type_mappings['flywire_FAFB_v783'][fw_type] = {'male-cns:v1.0': mcns_type}
-                self._type_mappings['flywire_BANC_v626'][fw_type] = {'male-cns:v1.0': mcns_type}
-                
-                # Also populate hemibrain/manc mappings transitively
-                if mcns_type in self._type_mappings['male-cns:v1.0']:
-                    for target_ds, target_type in self._type_mappings['male-cns:v1.0'][mcns_type].items():
-                        if target_ds not in ['flywire_FAFB_v783', 'flywire_BANC_v626']:
-                            if fw_type not in self._type_mappings['flywire_FAFB_v783']:
-                                self._type_mappings['flywire_FAFB_v783'][fw_type] = {}
-                            self._type_mappings['flywire_FAFB_v783'][fw_type][target_ds] = target_type
-                            if fw_type not in self._type_mappings['flywire_BANC_v626']:
-                                self._type_mappings['flywire_BANC_v626'][fw_type] = {}
-                            self._type_mappings['flywire_BANC_v626'][fw_type][target_ds] = target_type
-            elif len(mcns_types) > 1:
-                # N-to-1: multiple mcns types map to same flywire type
-                # This should NOT be aggregated
-                self._conflicts.append(TypeMappingConflict(
-                    source_dataset='flywire_FAFB_v783',
-                    target_dataset='male-cns:v1.0',
-                    source_type=fw_type,
-                    target_types=mcns_types,
-                    relationship='N-to-1',
-                ))
-                self._n_to_1_types['flywire_FAFB_v783'].add(fw_type)
-                for mt in mcns_types:
-                    self._n_to_1_types['male-cns:v1.0'].add(mt)
+        for fw_key in FLYWIRE_MAPPING_KEYS:
+            for fw_type in flywire_to_mcns[fw_key]:
+                mcns_types_for_fw = flywire_to_mcns[fw_key][fw_type]
+                if len(mcns_types_for_fw) == 1:
+                    mcns_type = next(iter(mcns_types_for_fw))
+                    self._type_mappings[fw_key][fw_type] = {'male-cns:v1.0': mcns_type}
+                elif len(mcns_types_for_fw) > 1:
+                    # N-to-1: multiple mcns types map to the same type in
+                    # this FlyWire namespace. This should NOT be aggregated.
+                    self._conflicts.append(TypeMappingConflict(
+                        source_dataset=fw_key,
+                        target_dataset='male-cns:v1.0',
+                        source_type=fw_type,
+                        target_types=mcns_types_for_fw,
+                        relationship='N-to-1',
+                    ))
+                    self._n_to_1_types[fw_key].add(fw_type)
+                    for mt in mcns_types_for_fw:
+                        self._n_to_1_types['male-cns:v1.0'].add(mt)
+
+        # Transitive mappings from each FlyWire namespace: its reverse
+        # entries gain the male-cns type's other targets, including the
+        # sibling FlyWire namespace (FAFB <-> BANC names can legitimately
+        # differ after rename resolution).
+        for fw_key in FLYWIRE_MAPPING_KEYS:
+            for fw_type, target_maps in self._type_mappings[fw_key].items():
+                mcns_type = target_maps.get('male-cns:v1.0')
+                if not mcns_type or mcns_type not in self._type_mappings['male-cns:v1.0']:
+                    continue
+                for target_ds, target_type in self._type_mappings['male-cns:v1.0'][mcns_type].items():
+                    if target_ds == fw_key:
+                        continue
+                    target_maps[target_ds] = target_type
         
         # Similarly for hemibrain
         for hb_type in hemibrain_types:
@@ -550,10 +722,13 @@ class CrossDatasetTypeMapper:
         namespace, however:
 
         * Male-CNS v0.9 and v1.0 use the Male-CNS ``type`` namespace.
-        * FAFB and BANC releases use the shared FlyWire ``flywireType``
-          namespace.  The v1.0 neuron table stores that crosswalk under the
-          existing FAFB v783 mapping key, and the BANC v626 entries contain
-          the same values.
+        * FAFB releases share the FlyWire ``flywireType`` crosswalk that the
+          v1.0 neuron table stores under the ``flywire_FAFB_v783`` mapping
+          key.
+        * BANC releases draw on the same crosswalk column, but BANC renames
+          types independently through its ``Alternative Cell Type(s)``
+          column, so its resolved names live under the ``flywire_BANC_v626``
+          mapping key.
 
         Keeping this translation separate prevents a release collision from
         either losing a valid mapping or renaming one release into another.
@@ -563,8 +738,11 @@ class CrossDatasetTypeMapper:
         if normalized.startswith('male-cns:'):
             return 'male-cns:v1.0'
 
-        if normalized.startswith('flywire_FAFB_') or normalized.startswith('flywire_BANC_'):
+        if normalized.startswith('flywire_FAFB_'):
             return 'flywire_FAFB_v783'
+
+        if normalized.startswith('flywire_BANC_'):
+            return 'flywire_BANC_v626'
 
         return normalized
 

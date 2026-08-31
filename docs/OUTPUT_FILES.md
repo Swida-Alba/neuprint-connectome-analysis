@@ -507,6 +507,13 @@ Type mappings are derived from the `male-cns_v1_0_allneurons_neuron_df.csv` file
 *   `hemibrainType`: Corresponding Hemibrain type name
 *   `mancType`: Corresponding MANC type name
 
+Crosswalk cells may list several names separated by `,`. When a `flywireType`
+value is no longer a primary type in FAFB/BANC but appears in their
+additional-type column (FAFB `additional_type(s)`, BANC
+`Alternative Cell Type(s)`), it is resolved to the current primary name
+(e.g. male-cns `SLP249` → FAFB `APDN3`); ambiguous splits become recorded
+conflicts instead of mappings.
+
 ### Priority Order
 When resolving types, the priority is: male-cns > flywire > manc > hemibrain > optic-lobe
 

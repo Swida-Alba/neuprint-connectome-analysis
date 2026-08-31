@@ -58,6 +58,143 @@ def mapper(csv_path):
 
 
 # ---------------------------------------------------------------------------
+# FlyWire additional Type(S) rename resolution
+# ---------------------------------------------------------------------------
+#
+# FAFB carries an `additional_type(s)` column and BANC an
+# `Alternative Cell Type(s)` column listing previous/alternative type names.
+# A male-cns flywireType that is no longer a primary type in the target
+# dataset must resolve to the current primary name (SLP249 -> APDN3).
+
+MCNS_RENAME_ROWS = (
+    "bodyId,type,flywireType,hemibrainType,mancType\n"
+    "1,Mc249,SLP249,,\n"            # renamed in FAFB -> APDN3
+    "2,McCB,CB1215,,\n"             # both resolve to LPN via one comma cell
+    "3,McPV,PV7c11,,\n"
+    "4,McOld,OldSplit,,\n"          # ambiguous: SplitA vs SplitB
+    "5,McDirect,MTe07,,\n"          # primary passthrough
+    "6,MDNx,MDN,,\n"                # FAFB renames MDN -> DNp50, BANC keeps MDN
+    "7,Bonly1,BOnly,,\n"            # only BANC resolves it
+    "8,McVS,\"VS1,VS2\",,\n"        # comma in crosswalk cell -> 1-to-N
+)
+
+FAFB_RENAME_TABLE = (
+    "bodyId,type,instance,additional_type(s)\n"
+    "f1,APDN3,APDN3_1,SLP249\n"
+    "f2,LPN,LPN_1,\"CB1215, PV7c11\"\n"
+    "f3,SplitA,SplitA_1,OldSplit\n"
+    "f4,SplitB,SplitB_1,OldSplit\n"
+    "f5,MTe07,MTe07_1,\n"
+    "f6,DNp50,DNp50_1,MDN\n"
+)
+
+BANC_RENAME_TABLE = (
+    "bodyId,type,instance,Alternative Cell Type(s)\n"
+    "b1,MDN,MDN_1,\n"
+    "b2,SOMEB,SOMEB_1,BOnly\n"
+)
+
+
+@pytest.fixture
+def rename_mapper(tmp_path):
+    mcns_csv = tmp_path / 'mcns.csv'
+    mcns_csv.write_text(MCNS_RENAME_ROWS, encoding='utf-8')
+    fafb_csv = tmp_path / 'fafb.csv'
+    fafb_csv.write_text(FAFB_RENAME_TABLE, encoding='utf-8')
+    banc_csv = tmp_path / 'banc.csv'
+    banc_csv.write_text(BANC_RENAME_TABLE, encoding='utf-8')
+    m = CrossDatasetTypeMapper(
+        neuron_df_path=str(mcns_csv),
+        flywire_neuron_df_paths={
+            'flywire_FAFB_v783': str(fafb_csv),
+            'flywire_BANC_v626': str(banc_csv),
+        },
+        verbose=False,
+    )
+    assert m.load() is True
+    return m
+
+
+def test_flywire_rename_resolves_to_primary_type(rename_mapper):
+    # male-cns Mc249 -> FAFB APDN3 (its flywireType SLP249 only exists as
+    # FAFB additional_type(s)); reverse direction stays unique here.
+    assert rename_mapper.get_mapped_type('Mc249', MCNS, FW) == 'APDN3'
+    assert rename_mapper.get_mapped_type('APDN3', FW, MCNS) == 'Mc249'
+    assert rename_mapper.get_canonical_type('APDN3', FW) == 'Mc249'
+
+
+def test_flywire_rename_comma_separated_additional_cell(rename_mapper):
+    # one FAFB additional cell lists two old names; both map to LPN
+    assert rename_mapper.get_mapped_type('McCB', MCNS, FW) == 'LPN'
+    assert rename_mapper.get_mapped_type('McPV', MCNS, FW) == 'LPN'
+    # reverse is N-to-1 (two mcns types share LPN) -> not mapped
+    assert rename_mapper.get_mapped_type('LPN', FW, MCNS) is None
+    assert rename_mapper.is_n_to_1_type('LPN', FW) is True
+
+
+def test_flywire_ambiguous_rename_is_conflict(rename_mapper):
+    # OldSplit is listed as additional type of two FAFB primaries ->
+    # cannot pick one, so no mapping and a 1-to-N conflict is recorded.
+    assert rename_mapper.get_mapped_type('McOld', MCNS, FW) is None
+    conflicts = rename_mapper.get_1_to_n_conflicts()
+    assert any(
+        c.source_type == 'McOld' and c.target_types == {'SplitA', 'SplitB'}
+        for c in conflicts
+    )
+
+
+def test_flywire_primary_name_passthrough(rename_mapper):
+    assert rename_mapper.get_mapped_type('McDirect', MCNS, FW) == 'MTe07'
+    assert rename_mapper.get_mapped_type('MTe07', FW, MCNS) == 'McDirect'
+
+
+def test_fafb_banc_namespaces_resolve_independently(rename_mapper):
+    # FAFB renamed MDN -> DNp50; BANC still uses MDN as primary
+    assert rename_mapper.get_mapped_type('MDNx', MCNS, FW) == 'DNp50'
+    assert rename_mapper.get_mapped_type('MDNx', MCNS, BANC) == 'MDN'
+    # FAFB <-> BANC stay connected through the shared male-cns crosswalk
+    assert rename_mapper.get_mapped_type('DNp50', FW, BANC) == 'MDN'
+    assert rename_mapper.get_mapped_type('MDN', BANC, FW) == 'DNp50'
+
+    # BANC-only rename: BOnly is additional in BANC (-> SOMEB) but unknown
+    # to FAFB, where the crosswalk name passes through.
+    assert rename_mapper.get_mapped_type('Bonly1', MCNS, BANC) == 'SOMEB'
+    assert rename_mapper.get_mapped_type('Bonly1', MCNS, FW) == 'BOnly'
+
+
+def test_comma_separated_crosswalk_cell_is_one_to_n(rename_mapper):
+    # 'VS1,VS2' expands to two FAFB primaries -> conflict, no auto mapping
+    assert rename_mapper.get_mapped_type('McVS', MCNS, FW) is None
+    assert any(
+        c.source_type == 'McVS' and c.target_types == {'VS1', 'VS2'}
+        for c in rename_mapper.get_1_to_n_conflicts()
+    )
+
+
+def test_rename_display_name_uses_primary_name(rename_mapper):
+    assert rename_mapper.get_display_name('Mc249', [MCNS, FW]) == 'Mc249(APDN3)'
+
+
+def test_missing_flywire_table_disables_rename(tmp_path):
+    mcns_csv = tmp_path / 'mcns.csv'
+    mcns_csv.write_text(MCNS_RENAME_ROWS, encoding='utf-8')
+    m = CrossDatasetTypeMapper(
+        neuron_df_path=str(mcns_csv), verbose=False)
+    assert m.load() is True
+    # without FAFB/BANC tables the crosswalk names pass through unchanged
+    assert m.get_mapped_type('Mc249', MCNS, FW) == 'SLP249'
+    # explicit None also disables resolution per namespace
+    m2 = CrossDatasetTypeMapper(
+        neuron_df_path=str(mcns_csv),
+        flywire_neuron_df_paths={'flywire_FAFB_v783': None},
+        verbose=False,
+    )
+    assert m2.load() is True
+    assert m2.get_mapped_type('Mc249', MCNS, FW) == 'SLP249'
+    assert m2._flywire_alt_to_primary.get('flywire_FAFB_v783') is None
+
+
+# ---------------------------------------------------------------------------
 # Loading
 # ---------------------------------------------------------------------------
 
@@ -142,7 +279,10 @@ def test_get_type_mapping_key(mapper):
     assert key('male-cns:v0.9') == 'male-cns:v1.0'
     assert key('male-cns:v1.0') == 'male-cns:v1.0'
     assert key('flywire_FAFB_v783') == 'flywire_FAFB_v783'
-    assert key('flywire_BANC_v626') == 'flywire_FAFB_v783'  # shared namespace
+    # BANC keeps its own namespace: it resolves renames through its own
+    # "Alternative Cell Type(s)" column, so names can differ from FAFB.
+    assert key('flywire_BANC_v626') == 'flywire_BANC_v626'
+    assert key('flywire_BANC_v888') == 'flywire_BANC_v626'
     assert key('hemibrain:v1.2.1') == 'hemibrain:v1.2.1'
 
 
