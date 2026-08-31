@@ -2062,6 +2062,22 @@ class VisualizeSkeleton:
     - Video frames
     '''
 
+    html_theme_toggle: bool = True
+    '''
+    Embed a light/dark theme switch into the main exported HTML viewer.
+
+    The switch is a small floating button (top-right corner, also bound to
+    the 'T' key) that flips the page background, legend/dropdown/hint text
+    colors, and the auto-adaptive brain/VNC mesh color at runtime via Plotly
+    relayout/restyle. The theme shown on load always matches background_color;
+    the switch only affects interactive viewing.
+
+    The switch is embedded in {saveas}.html and its {saveas}_simplified.html
+    viewer copies. Per-neuron HTML files and every static export (view PNGs,
+    individual PNG/HTML/PDF/PPTX, video) keep the fixed background_color set
+    before generation. Only the Plotly backend is supported.
+    '''
+
     neuron_colors: tuple | list | str = None
     '''
     Colors for neuron layers. Supports multiple input formats that are automatically
@@ -2665,35 +2681,43 @@ class VisualizeSkeleton:
     step events (script/API callers keep the previous quiet behavior).
     '''
 
+    @staticmethod
+    def _auto_mesh_theme_colors():
+        """Auto brain/VNC mesh colors keyed by page theme.
+
+        'light' targets a white background, 'dark' a black one. Shared by
+        _get_effective_mesh_color (generation time) and the exported HTML
+        theme toggle (viewing time) so the two can never drift apart.
+        """
+        return {
+            'light': 'rgba(200, 230, 240, 0.1)',  # Light blue, 10% opacity
+            'dark': 'rgba(60, 60, 70, 0.1)',  # Subtle dark gray, 10% opacity
+        }
+
     def _get_effective_mesh_color(self, mesh_type='brain'):
         """
         Get the effective mesh color, resolving 'auto' based on background.
-        
+
         Parameters
         ----------
         mesh_type : str
             'brain' or 'vnc' to select which mesh color to resolve
-            
+
         Returns
         -------
         str
             RGBA color string
         """
+        theme = 'dark' if self._is_dark_background() else 'light'
         if mesh_type == 'brain':
             color = self.brain_mesh_color
             if color == 'auto':
-                if self._is_dark_background():
-                    return 'rgba(60, 60, 70, 0.1)'  # Subtle dark gray for dark backgrounds
-                else:
-                    return 'rgba(200, 230, 240, 0.1)'  # Light blue for light backgrounds
+                return self._auto_mesh_theme_colors()[theme]
             return color
         else:  # vnc
             color = self.vnc_mesh_color
             if color == 'auto':
-                if self._is_dark_background():
-                    return 'rgba(60, 60, 70, 0.1)'  # Subtle dark green-gray for dark backgrounds
-                else:
-                    return 'rgba(200, 230, 240, 0.1)'  # Light green for light backgrounds
+                return self._auto_mesh_theme_colors()[theme]
             return color
 
     def list_available_rois(self, refresh=False, fetch_online=True):
@@ -3160,70 +3184,268 @@ class VisualizeSkeleton:
             f'{paragraphs}</div>'
         )
 
-    def _inject_in_page_warning(self, html_path):
-        """Insert the single combined warning banner at the top of a page."""
+    def _collect_adaptive_mesh_trace_indices(self, figure):
+        """Find Mesh3d traces carrying an auto brain/VNC mesh color.
+
+        The exported HTML theme switch bakes these indices at write time so
+        it can restyle the brain/VNC meshes together with the background.
+        Explicit user mesh colors never match the auto pair and are left
+        untouched.
+        """
+        auto_hex = set()
+        for rgba in self._auto_mesh_theme_colors().values():
+            try:
+                auto_hex.add(color_to_hex(rgba).lower())
+            except (TypeError, ValueError):
+                pass
+        indices = []
+        for idx, trace in enumerate(figure.data):
+            if getattr(trace, 'type', None) != 'mesh3d':
+                continue
+            trace_color = getattr(trace, 'color', None)
+            if isinstance(trace_color, str) and trace_color.lower() in auto_hex:
+                indices.append(idx)
+        return indices
+
+    def _theme_toggle_html(self, mesh_indices=None):
+        """Build the floating light/dark switch injected into viewer HTML.
+
+        The switch starts in the theme matching background_color and flips
+        page background, plotly chrome colors, and the auto brain/VNC mesh
+        color at runtime. Neuron/synapse trace colors are left alone — those
+        palettes are chosen per background before generation. Everything is
+        guarded so a script error can never break the page, and the widget
+        hides itself under webdriver (navigator.webdriver) so automated
+        exports never show or trigger it.
+        """
+        initial = 'dark' if self._is_dark_background() else 'light'
+        mesh_colors = {}
+        for theme, rgba in self._auto_mesh_theme_colors().items():
+            mesh_colors[theme] = {
+                'color': self._rgba_to_hex(rgba),
+                'opacity': self._extract_alpha_from_color(rgba),
+            }
+        baked = {
+            'initial': initial,
+            'meshTraces': list(mesh_indices or []),
+            'meshColors': mesh_colors,
+        }
+
+        button_html = (
+            '<button id="drocat-theme-toggle" type="button"'
+            ' aria-label="Toggle light/dark theme"'
+            ' title="Toggle light/dark theme (T)"></button>'
+        )
+        style_html = (
+            '<style>'
+            '#drocat-theme-toggle{position:fixed;right:14px;top:14px;'
+            'z-index:10000;width:36px;height:36px;border-radius:50%;'
+            'font-size:16px;line-height:1;display:flex;align-items:center;'
+            'justify-content:center;cursor:pointer;opacity:.85;'
+            'transition:opacity .15s,background .15s,color .15s;}'
+            '#drocat-theme-toggle:hover{opacity:1;}'
+            # Keep the hover mode bar clear of the corner button.
+            '.modebar-container{right:52px !important;}'
+            '</style>'
+        )
+        script_html = """
+<script>
+(function(){
+  if (window.__drocatThemeToggle) { return; }
+  var CONFIG = __DROCAT_CONFIG__;
+  var THEMES = {
+    light: {bg:'#ffffff', text:'#000000', menuBg:'rgba(255,255,255,0.9)',
+            hintColor:'gray', hintBg:'rgba(255,255,255,0.7)',
+            btnBg:'rgba(255,255,255,0.85)', btnBorder:'rgba(0,0,0,0.3)',
+            icon:'\\uD83C\\uDF19'},
+    dark:  {bg:'#000000', text:'#ffffff', menuBg:'rgba(50,50,50,0.9)',
+            hintColor:'lightgray', hintBg:'rgba(50,50,50,0.7)',
+            btnBg:'rgba(50,50,50,0.85)', btnBorder:'rgba(255,255,255,0.35)',
+            icon:'\\u2600\\uFE0F'}
+  };
+  var current = CONFIG.initial;
+  var btn = document.getElementById('drocat-theme-toggle');
+
+  function decorateButton(theme) {
+    if (!btn) { return; }
+    var t = THEMES[theme];
+    btn.style.background = t.btnBg;
+    btn.style.border = '1px solid ' + t.btnBorder;
+    btn.style.color = t.text;
+    btn.textContent = t.icon;
+  }
+
+  function graphDiv() {
+    return document.querySelector('.js-plotly-plot')
+      || document.querySelector('.plotly-graph-div');
+  }
+
+  function apply(name) {
+    var t = THEMES[name];
+    if (!t) { return; }
+    current = name;
+    document.body.style.backgroundColor = t.bg;
+    decorateButton(name);
+    try {
+      var gd = graphDiv();
+      if (!gd || !window.Plotly || !gd._fullLayout) { return; }
+      var layout = gd.layout || {};
+      var update = {
+        paper_bgcolor: t.bg,
+        plot_bgcolor: t.bg,
+        'scene.bgcolor': t.bg,
+        'legend.font.color': t.text,
+        'title.font.color': t.text,
+        'font.color': t.text
+      };
+      var menus = layout.updatemenus || [];
+      for (var i = 0; i < menus.length; i++) {
+        update['updatemenus[' + i + '].bgcolor'] = t.menuBg;
+        update['updatemenus[' + i + '].font.color'] = t.text;
+      }
+      var anns = layout.annotations || [];
+      for (var j = 0; j < anns.length; j++) {
+        if (anns[j] && anns[j].bgcolor) {
+          update['annotations[' + j + '].font.color'] = t.hintColor;
+          update['annotations[' + j + '].bgcolor'] = t.hintBg;
+        } else {
+          update['annotations[' + j + '].font.color'] = t.text;
+        }
+      }
+      var sliders = layout.sliders || [];
+      for (var k = 0; k < sliders.length; k++) {
+        update['sliders[' + k + '].font.color'] = t.text;
+        update['sliders[' + k + '].currentvalue.font.color'] = t.text;
+      }
+      Plotly.relayout(gd, update);
+      if (CONFIG.meshTraces.length) {
+        Plotly.restyle(gd,
+          {color: CONFIG.meshColors[name].color,
+           opacity: CONFIG.meshColors[name].opacity},
+          CONFIG.meshTraces);
+      }
+    } catch (err) { /* the switch must never break the page */ }
+  }
+
+  function toggle() {
+    apply(current === 'dark' ? 'light' : 'dark');
+  }
+
+  window.__drocatThemeToggle = true;
+  if (navigator.webdriver) {
+    if (btn) { btn.style.display = 'none'; }
+    return;
+  }
+  document.body.style.backgroundColor = THEMES[current].bg;
+  decorateButton(current);
+  if (!btn) { return; }
+  btn.addEventListener('click', toggle);
+  document.addEventListener('keydown', function(e){
+    var tag = (e.target && e.target.tagName) || '';
+    if (/input|textarea|select/i.test(tag)) { return; }
+    if (e.key === 't' || e.key === 'T') { toggle(); }
+  });
+})();
+</script>
+"""
+        script_html = script_html.replace(
+            '__DROCAT_CONFIG__', json.dumps(baked, ensure_ascii=True)
+        )
+        return button_html + style_html + script_html
+
+    def _inject_page_extras(self, html_path, theme_toggle=False,
+                            mesh_indices=None):
+        """Insert the warning banner and/or theme switch at the top of a page.
+
+        Both extras share one read/insert/write pass so large HTML files are
+        not rewritten twice.  Either extra is skipped when already present,
+        keeping the pass idempotent against retry/export paths.
+        """
+        if not os.path.exists(html_path):
+            return
+
         warning_html = self._in_page_warning_html()
-        if not warning_html or not os.path.exists(html_path):
+        theme_html = (
+            self._theme_toggle_html(mesh_indices) if theme_toggle else ''
+        )
+        if not warning_html and not theme_html:
             return
 
         try:
             with open(html_path, 'r', encoding='utf-8') as handle:
                 html = handle.read()
 
+            blocks = []
             # Avoid duplicate banners when an existing file is decorated by a
             # retry/export path more than once.  The legacy ids keep pages
             # written by older versions from being decorated a second time.
-            if ('drocat-in-page-warning' in html
-                    or 'drocat-skeleton-simplification-warning' in html
-                    or 'drocat-line-mode-export-warning' in html
-                    or 'drocat-pre-post-sites-warning' in html
-                    or 'drocat-layer-sampling-warning' in html):
+            if warning_html and not any(
+                    marker in html
+                    for marker in (
+                        'drocat-in-page-warning',
+                        'drocat-skeleton-simplification-warning',
+                        'drocat-line-mode-export-warning',
+                        'drocat-pre-post-sites-warning',
+                        'drocat-layer-sampling-warning',
+                    )):
+                # Wrap the banners in a flex-shrinking container and run the
+                # page as a full-height flex column so the plot (with its
+                # bottom size slider) fills the remaining viewport instead
+                # of pushing a scrollbar.
+                blocks.append(
+                    '<div class="drocat-warning-container">'
+                    + warning_html
+                    + '</div>'
+                    '<style>'
+                    'html,body{height:100%;margin:0;overflow:hidden;}'
+                    'body{display:flex;flex-direction:column;}'
+                    '.drocat-warning-container{flex:0 0 auto;}'
+                    'body > div:not(.drocat-warning-container)'
+                    '{flex:1 1 auto;min-height:0;position:relative;}'
+                    'body > div:not(.drocat-warning-container) .plotly-graph-div'
+                    '{height:100% !important;width:100% !important;}'
+                    '</style>'
+                )
+            if theme_html and 'drocat-theme-toggle' not in html:
+                blocks.append(theme_html)
+            if not blocks:
                 return
 
-            import re
             match = re.search(r'<body\b[^>]*>', html, flags=re.IGNORECASE)
             if match is None:
                 return
 
-            # Wrap the banners in a flex-shrinking container and run the page as a
-            # full-height flex column so the plot (with its bottom size slider)
-            # fills the remaining viewport instead of pushing a scrollbar.
-            banner_block = (
-                '<div class="drocat-warning-container">'
-                + warning_html
-                + '</div>'
-                '<style>'
-                'html,body{height:100%;margin:0;overflow:hidden;}'
-                'body{display:flex;flex-direction:column;}'
-                '.drocat-warning-container{flex:0 0 auto;}'
-                'body > div:not(.drocat-warning-container)'
-                '{flex:1 1 auto;min-height:0;position:relative;}'
-                'body > div:not(.drocat-warning-container) .plotly-graph-div'
-                '{height:100% !important;width:100% !important;}'
-                '</style>'
-            )
-            html = html[:match.end()] + '\n' + banner_block + html[match.end():]
+            html = (html[:match.end()] + '\n' + '\n'.join(blocks)
+                    + html[match.end():])
             with open(html_path, 'w', encoding='utf-8') as handle:
                 handle.write(html)
         except Exception as exc:
             self._vprint(
-                f'  Warning: could not add HTML in-page warning: {exc}',
+                f'  Warning: could not decorate HTML page: {exc}',
                 level='full',
             )
 
-    def _write_plotly_html(self, figure, html_path, **kwargs):
+    def _write_plotly_html(self, figure, html_path, theme_toggle=False,
+                           **kwargs):
         """Write a self-contained visualization HTML.
 
         Plotly's JavaScript runtime is embedded in every page so an HTML file
         remains portable when copied without its output directory.  A warning
         banner is added after Plotly has generated the document so it remains
-        visible in both the main and per-neuron pages.
+        visible in both the main and per-neuron pages, and permanent viewer
+        copies can additionally carry the light/dark theme switch.
         """
         kwargs.setdefault('auto_open', False)
         kwargs.setdefault('full_html', True)
         kwargs.setdefault('include_plotlyjs', True)
         figure.write_html(html_path, **kwargs)
-        self._inject_in_page_warning(html_path)
+        mesh_indices = (
+            self._collect_adaptive_mesh_trace_indices(figure)
+            if theme_toggle else None
+        )
+        self._inject_page_extras(
+            html_path, theme_toggle=theme_toggle, mesh_indices=mesh_indices
+        )
         self._record_large_html_warning(html_path)
 
     def _simplify_mesh_open3d(self, trimesh_obj, target_faces):
@@ -3717,6 +3939,7 @@ class VisualizeSkeleton:
                             self._write_plotly_html(
                                 simplified_fig,
                                 simplified_html_path,
+                                theme_toggle=self.html_theme_toggle,
                                 auto_open=False,
                                 include_plotlyjs=True,
                                 config={'displayModeBar': False},
@@ -15021,6 +15244,7 @@ class VisualizeSkeleton:
             self._write_plotly_html(
                 self.fig_3d,
                 self.fig_path + '.html',
+                theme_toggle=self.html_theme_toggle,
                 auto_open=False,
                 include_plotlyjs=True,
                 config=html_config,
@@ -15162,6 +15386,7 @@ class VisualizeSkeleton:
                             self._write_plotly_html(
                                 export_fig,
                                 simplified_html_path,
+                                theme_toggle=self.html_theme_toggle,
                                 auto_open=False,
                                 include_plotlyjs=True,
                                 config={'displayModeBar': False},
@@ -17286,6 +17511,7 @@ class VisualizeSkeleton:
                         self._write_plotly_html(
                             fig_new,
                             simplified_html_path,
+                            theme_toggle=self.html_theme_toggle,
                             auto_open=False,
                             include_plotlyjs=True,
                             config={'displayModeBar': False},

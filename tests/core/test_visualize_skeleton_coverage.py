@@ -318,18 +318,18 @@ class TestWarningBanners:
         vis = make_vis(skeleton_mode='line', save_folder=str(tmp_path))
         page = tmp_path / 'page.html'
         page.write_text('<html><body><div>plot</div></body></html>')
-        vis._inject_in_page_warning(str(page))
+        vis._inject_page_extras(str(page))
         content = page.read_text()
         assert 'drocat-in-page-warning' in content
         # second injection must be a no-op
-        vis._inject_in_page_warning(str(page))
+        vis._inject_page_extras(str(page))
         assert content == page.read_text()
         # no body tag -> untouched; missing file -> untouched
         page2 = tmp_path / 'nobody.html'
         page2.write_text('<html></html>')
-        vis._inject_in_page_warning(str(page2))
+        vis._inject_page_extras(str(page2))
         assert page2.read_text() == '<html></html>'
-        vis._inject_in_page_warning(str(tmp_path / 'absent.html'))
+        vis._inject_page_extras(str(tmp_path / 'absent.html'))
 
     def test_layer_sampling_warning_html(self):
         assert make_vis()._layer_sampling_warning_html() == ''
@@ -354,12 +354,12 @@ class TestWarningBanners:
             layer_sample_notes=["r1_T1: showing 20 of 25 members"])
         page = tmp_path / 'page.html'
         page.write_text('<html><body><div>plot</div></body></html>')
-        vis._inject_in_page_warning(str(page))
+        vis._inject_page_extras(str(page))
         content = page.read_text()
         assert 'drocat-in-page-warning' in content
         assert 'Truncated type layers.' in content
         # second injection must be a no-op
-        vis._inject_in_page_warning(str(page))
+        vis._inject_page_extras(str(page))
         assert content == page.read_text()
 
     def test_write_plotly_html(self, tmp_path):
