@@ -57,6 +57,23 @@ def _write_paged_index(tmp_path, dataset="paged:v1.0", row_count=60):
     return dataset
 
 
+def _write_taxonomy_index(tmp_path, dataset="taxonomy:v1.0"):
+    folder = dataset.replace(":", "_").replace(".", "_")
+    cache_dir = tmp_path / "neuron_indexes" / folder
+    cache_dir.mkdir(parents=True)
+    index_path = cache_dir / "neuron_index.parquet"
+    pl.DataFrame(
+        {
+            "bodyId": ["100", "200", "300", "400", "500"],
+            "type": ["DN1a", "l-LNv", "s-LNv", "DN1a", ""],
+            "instance": ["DN1a_L", "l-LNv_L", "s-LNv_L", "DN1a_R", ""],
+            "cell_class": ["circadian", "circadian", "circadian", "other", "circadian"],
+            "post": [1, 2, 3, 4, 5],
+        }
+    ).write_parquet(index_path)
+    return dataset
+
+
 @pytest.fixture
 def isolated_index_root(tmp_path, monkeypatch):
     import ui.neuron_index as neuron_index
@@ -721,6 +738,93 @@ class TestNeuronIndexData:
         # Without the flag the full map stays empty to keep paged browsing cheap.
         plain = query_neuron_index(index, search="aMe", page_size=10)
         assert plain.all_keys == {}
+
+    def test_match_group_subtypes_expand_a_coarse_entry(
+        self, isolated_index_root
+    ):
+        from ui.neuron_index import (
+            load_cached_neuron_index,
+            query_match_group_subtypes,
+            query_neuron_index,
+        )
+
+        dataset = _write_taxonomy_index(isolated_index_root)
+        index = load_cached_neuron_index(dataset, enrich=False)
+
+        result = query_neuron_index(index, search="circadian")
+        assert [group["match_value"] for group in result.match_groups] == [
+            "circadian"
+        ]
+        group = result.match_groups[0]
+        assert group["match_column_key"] == "cell_class"
+        assert group["body_count"] == 4
+
+        payload = query_match_group_subtypes(
+            index, result.match_group_members["circadian"]
+        )
+        assert payload["total_types"] == 3
+        assert payload["truncated"] is False
+        # Sorted by type name; the blank-type body stays out of the list.
+        assert [
+            subtype["match_value"] for subtype in payload["subtypes"]
+        ] == ["DN1a", "l-LNv", "s-LNv"]
+        dn1a = payload["subtypes"][0]
+        # Membership is restricted to the expanded entry: the DN1a body in
+        # the "other" class must not appear.
+        assert dn1a["body_ids"] == ("100",)
+        assert dn1a["member_keys"] == ("100::0",)
+        assert dn1a["first_body_id"] == "100"
+        assert dn1a["body_count"] == 1
+
+    def test_match_group_subtypes_ignores_unknown_keys_and_caps_output(
+        self, isolated_index_root
+    ):
+        from ui.neuron_index import (
+            load_cached_neuron_index,
+            query_match_group_subtypes,
+        )
+
+        dataset = _write_taxonomy_index(isolated_index_root)
+        index = load_cached_neuron_index(dataset, enrich=False)
+
+        assert query_match_group_subtypes(index, ["nonsense", "", None]) == {
+            "subtypes": [],
+            "total_types": 0,
+            "truncated": False,
+        }
+
+        payload = query_match_group_subtypes(
+            index,
+            ["100::0", "200::1", "300::2", "400::3"],
+            limit=2,
+        )
+        assert payload["total_types"] == 3
+        assert payload["truncated"] is True
+        assert [subtype["match_value"] for subtype in payload["subtypes"]] == [
+            "DN1a",
+            "l-LNv",
+        ]
+        # The cap keeps the DN1a bodies from both taxonomy classes because
+        # both rows are part of the requested membership.
+        dn1a = payload["subtypes"][0]
+        assert dn1a["body_ids"] == ("100", "400")
+
+        typeless = "typeless:v1.0"
+        folder = typeless.replace(":", "_").replace(".", "_")
+        cache_dir = isolated_index_root / "neuron_indexes" / folder
+        cache_dir.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "bodyId": ["100", "200"],
+                "post": [1, 2],
+            }
+        ).write_parquet(cache_dir / "neuron_index.parquet")
+        typeless_index = load_cached_neuron_index(typeless, enrich=False)
+        assert query_match_group_subtypes(typeless_index, ["100::0"]) == {
+            "subtypes": [],
+            "total_types": 0,
+            "truncated": False,
+        }
 
 
 class TestNeuronIndexViewer:
@@ -1540,3 +1644,150 @@ class TestNeuronIndexViewer:
             for el in client.elements.values()
         )
         assert "The viewer does not open or stream the original dataset file." in joined
+
+    def test_coarse_match_entry_expands_to_selectable_subtypes(
+        self, isolated_index_root, monkeypatch
+    ):
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.components.neuron_index_viewer as viewer
+        from ui.components.neuron_index_viewer import create_neuron_index_viewer_link
+
+        dataset = _write_taxonomy_index(isolated_index_root)
+        monkeypatch.setattr(viewer, "PROJECT_ROOT", isolated_index_root)
+        current_query = ["existing"]
+        selection_batches = []
+        resolution_batches = []
+
+        def sync_query(values):
+            selection_batches.append(list(values))
+            current_query[:] = ["existing", *values]
+
+        def sync_resolution(values):
+            resolution_batches.append(list(values))
+
+        client = Client(page("/neuron-index-viewer-subtypes"))
+        with client:
+            link = create_neuron_index_viewer_link(
+                lambda: dataset,
+                query_values_getter=lambda: current_query,
+                query_selection=sync_query,
+                query_resolution=sync_resolution,
+            )
+        # The trigger presents itself as a loupe.
+        assert link._props.get("icon") == "search"
+        self._click(link)
+
+        tables = [el for el in client.elements.values() if type(el).__name__ == "Table"]
+        match_table = next(
+            table for table in tables
+            if table._props["columns"][0]["name"] == "match_column"
+        )
+        body_template = match_table.slots["body"].template
+        assert "match-expand-toggle" in body_template
+        assert "match-subtype-toggle" in body_template
+        assert "drocat-neuron-match-subtype-list" in body_template
+
+        search_input = next(
+            element for element in client.elements.values()
+            if getattr(element, "_props", {}).get("label")
+            == "Search identities & taxonomy"
+        )
+        search_listener = next(iter(search_input._event_listeners.values()))
+        search_input._handle_event({
+            "listener_id": search_listener.id,
+            "args": "circadian",
+        })
+
+        row = match_table._props["rows"][0]
+        assert row["match_value"] == "circadian"
+        assert row["match_column_key"] == "cell_class"
+        assert row["__can_expand"] is True
+        assert "__expanded" not in row
+
+        expand_listener = next(
+            listener for listener in match_table._event_listeners.values()
+            if listener.type == "matchExpandToggle"
+        )
+        match_table._handle_event({
+            "listener_id": expand_listener.id,
+            "args": "circadian",
+        })
+
+        row = match_table._props["rows"][0]
+        assert row["__expanded"] is True
+        display = row["__subtypes"]
+        assert display["total_types"] == 3
+        assert display["truncated"] is False
+        assert [s["match_value"] for s in display["subtypes"]] == [
+            "DN1a", "l-LNv", "s-LNv",
+        ]
+        assert [s["body_count"] for s in display["subtypes"]] == [1, 1, 1]
+        assert all(not s["selected"] for s in display["subtypes"])
+
+        subtype_listener = next(
+            listener for listener in match_table._event_listeners.values()
+            if listener.type == "matchSubtypeToggle"
+        )
+        match_table._handle_event({
+            "listener_id": subtype_listener.id,
+            "args": {
+                "group": "circadian",
+                "value": "DN1a",
+                "selected": True,
+            },
+        })
+
+        assert selection_batches[-1] == ["DN1a"]
+        assert resolution_batches[-1] == ["100"]
+        assert current_query == ["existing", "DN1a"]
+        row = match_table._props["rows"][0]
+        selected_flags = {
+            s["match_value"]: s["selected"] for s in row["__subtypes"]["subtypes"]
+        }
+        assert selected_flags == {"DN1a": True, "l-LNv": False, "s-LNv": False}
+        full_table = next(
+            table for table in tables
+            if table._props["columns"][0]["name"] == "bodyId"
+        )
+        assert {str(r["bodyId"]) for r in full_table.selected} == {"100"}
+
+        # Deselecting the subtype removes exactly that value again.
+        match_table._handle_event({
+            "listener_id": subtype_listener.id,
+            "args": {
+                "group": "circadian",
+                "value": "DN1a",
+                "selected": False,
+            },
+        })
+        assert selection_batches[-1] == []
+        assert resolution_batches[-1] == []
+        assert current_query == ["existing"]
+        row = match_table._props["rows"][0]
+        assert not any(s["selected"] for s in row["__subtypes"]["subtypes"])
+
+        # Collapsing keeps the cached panel so a re-expand needs no recompute.
+        match_table._handle_event({
+            "listener_id": expand_listener.id,
+            "args": "circadian",
+        })
+        row = match_table._props["rows"][0]
+        assert row["__expanded"] is False
+        assert row["__subtypes"]["total_types"] == 3
+        match_table._handle_event({
+            "listener_id": expand_listener.id,
+            "args": "circadian",
+        })
+        row = match_table._props["rows"][0]
+        assert row["__expanded"] is True
+
+        # A type match is already the leaf identity and gets no expander.
+        search_input._handle_event({
+            "listener_id": search_listener.id,
+            "args": "DN1a",
+        })
+        row = match_table._props["rows"][0]
+        assert row["match_value"] == "DN1a"
+        assert row["match_column_key"] == "type"
+        assert row["__can_expand"] is False

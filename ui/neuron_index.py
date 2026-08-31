@@ -2365,3 +2365,99 @@ def query_neuron_index(
         focus_page=focus_page,
         all_keys=all_keys,
     )
+
+
+def query_match_group_subtypes(
+    index: CachedNeuronIndex,
+    member_keys,
+    *,
+    type_column: str = "type",
+    limit: int = 500,
+) -> Dict[str, Any]:
+    """Return the distinct type values inside one match group's member rows.
+
+    The viewer calls this lazily when a coarse taxonomy entry (for example a
+    ``cell_type`` value such as ``circadian_clock``) is expanded, so a broad
+    query never pays the subtype fan-out for every group. Member keys are the
+    private ``bodyId::<row ordinal>`` keys used by the match panel; the
+    ordinals are positions in the cached frame and stay stable for the
+    lifetime of the loaded index, so filtering by them reproduces exactly the
+    rows behind the clicked entry.
+
+    The result is sorted by type name (case-insensitive). ``body_ids`` and
+    ``member_keys`` per subtype are the exact selection payloads for the
+    viewer; the client only receives the compact display fields.
+    """
+    import polars as pl
+
+    empty = {"subtypes": [], "total_types": 0, "truncated": False}
+    ordinals: List[int] = []
+    key_by_ordinal: Dict[int, str] = {}
+    for raw in member_keys or ():
+        key = str(raw or "").strip()
+        if not key:
+            continue
+        suffix = key.rpartition("::")[2]
+        try:
+            ordinal = int(suffix)
+        except ValueError:
+            continue
+        if ordinal < 0 or ordinal in key_by_ordinal:
+            continue
+        ordinals.append(ordinal)
+        key_by_ordinal[ordinal] = key
+    if not ordinals or type_column not in index.columns:
+        return empty
+
+    frame = index.frame.with_row_index("__neuron_row").filter(
+        pl.col("__neuron_row").is_in(
+            pl.Series(ordinals, dtype=pl.UInt32).implode()
+        )
+    )
+    frame = frame.with_columns(
+        pl.col(type_column)
+        .cast(pl.Utf8, strict=False)
+        .fill_null("")
+        .str.strip_chars()
+        .alias("__subtype_value")
+    ).filter(pl.col("__subtype_value") != "")
+    if frame.is_empty():
+        return empty
+
+    grouped = frame.group_by("__subtype_value").agg(
+        pl.col("bodyId").cast(pl.Utf8, strict=False).fill_null("").alias(
+            "__subtype_body_ids"
+        ),
+        pl.col("__neuron_row").alias("__subtype_rows"),
+    )
+    subtypes: List[Dict[str, Any]] = []
+    for raw in grouped.to_dicts():
+        value = str(raw.get("__subtype_value") or "")
+        keys: List[str] = []
+        for ordinal in raw.get("__subtype_rows") or ():
+            key = key_by_ordinal.get(int(ordinal))
+            if key and key not in keys:
+                keys.append(key)
+        body_ids: List[str] = []
+        for raw_body_id in raw.get("__subtype_body_ids") or ():
+            body_id = str(raw_body_id or "").strip()
+            if body_id.endswith(".0") and body_id[:-2].isdigit():
+                body_id = body_id[:-2]
+            if body_id and body_id not in body_ids:
+                body_ids.append(body_id)
+        subtypes.append({
+            "match_value": value,
+            "body_count": len(body_ids),
+            "first_body_id": body_ids[0] if body_ids else "",
+            "body_ids": tuple(body_ids),
+            "member_keys": tuple(keys),
+        })
+    subtypes.sort(
+        key=lambda item: (item["match_value"].casefold(), item["match_value"])
+    )
+    total_types = len(subtypes)
+    return {
+        "subtypes": subtypes[: max(0, int(limit))],
+        "total_types": total_types,
+        "truncated": total_types > int(limit),
+    }

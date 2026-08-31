@@ -13,6 +13,7 @@ from ..config import PROJECT_ROOT
 from ..neuron_index import (
     load_cached_neuron_index,
     neuron_index_path,
+    query_match_group_subtypes,
     query_neuron_index,
 )
 
@@ -422,6 +423,12 @@ def _render_index(
         selected_match_members: dict[str, set[str]] = {}
         selected_match_body_ids: dict[str, tuple[str, ...]] = {}
         selected_body_ids: dict[str, str] = {}
+        # Expanded subtype panels, keyed by the match-group value. Entries
+        # survive query re-runs (paging, focus jumps) so a click on a member
+        # body does not collapse the panel the user is working in. ``members``
+        # keeps the payload from being reused when a later search changes the
+        # membership of a same-named group.
+        subtype_expansions: dict[str, dict] = {}
         # Lazily-computed complete key->bodyId map for the current query, used
         # only by the full metadata table's select-all across all pages.
         full_table_all_keys: dict[str, str] | None = None
@@ -454,6 +461,30 @@ def _render_index(
         match_previous_button = None
         match_next_button = None
         query_callback = query_selection or add_to_query
+
+        # Subtype expansion is only meaningful below a coarse taxonomy entry.
+        # A type, instance, or bodyId match is already the leaf identity.
+        subtype_leaf_columns = {"bodyId", "type", "instance"}
+
+        def stamp_match_group_flags() -> None:
+            """Attach expansion eligibility and persisted panel state."""
+            can_expand = "type" in columns
+            for group in match_groups_all:
+                group["__can_expand"] = (
+                    can_expand
+                    and str(group.get("match_column_key", "") or "")
+                    not in subtype_leaf_columns
+                )
+            for group in match_groups_all:
+                key = str(group.get("__match_group_key", "") or "")
+                entry = subtype_expansions.get(key)
+                if entry is None:
+                    continue
+                if set(group_members.get(key, ())) != entry["members"]:
+                    continue
+                group["__subtypes"] = entry["display"]
+                group["__expanded"] = entry["expanded"]
+        stamp_match_group_flags()
 
         def effective_body_keys() -> set[str]:
             keys = set(selected_body_ids)
@@ -575,6 +606,30 @@ def _render_index(
                 if value not in linked_values
             ]
 
+        def remember_subtype(
+            value: str,
+            member_keys,
+            body_ids,
+        ) -> None:
+            """Record one expanded subtype with its exact membership.
+
+            Subtypes reuse the named-selection maps so query chips, body-ID
+            resolution, chip removal, and cross-search persistence behave
+            exactly like a match group picked from the panel.
+            """
+            value = str(value or "").strip()
+            if not value:
+                return
+            selected_match_values.add(value)
+            selected_match_members[value] = {
+                str(key) for key in member_keys or () if str(key or "").strip()
+            }
+            selected_match_body_ids[value] = tuple(
+                str(body_id) for body_id in body_ids or () if str(body_id or "").strip()
+            )
+            if value not in selected_match_order:
+                selected_match_order.append(value)
+
         def row_body_id(row) -> str:
             """Return a verified, query-safe body ID for an individual row."""
             value = str(row.get("bodyId", "") or "").strip()
@@ -669,6 +724,17 @@ def _render_index(
                 selection_status.update()
 
         def refresh_table_selection() -> None:
+            # Expansion checkboxes render from row data, so their checked
+            # flags must be re-stamped before the table pushes an update.
+            for group in current_groups:
+                display = group.get("__subtypes")
+                if not display:
+                    continue
+                for subtype in display.get("subtypes", ()):
+                    subtype["selected"] = (
+                        str(subtype.get("match_value", "") or "").strip()
+                        in selected_match_values
+                    )
             if match_table is not None:
                 visible_match_rows = [
                     row for row in current_groups
@@ -798,6 +864,95 @@ def _render_index(
                     request_focus(focus_keys, anchor_key=focus_keys[0])
                     return
             refresh_table_selection()
+
+        def build_subtype_entry(group) -> dict:
+            """Compute and cache the subtype panel for one match group.
+
+            The server-side entry keeps the full selection payload (member
+            keys and body IDs); only the compact display copy is attached to
+            the row so a 500-subtype expansion never ships its whole
+            membership over the websocket.
+            """
+            key = str(group.get("__match_group_key", "") or "")
+            members = tuple(sorted(group_members.get(key, ())))
+            payload = query_match_group_subtypes(index, members)
+            display = {
+                "subtypes": [
+                    {
+                        "match_value": subtype["match_value"],
+                        "body_count": subtype["body_count"],
+                        "selected": subtype["match_value"] in selected_match_values,
+                    }
+                    for subtype in payload["subtypes"]
+                ],
+                "total_types": payload["total_types"],
+                "truncated": payload["truncated"],
+            }
+            entry = {
+                "members": set(members),
+                "payload": payload,
+                "display": display,
+                "expanded": False,
+            }
+            subtype_expansions[key] = entry
+            return entry
+
+        def handle_match_expand_toggle(event) -> None:
+            key = str(getattr(event, "args", "") or "").strip()
+            if not key:
+                return
+            group = next(
+                (
+                    candidate
+                    for candidate in match_groups_all
+                    if str(candidate.get("__match_group_key", "") or "") == key
+                ),
+                None,
+            )
+            if group is None or not group.get("__can_expand"):
+                return
+            entry = subtype_expansions.get(key)
+            if entry is None or set(group_members.get(key, ())) != entry["members"]:
+                entry = build_subtype_entry(group)
+            entry["expanded"] = not entry["expanded"]
+            group["__subtypes"] = entry["display"]
+            group["__expanded"] = entry["expanded"]
+            match_table.update_rows(current_groups)
+
+        def handle_subtype_toggle(event) -> None:
+            """Apply one expanded-subtype checkbox toggle."""
+            args = getattr(event, "args", None)
+            if not isinstance(args, dict):
+                return
+            group_key = str(args.get("group", "") or "").strip()
+            value = str(args.get("value", "") or "").strip()
+            if not value:
+                return
+            if bool(args.get("selected")):
+                subtype = None
+                entry = subtype_expansions.get(group_key)
+                if entry is not None:
+                    subtype = next(
+                        (
+                            candidate
+                            for candidate in entry["payload"]["subtypes"]
+                            if str(candidate.get("match_value", "")) == value
+                        ),
+                        None,
+                    )
+                if subtype is not None:
+                    remember_subtype(
+                        value,
+                        subtype.get("member_keys", ()),
+                        subtype.get("body_ids", ()),
+                    )
+                else:
+                    remember_match(value)
+            else:
+                forget_match(value)
+            sync_query_selection()
+            refresh_table_selection()
+            match_table.update_rows(current_groups)
 
         def handle_body_selection(event) -> None:
             visible = {
@@ -951,6 +1106,13 @@ def _render_index(
                       </q-td>
                       <q-td key="match_column" :props="props" class="drocat-neuron-match-by">
                         <div class="drocat-neuron-match-source">
+                          <q-btn
+                            v-if="props.row.__can_expand"
+                            flat dense round size="xs"
+                            class="drocat-neuron-match-expand-btn"
+                            :icon="props.row.__expanded ? 'expand_less' : 'expand_more'"
+                            @click.stop="$parent.$emit('match-expand-toggle', props.row.__match_group_key)"
+                          />
                           <q-icon
                             v-if="props.row.match_role === 'secondary'"
                             name="arrow_right_alt"
@@ -976,6 +1138,46 @@ def _render_index(
                       </q-td>
                       <q-td key="body_count" :props="props" class="text-right">
                         {{ props.row.body_count }}
+                      </q-td>
+                    </q-tr>
+                    <q-tr
+                      v-if="props.row.__expanded && props.row.__subtypes"
+                      class="drocat-neuron-match-subtype-panel-row"
+                    >
+                      <q-td colspan="4" class="drocat-neuron-match-subtype-cell">
+                        <div class="drocat-neuron-match-subtype-head">
+                          {{ props.row.__subtypes.total_types }}
+                          {{ props.row.__subtypes.total_types === 1 ? 'type' : 'types' }}
+                          in {{ props.row.match_value }}
+                        </div>
+                        <div class="drocat-neuron-match-subtype-list">
+                          <div
+                            v-for="subtype in props.row.__subtypes.subtypes"
+                            :key="subtype.match_value"
+                            class="drocat-neuron-match-subtype-item"
+                          >
+                            <q-checkbox
+                              :model-value="!!subtype.selected"
+                              dense
+                              @click.stop="$parent.$emit('match-subtype-toggle', { group: props.row.__match_group_key, value: subtype.match_value, selected: !subtype.selected })"
+                            />
+                            <span class="drocat-neuron-match-subtype-name">{{ subtype.match_value }}</span>
+                            <span class="drocat-neuron-match-subtype-count">{{ subtype.body_count }}</span>
+                          </div>
+                          <div
+                            v-if="!props.row.__subtypes.subtypes.length"
+                            class="drocat-neuron-match-subtype-note"
+                          >
+                            No type values in this entry.
+                          </div>
+                          <div
+                            v-if="props.row.__subtypes.truncated"
+                            class="drocat-neuron-match-subtype-note"
+                          >
+                            Showing the first {{ props.row.__subtypes.subtypes.length }} of
+                            {{ props.row.__subtypes.total_types }} types. Refine by searching the type name.
+                          </div>
+                        </div>
                       </q-td>
                     </q-tr>
                     """,
@@ -1268,6 +1470,7 @@ def _render_index(
             str(key): set(values)
             for key, values in result.match_group_members.items()
         })
+        stamp_match_group_flags()
         render_match_page()
         table.update_rows(current_rows)
         if focus_keys is None and focus_key:
@@ -1366,6 +1569,8 @@ def _render_index(
     match_next_button.on_click(lambda: change_match_page(1))
     match_table.on("match-value-click", handle_match_value_click)
     match_table.on("match-selection-toggle", handle_match_toggle)
+    match_table.on("match-expand-toggle", handle_match_expand_toggle)
+    match_table.on("match-subtype-toggle", handle_subtype_toggle)
     table.on("full-table-select-all", handle_full_table_select_all)
     refresh()
 
@@ -1504,7 +1709,7 @@ def create_neuron_index_viewer_link(
             apply_holder=_apply_holder,
         )
 
-    link = ui.button(label, icon="table_view", on_click=open_viewer).props(
+    link = ui.button(label, icon="search", on_click=open_viewer).props(
         "flat dense no-caps"
     ).classes("drocat-inline-link")
     # Expose the dialog for component-level tests and for callers that want
