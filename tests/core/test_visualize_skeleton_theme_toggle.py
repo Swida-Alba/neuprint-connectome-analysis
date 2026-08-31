@@ -72,6 +72,16 @@ def test_theme_toggle_html_starts_at_background_theme():
     assert '"initial": "dark"' in dark._theme_toggle_html()
 
 
+def test_theme_toggle_html_repositions_below_warning_banner():
+    # The switch is fixed to the viewport's top-right corner and would
+    # otherwise paint over the full-width warning banner; the injected
+    # script must measure the banner and drop the switch below it.
+    html = _make_visualizer('white')._theme_toggle_html(mesh_indices=[0])
+    assert 'drocat-warning-container' in html
+    assert 'positionBelowBanner' in html
+    assert "addEventListener('resize', positionBelowBanner)" in html
+
+
 def test_write_plotly_html_embeds_toggle_only_when_requested(tmp_path):
     visualizer = _make_visualizer()
 

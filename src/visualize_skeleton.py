@@ -3357,6 +3357,21 @@ class VisualizeSkeleton:
     if (/input|textarea|select/i.test(tag)) { return; }
     if (e.key === 't' || e.key === 'T') { toggle(); }
   });
+
+  // The switch is fixed to the viewport's top-right corner, which would
+  // paint over a full-width warning banner. When a banner is present,
+  // drop the switch below it instead (its height varies with content).
+  function positionBelowBanner() {
+    var banner = document.querySelector('.drocat-warning-container');
+    if (!banner) { return; }
+    var bannerBottom = banner.getBoundingClientRect().bottom;
+    if (bannerBottom > 0) {
+      btn.style.top = (Math.round(bannerBottom) + 14) + 'px';
+    }
+  }
+  positionBelowBanner();
+  window.addEventListener('resize', positionBelowBanner);
+  window.addEventListener('load', positionBelowBanner);
 })();
 </script>
 """
