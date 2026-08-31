@@ -195,7 +195,17 @@ except ImportError:
     from .synapse_cache import SynapseCache
 
 
-def _configure_roi_mesh_traces(mesh_traces, roi_name):
+# Plotly's legend sorts by ``legendrank`` and coerces missing ranks to 0, so
+# unranked traces cluster into the first legend group and appear BETWEEN two
+# neuron entries. Pin every mesh family to an explicit rank band above all
+# neuron/site ranks (which grow by 100 per group): ROI meshes first, then the
+# brain mesh, with the VNC mesh always last.
+ROI_MESH_LEGEND_RANK_BASE = 100_000_000
+BRAIN_MESH_LEGEND_RANK = 200_000_000
+VNC_MESH_LEGEND_RANK = 200_000_001
+
+
+def _configure_roi_mesh_traces(mesh_traces, roi_name, legend_rank=None):
     """Give one resolved ROI its own Plotly legend entry and trace group."""
     legend_group = f'roi_mesh:{roi_name}'
     display_name = f'brain region [{roi_name}]'
@@ -206,6 +216,8 @@ def _configure_roi_mesh_traces(mesh_traces, roi_name):
         trace.name = display_name
         trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'
         trace.hoverinfo = 'name'
+        if legend_rank is not None:
+            trace.legendrank = legend_rank
 
     return mesh_traces
 
@@ -14941,7 +14953,10 @@ class VisualizeSkeleton:
                     mesh_traces = fig_mesh.data
                     
                     roi_name = roi_names[roi_i]
-                    _configure_roi_mesh_traces(mesh_traces, roi_name)
+                    _configure_roi_mesh_traces(
+                        mesh_traces, roi_name,
+                        legend_rank=ROI_MESH_LEGEND_RANK_BASE + roi_i * 100,
+                    )
                     self.fig_3d.add_traces(mesh_traces)
                 elif self.backend == 'k3d':
                     try:
@@ -15031,6 +15046,7 @@ class VisualizeSkeleton:
                         trace.showlegend = True
                         trace.name = mesh_display_name
                         trace.hoverinfo = 'none'
+                        trace.legendrank = BRAIN_MESH_LEGEND_RANK
                         self._apply_plotly_trace_color(trace, effective_brain_color)
                     self.fig_3d.add_traces(brain_traces)
                 elif self.backend == 'k3d':
@@ -15066,6 +15082,7 @@ class VisualizeSkeleton:
                                 trace.showlegend = True
                                 trace.name = mesh_display_name
                                 trace.hoverinfo = 'none'
+                                trace.legendrank = BRAIN_MESH_LEGEND_RANK
                                 self._apply_plotly_trace_color(trace, effective_brain_color)
                             self.fig_3d.add_traces(brain_traces)
                         elif self.backend == 'k3d':
@@ -15121,6 +15138,7 @@ class VisualizeSkeleton:
                                 trace.showlegend = True
                                 trace.name = vnc_display_name
                                 trace.hoverinfo = 'none'
+                                trace.legendrank = VNC_MESH_LEGEND_RANK
                                 self._apply_plotly_trace_color(trace, effective_vnc_color)
                             self.fig_3d.add_traces(vnc_traces)
                         elif self.backend == 'k3d':
