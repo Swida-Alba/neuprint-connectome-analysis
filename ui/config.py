@@ -725,8 +725,10 @@ DEFAULT_SETTING_SPECS = {
         "label": "Neuron Legend Mode",
         "group": "skeleton_render",
         "kind": "select",
-        "options": ["layer", "type", "single"],
-        "hint": "One legend entry per layer, type, or individual neuron.",
+        "options": ["layer", "type", "type_tree", "single"],
+        "hint": "One legend entry per layer, type, or individual neuron. "
+                "'type_tree' adds an expandable type -> neuron legend panel "
+                "to the exported interactive HTML.",
     },
     "background": {
         "label": "Background",

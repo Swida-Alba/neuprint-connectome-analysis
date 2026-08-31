@@ -213,9 +213,11 @@ def skeleton_visualization_settings(
             )
             fields["legend_mode"] = select_input(
                 "Legend Mode",
-                ["layer", "type", "single"],
+                ["layer", "type", "type_tree", "single"],
                 get_user_default("legend_mode"),
-                hint="Choose one legend entry per layer, type, or individual neuron.",
+                hint="Choose one legend entry per layer, type, or individual "
+                     "neuron. 'type_tree' adds an expandable type -> neuron "
+                     "legend panel to the exported interactive HTML.",
             )
             fields["background_color"] = select_input(
                 "Background",

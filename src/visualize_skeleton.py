@@ -204,6 +204,11 @@ ROI_MESH_LEGEND_RANK_BASE = 100_000_000
 BRAIN_MESH_LEGEND_RANK = 200_000_000
 VNC_MESH_LEGEND_RANK = 200_000_001
 
+# Legend modes. 'type_tree' renders exactly like 'type' (same native legend,
+# used by static exports) and additionally tags traces so the exported
+# interactive HTML can embed a collapsible type -> neuron legend panel.
+LEGEND_MODES = ('single', 'type', 'type_tree', 'layer')
+
 
 def _configure_roi_mesh_traces(mesh_traces, roi_name, legend_rank=None):
     """Give one resolved ROI its own Plotly legend entry and trace group."""
@@ -2347,6 +2352,10 @@ class VisualizeSkeleton:
                 Full detail for identifying individual neurons.
     - 'type': Group by neuron type within each layer. If a layer has multiple
               neuron types, each type gets a separate legend entry.
+    - 'type_tree': Same legend as 'type', plus the exported interactive HTML
+                   embeds a collapsible type -> neuron legend panel (top-left;
+                   a type row expands to its bodyId rows, each toggleable).
+                   Static exports keep the plain type-level legend.
     - 'layer': Merge all neurons in a layer into one legend entry.
                Auto-named as {type1}_{type2}_etc if 3+ types present.
     '''
@@ -3297,6 +3306,7 @@ class VisualizeSkeleton:
     if (!t) { return; }
     current = name;
     document.body.style.backgroundColor = t.bg;
+    document.body.classList.toggle('drocat-theme-dark', name === 'dark');
     decorateButton(name);
     try {
       var gd = graphDiv();
@@ -3349,6 +3359,7 @@ class VisualizeSkeleton:
     return;
   }
   document.body.style.backgroundColor = THEMES[current].bg;
+  document.body.classList.toggle('drocat-theme-dark', current === 'dark');
   decorateButton(current);
   if (!btn) { return; }
   btn.addEventListener('click', toggle);
@@ -3380,12 +3391,305 @@ class VisualizeSkeleton:
         )
         return button_html + style_html + script_html
 
-    def _inject_page_extras(self, html_path, theme_toggle=False,
-                            mesh_indices=None):
-        """Insert the warning banner and/or theme switch at the top of a page.
+    def _legend_tree_html(self):
+        """Build the collapsible type -> neuron legend panel for viewer HTML.
 
-        Both extras share one read/insert/write pass so large HTML files are
-        not rewritten twice.  Either extra is skipped when already present,
+        Injected only for ``legend_mode='type_tree'`` on the permanent
+        viewer copies. The panel is built client-side from the
+        ``drocatLegend`` meta tags written at legend-assignment time, so
+        the row-to-trace mapping can never drift from the figure. The
+        native Plotly legend is hidden on these pages; static exports
+        never receive this injection and keep the native type-level
+        legend. Type toggles cover the type's skeleton plus its pre/post
+        site traces; synapse-group and mesh traces get their own rows,
+        with meshes pinned last.
+        """
+        baked = {'meshRankBase': ROI_MESH_LEGEND_RANK_BASE}
+        panel_html = '<div id="drocat-legend-tree" style="display:none"></div>'
+        style_html = (
+            '<style>'
+            '#drocat-legend-tree{position:fixed;left:10px;top:48px;'
+            'z-index:9999;max-width:280px;max-height:65vh;overflow-y:auto;'
+            'overflow-x:hidden;font:12px/1.6 -apple-system,BlinkMacSystemFont,'
+            'Segoe UI,sans-serif;border-radius:8px;padding:6px 8px;'
+            'background:rgba(255,255,255,0.92);color:#000;'
+            'border:1px solid rgba(0,0,0,0.25);user-select:none;'
+            '-webkit-user-select:none;}'
+            'body.drocat-theme-dark #drocat-legend-tree{'
+            'background:rgba(28,28,30,0.92);color:#fff;'
+            'border-color:rgba(255,255,255,0.28);}'
+            '.drocat-lt-row{display:flex;align-items:center;gap:6px;'
+            'padding:1px 2px;border-radius:4px;cursor:pointer;'
+            'white-space:nowrap;}'
+            '.drocat-lt-row:hover{background:rgba(128,128,128,0.18);}'
+            '.drocat-lt-caret{width:10px;flex:0 0 auto;font-size:9px;}'
+            '.drocat-lt-swatch{width:11px;height:11px;border-radius:2px;'
+            'flex:0 0 auto;display:inline-block;}'
+            '.drocat-lt-swatch-item{width:8px;height:8px;margin-left:10px;}'
+            '.drocat-lt-label{overflow:hidden;text-overflow:ellipsis;'
+            'flex:1 1 auto;}'
+            '.drocat-lt-count{opacity:.6;font-size:10px;flex:0 0 auto;}'
+            '.drocat-lt-eye{flex:0 0 auto;font-size:10px;opacity:.85;}'
+            '.drocat-lt-group-row{font-weight:600;}'
+            '.drocat-lt-off{opacity:.4;}'
+            '.drocat-lt-section{font-weight:600;opacity:.65;'
+            'margin:6px 0 2px 2px;font-size:10px;text-transform:uppercase;'
+            'letter-spacing:.4px;}'
+            # type_tree replaces the native legend on these pages
+            '.js-plotly-plot .legend{display:none !important;}'
+            '</style>'
+        )
+        script_html = """
+<script>
+(function(){
+  if (window.__drocatLegendTree) { return; }
+  window.__drocatLegendTree = true;
+  var CONFIG = __DROCAT_TREE_CONFIG__;
+  var panel = document.getElementById('drocat-legend-tree');
+  if (!panel) { return; }
+  if (navigator.webdriver) { return; }
+
+  function graphDiv() {
+    return document.querySelector('.js-plotly-plot')
+      || document.querySelector('.plotly-graph-div');
+  }
+  function isVisible(tr) { return !tr || tr.visible !== false; }
+  function traceColor(tr) {
+    if (tr.marker && tr.marker.color) { return tr.marker.color; }
+    if (tr.line && tr.line.color) { return tr.line.color; }
+    return tr.color || null;
+  }
+
+  var records = [];  /* {row, eye, indices} kept in sync with the plot */
+
+  function buildModel(data) {
+    var groups = {}, groupOrder = [];
+    var meshes = {}, meshOrder = [];
+    var synapses = {}, synOrder = [];
+    data.forEach(function(tr, i) {
+      var lg = tr.meta && tr.meta.drocatLegend;
+      if (lg && lg.group) {
+        if (!groups[lg.group]) {
+          groups[lg.group] = {rank: Infinity, items: {}, itemOrder: [],
+                              indices: []};
+          groupOrder.push(lg.group);
+        }
+        var g = groups[lg.group];
+        if (typeof tr.legendrank === 'number') {
+          g.rank = Math.min(g.rank, tr.legendrank);
+        }
+        g.indices.push(i);
+        if (!g.items[lg.item]) { g.items[lg.item] = []; g.itemOrder.push(lg.item); }
+        g.items[lg.item].push(i);
+        return;
+      }
+      if ((tr.legendgroup || '').indexOf('synapses ') === 0) {
+        if (!synapses[tr.legendgroup]) {
+          synapses[tr.legendgroup] = {name: tr.name || tr.legendgroup,
+                                      color: traceColor(tr), indices: []};
+          synOrder.push(tr.legendgroup);
+        }
+        synapses[tr.legendgroup].indices.push(i);
+        return;
+      }
+      if (typeof tr.legendrank === 'number'
+          && tr.legendrank >= CONFIG.meshRankBase) {
+        var mk = tr.name || ('mesh ' + i);
+        if (!meshes[mk]) {
+          meshes[mk] = {color: traceColor(tr), rank: tr.legendrank,
+                        indices: []};
+          meshOrder.push(mk);
+        }
+        meshes[mk].indices.push(i);
+      }
+    });
+    groupOrder.sort(function(a, b) { return groups[a].rank - groups[b].rank; });
+    meshOrder.sort(function(a, b) { return meshes[a].rank - meshes[b].rank; });
+    return {groups: groups, groupOrder: groupOrder, meshes: meshes,
+            meshOrder: meshOrder, synapses: synapses, synOrder: synOrder};
+  }
+
+  function groupColor(data, g, groupName) {
+    /* Prefer the opaque legend-swatch trace (marker color, group name). */
+    for (var i = 0; i < data.length; i++) {
+      var tr = data[i];
+      if (tr.name === groupName && tr.marker && tr.marker.color) {
+        return tr.marker.color;
+      }
+    }
+    for (var j = 0; j < g.indices.length; j++) {
+      var c = traceColor(data[g.indices[j]]);
+      if (c) { return c; }
+    }
+    return '#7f7f7f';
+  }
+
+  function makeEl(tag, className, text) {
+    var el = document.createElement(tag);
+    if (className) { el.className = className; }
+    if (text !== undefined) { el.textContent = text; }
+    return el;
+  }
+
+  function sync() {
+    var gd = graphDiv();
+    if (!gd) { return; }
+    records.forEach(function(rec) {
+      var on = rec.indices.every(function(i) { return isVisible(gd.data[i]); });
+      rec.eye.textContent = on ? '\\u25CF' : '\\u25CB';
+      rec.row.classList.toggle('drocat-lt-off', !on);
+    });
+  }
+
+  function addToggleRow(container, label, color, indices, extraIcon) {
+    var row = makeEl('div', 'drocat-lt-row' + (extraIcon ? '' : ' drocat-lt-mesh-row'));
+    var swatch = makeEl('span', 'drocat-lt-swatch');
+    swatch.style.background = color;
+    var text = makeEl('span', 'drocat-lt-label', label);
+    text.title = label;
+    var eye = makeEl('span', 'drocat-lt-eye');
+    if (extraIcon) {
+      row.appendChild(extraIcon);
+      row.classList.add('drocat-lt-group-row');
+    }
+    row.appendChild(swatch);
+    row.appendChild(text);
+    row.appendChild(eye);
+    container.appendChild(row);
+    records.push({row: row, eye: eye, indices: indices});
+    eye.addEventListener('click', function(e) {
+      e.stopPropagation();
+      var gd = graphDiv();
+      if (!gd) { return; }
+      var on = indices.every(function(i) { return isVisible(gd.data[i]); });
+      Plotly.restyle(gd, {visible: !on}, indices);
+      sync();
+    });
+    return {row: row, eye: eye};
+  }
+
+  function render(model, data) {
+    model.groupOrder.forEach(function(name) {
+      var g = model.groups[name];
+      var groupEl = makeEl('div', 'drocat-lt-group');
+      var caret = makeEl('span', 'drocat-lt-caret', '\\u25B8');
+      var color = groupColor(data, g, name);
+
+      var row = makeEl('div', 'drocat-lt-row drocat-lt-group-row');
+      var swatch = makeEl('span', 'drocat-lt-swatch');
+      swatch.style.background = color;
+      var label = makeEl('span', 'drocat-lt-label', name);
+      label.title = name;
+      var count = makeEl('span', 'drocat-lt-count', g.itemOrder.length);
+      var eye = makeEl('span', 'drocat-lt-eye');
+      row.appendChild(caret);
+      row.appendChild(swatch);
+      row.appendChild(label);
+      row.appendChild(count);
+      row.appendChild(eye);
+      groupEl.appendChild(row);
+
+      var itemsEl = makeEl('div', 'drocat-lt-items');
+      itemsEl.style.display = 'none';
+      g.itemOrder.forEach(function(itemName) {
+        var indices = g.items[itemName];
+        var irow = makeEl('div', 'drocat-lt-row drocat-lt-item-row');
+        var isw = makeEl('span', 'drocat-lt-swatch drocat-lt-swatch-item');
+        isw.style.background = color;
+        var ilabel = makeEl('span', 'drocat-lt-label', itemName);
+        ilabel.title = itemName;
+        var ieye = makeEl('span', 'drocat-lt-eye');
+        irow.appendChild(isw);
+        irow.appendChild(ilabel);
+        irow.appendChild(ieye);
+        itemsEl.appendChild(irow);
+        records.push({row: irow, eye: ieye, indices: indices});
+        irow.addEventListener('click', function() {
+          var gd = graphDiv();
+          if (!gd) { return; }
+          var on = indices.every(function(i) { return isVisible(gd.data[i]); });
+          Plotly.restyle(gd, {visible: !on}, indices);
+          sync();
+        });
+      });
+      groupEl.appendChild(itemsEl);
+      panel.appendChild(groupEl);
+
+      records.push({row: row, eye: eye, indices: g.indices});
+      eye.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var gd = graphDiv();
+        if (!gd) { return; }
+        var on = g.indices.every(function(i) { return isVisible(gd.data[i]); });
+        Plotly.restyle(gd, {visible: !on}, g.indices);
+        sync();
+      });
+      function toggleExpand() {
+        var open = itemsEl.style.display === 'none';
+        itemsEl.style.display = open ? 'block' : 'none';
+        caret.textContent = open ? '\\u25BE' : '\\u25B8';
+      }
+      caret.addEventListener('click', toggleExpand);
+      label.addEventListener('click', toggleExpand);
+    });
+
+    if (model.synOrder.length) {
+      panel.appendChild(makeEl('div', 'drocat-lt-section', 'Synapses'));
+      model.synOrder.forEach(function(key) {
+        var s = model.synapses[key];
+        addToggleRow(panel, s.name, s.color || '#7f7f7f', s.indices);
+      });
+    }
+    if (model.meshOrder.length) {
+      panel.appendChild(makeEl('div', 'drocat-lt-section', 'Meshes'));
+      model.meshOrder.forEach(function(name) {
+        var m = model.meshes[name];
+        addToggleRow(panel, name, m.color || '#7f7f7f', m.indices);
+      });
+    }
+  }
+
+  function positionPanel() {
+    /* Stay below the warning banner (which shifts the whole plot down). */
+    var top = 48;
+    var banner = document.querySelector('.drocat-warning-container');
+    if (banner) {
+      var bottom = banner.getBoundingClientRect().bottom;
+      if (bottom > 0) { top += Math.round(bottom); }
+    }
+    panel.style.top = top + 'px';
+  }
+
+  var tries = 0;
+  (function whenPlotly() {
+    var gd = graphDiv();
+    if (gd && window.Plotly && gd._fullLayout) {
+      var model = buildModel(gd.data || []);
+      render(model, gd.data || []);
+      panel.style.display = 'block';
+      positionPanel();
+      sync();
+      try { gd.on('plotly_restyle', function() { sync(); }); } catch (err) {}
+      window.addEventListener('resize', positionPanel);
+      window.addEventListener('load', positionPanel);
+      return;
+    }
+    if (++tries < 300) { setTimeout(whenPlotly, 200); }
+  })();
+})();
+</script>
+"""
+        script_html = script_html.replace(
+            '__DROCAT_TREE_CONFIG__', json.dumps(baked, ensure_ascii=True)
+        )
+        return panel_html + style_html + script_html
+
+    def _inject_page_extras(self, html_path, theme_toggle=False,
+                            mesh_indices=None, legend_tree=False):
+        """Insert the warning banner and/or viewer extras at the top of a page.
+
+        All extras share one read/insert/write pass so large HTML files are
+        not rewritten twice.  Each extra is skipped when already present,
         keeping the pass idempotent against retry/export paths.
         """
         if not os.path.exists(html_path):
@@ -3395,7 +3699,8 @@ class VisualizeSkeleton:
         theme_html = (
             self._theme_toggle_html(mesh_indices) if theme_toggle else ''
         )
-        if not warning_html and not theme_html:
+        legend_html = self._legend_tree_html() if legend_tree else ''
+        if not warning_html and not theme_html and not legend_html:
             return
 
         try:
@@ -3435,6 +3740,8 @@ class VisualizeSkeleton:
                 )
             if theme_html and 'drocat-theme-toggle' not in html:
                 blocks.append(theme_html)
+            if legend_html and 'drocat-legend-tree' not in html:
+                blocks.append(legend_html)
             if not blocks:
                 return
 
@@ -3453,14 +3760,15 @@ class VisualizeSkeleton:
             )
 
     def _write_plotly_html(self, figure, html_path, theme_toggle=False,
-                           **kwargs):
+                           legend_tree=False, **kwargs):
         """Write a self-contained visualization HTML.
 
         Plotly's JavaScript runtime is embedded in every page so an HTML file
         remains portable when copied without its output directory.  A warning
         banner is added after Plotly has generated the document so it remains
         visible in both the main and per-neuron pages, and permanent viewer
-        copies can additionally carry the light/dark theme switch.
+        copies can additionally carry the light/dark theme switch and the
+        collapsible type_tree legend panel.
         """
         kwargs.setdefault('auto_open', False)
         kwargs.setdefault('full_html', True)
@@ -3471,7 +3779,8 @@ class VisualizeSkeleton:
             if theme_toggle else None
         )
         self._inject_page_extras(
-            html_path, theme_toggle=theme_toggle, mesh_indices=mesh_indices
+            html_path, theme_toggle=theme_toggle, mesh_indices=mesh_indices,
+            legend_tree=legend_tree,
         )
         self._record_large_html_warning(html_path)
 
@@ -3967,6 +4276,7 @@ class VisualizeSkeleton:
                                 simplified_fig,
                                 simplified_html_path,
                                 theme_toggle=self.html_theme_toggle,
+                                legend_tree=(self.legend_mode == 'type_tree'),
                                 auto_open=False,
                                 include_plotlyjs=True,
                                 config={'displayModeBar': False},
@@ -5681,8 +5991,10 @@ class VisualizeSkeleton:
             raise ValueError('synapse_mode can only be "scatter", "sphere", "cone", "tetrahedron", or "pre_post"')
         
         # Validate legend_mode
-        if self.legend_mode not in ['single', 'type', 'layer']:
-            raise ValueError('legend_mode must be "single", "type", or "layer"')
+        if self.legend_mode not in LEGEND_MODES:
+            raise ValueError(
+                'legend_mode must be one of: ' + ', '.join(LEGEND_MODES)
+            )
 
         if self.color_mode not in ['per_layer', 'per_neuron']:
             raise ValueError('color_mode must be "per_layer" or "per_neuron"')
@@ -10601,7 +10913,7 @@ class VisualizeSkeleton:
 
                 # Build a mapping of neuron ID to type for 'type' legend mode
                 neuron_type_map = {}
-                if self.legend_mode == 'type' and self.neuron_dfs[i] is not None:
+                if self.legend_mode in ('type', 'type_tree') and self.neuron_dfs[i] is not None:
                     ndf = self.neuron_dfs[i]
                     type_col = None
                     for col in ['type', 'cell_type', 'neuronType']:
@@ -10657,10 +10969,10 @@ class VisualizeSkeleton:
                         trace.hoverinfo = 'name'
                         self.fig_3d.add_trace(trace)
 
-                    elif self.legend_mode == 'type':
+                    elif self.legend_mode in ('type', 'type_tree'):
                         # Group by neuron type - each type gets separate legend but keeps layer color
                         neuron_type = neuron_type_map.get(neuron_id, None)
-                        
+
                         # Fallback: try different ID strategies if type not found
                         if not neuron_type and source_index < len(neuron_vols):
                             # Try using the ID from the source neuron object
@@ -10669,7 +10981,7 @@ class VisualizeSkeleton:
                                 neuron_type = neuron_type_map.get(vid, None)
                             except:
                                 pass
-                            
+
                             # If still not found, try using the name from source neuron
                             if not neuron_type and hasattr(neuron_vols[source_index], 'name'):
                                 try:
@@ -10696,6 +11008,22 @@ class VisualizeSkeleton:
                         shown_legend_groups.add(legend_group)
                         trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'
                         trace.hoverinfo = 'name'
+                        if self.legend_mode == 'type_tree':
+                            # The exported HTML's collapsible legend panel
+                            # groups traces by 'group' and labels each
+                            # expandable row by 'item' (the bodyId).
+                            tree_label = str(neuron_id)
+                            if self.neuron_dfs[i] is not None and source_index < len(self.neuron_dfs[i]):
+                                source_row = self.neuron_dfs[i].iloc[source_index]
+                                if 'bodyId' in source_row.index and pd.notna(source_row.get('bodyId')):
+                                    tree_label = str(source_row['bodyId'])
+                            tree_meta = dict(getattr(trace, 'meta', None) or {})
+                            tree_meta['drocatLegend'] = {
+                                'kind': 'neuron',
+                                'group': legend_group,
+                                'item': tree_label,
+                            }
+                            trace.meta = tree_meta
                         self.fig_3d.add_trace(trace)
 
                     elif self.legend_mode == 'single':
@@ -12306,7 +12634,7 @@ class VisualizeSkeleton:
         # plot_skeleton first) still follows the documented legend levels.
         if mode == 'layer':
             return layer
-        if mode == 'type':
+        if mode in ('type', 'type_tree'):
             return self._pre_post_site_type_label(neuron_id, layer_idx)
         owner = self._pre_post_site_owner_label(neuron_id, layer_idx)
         return f'{owner}_{layer}'
@@ -12395,6 +12723,18 @@ class VisualizeSkeleton:
             if show_legend:
                 self._pre_post_seen_legend_groups.add(legend_group)
 
+            # In type_tree mode the collapsible HTML legend groups a site
+            # with its owner's type so one type toggle covers the whole
+            # neuron (legend_name is '<owner_identity>_<role>').
+            tree_meta = None
+            if self.legend_mode == 'type_tree':
+                owner_identity = legend_name[:-(len(site_type) + 1)]
+                tree_meta = {
+                    'kind': 'site',
+                    'group': owner_identity,
+                    'item': legend_name,
+                }
+
             if self.backend == 'plotly':
                 if getattr(self, 'pre_post_scatter', False):
                     # Scatter markers: post/input sites as circles, pre/output
@@ -12403,6 +12743,9 @@ class VisualizeSkeleton:
                     # diamond is the closest distinct, pointy marker.
                     symbol = 'diamond' if site_type == 'pre' else 'circle'
                     scatter_size = self._scatter_synapse_marker_size()
+                    site_meta = {'drocat_scatter_size_role': 'pre_post_site'}
+                    if tree_meta is not None:
+                        site_meta['drocatLegend'] = tree_meta
                     self.fig_3d.add_trace(go.Scatter3d(
                         x=coords[:, 0], y=coords[:, 1], z=coords[:, 2],
                         mode='markers',
@@ -12413,7 +12756,7 @@ class VisualizeSkeleton:
                         marker=dict(size=scatter_size, color=opaque_color, symbol=symbol, opacity=opacity),
                         hovertemplate=hover,
                         hoverinfo='name',
-                        meta={'drocat_scatter_size_role': 'pre_post_site'},
+                        meta=site_meta,
                     ))
                     continue
 
@@ -12428,6 +12771,10 @@ class VisualizeSkeleton:
                 mesh.legendrank = legend_rank
                 mesh.hovertemplate = hover
                 mesh.hoverinfo = 'name'
+                if tree_meta is not None:
+                    mesh_meta = dict(getattr(mesh, 'meta', None) or {})
+                    mesh_meta['drocatLegend'] = tree_meta
+                    mesh.meta = mesh_meta
                 self.fig_3d.add_trace(mesh)
                 self._append_exportable_mesh(
                     mesh, color=base_color, alpha=opacity,
@@ -15278,6 +15625,7 @@ class VisualizeSkeleton:
                 self.fig_3d,
                 self.fig_path + '.html',
                 theme_toggle=self.html_theme_toggle,
+                legend_tree=(self.legend_mode == 'type_tree'),
                 auto_open=False,
                 include_plotlyjs=True,
                 config=html_config,
@@ -15420,6 +15768,7 @@ class VisualizeSkeleton:
                                 export_fig,
                                 simplified_html_path,
                                 theme_toggle=self.html_theme_toggle,
+                                legend_tree=(self.legend_mode == 'type_tree'),
                                 auto_open=False,
                                 include_plotlyjs=True,
                                 config={'displayModeBar': False},
@@ -17545,6 +17894,7 @@ class VisualizeSkeleton:
                             fig_new,
                             simplified_html_path,
                             theme_toggle=self.html_theme_toggle,
+                            legend_tree=(self.legend_mode == 'type_tree'),
                             auto_open=False,
                             include_plotlyjs=True,
                             config={'displayModeBar': False},

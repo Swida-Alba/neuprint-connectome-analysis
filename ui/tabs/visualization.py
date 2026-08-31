@@ -412,9 +412,11 @@ def create_skeleton_tab():
                         hint="'tube': 3D tube rendering (detailed). 'line': thin line (fast, for many neurons).",
                     )
                     legend_mode = select_input(
-                        "Neuron Legend Mode", ["layer", "type", "single"], get_user_default("legend_mode"),
+                        "Neuron Legend Mode", ["layer", "type", "type_tree", "single"], get_user_default("legend_mode"),
                         hint="'layer': one neuron legend entry per layer (or per custom group). "
-                             "'type': per neuron type. 'single': every neuron. "
+                             "'type': per neuron type. 'type_tree': per type with an "
+                             "expandable type -> neuron panel in the exported HTML. "
+                             "'single': every neuron. "
                              "ROI meshes always remain separate.",
                     )
                     bg_color = select_input(

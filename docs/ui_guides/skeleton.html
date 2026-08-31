@@ -136,8 +136,16 @@
       <h3>General Appearance</h3>
       <ul>
         <li><b>Skeleton Mode</b>: tube (detailed) or line (fast).</li>
-        <li><b>Neuron Legend Mode</b>: layer, type, or single. ROI meshes
-          always keep independent legend entries.</li>
+        <li><b>Neuron Legend Mode</b>: layer, type, type_tree, or single. ROI
+          meshes always keep independent legend entries and rank after every
+          neuron entry (brain mesh, then VNC mesh, last).</li>
+        <li><b>Expandable legend (type_tree)</b>: the exported interactive HTML
+          replaces the flat legend with a collapsible panel (top-left). Each
+          type row shows a color swatch and neuron count and expands to
+          per-neuron bodyId rows; toggling a type hides its skeleton and
+          pre/post site traces, individual neurons toggle separately, and
+          synapse/mesh rows sit below the types (meshes last). Static exports
+          keep the plain type-level legend.</li>
         <li><b>Background</b>: white or black. The default neuron palette
           follows it — <b>Category10</b> on white, <b>Set3</b> on black —
           until you pick a palette manually.</li>
