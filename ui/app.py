@@ -600,10 +600,21 @@ html, body {
     border-radius: 8px;
     background: var(--drocat-toolbar-soft);
 }
-.drocat-neuron-match-table .q-table__middle {
-    max-height: min(58vh, 680px);
+/* The results window has a fixed height and both panels clip overflow, so the
+   inner scroll chains must shrink into each panel's leftover space. Capping
+   .q-table__middle at the full window height instead pushed the scroller's
+   bottom edge past the panel border, where the clipped last row(s) could never
+   be scrolled into view. flex-shrink with min-height: 0 bounds every box to
+   the space actually available; short result sets still hug their content. */
+.drocat-neuron-match-panel > .drocat-neuron-match-table.q-table__container {
+    display: flex;
+    flex-direction: column;
+    flex: 0 1 auto;
     min-height: 0;
-    flex: 1 1 auto;
+}
+.drocat-neuron-match-table .q-table__middle {
+    min-height: 0;
+    flex: 0 1 auto;
     overflow-x: hidden;
     overflow-y: auto;
     margin-top: 8px;
@@ -818,10 +829,21 @@ html, body {
     border: 1px solid var(--drocat-line);
     border-radius: 10px;
 }
-.drocat-data-viewer-table .q-table__middle {
-    max-height: min(58vh, 680px);
+.drocat-neuron-full-panel > .drocat-data-viewer-scroll {
+    display: flex;
+    flex-direction: column;
+    flex: 0 1 auto;
     min-height: 0;
-    flex: 1 1 auto;
+}
+.drocat-neuron-full-panel .drocat-data-viewer-table.q-table__container {
+    display: flex;
+    flex-direction: column;
+    flex: 0 1 auto;
+    min-height: 0;
+}
+.drocat-data-viewer-table .q-table__middle {
+    min-height: 0;
+    flex: 0 1 auto;
     overflow: auto;
 }
 .drocat-data-viewer-table .q-table__middle thead tr:first-child th {
@@ -935,6 +957,13 @@ html, body {
     }
     .drocat-neuron-results-layout {
         grid-template-columns: 1fr;
+        height: auto;
+    }
+    /* Stacked panels each keep their own fixed window so the internal
+       scroll chains stay height-bounded. */
+    .drocat-neuron-match-panel,
+    .drocat-neuron-full-panel {
+        height: min(58vh, 680px);
     }
     .drocat-neuron-match-panel {
         position: static;
