@@ -3989,9 +3989,12 @@ class TestPrepareNeuprintSkeletons:
             attempts['n'] += 1
             raise RuntimeError('Query returned error 400')
         vis._fetch_neuprint_skeletons_batched = hard_fail
-        prepared, _ = vis._prepare_neuprint_skeletons_for_render(
-            [101], False, False, None)
-        assert prepared == {} and attempts['n'] == 1
+        # A fully failed fetch must abort loudly instead of silently
+        # rendering an empty figure.
+        with pytest.raises(RuntimeError, match='fetch failed for all 1'):
+            vis._prepare_neuprint_skeletons_for_render(
+                [101], False, False, None)
+        assert attempts['n'] == 1
 
     def test_raw_cache_check_failure_falls_through(self, tmp_path, monkeypatch):
         import morphology

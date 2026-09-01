@@ -17,7 +17,7 @@ def test_warn_neuprint_token_rejected_prints_guidance(capsys):
     assert '401' in out
     assert 'https://neuprint.janelia.org/account' in out
     assert 'config_local.json' in out
-    assert 'cached data' in out
+    assert 'aborted' in out
 
 
 def test_warn_neuprint_token_rejected_env_variant_points_at_env(capsys):

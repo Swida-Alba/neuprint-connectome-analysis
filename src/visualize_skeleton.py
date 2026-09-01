@@ -2835,8 +2835,9 @@ class VisualizeSkeleton:
         """Print actionable guidance when NeuPrint rejects the token (401).
 
         NeuPrint can revoke a token server-side even before its JWT expiry.
-        The run continues without a live connection so cached data can still
-        be used; fetches that require the client will fail afterwards.
+        The caller aborts the run: continuing without a client silently
+        renders empty or degraded figures whenever the caches do not fully
+        cover the request.
         """
         source = (
             'the NEUPRINT_APPLICATION_CREDENTIALS / NEUPRINT_TOKEN environment'
@@ -2849,9 +2850,8 @@ class VisualizeSkeleton:
               ' https://neuprint.janelia.org — it may have been revoked')
         print('   even though it has not expired. Generate a fresh token at'
               ' https://neuprint.janelia.org/account and update it there.')
-        print('   Continuing without a live connection; cached data will be'
-              ' used where available, but fetches that need the client will'
-              ' fail.')
+        print('   The run is aborted so it cannot silently render an empty '
+              'or degraded figure; re-run after updating the token.')
 
     def _add_view_selection_menu(self):
         """
@@ -6059,8 +6059,8 @@ class VisualizeSkeleton:
                         except Exception as exc:
                             if not _token_rejected(exc):
                                 raise
-                            self.client = None
                             self._warn_neuprint_token_rejected()
+                            raise
                         else:
                             # Set as default to avoid "multiple clients" error
                             neuprint.set_default_client(self.client)
@@ -6073,8 +6073,8 @@ class VisualizeSkeleton:
                         except Exception as exc:
                             if not _token_rejected(exc):
                                 raise
-                            self.client = None
                             self._warn_neuprint_token_rejected(from_env=True)
+                            raise
                         else:
                             # Set as default to avoid "multiple clients" error
                             neuprint.set_default_client(self.client)
@@ -8254,6 +8254,17 @@ class VisualizeSkeleton:
                     tqdm.write(
                         f'  ⚠️  NeuPrint preprocessing fetch failed: {exc}')
                     break
+
+            if fetch_ids and not online_fetched:
+                # Never fall through to a silent empty render: a fully
+                # failed fetch means the figure would contain no neurons.
+                detail = '' if self.client else (
+                    ' No NeuPrint client is configured — check '
+                    "tokens.neuprint in config.json / config_local.json or "
+                    'the NEUPRINT_APPLICATION_CREDENTIALS variable.')
+                raise RuntimeError(
+                    f'NeuPrint skeleton fetch failed for all '
+                    f'{len(fetch_ids)} requested neurons.{detail}')
 
             self._vprint(
                 f'  ✓ Skeleton fetch phase complete: {len(online_fetched)}/'
