@@ -77,6 +77,11 @@ def test_legend_tree_html_contains_panel_and_markers():
     # banner-aware positioning + webdriver guard
     assert 'drocat-warning-container' in html
     assert 'navigator.webdriver' in html
+    # panel sits on the right, below the theme switch
+    assert 'position:fixed;right:10px;top:60px;' in html
+    # triangle caret that rotates when a group expands
+    assert '\\u25B6' in html
+    assert '.drocat-lt-expanded .drocat-lt-caret{transform:rotate(90deg);}' in html
 
 
 def test_write_plotly_html_embeds_tree_only_when_requested(tmp_path):

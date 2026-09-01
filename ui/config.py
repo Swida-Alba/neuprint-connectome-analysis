@@ -380,7 +380,7 @@ DEFAULTS = {
     # explicit override in Settings).
     "show_fig_skeleton": False,
     "export_views": True,
-    "legend_mode": "type",
+    "legend_mode": "type_tree",
     "background": "white",
     "brain_mesh": "template",
     "synapse_size": "1",

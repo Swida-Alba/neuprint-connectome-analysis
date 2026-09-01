@@ -2353,8 +2353,9 @@ class VisualizeSkeleton:
     - 'type': Group by neuron type within each layer. If a layer has multiple
               neuron types, each type gets a separate legend entry.
     - 'type_tree': Same legend as 'type', plus the exported interactive HTML
-                   embeds a collapsible type -> neuron legend panel (top-left;
-                   a type row expands to its bodyId rows, each toggleable).
+                   embeds a collapsible type -> neuron legend panel at the
+                   original legend position (top-right; a type row expands to
+                   its bodyId rows, each toggleable).
                    Static exports keep the plain type-level legend.
     - 'layer': Merge all neurons in a layer into one legend entry.
                Auto-named as {type1}_{type2}_etc if 3+ types present.
@@ -3430,7 +3431,7 @@ class VisualizeSkeleton:
         panel_html = '<div id="drocat-legend-tree" style="display:none"></div>'
         style_html = (
             '<style>'
-            '#drocat-legend-tree{position:fixed;left:10px;top:48px;'
+            '#drocat-legend-tree{position:fixed;right:10px;top:60px;'
             'z-index:9999;max-width:280px;max-height:65vh;overflow-y:auto;'
             'overflow-x:hidden;font:12px/1.6 -apple-system,BlinkMacSystemFont,'
             'Segoe UI,sans-serif;border-radius:8px;padding:6px 8px;'
@@ -3444,7 +3445,9 @@ class VisualizeSkeleton:
             'padding:1px 2px;border-radius:4px;cursor:pointer;'
             'white-space:nowrap;}'
             '.drocat-lt-row:hover{background:rgba(128,128,128,0.18);}'
-            '.drocat-lt-caret{width:10px;flex:0 0 auto;font-size:9px;}'
+            '.drocat-lt-caret{width:10px;flex:0 0 auto;font-size:9px;'
+            'display:inline-block;transition:transform .15s;}'
+            '.drocat-lt-expanded .drocat-lt-caret{transform:rotate(90deg);}'
             '.drocat-lt-swatch{width:11px;height:11px;border-radius:2px;'
             'flex:0 0 auto;display:inline-block;}'
             '.drocat-lt-swatch-item{width:8px;height:8px;margin-left:10px;}'
@@ -3594,7 +3597,7 @@ class VisualizeSkeleton:
     model.groupOrder.forEach(function(name) {
       var g = model.groups[name];
       var groupEl = makeEl('div', 'drocat-lt-group');
-      var caret = makeEl('span', 'drocat-lt-caret', '\\u25B8');
+      var caret = makeEl('span', 'drocat-lt-caret', '\\u25B6');
       var color = groupColor(data, g, name);
 
       var row = makeEl('div', 'drocat-lt-row drocat-lt-group-row');
@@ -3649,7 +3652,7 @@ class VisualizeSkeleton:
       function toggleExpand() {
         var open = itemsEl.style.display === 'none';
         itemsEl.style.display = open ? 'block' : 'none';
-        caret.textContent = open ? '\\u25BE' : '\\u25B8';
+        groupEl.classList.toggle('drocat-lt-expanded', open);
       }
       caret.addEventListener('click', toggleExpand);
       label.addEventListener('click', toggleExpand);
@@ -3672,8 +3675,9 @@ class VisualizeSkeleton:
   }
 
   function positionPanel() {
-    /* Stay below the warning banner (which shifts the whole plot down). */
-    var top = 48;
+    /* Sit below the theme switch on the right, and below the warning
+       banner (which shifts the whole plot down) when one is present. */
+    var top = 60;
     var banner = document.querySelector('.drocat-warning-container');
     if (banner) {
       var bottom = banner.getBoundingClientRect().bottom;
