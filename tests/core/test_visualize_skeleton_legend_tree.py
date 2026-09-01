@@ -1,6 +1,6 @@
-"""Tests for the collapsible type_tree legend panel injected into viewer HTML.
+"""Tests for the collapsible tree legend panel injected into viewer HTML.
 
-``legend_mode='type_tree'`` renders exactly like ``'type'`` (the native
+``legend_mode='tree'`` renders exactly like ``'type'`` (the native
 legend used by static exports) and additionally tags traces with
 ``drocatLegend`` meta so the exported interactive HTML can embed a
 collapsible type -> neuron legend panel built client-side.
@@ -19,7 +19,7 @@ import visualize_skeleton  # noqa: E402
 from visualize_skeleton import LEGEND_MODES, VisualizeSkeleton  # noqa: E402
 
 
-def _make_visualizer(legend_mode='type_tree'):
+def _make_visualizer(legend_mode='tree'):
     visualizer = object.__new__(VisualizeSkeleton)
     visualizer.background_color = 'white'
     visualizer.legend_mode = legend_mode
@@ -27,7 +27,7 @@ def _make_visualizer(legend_mode='type_tree'):
 
 
 def _tagged_figure():
-    """A figure shaped like a type_tree export: tagged neurons, a paired
+    """A figure shaped like a tree export: tagged neurons, a paired
     synapse legend dummy, and a mesh pinned last."""
     fig = go.Figure()
     for i, (group, item) in enumerate(
@@ -60,9 +60,17 @@ def _tagged_figure():
     return fig
 
 
-def test_legend_modes_include_type_tree():
-    assert 'type_tree' in LEGEND_MODES
+def test_legend_modes_include_tree():
+    assert 'tree' in LEGEND_MODES
     assert 'type' in LEGEND_MODES
+
+
+def test_tree_custom_group_detection():
+    visualizer = _make_visualizer()
+    visualizer.custom_layer_names = []
+    assert visualizer._tree_uses_custom_groups() is False
+    visualizer.custom_layer_names = ['Group A', 'Group B']
+    assert visualizer._tree_uses_custom_groups() is True
 
 
 def test_legend_tree_html_contains_panel_and_markers():

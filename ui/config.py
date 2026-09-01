@@ -380,7 +380,7 @@ DEFAULTS = {
     # explicit override in Settings).
     "show_fig_skeleton": False,
     "export_views": True,
-    "legend_mode": "type_tree",
+    "legend_mode": "tree",
     "background": "white",
     "brain_mesh": "template",
     "synapse_size": "1",
@@ -704,9 +704,9 @@ DEFAULT_SETTING_SPECS = {
         "label": "Neuron Legend Mode",
         "group": "skeleton_render",
         "kind": "select",
-        "options": ["layer", "type", "type_tree", "single"],
+        "options": ["layer", "type", "tree", "single"],
         "hint": "One legend entry per layer, type, or individual neuron. "
-                "'type_tree' adds an expandable type -> neuron legend panel "
+                "'tree' adds an expandable type -> neuron legend panel "
                 "to the exported interactive HTML.",
     },
     "background": {

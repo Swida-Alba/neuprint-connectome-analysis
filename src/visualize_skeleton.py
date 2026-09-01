@@ -204,10 +204,10 @@ ROI_MESH_LEGEND_RANK_BASE = 100_000_000
 BRAIN_MESH_LEGEND_RANK = 200_000_000
 VNC_MESH_LEGEND_RANK = 200_000_001
 
-# Legend modes. 'type_tree' renders exactly like 'type' (same native legend,
+# Legend modes. 'tree' renders exactly like 'type' (same native legend,
 # used by static exports) and additionally tags traces so the exported
 # interactive HTML can embed a collapsible type -> neuron legend panel.
-LEGEND_MODES = ('single', 'type', 'type_tree', 'layer')
+LEGEND_MODES = ('single', 'type', 'tree', 'layer')
 
 
 def _configure_roi_mesh_traces(mesh_traces, roi_name, legend_rank=None):
@@ -2352,7 +2352,7 @@ class VisualizeSkeleton:
                 Full detail for identifying individual neurons.
     - 'type': Group by neuron type within each layer. If a layer has multiple
               neuron types, each type gets a separate legend entry.
-    - 'type_tree': Same legend as 'type', plus the exported interactive HTML
+    - 'tree': Same legend as 'type', plus the exported interactive HTML
                    embeds a collapsible type -> neuron legend panel at the
                    original legend position (top-right; a type row expands to
                    its bodyId rows, each toggleable).
@@ -3414,10 +3414,19 @@ class VisualizeSkeleton:
         )
         return button_html + style_html + script_html
 
+    def _tree_uses_custom_groups(self):
+        """Whether tree mode organizes the legend by custom group first.
+
+        Custom groups come from custom_layer_names (or a layer_map_csv,
+        which fills the same field); each layer then holds a mixed set of
+        neurons, so the tree becomes group > type > bodyId.
+        """
+        return bool(getattr(self, 'custom_layer_names', None))
+
     def _legend_tree_html(self):
         """Build the collapsible type -> neuron legend panel for viewer HTML.
 
-        Injected only for ``legend_mode='type_tree'`` on the permanent
+        Injected only for ``legend_mode='tree'`` on the permanent
         viewer copies. The panel is built client-side from the
         ``drocatLegend`` meta tags written at legend-assignment time, so
         the row-to-trace mapping can never drift from the figure. The
@@ -3460,7 +3469,7 @@ class VisualizeSkeleton:
             '.drocat-lt-section{font-weight:600;opacity:.65;'
             'margin:6px 0 2px 2px;font-size:10px;text-transform:uppercase;'
             'letter-spacing:.4px;}'
-            # type_tree replaces the native legend on these pages
+            # tree replaces the native legend on these pages
             '.js-plotly-plot .legend{display:none !important;}'
             '</style>'
         )
@@ -3495,7 +3504,8 @@ class VisualizeSkeleton:
       var lg = tr.meta && tr.meta.drocatLegend;
       if (lg && lg.group) {
         if (!groups[lg.group]) {
-          groups[lg.group] = {rank: Infinity, items: {}, itemOrder: [],
+          groups[lg.group] = {rank: Infinity, types: {}, typeOrder: [],
+                              direct: {}, directOrder: [], sites: [],
                               indices: []};
           groupOrder.push(lg.group);
         }
@@ -3504,8 +3514,32 @@ class VisualizeSkeleton:
           g.rank = Math.min(g.rank, tr.legendrank);
         }
         g.indices.push(i);
-        if (!g.items[lg.item]) { g.items[lg.item] = []; g.itemOrder.push(lg.item); }
-        g.items[lg.item].push(i);
+        if (lg.kind === 'site') {
+          /* Sites toggle with their type sub-row when one exists. */
+          g.sites.push({type: lg.type || null, index: i});
+          return;
+        }
+        if (lg.type) {
+          /* Custom-group hierarchy: group > type > bodyId. */
+          if (!g.types[lg.type]) {
+            g.types[lg.type] = {items: {}, itemOrder: [], indices: []};
+            g.typeOrder.push(lg.type);
+          }
+          g.types[lg.type].indices.push(i);
+          if (!g.types[lg.type].items[lg.item]) {
+            g.types[lg.type].items[lg.item] = [];
+            g.types[lg.type].itemOrder.push(lg.item);
+          }
+          g.types[lg.type].items[lg.item].push(i);
+        } else {
+          /* Flat (no custom groups): the group itself is the type and the
+             items are its neurons. */
+          if (!g.direct[lg.item]) {
+            g.direct[lg.item] = [];
+            g.directOrder.push(lg.item);
+          }
+          g.direct[lg.item].push(i);
+        }
         return;
       }
       if ((tr.legendgroup || '').indexOf('synapses ') === 0) {
@@ -3593,69 +3627,110 @@ class VisualizeSkeleton:
     return {row: row, eye: eye};
   }
 
+  function attachExpandable(parent, labelText, color, count, eyeIndices) {
+    /* One expandable row (caret + swatch + label + count + eye) with a
+       hidden container for its children. Returns the children container;
+       the caller fills it with leaf rows or nested expandables. */
+    var groupEl = makeEl('div', 'drocat-lt-group');
+    var caret = makeEl('span', 'drocat-lt-caret', '\\u25B6');
+    var row = makeEl('div', 'drocat-lt-row drocat-lt-group-row');
+    var swatch = makeEl('span', 'drocat-lt-swatch');
+    swatch.style.background = color;
+    var label = makeEl('span', 'drocat-lt-label', labelText);
+    label.title = labelText;
+    var countEl = makeEl('span', 'drocat-lt-count', count);
+    var eye = makeEl('span', 'drocat-lt-eye');
+    row.appendChild(caret);
+    row.appendChild(swatch);
+    row.appendChild(label);
+    row.appendChild(countEl);
+    row.appendChild(eye);
+    groupEl.appendChild(row);
+    var itemsEl = makeEl('div', 'drocat-lt-items');
+    itemsEl.style.display = 'none';
+    groupEl.appendChild(itemsEl);
+    parent.appendChild(groupEl);
+    records.push({row: row, eye: eye, indices: eyeIndices});
+    eye.addEventListener('click', function(e) {
+      e.stopPropagation();
+      var gd = graphDiv();
+      if (!gd) { return; }
+      var on = eyeIndices.every(function(i) { return isVisible(gd.data[i]); });
+      Plotly.restyle(gd, {visible: !on}, eyeIndices);
+      sync();
+    });
+    function toggleExpand() {
+      var open = itemsEl.style.display === 'none';
+      itemsEl.style.display = open ? 'block' : 'none';
+      groupEl.classList.toggle('drocat-lt-expanded', open);
+    }
+    caret.addEventListener('click', toggleExpand);
+    label.addEventListener('click', toggleExpand);
+    return itemsEl;
+  }
+
+  function attachLeaf(parent, labelText, color, indices) {
+    var irow = makeEl('div', 'drocat-lt-row drocat-lt-item-row');
+    var isw = makeEl('span', 'drocat-lt-swatch drocat-lt-swatch-item');
+    isw.style.background = color;
+    var ilabel = makeEl('span', 'drocat-lt-label', labelText);
+    ilabel.title = labelText;
+    var ieye = makeEl('span', 'drocat-lt-eye');
+    irow.appendChild(isw);
+    irow.appendChild(ilabel);
+    irow.appendChild(ieye);
+    parent.appendChild(irow);
+    records.push({row: irow, eye: ieye, indices: indices});
+    irow.addEventListener('click', function() {
+      var gd = graphDiv();
+      if (!gd) { return; }
+      var on = indices.every(function(i) { return isVisible(gd.data[i]); });
+      Plotly.restyle(gd, {visible: !on}, indices);
+      sync();
+    });
+  }
+
   function render(model, data) {
     model.groupOrder.forEach(function(name) {
       var g = model.groups[name];
-      var groupEl = makeEl('div', 'drocat-lt-group');
-      var caret = makeEl('span', 'drocat-lt-caret', '\\u25B6');
       var color = groupColor(data, g, name);
+      var neuronCount = g.indices.length - g.sites.length;
+      var itemsEl = attachExpandable(panel, name, color, neuronCount,
+                                     g.indices);
 
-      var row = makeEl('div', 'drocat-lt-row drocat-lt-group-row');
-      var swatch = makeEl('span', 'drocat-lt-swatch');
-      swatch.style.background = color;
-      var label = makeEl('span', 'drocat-lt-label', name);
-      label.title = name;
-      var count = makeEl('span', 'drocat-lt-count', g.itemOrder.length);
-      var eye = makeEl('span', 'drocat-lt-eye');
-      row.appendChild(caret);
-      row.appendChild(swatch);
-      row.appendChild(label);
-      row.appendChild(count);
-      row.appendChild(eye);
-      groupEl.appendChild(row);
-
-      var itemsEl = makeEl('div', 'drocat-lt-items');
-      itemsEl.style.display = 'none';
-      g.itemOrder.forEach(function(itemName) {
-        var indices = g.items[itemName];
-        var irow = makeEl('div', 'drocat-lt-row drocat-lt-item-row');
-        var isw = makeEl('span', 'drocat-lt-swatch drocat-lt-swatch-item');
-        isw.style.background = color;
-        var ilabel = makeEl('span', 'drocat-lt-label', itemName);
-        ilabel.title = itemName;
-        var ieye = makeEl('span', 'drocat-lt-eye');
-        irow.appendChild(isw);
-        irow.appendChild(ilabel);
-        irow.appendChild(ieye);
-        itemsEl.appendChild(irow);
-        records.push({row: irow, eye: ieye, indices: indices});
-        irow.addEventListener('click', function() {
-          var gd = graphDiv();
-          if (!gd) { return; }
-          var on = indices.every(function(i) { return isVisible(gd.data[i]); });
-          Plotly.restyle(gd, {visible: !on}, indices);
-          sync();
+      if (!g.typeOrder.length) {
+        /* Flat tree: the group is the type, items are its neurons. */
+        g.directOrder.forEach(function(itemName) {
+          attachLeaf(itemsEl, itemName, color, g.direct[itemName]);
         });
-      });
-      groupEl.appendChild(itemsEl);
-      panel.appendChild(groupEl);
-
-      records.push({row: row, eye: eye, indices: g.indices});
-      eye.addEventListener('click', function(e) {
-        e.stopPropagation();
-        var gd = graphDiv();
-        if (!gd) { return; }
-        var on = g.indices.every(function(i) { return isVisible(gd.data[i]); });
-        Plotly.restyle(gd, {visible: !on}, g.indices);
-        sync();
-      });
-      function toggleExpand() {
-        var open = itemsEl.style.display === 'none';
-        itemsEl.style.display = open ? 'block' : 'none';
-        groupEl.classList.toggle('drocat-lt-expanded', open);
+      } else {
+        /* Custom-group hierarchy: type sub-rows only when a group holds
+           2+ neurons of that type; singletons and untyped neurons become
+           direct bodyId/instance leaves. Sites toggle with their type. */
+        var sitesByType = {};
+        g.sites.forEach(function(s) {
+          (sitesByType[s.type] = sitesByType[s.type] || []).push(s.index);
+        });
+        g.typeOrder.forEach(function(t) {
+          var tt = g.types[t];
+          if (tt.indices.length < 2) {
+            /* Singleton type: no sub-row, show its bodyId directly. */
+            tt.itemOrder.forEach(function(itemName) {
+              attachLeaf(itemsEl, itemName, color, tt.items[itemName]);
+            });
+            return;
+          }
+          var eyeIdx = tt.indices.concat(sitesByType[t] || []);
+          var subEl = attachExpandable(itemsEl, t, color,
+                                       tt.indices.length, eyeIdx);
+          tt.itemOrder.forEach(function(itemName) {
+            attachLeaf(subEl, itemName, color, tt.items[itemName]);
+          });
+        });
+        g.directOrder.forEach(function(itemName) {
+          attachLeaf(itemsEl, itemName, color, g.direct[itemName]);
+        });
       }
-      caret.addEventListener('click', toggleExpand);
-      label.addEventListener('click', toggleExpand);
     });
 
     if (model.synOrder.length) {
@@ -3794,7 +3869,7 @@ class VisualizeSkeleton:
         banner is added after Plotly has generated the document so it remains
         visible in both the main and per-neuron pages, and permanent viewer
         copies can additionally carry the light/dark theme switch and the
-        collapsible type_tree legend panel.
+        collapsible tree legend panel.
         """
         kwargs.setdefault('auto_open', False)
         kwargs.setdefault('full_html', True)
@@ -4302,7 +4377,7 @@ class VisualizeSkeleton:
                                 simplified_fig,
                                 simplified_html_path,
                                 theme_toggle=self.html_theme_toggle,
-                                legend_tree=(self.legend_mode == 'type_tree'),
+                                legend_tree=(self.legend_mode == 'tree'),
                                 auto_open=False,
                                 include_plotlyjs=True,
                                 config={'displayModeBar': False},
@@ -10957,7 +11032,7 @@ class VisualizeSkeleton:
 
                 # Build a mapping of neuron ID to type for 'type' legend mode
                 neuron_type_map = {}
-                if self.legend_mode in ('type', 'type_tree') and self.neuron_dfs[i] is not None:
+                if self.legend_mode in ('type', 'tree') and self.neuron_dfs[i] is not None:
                     ndf = self.neuron_dfs[i]
                     type_col = None
                     for col in ['type', 'cell_type', 'neuronType']:
@@ -11013,7 +11088,7 @@ class VisualizeSkeleton:
                         trace.hoverinfo = 'name'
                         self.fig_3d.add_trace(trace)
 
-                    elif self.legend_mode in ('type', 'type_tree'):
+                    elif self.legend_mode in ('type', 'tree'):
                         # Group by neuron type - each type gets separate legend but keeps layer color
                         neuron_type = neuron_type_map.get(neuron_id, None)
 
@@ -11052,21 +11127,35 @@ class VisualizeSkeleton:
                         shown_legend_groups.add(legend_group)
                         trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'
                         trace.hoverinfo = 'name'
-                        if self.legend_mode == 'type_tree':
+                        if self.legend_mode == 'tree':
                             # The exported HTML's collapsible legend panel
                             # groups traces by 'group' and labels each
-                            # expandable row by 'item' (the bodyId).
+                            # expandable row by 'item'. With custom groups the
+                            # hierarchy is group > type > bodyId: a type row
+                            # appears only when a group holds 2+ neurons of
+                            # that type; singletons and untyped neurons
+                            # become direct bodyId/instance leaves.
                             tree_label = str(neuron_id)
                             if self.neuron_dfs[i] is not None and source_index < len(self.neuron_dfs[i]):
                                 source_row = self.neuron_dfs[i].iloc[source_index]
-                                if 'bodyId' in source_row.index and pd.notna(source_row.get('bodyId')):
-                                    tree_label = str(source_row['bodyId'])
+                                for label_col in ('bodyId', 'instance'):
+                                    if label_col in source_row.index and pd.notna(source_row.get(label_col)):
+                                        tree_label = str(source_row[label_col])
+                                        break
                             tree_meta = dict(getattr(trace, 'meta', None) or {})
-                            tree_meta['drocatLegend'] = {
-                                'kind': 'neuron',
-                                'group': legend_group,
-                                'item': tree_label,
-                            }
+                            if self._tree_uses_custom_groups():
+                                tree_meta['drocatLegend'] = {
+                                    'kind': 'neuron',
+                                    'group': self.layer_names[i],
+                                    'type': neuron_type or None,
+                                    'item': tree_label,
+                                }
+                            else:
+                                tree_meta['drocatLegend'] = {
+                                    'kind': 'neuron',
+                                    'group': legend_group,
+                                    'item': tree_label,
+                                }
                             trace.meta = tree_meta
                         self.fig_3d.add_trace(trace)
 
@@ -12678,7 +12767,7 @@ class VisualizeSkeleton:
         # plot_skeleton first) still follows the documented legend levels.
         if mode == 'layer':
             return layer
-        if mode in ('type', 'type_tree'):
+        if mode in ('type', 'tree'):
             return self._pre_post_site_type_label(neuron_id, layer_idx)
         owner = self._pre_post_site_owner_label(neuron_id, layer_idx)
         return f'{owner}_{layer}'
@@ -12767,17 +12856,26 @@ class VisualizeSkeleton:
             if show_legend:
                 self._pre_post_seen_legend_groups.add(legend_group)
 
-            # In type_tree mode the collapsible HTML legend groups a site
-            # with its owner's type so one type toggle covers the whole
-            # neuron (legend_name is '<owner_identity>_<role>').
+            # In tree mode the collapsible HTML legend groups a site with its
+            # owner so one toggle covers the whole neuron (legend_name is
+            # '<owner_identity>_<role>'). With custom groups the site rides
+            # under its owner's custom group and type.
             tree_meta = None
-            if self.legend_mode == 'type_tree':
+            if self.legend_mode == 'tree':
                 owner_identity = legend_name[:-(len(site_type) + 1)]
-                tree_meta = {
-                    'kind': 'site',
-                    'group': owner_identity,
-                    'item': legend_name,
-                }
+                if self._tree_uses_custom_groups():
+                    tree_meta = {
+                        'kind': 'site',
+                        'group': self.layer_names[layer_idx],
+                        'type': owner_identity,
+                        'item': legend_name,
+                    }
+                else:
+                    tree_meta = {
+                        'kind': 'site',
+                        'group': owner_identity,
+                        'item': legend_name,
+                    }
 
             if self.backend == 'plotly':
                 if getattr(self, 'pre_post_scatter', False):
@@ -15669,7 +15767,7 @@ class VisualizeSkeleton:
                 self.fig_3d,
                 self.fig_path + '.html',
                 theme_toggle=self.html_theme_toggle,
-                legend_tree=(self.legend_mode == 'type_tree'),
+                legend_tree=(self.legend_mode == 'tree'),
                 auto_open=False,
                 include_plotlyjs=True,
                 config=html_config,
@@ -15812,7 +15910,7 @@ class VisualizeSkeleton:
                                 export_fig,
                                 simplified_html_path,
                                 theme_toggle=self.html_theme_toggle,
-                                legend_tree=(self.legend_mode == 'type_tree'),
+                                legend_tree=(self.legend_mode == 'tree'),
                                 auto_open=False,
                                 include_plotlyjs=True,
                                 config={'displayModeBar': False},
@@ -17938,7 +18036,7 @@ class VisualizeSkeleton:
                             fig_new,
                             simplified_html_path,
                             theme_toggle=self.html_theme_toggle,
-                            legend_tree=(self.legend_mode == 'type_tree'),
+                            legend_tree=(self.legend_mode == 'tree'),
                             auto_open=False,
                             include_plotlyjs=True,
                             config={'displayModeBar': False},
