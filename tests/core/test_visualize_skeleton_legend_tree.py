@@ -103,6 +103,21 @@ def test_tree_neuron_label_fafb_uses_type_and_hemisphere():
     assert visualizer._tree_neuron_label('x', row3) == '7205759406_Tm3'
 
 
+def test_tree_neuron_label_normalizes_legacy_names():
+    """Legacy navis neuron names ('{instance} ({bodyId})') normalize to the
+    same '{bodyId}_{instance}' shape as properly resolved labels."""
+    import pandas as pd
+
+    visualizer = _make_visualizer('male-cns:v1.0')
+    # no matching metadata row: parse the legacy name
+    assert visualizer._tree_neuron_label(
+        'MeVPMe7_L (12805)', None) == '12805_MeVPMe7_L'
+    # matching row wins with the proper instance column
+    row = pd.Series({'bodyId': 12805, 'instance': 'MeVPMe7_L'})
+    assert visualizer._tree_neuron_label(
+        'MeVPMe7_L (12805)', row) == '12805_MeVPMe7_L'
+
+
 def test_legend_tree_html_contains_panel_and_markers():
     html = _make_visualizer()._legend_tree_html()
     assert 'drocat-legend-tree' in html

@@ -3420,10 +3420,17 @@ class VisualizeSkeleton:
         NeuPrint datasets: ``'{bodyId}_{instance}'`` (e.g. ``11309_aMe4_L``).
         FlyWire/FAFB: ``'{bodyId}_{type}_L/_R'`` - the hemisphere comes from
         the side column or the instance suffix. Falls back to the instance,
-        then the raw neuron id.
+        then the raw neuron id. Legacy navis neuron names of the form
+        ``'{instance} ({bodyId})'`` are normalized to the same
+        ``'{bodyId}_{instance}'`` shape so every leaf reads alike.
         """
         base = str(neuron_id)
         suffix = None
+        legacy_name = None
+        m = re.match(r"^(.*)\s*\((\d+)\)\s*$", base)
+        if m and m.group(1).strip():
+            legacy_name = m.group(1).strip()
+            base = m.group(2)
         if source_row is not None:
             body = source_row.get('bodyId')
             if body is not None and pd.notna(body):
@@ -3446,6 +3453,8 @@ class VisualizeSkeleton:
                 inst = source_row.get('instance')
                 if inst is not None and pd.notna(inst) and str(inst).strip():
                     suffix = str(inst).strip()
+        if suffix is None:
+            suffix = legacy_name
         return base if not suffix else f'{base}_{suffix}'
 
     @staticmethod
@@ -3527,6 +3536,10 @@ class VisualizeSkeleton:
             '.drocat-lt-eye{flex:0 0 auto;font-size:10px;opacity:.85;}'
             '.drocat-lt-group-row{font-weight:600;}'
             '.drocat-lt-off{opacity:.4;}'
+            '.drocat-lt-header{display:flex;align-items:center;'
+            'justify-content:space-between;opacity:.8;padding:0 2px 3px;}'
+            '.drocat-lt-title{font-weight:600;font-size:11px;}'
+            '.drocat-lt-header .drocat-lt-eye{cursor:pointer;font-size:11px;}'
             '.drocat-lt-items.drocat-lt-scroll{max-height:224px;'
             'overflow-y:auto;overflow-x:hidden;}'
             '.drocat-lt-section{font-weight:600;opacity:.65;'
@@ -3558,6 +3571,17 @@ class VisualizeSkeleton:
   }
 
   var records = [];  /* {row, eye, indices} kept in sync with the plot */
+  var masterEyeEl = null;
+
+  function managedIndices() {
+    var all = [];
+    records.forEach(function(rec) {
+      rec.indices.forEach(function(i) {
+        if (all.indexOf(i) < 0) { all.push(i); }
+      });
+    });
+    return all;
+  }
 
   function buildModel(data) {
     var groups = {}, groupOrder = [];
@@ -3632,15 +3656,22 @@ class VisualizeSkeleton:
   }
 
   function groupColor(data, g, groupName) {
-    /* Prefer the opaque legend-swatch trace (marker color, group name). */
+    /* Prefer the baked display color from the trace meta (resolved from
+       the same neuron_color the renderer applied), then the opaque
+       legend-swatch trace, then any member trace color. */
+    for (var j = 0; j < g.indices.length; j++) {
+      var src = data[g.indices[j]].meta;
+      var lg2 = src && src.drocatLegend;
+      if (lg2 && lg2.color) { return lg2.color; }
+    }
     for (var i = 0; i < data.length; i++) {
       var tr = data[i];
       if (tr.name === groupName && tr.marker && tr.marker.color) {
         return tr.marker.color;
       }
     }
-    for (var j = 0; j < g.indices.length; j++) {
-      var c = traceColor(data[g.indices[j]]);
+    for (var k = 0; k < g.indices.length; k++) {
+      var c = traceColor(data[g.indices[k]]);
       if (c) { return c; }
     }
     return '#7f7f7f';
@@ -3661,6 +3692,40 @@ class VisualizeSkeleton:
       rec.eye.textContent = on ? '\\u25CF' : '\\u25CB';
       rec.row.classList.toggle('drocat-lt-off', !on);
     });
+    if (masterEyeEl) {
+      var anyOn = managedIndices().some(function(i) {
+        return isVisible(gd.data[i]);
+      });
+      masterEyeEl.textContent = anyOn ? '\\u25CF' : '\\u25CB';
+    }
+  }
+
+  function isolate(indices) {
+    /* Double-click: show only this row's traces; a second double-click
+       while isolated restores every trace (mirrors the native plotly
+       legend's double-click isolation). */
+    var gd = graphDiv();
+    if (!gd) { return; }
+    var all = managedIndices();
+    if (!all.length) { return; }
+    if (!all.every(function(i) { return isVisible(gd.data[i]); })) {
+      Plotly.restyle(gd, {visible: true}, all);
+      sync();
+      return;
+    }
+    var others = all.filter(function(i) { return indices.indexOf(i) < 0; });
+    if (others.length) { Plotly.restyle(gd, {visible: false}, others); }
+    sync();
+  }
+
+  function toggleAll() {
+    var gd = graphDiv();
+    if (!gd) { return; }
+    var all = managedIndices();
+    if (!all.length) { return; }
+    var on = all.every(function(i) { return isVisible(gd.data[i]); });
+    Plotly.restyle(gd, {visible: !on}, all);
+    sync();
   }
 
   function addToggleRow(container, label, color, indices, extraIcon) {
@@ -3722,6 +3787,12 @@ class VisualizeSkeleton:
       Plotly.restyle(gd, {visible: !on}, eyeIndices);
       sync();
     });
+    /* Double-click isolates this row (show only its traces), matching the
+       native plotly legend's double-click isolation. */
+    row.addEventListener('dblclick', function(e) {
+      e.stopPropagation();
+      isolate(eyeIndices);
+    });
     function toggleExpand() {
       var open = itemsEl.style.display === 'none';
       itemsEl.style.display = open ? 'block' : 'none';
@@ -3751,6 +3822,10 @@ class VisualizeSkeleton:
       Plotly.restyle(gd, {visible: !on}, indices);
       sync();
     });
+    irow.addEventListener('dblclick', function(e) {
+      e.stopPropagation();
+      isolate(indices);
+    });
   }
 
   function siteLabel(meta) {
@@ -3760,6 +3835,16 @@ class VisualizeSkeleton:
   }
 
   function render(model, data) {
+    panel.innerHTML = '';
+    var header = makeEl('div', 'drocat-lt-header');
+    header.appendChild(makeEl('span', 'drocat-lt-title', 'Legend'));
+    masterEyeEl = makeEl('span', 'drocat-lt-eye');
+    masterEyeEl.setAttribute('title',
+      'Show/hide all (double-click a row to isolate it)');
+    masterEyeEl.addEventListener('click', toggleAll);
+    header.appendChild(masterEyeEl);
+    panel.appendChild(header);
+
     model.groupOrder.forEach(function(name) {
       var g = model.groups[name];
       var color = groupColor(data, g, name);
@@ -3775,21 +3860,15 @@ class VisualizeSkeleton:
            sub-row, or under the group when there is no matching sub-row.
            Their eye toggles just that site trace. */
         (sitesByType[t] || []).forEach(function(idx) {
-          attachLeaf(container, siteLabel(data[idx].meta.drocatLegend),
-                     traceColor(data[idx]) || color, [idx]);
+          var meta = data[idx].meta.drocatLegend;
+          attachLeaf(container, siteLabel(meta),
+                     meta.color || traceColor(data[idx]) || color, [idx]);
         });
       }
 
-      if (!g.typeOrder.length) {
-        /* Flat tree: the group is the type, items are its neurons. */
-        g.directOrder.forEach(function(itemName) {
-          attachLeaf(itemsEl, itemName, color, g.direct[itemName]);
-        });
-        addSiteLeaves(itemsEl, null);
-      } else {
-        /* Custom-group hierarchy: type sub-rows only when a group holds
-           2+ neurons of that type; singletons and untyped neurons become
-           direct bodyId/instance leaves. Sites toggle with their type. */
+      if (g.typeOrder.length > 1) {
+        /* Mixed custom group (2+ types): type sub-rows for types with 2+
+           neurons; singletons and untyped neurons become direct leaves. */
         g.typeOrder.forEach(function(t) {
           var tt = g.types[t];
           if (tt.indices.length < 2) {
@@ -3812,6 +3891,22 @@ class VisualizeSkeleton:
           attachLeaf(itemsEl, itemName, color, g.direct[itemName]);
         });
         addSiteLeaves(itemsEl, null);
+      } else {
+        /* Single-type (or untyped) group: the group row is already the
+           type level, so render the bodyId/instance leaves directly
+           instead of nesting a redundant type row. */
+        if (g.typeOrder.length) {
+          var t0 = g.typeOrder[0];
+          g.types[t0].itemOrder.forEach(function(itemName) {
+            attachLeaf(itemsEl, itemName, color,
+                       g.types[t0].items[itemName]);
+          });
+          addSiteLeaves(itemsEl, t0);
+        }
+        g.directOrder.forEach(function(itemName) {
+          attachLeaf(itemsEl, itemName, color, g.direct[itemName]);
+        });
+        if (!g.typeOrder.length) { addSiteLeaves(itemsEl, null); }
       }
     });
 
@@ -3834,6 +3929,7 @@ class VisualizeSkeleton:
     panel.querySelectorAll('.drocat-lt-items').forEach(function(el) {
       if (el.children.length > 10) { el.classList.add('drocat-lt-scroll'); }
     });
+    sync();
   }
 
   function positionPanel() {
@@ -11197,27 +11293,43 @@ class VisualizeSkeleton:
                             # groups traces by 'group' and labels each
                             # expandable row by 'item'. With custom groups the
                             # hierarchy is group > type > bodyId: a type row
-                            # appears only when a group holds 2+ neurons of
-                            # that type; singletons and untyped neurons
-                            # become direct bodyId/instance leaves.
+                            # appears only when a group holds neurons of 2+
+                            # distinct types; single-type groups render their
+                            # bodyId/instance leaves directly.
                             source_row = None
                             if self.neuron_dfs[i] is not None and source_index < len(self.neuron_dfs[i]):
                                 source_row = self.neuron_dfs[i].iloc[source_index]
                             tree_label = self._tree_neuron_label(
                                 neuron_id, source_row)
+                            try:
+                                display_color = self._get_opaque_color(
+                                    neuron_color)
+                            except Exception:
+                                display_color = None
                             tree_meta = dict(getattr(trace, 'meta', None) or {})
                             if self._tree_uses_custom_groups():
+                                # Homolog/find-similar query overlays
+                                # (query_transformed_* layers) collapse into
+                                # one shared group instead of one group per
+                                # query neuron.
+                                if str(self.layer_names[i]).startswith(
+                                        'query_transformed'):
+                                    group_name = 'query_transformed'
+                                else:
+                                    group_name = self.layer_names[i]
                                 tree_meta['drocatLegend'] = {
                                     'kind': 'neuron',
-                                    'group': self.layer_names[i],
+                                    'group': group_name,
                                     'type': neuron_type or None,
                                     'item': tree_label,
+                                    'color': display_color,
                                 }
                             else:
                                 tree_meta['drocatLegend'] = {
                                     'kind': 'neuron',
                                     'group': legend_group,
                                     'item': tree_label,
+                                    'color': display_color,
                                 }
                             trace.meta = tree_meta
                         self.fig_3d.add_trace(trace)
@@ -12926,18 +13038,24 @@ class VisualizeSkeleton:
             tree_meta = None
             if self.legend_mode == 'tree':
                 owner_identity = legend_name[:-(len(site_type) + 1)]
+                try:
+                    site_display = self._get_opaque_color(base_color)
+                except Exception:
+                    site_display = None
                 if self._tree_uses_custom_groups():
                     tree_meta = {
                         'kind': 'site',
                         'group': self.layer_names[layer_idx],
                         'type': owner_identity,
                         'item': legend_name,
+                        'color': site_display,
                     }
                 else:
                     tree_meta = {
                         'kind': 'site',
                         'group': owner_identity,
                         'item': legend_name,
+                        'color': site_display,
                     }
 
             if self.backend == 'plotly':
