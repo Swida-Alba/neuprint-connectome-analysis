@@ -8315,8 +8315,11 @@ class HomologFinder:
         # Rendering semantics owned by a call site must win over user
         # preferences: the homolog outputs promise one legend entry per layer
         # named ``{type}_{bodyId}``, which requires the site's explicit
-        # legend_mode instead of the app-wide default ('type').
-        if 'legend_mode' in options:
+        # legend_mode instead of the app-wide default ('type'). The
+        # interactive 'tree' preference IS honoured: its panel re-groups by
+        # the call site's custom layer names, keeping candidates collapsed
+        # per layer.
+        if 'legend_mode' in options and settings.get('legend_mode') != 'tree':
             settings.pop('legend_mode', None)
         options.update(settings)
         options.pop('visualize_top_n', None)

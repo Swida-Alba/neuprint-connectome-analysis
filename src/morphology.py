@@ -8414,8 +8414,11 @@ class MorphologyComparer:
                     # Derived from ``visualize_by`` above. Letting the shared
                     # panel's global preference (app default 'type') rewrite
                     # it collapsed per-bodyId legends into bare type names,
-                    # exactly like the Find Homologs regression.
-                    continue
+                    # exactly like the Find Homologs regression. The
+                    # interactive 'tree' preference IS let through: its panel
+                    # re-groups by the custom layer names.
+                    if value != "tree":
+                        continue
                 viz_kwargs[key] = value
 
             # The shared panel returns None when its analysis default is

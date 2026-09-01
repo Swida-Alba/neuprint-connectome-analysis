@@ -150,8 +150,7 @@ class TestNeuPrintSimplifiedCache:
             is_fafb=False, using_simplified_cache=True
         ) == pytest.approx(0.95)
 
-    def test_mixed_legacy_cache_levels_are_marked_stale_and_normalized(
-            self, tmp_path):
+    def test_mixed_legacy_cache_levels_are_marked_stale(self, tmp_path):
         vs = build_vs(tmp_path)
         raw = make_neuron(120)
         raw.id = 101
@@ -171,14 +170,38 @@ class TestNeuPrintSimplifiedCache:
         assert set(stale) == {202}
         assert missing == [303]
 
-        normalized = vs._normalize_neuprint_cache_fallback(
-            preferred, stale, {101: raw}
-        )
-        assert set(normalized) == {101, 202}
-        assert {
-            vs._cached_skeleton_level(neuron)
-            for neuron in normalized.values()
-        } == {90}
+    def test_unrefreshable_legacy_cache_aborts_render(
+            self, tmp_path, monkeypatch):
+        """A simp90 file that cannot be refreshed online must abort the
+        render instead of re-leveling every raw source to level 90."""
+        import morphology
+
+        vs = build_vs(tmp_path)
+        raw = make_neuron(120)
+        raw.id = 101
+        raw._drocat_simplification = 0
+        legacy = make_neuron(120)
+        legacy.id = 202
+        legacy._drocat_simplification = 90
+
+        class MixedCache:
+            def load_skeleton(self, body_id):
+                return {101: raw, 202: legacy}.get(body_id)
+
+        monkeypatch.setattr(
+            morphology, "find_similar_raw_cache",
+            lambda *a, **k: MixedCache())
+
+        def partial_fetch(fetch_df, fetch_kwargs, persist=False):
+            # The missing raw skeleton comes back online; the stale legacy
+            # file does not.
+            return [raw]
+
+        vs._fetch_neuprint_skeletons_batched = partial_fetch
+
+        with pytest.raises(RuntimeError, match="legacy simp90"):
+            vs._prepare_neuprint_skeletons_for_render(
+                [101, 202], False, False, None)
 
 
 class TestFlywireCacheUntouched:
