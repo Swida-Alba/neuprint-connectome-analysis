@@ -103,17 +103,27 @@ exported to `auto_type_mapping.csv` (and conflicts to
 `auto_type_mapping_conflicts.csv`) in the output folder.
 
 3. **See available neurons viewer (expanded search)**: when a search finds
-   no rows in the selected dataset, the viewer probes the auto type mapping
-   and the *cached* neuron indexes of the other datasets and shows a clearly
-   separated panel: the alias per dataset with its relation (`same name` /
-   `renamed` / `splits into` / `one of N`), an optional `a match also
-   covers: …` annotation when matching by the alias would aggregate sibling
-   types, neuron counts, and — for the selected dataset only — a
-   `Search '<alias>' here` action. Datasets where the mapper knows no
-   counterpart are listed explicitly. Cross-dataset rows are informational
-   only: they are never merged into the selected dataset's table or
-   selection (bodyIds from different datasets must not be mixed), and the
-   panel repeats the double-check recommendation.
+   no rows in the selected dataset, the viewer probes two expansions and
+   shows a clearly separated panel:
+
+   - **Type-name matches (native, mapper-free)**: the search text is
+     matched as a case-insensitive substring against the `type` column and
+     the taxonomy label columns (`class`/`cell_class`/`cell_type`/… ) of
+     every other *cached* dataset's index. Matches are name-similar entries
+     — **not necessarily the same type** — listed with neuron counts
+     (exact matches first, then by count; capped per dataset). This tier
+     works even when the auto type mapping knows nothing about the query.
+   - **Auto type mapping** (the tier described above): renamed types,
+     splits, and N-to-1 groups for the query name.
+
+   Every matched foreign type is additionally annotated with what it is
+   called in the selected dataset (unique rename, same name, or the members
+   of a refused N-to-1 aggregation); types without a counterpart stay
+   visible unannotated so the user is led to inspect them in the other
+   dataset. Cross-dataset rows are informational only — they are never
+   merged into the selected dataset's table or selection (bodyIds from
+   different datasets must not be mixed) — and the panel repeats the
+   double-check recommendation.
 
 ### 4. Standardization Process
 

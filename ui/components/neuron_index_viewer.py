@@ -12,7 +12,7 @@ from nicegui import ui
 
 from ..config import PROJECT_ROOT
 from ..neuron_index import (
-    collect_alias_matches,
+    collect_zero_hit_matches,
     load_cached_neuron_index,
     neuron_index_path,
     query_match_group_subtypes,
@@ -1343,16 +1343,22 @@ def _render_index(
 
         def render_alias_matches() -> None:
             try:
-                matches = collect_alias_matches(
+                matches = collect_zero_hit_matches(
                     dataset, str(search_input.value or "").strip()
                 )
             except Exception:
                 alias_section.set_visibility(False)
                 return
-            useful = any(
-                entry["outcome"] == "matched" and entry["candidates"]
-                for entry in matches
+            native = matches.get("native", [])
+            mapped = matches.get("mapped", [])
+            native_useful = any(
+                entry.get("types") or entry.get("labels") for entry in native
             )
+            mapped_useful = any(
+                entry["outcome"] == "matched" and entry["candidates"]
+                for entry in mapped
+            )
+            useful = native_useful or mapped_useful
             alias_section.set_visibility(useful)
             if not useful:
                 alias_container.clear()
@@ -1363,41 +1369,122 @@ def _render_index(
                 with ui.row().classes("w-full items-center gap-2 flex-wrap"):
                     ui.icon("travel_explore", color="warning").classes("text-lg")
                     ui.label(
-                        "No rows here. Cross-dataset matches via auto type "
-                        "mapping — informational only, please double check."
+                        "No rows here. Cross-dataset matches — informational "
+                        "only, please double check."
                     ).classes("text-subtitle2 font-bold")
-                for entry in matches:
-                    if entry["outcome"] != "matched" or not entry["candidates"]:
-                        continue
-                    with ui.row().classes(
-                        "w-full items-start gap-2 flex-wrap drocat-neuron-alias-row"
-                    ):
-                        ui.badge(
-                            entry["dataset"]
-                            + (" (this dataset)" if entry["is_selected"] else "")
-                        ).props("outline")
-                        for cand in entry["candidates"]:
-                            text = f"'{cand['name']}' — {cand['kind']}"
-                            if cand.get("aggregates"):
-                                text += (
-                                    "; a match also covers: "
-                                    + ", ".join(cand["aggregates"])
-                                )
-                            if cand.get("count") is not None:
-                                text += f" ({cand['count']:,} neurons)"
-                            ui.label(text).classes("text-caption")
-                            if entry["is_selected"]:
-                                ui.button(
-                                    f"Search '{cand['name']}' here",
-                                    icon="search",
-                                ).props("flat dense").on_click(
-                                    lambda _e=None, name=cand["name"]:
-                                    _search_local_alias(name)
-                                )
+
+                def _annotation_text(ann) -> str:
+                    if not ann:
+                        return "— no counterpart in this dataset"
+                    if ann["kind"] == "one of N":
+                        return "— here: one of " + ", ".join(ann["targets"])
+                    if ann["kind"] == "renamed":
+                        return "— here: maps to '" + ann["targets"][0] + "'"
+                    if ann["kind"] == "same name":
+                        return "— same name in this dataset"
+                    return f"— here: {ann['kind']} {', '.join(ann['targets'])}"
+
+                if native_useful:
+                    with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                        ui.label(
+                            "Type-name matches in other datasets "
+                            "(name-similar — not necessarily the same type):"
+                        ).classes("text-caption font-bold drocat-muted")
+                    for entry in native:
+                        if not (entry.get("types") or entry.get("labels")):
+                            continue
+                        with ui.row().classes(
+                            "w-full items-start gap-2 flex-wrap "
+                            "drocat-neuron-alias-row"
+                        ):
+                            ui.badge(entry["dataset"]).props("outline")
+                            with ui.element("div").classes("flex-grow"):
+                                for cand in entry.get("types", []):
+                                    text = (
+                                        f"'{cand['name']}' "
+                                        f"({cand['count']:,} neurons) "
+                                        + _annotation_text(cand.get("mapped"))
+                                    )
+                                    ui.label(text).classes("text-caption")
+                                if entry.get("types_truncated"):
+                                    ui.label(
+                                        f"+{entry['types_truncated']} more types"
+                                    ).classes("text-caption drocat-muted")
+                                for label in entry.get("labels", []):
+                                    ui.label(
+                                        f"label '{label['label']}' · "
+                                        f"{label['column']} "
+                                        f"({label['count']:,} neurons)"
+                                    ).classes("text-caption")
+                                    covered = [
+                                        f"'{t['name']}' ({t['count']:,}) "
+                                        + _annotation_text(t.get("mapped"))
+                                        for t in label.get("types", [])
+                                    ]
+                                    if covered:
+                                        ui.label(
+                                            "    types under this label: "
+                                            + "; ".join(covered)
+                                        ).classes("text-caption drocat-muted")
+                                    if label.get("types_truncated"):
+                                        ui.label(
+                                            f"    +{label['types_truncated']} "
+                                            "more types under this label"
+                                        ).classes("text-caption drocat-muted")
+                                if entry.get("labels_truncated"):
+                                    ui.label(
+                                        f"+{entry['labels_truncated']} more labels"
+                                    ).classes("text-caption drocat-muted")
+
+                if mapped_useful:
+                    with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                        ui.label(
+                            "Auto type mapping:"
+                        ).classes("text-caption font-bold drocat-muted")
+                    for entry in mapped:
+                        if entry["outcome"] != "matched" or not entry["candidates"]:
+                            continue
+                        with ui.row().classes(
+                            "w-full items-start gap-2 flex-wrap "
+                            "drocat-neuron-alias-row"
+                        ):
+                            ui.badge(
+                                entry["dataset"]
+                                + (" (this dataset)" if entry["is_selected"] else "")
+                            ).props("outline")
+                            for cand in entry["candidates"]:
+                                text = f"'{cand['name']}' — {cand['kind']}"
+                                if cand.get("aggregates"):
+                                    text += (
+                                        "; a match also covers: "
+                                        + ", ".join(cand["aggregates"])
+                                    )
+                                if cand.get("count") is not None:
+                                    text += f" ({cand['count']:,} neurons)"
+                                ui.label(text).classes("text-caption")
+                                if entry["is_selected"]:
+                                    ui.button(
+                                        f"Search '{cand['name']}' here",
+                                        icon="search",
+                                    ).props("flat dense").on_click(
+                                        lambda _e=None, name=cand["name"]:
+                                        _search_local_alias(name)
+                                    )
+
+                matched_datasets = {
+                    entry["dataset"]
+                    for entry in mapped
+                    if entry["outcome"] == "matched" and entry["candidates"]
+                }
+                matched_datasets.update(
+                    entry["dataset"]
+                    for entry in native
+                    if entry.get("types") or entry.get("labels")
+                )
                 unknown = [
                     entry["dataset"]
-                    for entry in matches
-                    if entry["outcome"] != "matched"
+                    for entry in mapped
+                    if entry["dataset"] not in matched_datasets
                 ]
                 if unknown:
                     ui.label(

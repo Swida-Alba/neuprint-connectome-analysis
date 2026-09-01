@@ -149,3 +149,110 @@ def test_viewer_match_groups_split_combined_cells():
     assert 'vDeltaB' in group_values
     # a matched value is always one real name, never a joined cell
     assert all(',' not in v for v in group_values)
+
+
+# ---------------------------------------------------------------------------
+# Native (mapper-free) type-name expansion
+# ---------------------------------------------------------------------------
+
+def test_native_expansion_finds_dn3_relatives_in_other_datasets():
+    # DN3 does not exist anywhere as a standalone type; the expansion finds
+    # the name-similar types natively — no auto type mapping involved.
+    matches = collect_alias_matches  # noqa: F841  (sibling API sanity)
+    from ui.neuron_index import collect_native_type_matches
+
+    native = collect_native_type_matches(MCNS, 'DN3')
+    by_ds = {e['dataset']: e for e in native}
+
+    fafb = by_ds[FW]
+    fafb_types = {c['name']: c['count'] for c in fafb['types']}
+    assert fafb_types['APDN3'] == 12
+    assert fafb_types['s-CPDN3A'] == 38
+    assert fafb_types['l-CPDN3'] == 2
+    assert not any(c['exact'] for c in fafb['types'])
+    # sorted by neuron count (descending) within the non-exact tier
+    counts = [c['count'] for c in fafb['types']]
+    assert counts == sorted(counts, reverse=True)
+
+    banc = by_ds[BANC]
+    assert {c['name']: c['count'] for c in banc['types']}['APDN3'] == 8
+
+    # datasets with nothing related are reported as absent (not in the list)
+    assert MCNS not in by_ds          # selected dataset is not scanned
+    assert 'hemibrain:v1.2.1' not in by_ds
+
+
+def test_native_expansion_enriches_with_mapped_current_dataset_names():
+    from ui.neuron_index import collect_native_type_matches, enrich_native_type_matches
+
+    native = collect_native_type_matches(MCNS, 'DN3')
+    enrich_native_type_matches(native, MCNS)
+
+    by_ds = {e['dataset']: e for e in native}
+    apdn3 = next(c for c in by_ds[FW]['types'] if c['name'] == 'APDN3')
+    assert apdn3['mapped']['kind'] == 'one of N'
+    assert apdn3['mapped']['targets'] == ['CL125', 'PLP080', 'SLP249', 'SLP250']
+    # l-CPDN3 maps uniquely to male-cns aMe13
+    l_cpdn3 = next(c for c in by_ds[FW]['types'] if c['name'] == 'l-CPDN3')
+    assert l_cpdn3['mapped'] == {'kind': 'renamed', 'targets': ['aMe13']}
+
+
+def test_native_expansion_taxonomy_labels_map_covered_types():
+    from ui.neuron_index import collect_native_type_matches, enrich_native_type_matches
+
+    native = collect_native_type_matches(MCNS, 'circadian')
+    enrich_native_type_matches(native, MCNS)
+    by_ds = {e['dataset']: e for e in native}
+
+    fafb_labels = {l['label']: l for l in by_ds[FW]['labels']}
+    clock = fafb_labels['circadian_clock']
+    assert clock['column'] == 'cell_type'
+    covered = {t['name']: t for t in clock['types']}
+    s_cpdn3a = covered['s-CPDN3A']
+    assert s_cpdn3a['mapped']['kind'] == 'one of N'
+    # taxonomy labels themselves get no annotation; their covered types do
+    assert all(not l.get('mapped') for l in by_ds[FW]['labels'])
+
+    banc_labels = {l['label']: l for l in by_ds[BANC]['labels']}
+    neuron = banc_labels['circadian_neuron']
+    assert neuron['column'] == 'Class'
+    # covered types carry their mapping relation when one exists ...
+    kinds = {t.get('mapped', {}).get('kind') for t in neuron['types']}
+    assert {'renamed', 'same name', 'one of N'} <= kinds
+    # ... and BANC v888 covers an unmapped type, still shown so the user is
+    # led to inspect it in the other dataset.
+    v888 = {e['dataset']: e for e in native}['flywire_BANC_v888']
+    v888_labels = {l['label']: l for l in v888['labels']}
+    assert any(
+        t.get('mapped') is None for t in v888_labels['circadian_neuron']['types']
+    )
+
+
+def test_zero_hit_matches_merges_native_and_mapped_tiers():
+    from ui.neuron_index import collect_zero_hit_matches
+
+    result = collect_zero_hit_matches(MCNS, 'DN3')
+    assert set(result.keys()) == {'native', 'mapped'}
+    assert any(e['types'] for e in result['native'])
+    # the mapper knows nothing about DN3: the mapped tier stays empty while
+    # the native tier still delivers.
+    assert not any(
+        e['outcome'] == 'matched' and e['candidates'] for e in result['mapped']
+    )
+
+
+def test_native_expansion_is_mapper_free():
+    """The native tier is a pure neuron-index search: its code path must not
+    reference the auto type mapping at all."""
+    import inspect
+
+    import ui.neuron_index as ni
+
+    for func in (ni.collect_native_type_matches, ni._native_type_matches,
+                 ni._native_label_matches, ni._native_label_columns):
+        source = inspect.getsource(func)
+        # strip the docstring so prose mentions don't count as code usage
+        if source.count('"""') >= 2:
+            source = '"""'.join(source.split('"""')[2:])
+        assert 'mapper' not in source.lower(), func.__name__
+        assert 'comparison' not in source, func.__name__

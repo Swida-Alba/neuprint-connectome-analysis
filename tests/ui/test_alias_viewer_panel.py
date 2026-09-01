@@ -85,21 +85,24 @@ def test_zero_hit_query_reveals_alias_panel(viewer_client):
 
     texts = _wait_for_labels(
         client,
-        lambda t: any('Cross-dataset matches via auto type mapping' in x
+        lambda t: any('Cross-dataset matches — informational only' in x
                       for x in t),
     )
-    assert any('Cross-dataset matches via auto type mapping' in t for t in texts)
+    assert any('Cross-dataset matches — informational only' in t for t in texts)
     assert any('please double check' in t for t in texts)
 
-    # local group members are offered as same-dataset search actions
+    # mapped tier: local group members offered as same-dataset search actions
     assert any("'SLP249' — one of N (4 neurons)" in t for t in texts)
     assert any("Search 'SLP249' here" in t for t in texts)
-    # native FAFB entry carries the aggregation annotation and count
+    # native tier: FAFB entry carries the aggregation annotation and count
     assert any(
-        "'APDN3' — same name; a match also covers: CL125, PLP080, SLP249, "
-        "SLP250 (12 neurons)" in t
+        "'APDN3' (12 neurons) — here: one of CL125, PLP080, SLP249, SLP250"
+        in t
         for t in texts
     )
+    # native tier header states the name-similar caution
+    assert any('name-similar — not necessarily the same type' in t
+               for t in texts)
     # checked-but-unknown datasets are stated explicitly
     assert any(t.startswith('No known counterpart in:') for t in texts)
 
@@ -113,7 +116,7 @@ def test_hit_query_keeps_alias_panel_hidden(viewer_client):
     search.set_value('aMe12')  # male-cns has plenty of aMe12 rows
 
     texts = _labels(client)
-    assert not any('Cross-dataset matches via auto type mapping' in t
+    assert not any('Cross-dataset matches — informational only' in t
                    for t in texts)
     section = _alias_section(client)
     assert section is not None
@@ -145,7 +148,7 @@ def test_query_changes_refresh_the_panel(viewer_client):
     search.set_value('DNp50')  # FAFB primary; male-cns calls it MDN
     texts = _wait_for_labels(
         client, lambda t: any("'MDN' — renamed (4 neurons)" in x for x in t))
-    assert any("Cross-dataset matches via auto type mapping" in t for t in texts)
+    assert any("Cross-dataset matches — informational only" in t for t in texts)
     assert any("'MDN' — renamed (4 neurons)" in t for t in texts)
 
     # 4) back to a query with hits -> hidden again

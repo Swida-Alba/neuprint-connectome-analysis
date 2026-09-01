@@ -2535,6 +2535,226 @@ def _load_alias_index(dataset: str) -> Optional["CachedNeuronIndex"]:
     return cached
 
 
+# ---------------------------------------------------------------------------
+# Native cross-dataset type-name expansion (mapper-free search + enrichment)
+# ---------------------------------------------------------------------------
+
+# Caps for the native expansion.  Generous enough to keep reasonable entries
+# visible; anything beyond is summarized behind a "+N more" note.
+NATIVE_TYPE_MATCH_CAP = 16
+NATIVE_LABEL_MATCH_CAP = 8
+NATIVE_LABEL_TYPES_CAP = 8
+
+# Column names (normalized: casefold, non-alphanumerics removed) that carry
+# taxonomy labels in the shipped dataset indexes.
+_NATIVE_LABEL_COLUMNS = {
+    "class", "subclass", "superclass", "cellclass", "celltype", "group",
+}
+
+
+def _native_label_columns(index: "CachedNeuronIndex") -> List[str]:
+    """Taxonomy columns of one index, in a stable priority order."""
+    priority = ("class", "subclass", "superclass",
+                "cellclass", "celltype", "group")
+    found = []
+    for column in index.frame.columns:
+        norm = re.sub(r"[^a-z0-9]", "", str(column).casefold())
+        if norm in _NATIVE_LABEL_COLUMNS:
+            found.append((priority.index(norm), column))
+    found.sort()
+    return [column for _, column in found]
+
+
+def _native_type_matches(index: "CachedNeuronIndex", needle: str, cap: int):
+    """Substring type matches in one index, exact matches ranked first.
+
+    Returns ``(matches, truncated)`` where matches are
+    ``{'name', 'count', 'exact'}`` dicts sorted by exact-flag, count
+    (descending), then name.
+    """
+    import polars as pl
+
+    if "type" not in index.frame.columns:
+        return [], 0
+    folded = pl.col("type").cast(pl.Utf8, strict=False).str.to_lowercase()
+    hits = index.frame.filter(
+        folded.is_not_null() & folded.str.contains(needle.casefold(), literal=True)
+    )
+    if hits.is_empty():
+        return [], 0
+    grouped = hits.group_by("type").len().sort("type").to_dicts()
+    matches = [
+        {
+            "name": str(row["type"]),
+            "count": int(row["len"]),
+            "exact": str(row["type"]).casefold() == needle.casefold(),
+        }
+        for row in grouped if row["type"]
+    ]
+    matches.sort(key=lambda m: (not m["exact"], -m["count"], m["name"].casefold()))
+    return matches[:cap], max(0, len(matches) - cap)
+
+
+def _native_label_matches(index: "CachedNeuronIndex", needle: str, cap: int,
+                          types_cap: int):
+    """Taxonomy-label matches in one index with their covered types.
+
+    Returns ``(matches, truncated)`` where matches are
+    ``{'label', 'column', 'count', 'types': [{'name', 'count'}],
+    'types_truncated'}`` sorted by count (descending).
+    """
+    import polars as pl
+
+    folded_needle = needle.casefold()
+    matches = []
+    truncated_labels = 0
+    for column in _native_label_columns(index):
+        if column not in index.frame.columns:
+            continue
+        folded_col = pl.col(column).cast(pl.Utf8, strict=False).str.to_lowercase()
+        label_rows = index.frame.filter(
+            folded_col.is_not_null()
+            & folded_col.str.contains(folded_needle, literal=True)
+        )
+        if label_rows.is_empty():
+            continue
+        labels = (
+            label_rows.group_by(column).len()
+            .sort("len", descending=True).to_dicts()
+        )
+        for row in labels:
+            label = str(row[column])
+            if folded_needle not in label.casefold():
+                continue
+            types_frame = label_rows.filter(
+                pl.col(column) == row[column]
+            )
+            type_groups = (
+                types_frame.group_by("type").len()
+                .sort("len", descending=True).to_dicts()
+                if "type" in types_frame.columns else []
+            )
+            covered = [
+                {"name": str(g["type"]), "count": int(g["len"])}
+                for g in type_groups if g["type"]
+            ]
+            matches.append({
+                "label": label,
+                "column": column,
+                "count": int(row["len"]),
+                "types": covered[:types_cap],
+                "types_truncated": max(0, len(covered) - types_cap),
+            })
+    matches.sort(key=lambda m: -m["count"])
+    truncated_labels = max(0, len(matches) - cap)
+    return matches[:cap], truncated_labels
+
+
+def collect_native_type_matches(
+    dataset: str,
+    search: str,
+    datasets: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Native type-name expansion for a zero-hit viewer search.
+
+    Mapper-free by design: the search text is matched as a case-insensitive
+    substring against the ``type`` column and the taxonomy label columns of
+    every *other* locally cached dataset's index.  Results are name-similar
+    entries, not mapped equivalences, and stay strictly informational.
+    """
+    search = str(search or "").strip()
+    if not search or search.isdigit() or "*" in search or len(search) < 2:
+        return []
+    if datasets is None:
+        datasets = datasets_with_cached_indexes()
+    datasets = [
+        ds for ds in datasets
+        if ds != dataset and neuron_index_path(ds).is_file()
+    ]
+
+    matches = []
+    for ds in datasets:
+        index = _load_alias_index(ds)
+        if index is None:
+            continue
+        types, types_truncated = _native_type_matches(
+            index, search, NATIVE_TYPE_MATCH_CAP)
+        labels, labels_truncated = _native_label_matches(
+            index, search, NATIVE_LABEL_MATCH_CAP, NATIVE_LABEL_TYPES_CAP)
+        if types or labels:
+            matches.append({
+                "dataset": ds,
+                "is_selected": False,
+                "types": types,
+                "types_truncated": types_truncated,
+                "labels": labels,
+                "labels_truncated": labels_truncated,
+            })
+    return matches
+
+
+def enrich_native_type_matches(
+    native_matches: List[Dict[str, Any]],
+    selected_dataset: str,
+) -> None:
+    """Annotate native type matches with their mapped names, in place.
+
+    For every matched foreign type, the cross-dataset type mapper resolves
+    what that type corresponds to in the *selected* dataset (unique rename,
+    same name, or the members of a refused N-to-1 aggregation).  Types with
+    no counterpart keep ``annotation=None`` and stay visible unmapped, so
+    the user is still led to inspect them in the other dataset.  Mapper
+    failures simply leave everything unannotated.
+    """
+    try:
+        from comparison.cross_dataset_type_mapper import get_type_mapper
+
+        mapper = get_type_mapper()
+    except Exception:
+        return
+    if mapper is None or not getattr(mapper, "_loaded", False):
+        return
+
+    cache: Dict[str, Optional[Dict[str, Any]]] = {}
+
+    def _annotation(foreign_type: str) -> Optional[Dict[str, Any]]:
+        if foreign_type in cache:
+            return cache[foreign_type]
+        try:
+            res = mapper.get_alias_candidates(foreign_type, [selected_dataset])
+            info = res.get(selected_dataset) or {}
+            candidates = info.get("candidates", [])
+            if info.get("outcome") != "matched" or not candidates:
+                annotation = None
+            elif any(c["kind"] == "one of N" for c in candidates):
+                # The reverse aggregation is refused: show every local type
+                # that corresponds to the foreign name.
+                annotation = {
+                    "kind": "one of N",
+                    "targets": sorted(
+                        c["name"] for c in candidates
+                        if c["kind"] == "one of N"
+                    ),
+                }
+            else:
+                cand = candidates[0]
+                annotation = {
+                    "kind": cand["kind"],
+                    "targets": [cand["name"]],
+                }
+        except Exception:
+            annotation = None
+        cache[foreign_type] = annotation
+        return annotation
+
+    for entry in native_matches:
+        for cand in entry.get("types", []):
+            cand["mapped"] = _annotation(cand["name"])
+        for label in entry.get("labels", []):
+            for covered in label.get("types", []):
+                covered["mapped"] = _annotation(covered["name"])
+
+
 def collect_alias_matches(
     dataset: str,
     search: str,
@@ -2601,3 +2821,34 @@ def collect_alias_matches(
 
     matches.sort(key=lambda entry: not entry["is_selected"])
     return matches
+
+
+def collect_zero_hit_matches(
+    dataset: str,
+    search: str,
+    datasets: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Both expansion tiers for a zero-hit viewer search.
+
+    ``native``: mapper-free, name-similar type and taxonomy-label matches
+    from the other datasets' cached indexes (see
+    :func:`collect_native_type_matches`), enriched in place with mapped
+    current-dataset names where the type mapper knows them.
+
+    ``mapped``: the auto-type-mapping alias candidates for the query itself
+    (see :func:`collect_alias_matches`).
+
+    Both tiers are strictly informational.
+    """
+    if datasets is None:
+        datasets = datasets_with_cached_indexes()
+    native = collect_native_type_matches(dataset, search, datasets)
+    try:
+        enrich_native_type_matches(native, dataset)
+    except Exception:
+        pass
+    try:
+        mapped = collect_alias_matches(dataset, search, datasets)
+    except Exception:
+        mapped = []
+    return {"native": native, "mapped": mapped}
