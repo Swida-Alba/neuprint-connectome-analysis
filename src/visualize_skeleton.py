@@ -7397,24 +7397,6 @@ class VisualizeSkeleton:
         except (TypeError, ValueError):
             return 0
 
-    @staticmethod
-    def _relevel_cached_skeleton(neuron, target_level: int):
-        """Return a cached skeleton at *target_level* without mutating it."""
-        stored = VisualizeSkeleton._cached_skeleton_level(neuron)
-        target = max(0, int(target_level))
-        if target <= stored or not hasattr(neuron, 'nodes'):
-            return neuron
-        try:
-            from morphology import _relevel_for_target
-            result = _relevel_for_target(neuron, stored, target)
-            try:
-                result._drocat_simplification = target
-            except Exception:
-                pass
-            return result
-        except Exception:
-            return neuron
-
     def _resolve_neuprint_render_cache(self, raw_cache, body_ids):
         """Resolve a common source level for NeuPrint render skeletons.
 
@@ -7426,9 +7408,9 @@ class VisualizeSkeleton:
         refresh is unavailable, the fallback re-levels every available cached
         source to the same coarsest stored level instead of mixing resolutions.
 
-        Returns ``(preferred, stale, missing)`` mappings/lists. The caller can
-        add ``stale`` to its online fetch set and use ``fallback`` after a
-        failed fetch through :meth:`_normalize_neuprint_cache_fallback`.
+        Returns ``(preferred, stale, missing)`` mappings/lists. The caller
+        adds ``stale`` to its online fetch set; stale files that cannot be
+        refreshed online abort the render instead of degrading it.
         """
         preferred = {}
         stale = {}
@@ -7447,27 +7429,6 @@ class VisualizeSkeleton:
             else:
                 stale[body_id] = (neuron, level)
         return preferred, stale, missing
-
-    def _normalize_neuprint_cache_fallback(self, preferred, stale, fetched):
-        """Merge an offline legacy-cache fallback at one common level."""
-        if not stale:
-            return dict(fetched)
-        fallback_level = max(level for _neuron, level in stale.values())
-        available = dict(preferred)
-        available.update(fetched)
-        for body_id, (neuron, _level) in stale.items():
-            available.setdefault(body_id, neuron)
-        normalized = {
-            body_id: self._relevel_cached_skeleton(neuron, fallback_level)
-            for body_id, neuron in available.items()
-        }
-        self._vprint(
-            f'  ⚠️ Using legacy NeuPrint skeleton cache fallback at '
-            f'simplification level {fallback_level}; all available neurons '
-            'were normalized to that level',
-            level='simple',
-        )
-        return normalized
 
     def _persist_neuprint_render_skeletons(self, raw_cache, raw_items):
         """Persist visualization sources at raw level 0.
@@ -8299,20 +8260,26 @@ class VisualizeSkeleton:
 
         for key in list(fetched):
             fetched[key] = _scale_manc(fetched[key])
-        # If an old simp90 file could not be refreshed, use it only as a
-        # consistent fallback. Re-leveling every available source to the same
-        # legacy level prevents one neuron from silently using raw geometry
-        # while another uses a pre-simplified cache file.
+        # Legacy simp90 cache files that could not be refreshed online must
+        # not degrade the render: the old fallback re-leveled every raw
+        # source down to the coarsest stored level, silently oversimplifying
+        # the whole scene. Abort with the remedy instead.
         unresolved_legacy = {
             body_id: entry for body_id, entry in legacy_cached_skeletons.items()
             if body_id not in online_fetched
         }
         if unresolved_legacy:
-            fetched = self._normalize_neuprint_cache_fallback(
-                raw_cached_skeletons,
-                unresolved_legacy,
-                fetched,
-            )
+            stale_ids = ', '.join(str(b) for b in
+                                  sorted(unresolved_legacy)[:10])
+            more = (' …' if len(unresolved_legacy) > 10 else '')
+            raise RuntimeError(
+                f'{len(unresolved_legacy)} legacy simp90 skeleton cache files '
+                'could not be refreshed online '
+                f'(bodyIds: {stale_ids}{more}). Rendering them would '
+                'oversimplify the scene. Re-run with network access so they '
+                'refresh at level 0, or delete the listed '
+                'cache/<dataset>/skeletons/raw_skeletons/<bodyId>.swc.zst '
+                'files to force a clean refetch.')
 
         # Online fetches are persisted by the shared batched fetcher. Keep
         # this phase render-only; no simplified skeleton pickle is written.
