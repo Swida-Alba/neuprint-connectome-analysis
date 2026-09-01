@@ -3414,6 +3414,67 @@ class VisualizeSkeleton:
         )
         return button_html + style_html + script_html
 
+    def _tree_neuron_label(self, neuron_id, source_row):
+        """BodyId leaf label for the tree legend panel.
+
+        NeuPrint datasets: ``'{bodyId}_{instance}'`` (e.g. ``11309_aMe4_L``).
+        FlyWire/FAFB: ``'{bodyId}_{type}_L/_R'`` - the hemisphere comes from
+        the side column or the instance suffix. Falls back to the instance,
+        then the raw neuron id.
+        """
+        base = str(neuron_id)
+        suffix = None
+        if source_row is not None:
+            body = source_row.get('bodyId')
+            if body is not None and pd.notna(body):
+                base = str(body)
+            is_fafb = ('flywire' in self.dataset.lower()
+                       or 'fafb' in self.dataset.lower())
+            if is_fafb:
+                ntype = None
+                for col in ('flywireType', 'type'):
+                    val = source_row.get(col)
+                    if val is not None and pd.notna(val) and str(val).strip():
+                        ntype = str(val).strip()
+                        break
+                if ntype:
+                    suffix = ntype
+                    side = self._neuron_hemisphere_code(source_row)
+                    if side in ('L', 'R'):
+                        suffix = f'{ntype}_{side}'
+            else:
+                inst = source_row.get('instance')
+                if inst is not None and pd.notna(inst) and str(inst).strip():
+                    suffix = str(inst).strip()
+        return base if not suffix else f'{base}_{suffix}'
+
+    @staticmethod
+    def _neuron_hemisphere_code(source_row):
+        """'_L'/'_R' hemisphere code for one neuron-info row, else None.
+
+        Mirrors _filter_neuron_df_by_hemisphere: the side column wins, then
+        the instance suffix.
+        """
+        lowered = {str(c).strip().lower(): c for c in source_row.index}
+        for candidate in ('hemisphere', 'soma side', 'somaside', 'rootside'):
+            if candidate in lowered:
+                val = source_row.get(lowered[candidate])
+                if val is not None and pd.notna(val):
+                    code = str(val).strip().lower()
+                    if code in ('l', 'left', 'lhs', 'left hemisphere'):
+                        return 'L'
+                    if code in ('r', 'right', 'rhs', 'right hemisphere'):
+                        return 'R'
+                break
+        inst = source_row.get('instance')
+        if inst is not None and pd.notna(inst):
+            inst = str(inst).strip()
+            if inst.endswith('_R'):
+                return 'R'
+            if inst.endswith('_L'):
+                return 'L'
+        return None
+
     def _tree_uses_custom_groups(self):
         """Whether tree mode organizes the legend by custom group first.
 
@@ -11113,13 +11174,11 @@ class VisualizeSkeleton:
                             # appears only when a group holds 2+ neurons of
                             # that type; singletons and untyped neurons
                             # become direct bodyId/instance leaves.
-                            tree_label = str(neuron_id)
+                            source_row = None
                             if self.neuron_dfs[i] is not None and source_index < len(self.neuron_dfs[i]):
                                 source_row = self.neuron_dfs[i].iloc[source_index]
-                                for label_col in ('bodyId', 'instance'):
-                                    if label_col in source_row.index and pd.notna(source_row.get(label_col)):
-                                        tree_label = str(source_row[label_col])
-                                        break
+                            tree_label = self._tree_neuron_label(
+                                neuron_id, source_row)
                             tree_meta = dict(getattr(trace, 'meta', None) or {})
                             if self._tree_uses_custom_groups():
                                 tree_meta['drocatLegend'] = {

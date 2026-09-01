@@ -73,6 +73,36 @@ def test_tree_custom_group_detection():
     assert visualizer._tree_uses_custom_groups() is True
 
 
+def test_tree_neuron_label_neuprint_uses_instance():
+    import pandas as pd
+
+    visualizer = _make_visualizer('male-cns:v1.0')
+    visualizer.dataset = 'male-cns:v1.0'
+    row = pd.Series({'bodyId': 11309, 'instance': 'aMe4_L'})
+    assert visualizer._tree_neuron_label('11309', row) == '11309_aMe4_L'
+    # no instance -> bare bodyId; no row -> raw neuron id
+    assert visualizer._tree_neuron_label(
+        '11309', pd.Series({'bodyId': 11309})) == '11309'
+    assert visualizer._tree_neuron_label('11309', None) == '11309'
+
+
+def test_tree_neuron_label_fafb_uses_type_and_hemisphere():
+    import pandas as pd
+
+    visualizer = _make_visualizer()
+    visualizer.dataset = 'flywire_FAFB_v783'
+    row = pd.Series({'bodyId': '7205759406', 'flywireType': 'Tm3',
+                     'somaSide': 'L'})
+    assert visualizer._tree_neuron_label('x', row) == '7205759406_Tm3_L'
+    # hemisphere from the instance suffix when no side column exists
+    row2 = pd.Series({'bodyId': '7205759406', 'flywireType': 'Tm3',
+                      'instance': 'Tm3_R'})
+    assert visualizer._tree_neuron_label('x', row2) == '7205759406_Tm3_R'
+    # known type without hemisphere keeps just the type
+    row3 = pd.Series({'bodyId': '7205759406', 'flywireType': 'Tm3'})
+    assert visualizer._tree_neuron_label('x', row3) == '7205759406_Tm3'
+
+
 def test_legend_tree_html_contains_panel_and_markers():
     html = _make_visualizer()._legend_tree_html()
     assert 'drocat-legend-tree' in html
