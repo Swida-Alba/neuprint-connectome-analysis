@@ -15543,15 +15543,17 @@ class VisualizeSkeleton:
             template_info = self._get_template_info()
             mesh_display_name = template_info['mesh_name']
             
-            # For male-cns with brain_mesh='template', use brain-only mesh if vnc_mesh is also True
-            # This allows independent show/hide of brain and VNC in the interactive HTML
-            # If vnc_mesh=False, show the full CNS mesh
+            # For male-cns with brain_mesh='template', always extract the
+            # brain-only portion of JRCFIB2022M so the legend reads '(brain)'.
+            # The VNC envelope is only added as a separate '(VNC)' mesh when
+            # vnc_mesh=True; without it, showing the full CNS envelope under
+            # a '(brain + VNC)' label read like a mislabeled brain mesh.
             dataset_lower = self.dataset.lower()
             is_male_cns = 'male-cns' in dataset_lower or 'malecns' in dataset_lower
             # Note: 'manc' is NOT treated as male-cns here because its native template is VNC-only,
             # so we don't need to extract a "brain" portion from it.
-            
-            use_brain_only = is_male_cns and self.brain_mesh == 'template' and self.vnc_mesh
+
+            use_brain_only = is_male_cns and self.brain_mesh == 'template'
             
             if use_brain_only:
                 mesh_display_name = 'JRCFIB2022M (brain)'
