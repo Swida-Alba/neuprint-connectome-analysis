@@ -246,7 +246,9 @@ TOOLS = [
             "visualize": True,
             "visualize_top_n": 0,
         },
-        "timeout": 900,
+        # Cold-cache colabeling downloads ~45 NeuronBridge CDN images; the
+        # 2026-09-01 production run hit 93% when the old 900s cap fired.
+        "timeout": 1800,
     },
     {
         "name": "plot3d_skeleton",

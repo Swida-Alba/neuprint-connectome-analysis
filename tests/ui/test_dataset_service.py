@@ -32,6 +32,20 @@ NEUPRINT_EXPECTED = {
 FLYWIRE_EXPECTED = {"flywire_FAFB_v783", "flywire_BANC_v888", "flywire_BANC_v626"}
 
 
+class _PermissiveTokenManager:
+    """Stand-in for the shared token manager: never refuses a token, so
+    precedence tests stay hermetic (no neuprint.janelia.org calls)."""
+
+    def neuprint_token_rejected(self, token, server=None):
+        return False
+
+
+@pytest.fixture(autouse=True)
+def _no_network_probe(monkeypatch):
+    monkeypatch.setattr(
+        ds_mod, "_shared_token_manager", _PermissiveTokenManager())
+
+
 class TestDatasetLists:
     def test_neuprint_lists_are_complete_and_consistent(self):
         assert set(NEUPRINT_DATASETS) == NEUPRINT_EXPECTED
@@ -255,3 +269,93 @@ class TestTokenConfigJson:
             assert svc.get_token() == "cfg-np"
         finally:
             monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS")
+
+    def test_config_update_overrides_env_even_if_env_var_differs(
+            self, monkeypatch, tmp_path):
+        """Both config entries precede the env var in the chain."""
+        (tmp_path / "config.json").write_text(
+            '{"tokens": {"neuprint": "cfg-np"}}\n', encoding="utf-8")
+        (tmp_path / "config_local.json").write_text(
+            '{"tokens": {"neuprint": "local-np"}}\n', encoding="utf-8")
+        monkeypatch.setattr(ds_mod, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setenv("NEUPRINT_APPLICATION_CREDENTIALS", "env-np")
+        try:
+            svc = DatasetService()
+            assert svc.get_token() == "cfg-np"
+        finally:
+            monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS")
+
+
+class TestSkipInvalidTokenChain:
+    """A NeuPrint-rejected candidate is skipped to the next location
+    instead of failing the request."""
+
+    def _svc(self, monkeypatch, tmp_path, config):
+        (tmp_path / "config.json").write_text(config, encoding="utf-8")
+        monkeypatch.setattr(ds_mod, "PROJECT_ROOT", tmp_path)
+        monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS", raising=False)
+        monkeypatch.delenv("NEUPRINT_TOKEN", raising=False)
+        return DatasetService()
+
+    @staticmethod
+    def _probe_rejecting(*rejected):
+        class _Fake:
+            def neuprint_token_rejected(self, token, server=None):
+                return token in rejected
+        return _Fake()
+
+    def test_rejected_config_token_falls_back_to_env(
+            self, monkeypatch, tmp_path):
+        svc = self._svc(
+            monkeypatch, tmp_path, '{"tokens": {"neuprint": "revoked-tok"}}\n')
+        monkeypatch.setenv("NEUPRINT_APPLICATION_CREDENTIALS", "env-tok")
+        monkeypatch.setattr(
+            ds_mod, "_shared_token_manager", self._probe_rejecting("revoked-tok"))
+        try:
+            assert svc.get_token() == "env-tok"
+        finally:
+            monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS")
+
+    def test_rejected_config_json_falls_back_to_config_local(
+            self, monkeypatch, tmp_path):
+        (tmp_path / "config.json").write_text(
+            '{"tokens": {"neuprint": "revoked-tok"}}\n', encoding="utf-8")
+        (tmp_path / "config_local.json").write_text(
+            '{"tokens": {"neuprint": "fresh-tok"}}\n', encoding="utf-8")
+        monkeypatch.setattr(ds_mod, "PROJECT_ROOT", tmp_path)
+        monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS", raising=False)
+        monkeypatch.delenv("NEUPRINT_TOKEN", raising=False)
+        monkeypatch.setattr(
+            ds_mod, "_shared_token_manager", self._probe_rejecting("revoked-tok"))
+        assert DatasetService().get_token() == "fresh-tok"
+
+    def test_all_candidates_rejected_returns_first(
+            self, monkeypatch, tmp_path):
+        svc = self._svc(
+            monkeypatch, tmp_path, '{"tokens": {"neuprint": "revoked-tok"}}\n')
+        monkeypatch.setenv("NEUPRINT_TOKEN", "also-revoked")
+        monkeypatch.setattr(
+            ds_mod, "_shared_token_manager", self._probe_rejecting(
+                "revoked-tok", "also-revoked"))
+        try:
+            assert svc.get_token() == "revoked-tok"
+        finally:
+            monkeypatch.delenv("NEUPRINT_TOKEN")
+
+    def test_single_candidate_used_without_probe(
+            self, monkeypatch, tmp_path):
+        """With one candidate there is nowhere to fall back, so no probe
+        runs and the token is returned as-is."""
+        probe_calls = []
+
+        class _Counting:
+            def neuprint_token_rejected(self, token, server=None):
+                probe_calls.append(token)
+                return True
+
+        svc = self._svc(monkeypatch, tmp_path, '{"tokens": {}}\n')
+        svc._token = "revoked-tok"
+        svc._cave_token = "cave"
+        monkeypatch.setattr(ds_mod, "_shared_token_manager", _Counting())
+        assert svc.get_token() == "revoked-tok"
+        assert probe_calls == []

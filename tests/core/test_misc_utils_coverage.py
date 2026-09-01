@@ -78,6 +78,10 @@ class TestTokenManagerBranches:
         monkeypatch.delenv("NEUPRINT_TOKEN", raising=False)
         monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS", raising=False)
         monkeypatch.delenv("CAVE_TOKEN", raising=False)
+        # Keep the server probe hermetic: every token counts as accepted.
+        monkeypatch.setattr(
+            TokenManager, "neuprint_token_rejected",
+            lambda self, token, server=None: False)
         manager = TokenManager(project_root=str(tmp_path))
         result = manager.get_auto_token(direct_input="0123456789abcdef0123456789abcdef")
         assert result["detected_type"] == "cave"
@@ -87,6 +91,13 @@ class TestTokenManagerBranches:
     def test_auto_token_unknown_direct_input_honors_prefer_type(self, tmp_path,
                                                                 monkeypatch):
         monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("NEUPRINT_TOKEN", raising=False)
+        monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS", raising=False)
+        # Unknown-format input is kept as-is while the server accepts it;
+        # the probe stays stubbed so no real request is made.
+        monkeypatch.setattr(
+            TokenManager, "neuprint_token_rejected",
+            lambda self, token, server=None: False)
         manager = TokenManager(project_root=str(tmp_path))
         unknown = "this-token-matches-no-format"
         res_np = manager.get_auto_token(direct_input=unknown, prefer_type="neuprint")
@@ -101,13 +112,37 @@ class TestTokenManagerBranches:
         assert res_none["neuprint"] is None
         assert res_none["cave"] is None
 
+    def test_auto_token_unknown_rejected_direct_input_falls_to_chain(
+            self, tmp_path, monkeypatch):
+        """An unknown-format direct input the server refuses falls back to
+        the config/env chain instead of failing later."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("NEUPRINT_TOKEN", "env-np")
+        monkeypatch.setattr(
+            TokenManager, "neuprint_token_rejected",
+            lambda self, token, server=None: True)
+        try:
+            manager = TokenManager(project_root=str(tmp_path))
+            result = manager.get_auto_token(
+                direct_input="this-token-matches-no-format",
+                prefer_type="neuprint")
+            assert result["neuprint"] == "env-np"
+        finally:
+            monkeypatch.delenv("NEUPRINT_TOKEN")
+
     def test_require_both_tokens_success(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("NEUPRINT_TOKEN", raising=False)
         monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS", raising=False)
         monkeypatch.delenv("CAVE_TOKEN", raising=False)
+        monkeypatch.setattr(
+            TokenManager, "neuprint_token_rejected",
+            lambda self, token, server=None: False)
         manager = TokenManager(project_root=str(tmp_path))
-        manager.tokens = {"NEUPRINT_TOKEN": "np-tok", "CAVE_TOKEN": "cave-tok"}
+        manager._token_sources = {
+            "NEUPRINT_TOKEN": [("config.json", "np-tok")],
+            "CAVE_TOKEN": [("config.json", "cave-tok")],
+        }
         result = manager.require_both_tokens()
         assert result["neuprint"] == "np-tok"
         assert result["cave"] == "cave-tok"

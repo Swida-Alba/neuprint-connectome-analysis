@@ -246,6 +246,7 @@ def test_profile_build_cache_with_env_token(monkeypatch, fake_profiler_fnc, caps
     # them and keep only the legacy NEUPRINT_TOKEN env alias set.
     from utils.token_manager import token_manager
     monkeypatch.setattr(token_manager, "tokens", {})
+    monkeypatch.setattr(token_manager, "_token_sources", {})
     monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS", raising=False)
     monkeypatch.setenv("NEUPRINT_TOKEN", "env-token")
     FakeProfilerFNC.profiles = {

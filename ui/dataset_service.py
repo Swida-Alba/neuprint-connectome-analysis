@@ -14,6 +14,13 @@ from datetime import datetime
 
 from .config import PROJECT_ROOT
 
+try:
+    # Shared token resolution: the server probe that lets a rejected
+    # candidate fall through to the next location in the chain.
+    from src.utils.token_manager import token_manager as _shared_token_manager
+except ImportError:  # src not on sys.path; fall back to first-found tokens
+    _shared_token_manager = None
+
 
 @dataclass
 class DatasetInfo:
@@ -122,6 +129,9 @@ class DatasetService:
     def __init__(self):
         self._token: Optional[str] = None
         self._cave_token: Optional[str] = None
+        # Ordered neuprint candidates from the config files:
+        # [('config.json', '...'), ('config_local.json', '...')].
+        self._token_chain: List[Tuple[str, str]] = []
         self._cache: Dict[str, DatasetInfo] = {}
         self._lock = threading.Lock()
         self._datasets_dir = PROJECT_ROOT / "datasets"
@@ -276,9 +286,10 @@ class DatasetService:
             return
 
         loaded = {}
-        # config.json wins per key (the file a GitHub-pulled copy edits
-        # directly); the gitignored config_local.json only fills entries
-        # that are empty in config.json.
+        chain = []
+        # config.json comes first per key (the file a GitHub-pulled copy
+        # edits directly); the gitignored config_local.json follows in the
+        # fallback chain.
         for filename in ("config.json", "config_local.json"):
             config_path = PROJECT_ROOT / filename
             if not config_path.exists():
@@ -295,6 +306,8 @@ class DatasetService:
                         if isinstance(value, str) and value.strip() and not value.startswith("YOUR_"):
                             # First non-empty value wins: config.json is read first.
                             loaded.setdefault(key, value.strip())
+                            if key == "neuprint":
+                                chain.append((filename, value.strip()))
             except (OSError, ValueError):
                 pass
 
@@ -302,18 +315,46 @@ class DatasetService:
             self._token = loaded.get("neuprint")
         if self._cave_token is None:
             self._cave_token = loaded.get("cave")
+        self._token_chain = chain
 
     def get_token(self) -> Optional[str]:
         """Get NeuPrint token (config.json -> config_local.json -> env).
 
         Config wins per the standard chain, so a config update overrides a
         shell-exported NEUPRINT_APPLICATION_CREDENTIALS/NEUPRINT_TOKEN.
+        Candidates the NeuPrint server refuses (401/403) are skipped and the
+        next location is checked instead of failing the request; a probe
+        that cannot run (e.g. offline) never disqualifies a candidate. With
+        every candidate refused, the first is returned so callers surface
+        the rejected-token error.
         """
         self._load_tokens()
+        candidates = []
         if self._token:
-            return self._token
-        return (os.environ.get("NEUPRINT_APPLICATION_CREDENTIALS")
-                or os.environ.get("NEUPRINT_TOKEN"))
+            candidates.append(("config", self._token))
+            # Deeper config candidates (config_local.json when config.json
+            # also supplied a value) stay in the chain behind the winner.
+            for source, value in self._token_chain:
+                if value != self._token:
+                    candidates.append((source, value))
+        env_token = (os.environ.get("NEUPRINT_APPLICATION_CREDENTIALS")
+                     or os.environ.get("NEUPRINT_TOKEN"))
+        if env_token and env_token.strip() \
+                and not env_token.strip().startswith("YOUR_"):
+            candidates.append(("environment", env_token.strip()))
+        if not candidates:
+            return None
+        if _shared_token_manager is None or len(candidates) == 1:
+            return candidates[0][1]
+        first = candidates[0][1]
+        probed = set()
+        for _source, value in candidates:
+            if value in probed:
+                continue
+            probed.add(value)
+            if not _shared_token_manager.neuprint_token_rejected(value):
+                return value
+        return first
 
     def get_cave_token(self) -> Optional[str]:
         """Get CAVE token (config.json -> config_local.json -> env)."""
@@ -331,14 +372,15 @@ class DatasetService:
         """
         self._load_tokens()
 
-        if not self._token:
+        token = self.get_token()
+        if not token:
             return []
 
         # Try the proper API endpoint first
         try:
             import requests
             headers = {
-                "Authorization": f"Bearer {self._token}",
+                "Authorization": f"Bearer {token}",
                 "Content-type": "application/json",
             }
             r = requests.get(
@@ -505,7 +547,7 @@ class DatasetService:
         """
         info = DatasetInfo(name=dataset, source="neuprint")
 
-        if not self._token:
+        if not self.get_token():
             info.error = "No NeuPrint token configured"
             return info
 
@@ -553,12 +595,13 @@ class DatasetService:
         failure, or an empty response).  Used both by the slow availability
         probe and as a last resort for server datasets without local files.
         """
-        if not self._token:
+        token = self.get_token()
+        if not token:
             return 0, 0
         try:
             from neuprint import Client
 
-            client = Client(self.NEUPRINT_SERVER, dataset, self._token)
+            client = Client(self.NEUPRINT_SERVER, dataset, token)
             result = client.fetch_custom(
                 "MATCH (n:Neuron) RETURN count(n) as total, "
                 "sum(CASE WHEN n.type IS NOT NULL AND n.type <> '' THEN 1 ELSE 0 END) as typed"

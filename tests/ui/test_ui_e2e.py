@@ -3253,13 +3253,20 @@ class TestDatasetService:
         total, typed = service._load_cache_neuron_counts("hemibrain:v1.2.1")
         assert total == 3
 
-    def test_fetch_neuprint_counts_without_token(self, tmp_path):
+    def test_fetch_neuprint_counts_without_token(self, monkeypatch, tmp_path):
         """Without a NeuPrint token the count query must short-circuit to
-        (0, 0) instead of hitting the network."""
+        (0, 0) instead of hitting the network. The developer's real
+        config_local.json and shell env are excluded so "without token"
+        actually holds."""
+        import ui.dataset_service as ds_mod
         from ui.dataset_service import DatasetService
 
+        monkeypatch.setattr(ds_mod, "PROJECT_ROOT", tmp_path)
+        monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS", raising=False)
+        monkeypatch.delenv("NEUPRINT_TOKEN", raising=False)
+
         service = DatasetService()
-        assert service._token is None
+        assert service.get_token() is None
         assert service._fetch_neuprint_counts("hemibrain:v1.2.1") == (0, 0)
 
     def test_settings_guide_matches_converter_layout(self):
@@ -3707,12 +3714,16 @@ class TestTabs:
 
         assert "Export Video / GIF" in texts
         assert "Individual Profiles (PDF / PPTX)" in texts
-        # Legend mode defaults to per-type entries.
+        # The legend select is wired to the persisted user default; compare
+        # against the same source instead of a hardcoded value so the test
+        # holds whatever the developer's local settings currently are.
+        from ui.config import get_user_default
         legend = [
             el for el in client.elements.values()
             if getattr(el, "_props", {}).get("label") == "Neuron Legend Mode"
         ]
-        assert legend and legend[0].value == "type", "legend mode should default to 'type'"
+        assert legend and legend[0].value == get_user_default("legend_mode"), \
+            "legend mode should follow the user default"
         assert any("Each individual profile follows the Neuron Legend Mode" in t
                    for t in texts), "legend-mode grouping notice missing"
         assert any("Each row is one layer" in t
