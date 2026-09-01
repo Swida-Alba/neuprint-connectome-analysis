@@ -3527,6 +3527,8 @@ class VisualizeSkeleton:
             '.drocat-lt-eye{flex:0 0 auto;font-size:10px;opacity:.85;}'
             '.drocat-lt-group-row{font-weight:600;}'
             '.drocat-lt-off{opacity:.4;}'
+            '.drocat-lt-items.drocat-lt-scroll{max-height:224px;'
+            'overflow-y:auto;overflow-x:hidden;}'
             '.drocat-lt-section{font-weight:600;opacity:.65;'
             'margin:6px 0 2px 2px;font-size:10px;text-transform:uppercase;'
             'letter-spacing:.4px;}'
@@ -3751,6 +3753,12 @@ class VisualizeSkeleton:
     });
   }
 
+  function siteLabel(meta) {
+    /* 'aMe4_pre' -> 'pre sites' (falls back to the raw item label). */
+    var m = /^(?:.*_)?(pre|post)$/.exec(meta.item || '');
+    return m ? (m[1] + ' sites') : (meta.item || 'site');
+  }
+
   function render(model, data) {
     model.groupOrder.forEach(function(name) {
       var g = model.groups[name];
@@ -3758,20 +3766,30 @@ class VisualizeSkeleton:
       var neuronCount = g.indices.length - g.sites.length;
       var itemsEl = attachExpandable(panel, name, color, neuronCount,
                                      g.indices);
+      var sitesByType = {};
+      g.sites.forEach(function(s) {
+        (sitesByType[s.type] = sitesByType[s.type] || []).push(s.index);
+      });
+      function addSiteLeaves(container, t) {
+        /* Pre/post site traces of this group: leaf rows under their type
+           sub-row, or under the group when there is no matching sub-row.
+           Their eye toggles just that site trace. */
+        (sitesByType[t] || []).forEach(function(idx) {
+          attachLeaf(container, siteLabel(data[idx].meta.drocatLegend),
+                     traceColor(data[idx]) || color, [idx]);
+        });
+      }
 
       if (!g.typeOrder.length) {
         /* Flat tree: the group is the type, items are its neurons. */
         g.directOrder.forEach(function(itemName) {
           attachLeaf(itemsEl, itemName, color, g.direct[itemName]);
         });
+        addSiteLeaves(itemsEl, null);
       } else {
         /* Custom-group hierarchy: type sub-rows only when a group holds
            2+ neurons of that type; singletons and untyped neurons become
            direct bodyId/instance leaves. Sites toggle with their type. */
-        var sitesByType = {};
-        g.sites.forEach(function(s) {
-          (sitesByType[s.type] = sitesByType[s.type] || []).push(s.index);
-        });
         g.typeOrder.forEach(function(t) {
           var tt = g.types[t];
           if (tt.indices.length < 2) {
@@ -3779,6 +3797,7 @@ class VisualizeSkeleton:
             tt.itemOrder.forEach(function(itemName) {
               attachLeaf(itemsEl, itemName, color, tt.items[itemName]);
             });
+            addSiteLeaves(itemsEl, t);
             return;
           }
           var eyeIdx = tt.indices.concat(sitesByType[t] || []);
@@ -3787,10 +3806,12 @@ class VisualizeSkeleton:
           tt.itemOrder.forEach(function(itemName) {
             attachLeaf(subEl, itemName, color, tt.items[itemName]);
           });
+          addSiteLeaves(subEl, t);
         });
         g.directOrder.forEach(function(itemName) {
           attachLeaf(itemsEl, itemName, color, g.direct[itemName]);
         });
+        addSiteLeaves(itemsEl, null);
       }
     });
 
@@ -3808,6 +3829,11 @@ class VisualizeSkeleton:
         addToggleRow(panel, name, m.color || '#7f7f7f', m.indices);
       });
     }
+    /* Cap long item lists (a KCg-d-sized type holds hundreds of neurons):
+       expand into a mini scrollable area instead of stretching the panel. */
+    panel.querySelectorAll('.drocat-lt-items').forEach(function(el) {
+      if (el.children.length > 10) { el.classList.add('drocat-lt-scroll'); }
+    });
   }
 
   function positionPanel() {

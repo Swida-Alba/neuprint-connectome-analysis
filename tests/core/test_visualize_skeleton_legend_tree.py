@@ -120,6 +120,10 @@ def test_legend_tree_html_contains_panel_and_markers():
     # triangle caret that rotates when a group expands
     assert '\\u25B6' in html
     assert '.drocat-lt-expanded .drocat-lt-caret{transform:rotate(90deg);}' in html
+    # pre/post site traces get leaf rows; long item lists are scroll-capped
+    assert 'addSiteLeaves' in html
+    assert "children.length > 10" in html
+    assert '.drocat-lt-items.drocat-lt-scroll{max-height:224px;' in html
 
 
 def test_write_plotly_html_embeds_tree_only_when_requested(tmp_path):
