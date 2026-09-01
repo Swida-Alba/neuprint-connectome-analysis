@@ -106,6 +106,10 @@ class SkeletonVisualizationSettings:
             values["mesh_roi"] = list(values["mesh_roi"] or [])
         if "roi_colors" in values:
             values["mesh_color"] = values.pop("roi_colors")
+        # Soma spheres are always rendered; the removed checkbox used to
+        # expose this, and the constructor default (True) is pinned here so
+        # programmatic callers of values() keep the same behavior.
+        values["show_soma"] = True
         # Keep all skeleton visualizations aligned with the application's
         # global data-output preference while still allowing programmatic
         # callers to override it in their settings dictionary.
@@ -385,21 +389,6 @@ def skeleton_visualization_settings(
                 "Cache Synapses",
                 get_user_default("cache_synapses"),
                 hint="Cache fetched synapse data for faster repeat renders.",
-            )
-            fields["smooth_skeleton"] = checkbox_input(
-                "Smooth Skeleton",
-                get_user_default("smooth_skeleton"),
-                hint="Apply smoothing to skeleton tube meshes.",
-            )
-            fields["show_soma"] = checkbox_input(
-                "Show Soma",
-                get_user_default("show_soma"),
-                hint="Render soma spheres when available.",
-            )
-            fields["show_connectors"] = checkbox_input(
-                "Show Connectors",
-                get_user_default("show_connectors"),
-                hint="Render synaptic connector markers.",
             )
             fields["use_default_simplification"] = checkbox_input(
                 "Default Simplification",

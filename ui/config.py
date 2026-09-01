@@ -375,9 +375,6 @@ DEFAULTS = {
     "skeleton_mode": "tube",
     "analysis_skeleton_mode": "line",
     "simplification_method": "fast",
-    "smooth_skeleton": False,
-    "show_soma": True,
-    "show_connectors": False,
     # Show Figure defaults OFF globally; only the Visualization > Skeleton
     # tab still opens the figure by default (unless the user saves an
     # explicit override in Settings).
@@ -687,24 +684,6 @@ DEFAULT_SETTING_SPECS = {
         "kind": "select",
         "options": SIMPLIFICATION_METHODS,
         "hint": "NeuPrint tube rendering pipeline (fast / fine / artistic).",
-    },
-    "smooth_skeleton": {
-        "label": "Smooth Skeleton",
-        "group": "skeleton_render",
-        "kind": "bool",
-        "hint": "Apply mesh smoothing to neuron skeletons.",
-    },
-    "show_soma": {
-        "label": "Show Soma",
-        "group": "skeleton_render",
-        "kind": "bool",
-        "hint": "Render the soma sphere for neurons that have one.",
-    },
-    "show_connectors": {
-        "label": "Show Connectors",
-        "group": "skeleton_render",
-        "kind": "bool",
-        "hint": "Show synaptic connector markers.",
     },
     "show_fig_skeleton": {
         "label": "Show Figure (Skeleton renders)",

@@ -686,18 +686,6 @@ def create_skeleton_tab():
                         "Cache Synapses", get_user_default("cache_synapses"),
                         hint="Cache fetched synapse data locally.",
                     )
-                    smooth_skeleton = checkbox_input(
-                        "Smooth Skeleton", get_user_default("smooth_skeleton"),
-                        hint="Apply mesh smoothing to neuron skeletons.",
-                    )
-                    show_soma = checkbox_input(
-                        "Show Soma", get_user_default("show_soma"),
-                        hint="Render the soma sphere for neurons that have one.",
-                    )
-                    show_connectors = checkbox_input(
-                        "Show Connectors", get_user_default("show_connectors"),
-                        hint="Show synaptic connector markers.",
-                    )
                 with ui.row().classes("gap-4"):
                     simplification_method = select_input(
                         "Simplification Method",
@@ -1095,9 +1083,7 @@ def create_skeleton_tab():
             "mesh_alpha": float(mesh_alpha.value),
             "cache_neurons": cache_neurons.value,
             "cache_synapses": cache_synapses.value,
-            "smooth_skeleton": smooth_skeleton.value,
-            "show_soma": show_soma.value,
-            "show_connectors": show_connectors.value,
+            "show_soma": True,
             "export_method": export_method.value,
             "export_scale": int(export_scale.value),
             "export_views": export_views.value,
