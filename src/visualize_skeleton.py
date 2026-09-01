@@ -3506,7 +3506,8 @@ class VisualizeSkeleton:
         site traces; synapse-group and mesh traces get their own rows,
         with meshes pinned last.
         """
-        baked = {'meshRankBase': ROI_MESH_LEGEND_RANK_BASE}
+        baked = {'meshRankBase': ROI_MESH_LEGEND_RANK_BASE,
+                 'doubleClickMs': 700}
         panel_html = '<div id="drocat-legend-tree" style="display:none"></div>'
         style_html = (
             '<style>'
@@ -3581,6 +3582,18 @@ class VisualizeSkeleton:
       });
     });
     return all;
+  }
+
+  var lastRowClick = null;
+  function isDoubleClick(indices) {
+    /* Manual double-click detection with a window longer than the OS
+       default, so slower double-clicks still isolate. */
+    var now = Date.now();
+    var key = indices.join(',');
+    var hit = lastRowClick && lastRowClick.key === key &&
+              (now - lastRowClick.time) < CONFIG.doubleClickMs;
+    lastRowClick = hit ? null : {key: key, time: now};
+    return !!hit;
   }
 
   function buildModel(data) {
@@ -3700,25 +3713,38 @@ class VisualizeSkeleton:
     }
   }
 
-  function isolate(indices) {
-    /* Double-click: show only this row's traces; a second double-click
-       while isolated restores every trace (mirrors the native plotly
-       legend's double-click isolation). */
+  var isolatedKey = null;
+  function rowKey(indices) { return indices.join(','); }
+
+  function isolateOnly(indices) {
     var gd = graphDiv();
     if (!gd) { return; }
     var all = managedIndices();
     if (!all.length) { return; }
-    if (!all.every(function(i) { return isVisible(gd.data[i]); })) {
-      Plotly.restyle(gd, {visible: true}, all);
-      sync();
-      return;
-    }
     var others = all.filter(function(i) { return indices.indexOf(i) < 0; });
     if (others.length) { Plotly.restyle(gd, {visible: false}, others); }
+    Plotly.restyle(gd, {visible: true}, indices);
+    isolatedKey = rowKey(indices);
     sync();
   }
 
+  function showAll() {
+    isolatedKey = null;
+    var gd = graphDiv();
+    if (!gd) { return; }
+    Plotly.restyle(gd, {visible: true}, managedIndices());
+    sync();
+  }
+
+  function isolate(indices) {
+    /* Completing a double-click: isolate this row, or restore if this
+       exact row is the one currently isolated. */
+    if (isolatedKey === rowKey(indices)) { showAll(); return; }
+    isolateOnly(indices);
+  }
+
   function toggleAll() {
+    isolatedKey = null;
     var gd = graphDiv();
     if (!gd) { return; }
     var all = managedIndices();
@@ -3787,11 +3813,10 @@ class VisualizeSkeleton:
       Plotly.restyle(gd, {visible: !on}, eyeIndices);
       sync();
     });
-    /* Double-click isolates this row (show only its traces), matching the
-       native plotly legend's double-click isolation. */
-    row.addEventListener('dblclick', function(e) {
-      e.stopPropagation();
-      isolate(eyeIndices);
+    /* Two clicks on the row within doubleClickMs isolate it (show only
+       its traces); a later double-click restores all traces. */
+    row.addEventListener('click', function() {
+      if (isDoubleClick(eyeIndices)) { isolate(eyeIndices); }
     });
     function toggleExpand() {
       var open = itemsEl.style.display === 'none';
@@ -3816,15 +3841,12 @@ class VisualizeSkeleton:
     parent.appendChild(irow);
     records.push({row: irow, eye: ieye, indices: indices});
     irow.addEventListener('click', function() {
+      if (isDoubleClick(indices)) { isolate(indices); return; }
       var gd = graphDiv();
       if (!gd) { return; }
       var on = indices.every(function(i) { return isVisible(gd.data[i]); });
       Plotly.restyle(gd, {visible: !on}, indices);
       sync();
-    });
-    irow.addEventListener('dblclick', function(e) {
-      e.stopPropagation();
-      isolate(indices);
     });
   }
 

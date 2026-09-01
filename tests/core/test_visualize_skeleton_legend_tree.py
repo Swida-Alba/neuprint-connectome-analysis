@@ -132,6 +132,9 @@ def test_legend_tree_html_contains_panel_and_markers():
     assert 'navigator.webdriver' in html
     # panel sits on the right, below the theme switch
     assert 'position:fixed;right:10px;top:60px;' in html
+    # manual double-click window (longer than the OS dblclick threshold)
+    assert '"doubleClickMs": 700' in html
+    assert 'isDoubleClick' in html
     # triangle caret that rotates when a group expands
     assert '\\u25B6' in html
     assert '.drocat-lt-expanded .drocat-lt-caret{transform:rotate(90deg);}' in html
