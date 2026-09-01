@@ -2830,6 +2830,28 @@ class VisualizeSkeleton:
         else:
             print(msg, **kwargs)
 
+    def _warn_neuprint_token_rejected(self, from_env=False):
+        """Print actionable guidance when NeuPrint rejects the token (401).
+
+        NeuPrint can revoke a token server-side even before its JWT expiry.
+        The run continues without a live connection so cached data can still
+        be used; fetches that require the client will fail afterwards.
+        """
+        source = (
+            'the NEUPRINT_APPLICATION_CREDENTIALS / NEUPRINT_TOKEN environment'
+            ' variable' if from_env
+            else "the 'tokens.neuprint' entry in config.json / config_local.json"
+        )
+        print('\n\033[33m⚠️  NeuPrint rejected the configured token'
+              ' (401 Unauthorized).\033[0m')
+        print(f'   The token configured via {source} was refused by'
+              ' https://neuprint.janelia.org — it may have been revoked')
+        print('   even though it has not expired. Generate a fresh token at'
+              ' https://neuprint.janelia.org/account and update it there.')
+        print('   Continuing without a live connection; cached data will be'
+              ' used where available, but fetches that need the client will'
+              ' fail.')
+
     def _add_view_selection_menu(self):
         """
         Add interactive view selection dropdown and camera angle display to the figure.
@@ -5947,19 +5969,37 @@ class VisualizeSkeleton:
                     except ImportError:
                         env_token = os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS')
 
+                    def _token_rejected(exc) -> bool:
+                        text = str(exc)
+                        return '401' in text or 'Unauthorized' in text
+
                     if self.token:
-                        self.client = Client(self.server, dataset=self.dataset, token=self.token)
-                        self.client.fetch_version()
-                        # Set as default to avoid "multiple clients" error
-                        neuprint.set_default_client(self.client)
-                        self._vprint(f'Client initialized for {self.dataset} (set as default)', level='full')
+                        try:
+                            self.client = Client(self.server, dataset=self.dataset, token=self.token)
+                            self.client.fetch_version()
+                        except Exception as exc:
+                            if not _token_rejected(exc):
+                                raise
+                            self.client = None
+                            self._warn_neuprint_token_rejected()
+                        else:
+                            # Set as default to avoid "multiple clients" error
+                            neuprint.set_default_client(self.client)
+                            self._vprint(f'Client initialized for {self.dataset} (set as default)', level='full')
                     elif env_token:
                         # Auto-detect from env/config files
-                        self.client = Client(self.server, dataset=self.dataset)
-                        self.client.fetch_version()
-                        # Set as default to avoid "multiple clients" error
-                        neuprint.set_default_client(self.client)
-                        self._vprint(f'Client initialized from env/config for {self.dataset} (set as default)', level='full')
+                        try:
+                            self.client = Client(self.server, dataset=self.dataset)
+                            self.client.fetch_version()
+                        except Exception as exc:
+                            if not _token_rejected(exc):
+                                raise
+                            self.client = None
+                            self._warn_neuprint_token_rejected(from_env=True)
+                        else:
+                            # Set as default to avoid "multiple clients" error
+                            neuprint.set_default_client(self.client)
+                            self._vprint(f'Client initialized from env/config for {self.dataset} (set as default)', level='full')
                     else:
                         # Only warn if we are not using local cache/files exclusively
                         # But we don't know that yet.
