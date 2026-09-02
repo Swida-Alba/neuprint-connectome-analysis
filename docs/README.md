@@ -8,8 +8,6 @@ Welcome to the Drosophila Connectome Analysis Toolkit (DROCAT) documentation!
 - **[DROCAT Direct Analysis Skill](../skills/drocat-usage/SKILL.md)**: Run,
   inspect, and safely modify backend scripts without loading the entire
   repository into an agent context.
-- **[Agent Setup for Beginners](./INSTALLATION.md#52-recommended-low-cost-agent-codex--deepseek-v4-flash)**: Configure Codex with a
-  low-cost DeepSeek V4 Flash provider and run the first cached analysis.
 - **[Quick Start](./QUICK_START.md#agent-first-direct-mode-no-ui)**: Use the
   repository-safe direct launcher.
 

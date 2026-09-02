@@ -71,7 +71,6 @@ def test_layer1_usage_bundle_and_tabs() -> None:
         "tool-catalog.md",
         "workflow-recipes.md",
         "datasets-and-auth.md",
-        "deepseek-codex.md",
     ):
         assert (USAGE / "references" / ref).is_file()
     for name in TAB_RECIPES:
@@ -154,7 +153,6 @@ def test_readme_exposes_install_prompt_and_local_analysis_skills() -> None:
     assert "skills/drocat-install/SKILL.md" in readme
     assert "docs/INSTALLATION.md" in readme
     assert "mac_DROCAT.command" in readme  # one-click install & launch
-    assert "deepseek-v4-flash" in readme
     # Option 2 is a copyable prompt that starts with Fetching the install skill;
     # both the lead-in and the prompt state it finishes cloning, installing,
     # verifying, and launching

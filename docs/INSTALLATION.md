@@ -122,7 +122,7 @@ itself always ships with the repository.
 - Strict verification for a configured workstation:
   `python skills/drocat-install/scripts/verify_install.py --project . --require-token`
 
-## 5. Agent-assisted install & agent setup
+## 5. Agent-assisted install
 
 ### 5.1 Agent-assisted install
 
@@ -148,86 +148,7 @@ For agent-driven analysis *without* the UI, use the checked-in skills:
 and [`drocat-backend`](../skills/drocat-backend/SKILL.md) (Layer 2, backend
 module composition).
 
-### 5.2 Recommended low-cost agent: Codex + DeepSeek V4 Flash
-
-DeepSeek documents a Codex integration through its Responses API. At the time
-of this release, `deepseek-v4-flash` is the model documented as supporting
-Codex; use it for routine script execution, result inspection, and small
-patches. Reserve high/max reasoning or a stronger model for a difficult backend
-change. Pricing and availability can change, so check the platform before
-adding funds.
-
-Official references:
-
-- [DeepSeek Platform](https://platform.deepseek.com/)
-- [Responses API guide](https://api-docs.deepseek.com/guides/responses_api/)
-- [Codex integration guide](https://api-docs.deepseek.com/quick_start/agent_integrations/codex/)
-
-#### Configure Codex
-
-1. Install Codex CLI or launch the Codex desktop/VS Code client once so that
-   `~/.codex` exists.
-2. Create a DeepSeek API key on the platform. Treat it like a password and do
-   not place it in this repository.
-3. Run DeepSeek's official setup script:
-
-   macOS/Linux:
-
-   ```bash
-   bash <(curl -fsSL https://cdn.deepseek.com/api-docs/codex-deepseek-setup-en.sh)
-   ```
-
-   Windows PowerShell:
-
-   ```powershell
-   irm https://cdn.deepseek.com/api-docs/codex-deepseek-setup-en.ps1 | iex
-   ```
-
-   Review remote setup scripts according to your security policy. The official
-   script backs up `~/.codex/config.toml` under `~/.codex/backup-deepseek/`,
-   writes the model catalog, preserves compatible project/MCP settings, and
-   validates the configuration before writing it.
-4. Choose `deepseek-v4-flash` and restart the client if it is not listed.
-   Keep the generated configuration files at user level; do not copy a full
-   `models.json` into the DROCAT checkout.
-
-### 5.3 Use the analysis skills in an agent (no fetch)
-
-Do not manually copy the skills or fetch them from a URL. The repository ships the
-analysis skills, so an installed agent has them automatically:
-
-- [`drocat-usage`](../skills/drocat-usage/SKILL.md) — Layer 1, tab-matched direct
-  script analyses (a recipe for every analysis panel) via the `drocat-4.5.0` environment.
-- [`drocat-backend`](../skills/drocat-backend/SKILL.md) — Layer 2, flexible
-  composition of backend modules and function blocks.
-
-Open the repository in Codex (or another tool-enabled agent) and ask it to use
-the relevant checked-in skill. The skills contain no credentials; API keys and
-NeuPrint/CAVE tokens remain in the user's local configuration.
-
-### 5.4 First DROCAT agent request
-
-Open the repository in the agent and paste a focused request:
-
-```text
-Use the DROCAT v4.5.0 direct-analysis skill. Run a cached FindPath analysis
-from aMe12 to PPL101 in male-cns:v0.9, with max_interlayer=2, CSV output, and
-save everything under local_data/agent_runs/aMe12_to_PPL101. Use showfig=False,
-inspect the generated files, summarize row counts and warnings, and finish by
-reporting the validated artifacts. Do not stop at a plan.
-```
-
-For a code repair:
-
-```text
-Use the DROCAT v4.5.0 direct-analysis skill. Reproduce this direct-script
-failure with the smallest query, inspect only the relevant script and backend
-signature, patch the call, compile it, and run the focused regression test.
-Finish by reporting the patch and test result. Do not change tokens or
-dependencies.
-```
-
-### 5.5 Running scripts directly
+### 5.2 Running scripts directly
 
 The skill's launcher keeps the script's relative paths correct and adds the
 repository modules to `PYTHONPATH`:
@@ -258,7 +179,7 @@ Start with small cached queries, `showfig=False`, CSV output, and a unique
 output folder. Inspect CSV schemas and HTML existence before increasing hop
 counts, enabling bodyId-level work, or exporting images/video.
 
-### 5.6 Safety checklist
+### 5.3 Safety checklist
 
 - Never paste `NEUPRINT_TOKEN`, `CAVE_TOKEN`, or the contents of
   `config.json` into a prompt, patch, log, or report.

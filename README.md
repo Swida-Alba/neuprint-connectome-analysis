@@ -14,7 +14,7 @@ DROCAT is a Python toolkit for analyzing and visualizing connectome data from **
 > [`drocat-usage`](skills/drocat-usage/SKILL.md) for tab-matched script analyses
 > (a recipe for every analysis panel), and [`drocat-backend`](skills/drocat-backend/SKILL.md)
 > for flexible composition of backend modules. New to agents? Start with the
-> [agent setup section](docs/INSTALLATION.md#5-agent-assisted-install--agent-setup).
+> [agent-assisted install section](docs/INSTALLATION.md#5-agent-assisted-install).
 
 ---
 
@@ -78,7 +78,7 @@ conda activate drocat-4.5.0 && python ui/app.py
 
 Every UI panel links to its own instruction guide (see [docs/ui_guides/README.html](docs/ui_guides/README.html)).
 
-📖 **[Full Installation Guide](docs/INSTALLATION.md)** — installer details, manual setup, environment policy, token configuration (NeuPrint / CAVE), and agent setup (Codex + DeepSeek `deepseek-v4-flash`).
+📖 **[Full Installation Guide](docs/INSTALLATION.md)** — installer details, manual setup, environment policy, token configuration (NeuPrint / CAVE), and agent-assisted install.
 
 ---
 
@@ -89,7 +89,7 @@ Every UI panel links to its own instruction guide (see [docs/ui_guides/README.ht
 | Guide | Description |
 | --- | --- |
 | **[Quick Start](docs/QUICK_START.md)** | First-time setup and basic examples |
-| **[Installation](docs/INSTALLATION.md)** | One-click, agent-assisted, and manual install + token & agent setup |
+| **[Installation](docs/INSTALLATION.md)** | One-click, agent-assisted, and manual install + token configuration |
 | **[Script Examples](docs/core-features/ScriptExamples_Guide.md)** | Copy-paste code for pathfinding, comparison, NeuronBridge |
 | **[Troubleshooting](docs/TROUBLESHOOTING.md)** | Common issues and solutions |
 | **[Documentation Hub](docs/README.md)** | Full documentation index |
@@ -156,7 +156,7 @@ All NeuPrint server datasets are supported (verified against `api.neuprint.janel
 - **Palette editor** — drag-and-drop reordering of discrete palette colors, a range slider applied directly to the displayed palette, a reset button beside the preview, and lateral range labels.
 - **3D Skeleton reorganization** — independent card blocks for general appearance, neuron colors, synapse colors, and brain-region ROIs, with hemisphere-aware options.
 
-📖 **[Full changelog](docs/README.md#recent-updates)** · **[Agent setup](docs/INSTALLATION.md#5-agent-assisted-install--agent-setup)** — including the low-cost DeepSeek (`deepseek-v4-flash`) Codex configuration
+📖 **[Full changelog](docs/README.md#recent-updates)** · **[Agent-assisted install](docs/INSTALLATION.md#5-agent-assisted-install)**
 
 ---
 

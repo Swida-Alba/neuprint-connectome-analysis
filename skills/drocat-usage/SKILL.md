@@ -155,4 +155,3 @@ similar-neuron → 3D skeleton), see [references/combinations.md](references/com
 - [Workflow recipes](references/workflow-recipes.md)
 - [Cross-tab combinations](references/combinations.md)
 - [Datasets, authentication, and output files](references/datasets-and-auth.md)
-- [Beginner agent setup with DeepSeek and Codex](references/deepseek-codex.md)
