@@ -167,6 +167,10 @@ DROCAT_CSS = """
     --drocat-row-hover: #eaf3ff;
     --drocat-selected: #dcecff;
     --drocat-selected-hover: #cfe3ff;
+    /* Floating mapped-view columns: fully opaque and tinted differently
+       from regular cells so they read as a separate layer. */
+    --drocat-map-cell-bg: #e7ebff;
+    --drocat-map-cell-head-bg: #b7c8ff;
     --drocat-badge-bg: #fff8d6;
     --drocat-badge-fg: #946200;
     --drocat-badge-soft-bg: #fffbe8;
@@ -214,6 +218,10 @@ html:has(> body.body--dark) {
     --drocat-row-hover: #1e3050;
     --drocat-selected: #1d3a5f;
     --drocat-selected-hover: #25486f;
+    /* Floating mapped-view columns: fully opaque and tinted differently
+       from regular cells so they read as a separate layer. */
+    --drocat-map-cell-bg: #232f52;
+    --drocat-map-cell-head-bg: #43569b;
     --drocat-badge-bg: #3d3113;
     --drocat-badge-fg: #e5b74d;
     --drocat-badge-soft-bg: #332b16;
@@ -922,6 +930,36 @@ html, body {
 .drocat-data-viewer-table tr.drocat-neuron-selected-row > td.drocat-neuron-secondary-hit-cell {
     background: var(--drocat-selected) !important;
     color: var(--drocat-navy) !important;
+}
+.drocat-data-viewer-table td.drocat-neuron-map-cell,
+.drocat-data-viewer-table th.drocat-neuron-map-cell {
+    /* Outline + text layout; the opaque distinct background and the sticky
+       geometry are enforced by the end-of-sheet reinforcement rules and the
+       per-column inline styles. */
+    border-left: 1px solid var(--drocat-line-strong);
+    text-align: left;
+    vertical-align: top;
+}
+.drocat-data-viewer-table td.drocat-neuron-map-cell {
+    z-index: 5;
+}
+.drocat-data-viewer-table th.drocat-neuron-map-cell {
+    z-index: 9;
+    white-space: normal;
+}
+.drocat-data-viewer-table td.drocat-neuron-map-cell.drocat-neuron-map-edge {
+    border-right: 1px solid var(--drocat-line-strong);
+}
+.drocat-data-viewer-table tr.drocat-neuron-selected-row > td.drocat-neuron-map-cell {
+    box-shadow: inset 3px 0 0 var(--drocat-cobalt);
+}
+.drocat-data-viewer-table .drocat-neuron-map-value {
+    /* Fixed-width inner box: keeps the pinned column geometry stable no
+       matter how long the map text is (auto table layout would otherwise
+       expand the cell and desync the pinned offsets). */
+    width: 100%;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 .drocat-data-viewer-table mark.drocat-neuron-match-text {
     padding: 0 .08em;
@@ -2226,6 +2264,32 @@ html, body {
 .drocat-suggest-menu .drocat-history-dataset-badge {
     font-size: 10px;
     letter-spacing: .02em;
+}
+/* Reinforcement, kept last so nothing re-introduces translucency: the
+   floating mapped-view columns must stay fully opaque and visually distinct
+   from the metadata columns scrolling underneath them. The doubled class
+   raises specificity above every generic cell rule above. */
+.drocat-data-viewer-table td.drocat-neuron-map-cell.drocat-neuron-map-cell,
+.drocat-data-viewer-table th.drocat-neuron-map-cell.drocat-neuron-map-cell {
+    position: sticky;
+    background: var(--drocat-map-cell-bg) !important;
+    color: var(--drocat-navy) !important;
+    text-align: left !important;
+}
+.drocat-data-viewer-table th.drocat-neuron-map-cell.drocat-neuron-map-cell {
+    background: var(--drocat-map-cell-head-bg) !important;
+}
+/* The generic table-header rule below (… .q-table__middle thead tr:first-child
+   th) carries higher specificity than the class-only rule above, so the
+   distinct mapped-view head tint needs the same ancestor chain. */
+.drocat-data-viewer-table .q-table__middle thead tr:first-child th.drocat-neuron-map-cell.drocat-neuron-map-cell {
+    background: var(--drocat-map-cell-head-bg) !important;
+}
+.drocat-data-viewer-table tr.drocat-neuron-selected-row > td.drocat-neuron-map-cell.drocat-neuron-map-cell {
+    background: var(--drocat-selected) !important;
+}
+.drocat-data-viewer-table .drocat-neuron-map-value {
+    text-align: left;
 }
 """
 

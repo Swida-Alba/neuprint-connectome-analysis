@@ -296,6 +296,7 @@ class VisualizePath:
         hemisphere_desaturate_factor=0.4,  # NEW: Desaturation blend factor (0-1)
         hemisphere_mirror_default=None,  # None = auto-enable with separate_hemispheres
         progress_total=None,  # Optional [DROCAT][progress] step total (web UI runs only)
+        edge_weight_label='synapses',  # Unit label for the edge weight in hover info
     ):
         """
         Initialize VisualizePath with pathway data and visualization settings.
@@ -521,6 +522,9 @@ class VisualizePath:
         # Node-level dataset info for hover labels
         # Format: {node_label: {code: name_in_that_dataset}} e.g., {'MeVP(MTe07)': {'M': 'MeVP', 'F': 'MTe07'}}
         self.node_dataset_info = node_dataset_info or {}
+        # Unit label shown with the edge weight (e.g. 'synapses' for
+        # connectome graphs, 'neurons' for type-mapping graphs).
+        self.edge_weight_label = str(edge_weight_label or 'synapses')
 
         # Hemisphere visualization options
         self.separate_hemispheres = separate_hemispheres
@@ -1906,6 +1910,13 @@ class VisualizePath:
         as numeric), 'source_group'/'target_group' (endpoint node groups kept
         in self.custom_node_groups for node classification in build_network),
         and 'nt_group'/'custom_groups' (informational, skipped).
+
+        The hover-info columns 'edge info' / 'source info' / 'target info'
+        ({key:val; ...} cells written by the Edge List CSV export) restore
+        the hover labels: 'edge info' becomes per-edge custom labels, while
+        the source/target info cells are unioned per node (first value per
+        key wins) into self.node_dataset_info — a node appears in many rows
+        as source or target and keeps one merged info map.
         
         Parameters
         ----------
@@ -1936,12 +1947,16 @@ class VisualizePath:
         # custom_groups preserves in-HTML custom group names.
         nt_alias_names = {'nt_type', 'nt', 'neurotransmitter'}
         group_info_names = {'nt_group', 'custom_groups'}
+        hover_info_names = {'edge info', 'source info', 'target info'}
         
         # Look for the nt_type and endpoint-group columns BY NAME - dtype is
         # unreliable: an all-empty nt_type column reads as NaN and looks numeric.
         nt_type_col = None
         source_group_col = None
         target_group_col = None
+        edge_info_col = None
+        source_info_col = None
+        target_info_col = None
         for col in self.path_df.columns:
             if col in exclude_cols:
                 continue
@@ -1952,19 +1967,28 @@ class VisualizePath:
                 source_group_col = col
             elif target_group_col is None and col_lower == 'target_group':
                 target_group_col = col
+            elif edge_info_col is None and col_lower == 'edge info':
+                edge_info_col = col
+            elif source_info_col is None and col_lower == 'source info':
+                source_info_col = col
+            elif target_info_col is None and col_lower == 'target info':
+                target_info_col = col
         
         # Find all numeric columns that could be additional metrics
         numeric_cols = []
         additional_metric_names = []
         
         skip_cols = set(exclude_cols)
-        skip_cols_lower = set(group_info_names)
+        skip_cols_lower = set(group_info_names) | set(hover_info_names)
         if nt_type_col:
             skip_cols.add(nt_type_col)
         if source_group_col:
             skip_cols.add(source_group_col)
         if target_group_col:
             skip_cols.add(target_group_col)
+        for info_col in (edge_info_col, source_info_col, target_info_col):
+            if info_col:
+                skip_cols.add(info_col)
         
         for col in self.path_df.columns:
             if col in skip_cols or str(col).lower() in skip_cols_lower or col == weight_col:
@@ -1980,6 +2004,23 @@ class VisualizePath:
         nt_types_list = []
         # Endpoint group classification from the expanded export (node -> group)
         node_group_overrides = {}
+        # Hover-info cells from the expanded export: per-edge labels and the
+        # per-node union of every source/target info the node appears with.
+        edge_labels_loaded = {}
+        node_info_union = {}
+
+        def _parse_info_cell(value):
+            text = '' if value is None or (not isinstance(value, str) and pd.isna(value)) else str(value).strip()
+            if text.startswith('{') and text.endswith('}'):
+                text = text[1:-1]
+            info = {}
+            for part in text.split(';'):
+                part = part.strip()
+                if not part or ':' not in part:
+                    continue
+                key, _, val = part.partition(':')
+                info[key.strip()] = val.strip()
+            return info
         
         self._vprint(f"  Detected numeric columns: {[weight_col] + numeric_cols}")
         if nt_type_col:
@@ -2024,6 +2065,20 @@ class VisualizePath:
                 if pd.notna(grp) and str(grp).strip():
                     node_group_overrides[target] = str(grp).strip()
             
+            # Restore hover infos from the {key:val; ...} cells: edge info
+            # becomes the edge's custom labels; source/target info merge
+            # into one unique-union map per node (first value per key wins).
+            if edge_info_col is not None:
+                info = _parse_info_cell(row[edge_info_col])
+                if info:
+                    edge_labels_loaded[(source, target)] = info
+            if source_info_col is not None:
+                for key, val in _parse_info_cell(row[source_info_col]).items():
+                    node_info_union.setdefault(source, {}).setdefault(key, val)
+            if target_info_col is not None:
+                for key, val in _parse_info_cell(row[target_info_col]).items():
+                    node_info_union.setdefault(target, {}).setdefault(key, val)
+            
             # Store edge color if provided
             if color_col and color_col in row and pd.notna(row[color_col]):
                 edge_key = (source, target)
@@ -2035,6 +2090,22 @@ class VisualizePath:
         # Add new columns
         self.path_df['path_block'] = paths
         self.path_df['weights'] = weights
+        
+        # Restore hover infos for the renderer: per-edge custom labels and
+        # the per-node unique-union info map (the cytoscape hover reads
+        # self.edge_labels / self.node_dataset_info).
+        if edge_labels_loaded:
+            if not getattr(self, 'edge_labels', None):
+                self.edge_labels = {}
+            for edge_key, info in edge_labels_loaded.items():
+                self.edge_labels.setdefault(edge_key, {}).update(info)
+            self._vprint(f"  Restored hover labels for {len(edge_labels_loaded)} edge(s)")
+        if node_info_union:
+            for node, info in node_info_union.items():
+                merged = self.node_dataset_info.setdefault(node, {})
+                for key, val in info.items():
+                    merged.setdefault(key, val)
+            self._vprint(f"  Restored node info for {len(node_info_union)} node(s)")
         
         if nt_type_col:
             self.path_df['nt_types'] = nt_types_list
@@ -4322,13 +4393,18 @@ class VisualizePath:
         for node in G.nodes():
             node_type = G.nodes[node].get('node_type', 'intermediate')
 
-            # Assign color based on node type
+            # Assign color: an explicit per-node 'color' attribute on the
+            # graph wins (e.g. linker nodes colored by their metadata
+            # column), otherwise fall back to the node-type palette.
             if node_type == 'source':
                 base_color = self.node_color[0]
             elif node_type == 'target':
                 base_color = self.target_color
             else:  # intermediate
                 base_color = self.node_color[1]
+            override = G.nodes[node].get('color')
+            if override:
+                base_color = override
 
             base_name, hemisphere = _extract_hemisphere(str(node))
             if hemisphere:
@@ -4347,14 +4423,18 @@ class VisualizePath:
             nodes_data.append({
                 'data': {
                     'id': node,
-                    'label': node,
+                    'label': G.nodes[node].get('label', node),
                     'node_type': node_type,
                     'hemisphere': hemisphere if hemisphere else '',
                     'base_name': base_name,
                     'color': color,
                     'dataset_info': ds_info  # {code: name_in_that_dataset}
                 },
-                'position': {},  # Will be set by layout
+                # Preset layouts honor this top-level position verbatim
+                # (the mapping bridges preset); every other layout overwrites
+                # it when it runs. Nodes without a precomputed position
+                # start at the origin and are placed by their layout.
+                'position': G.nodes[node].get('position') or {},
                 'classes': ''  # For CSS classes
             })
         
@@ -4390,7 +4470,7 @@ class VisualizePath:
                 unique_nts_network.add(nt_type)
             
             # Format tooltip - use actual newline character, not escaped
-            tooltip_parts = [f"Weight: {weight:,}"]
+            tooltip_parts = [f"Weight: {weight:,} {self.edge_weight_label}"]
             if not np.isnan(ratio):
                 tooltip_parts.append(f"Ratio: {ratio:.3f}")
             if not np.isnan(prob):
@@ -4473,9 +4553,21 @@ class VisualizePath:
             'cose-bilkent': 'cose-bilkent', # CoSE Bilkent - Better quality force-directed
             'fcose': 'fcose',               # fCoSE - Fast CoSE with quality
             'klay': 'klay',                 # KLay - Layer-based layout (like dagre)
-            'elk': 'elk'                    # ELK - Eclipse Layout Kernel
+            'elk': 'elk',                   # ELK - Eclipse Layout Kernel
+            'mapping': 'preset'             # Mapping bridges: layered LR preset
         }
         cytoscape_layout = layout_map.get(layout, 'dagre')
+        # JS-facing layout name: the dropdown option value getLayoutConfig
+        # is keyed by. The mapping bridges keep their friendly name so the
+        # selector highlights the Mapping option and the initial re-layout
+        # re-applies the embedded per-node positions (preset) instead of
+        # silently falling back to dagre.
+        js_layout_name = (
+            layout if cytoscape_layout == 'preset' else cytoscape_layout
+        )
+        mapping_selected_attr = (
+            "selected" if js_layout_name == "mapping" else ""
+        )
         
         # Generate NT-based edge styles if enabled
         nt_edge_styles = ""
@@ -4893,6 +4985,9 @@ class VisualizePath:
         <div style="padding: 10px; background: #fff3e0; border-radius: 5px; margin-bottom: 8px; max-width: 185px;">
             <h4 style="margin: 0 0 8px 0; font-size: 14px; color: #e65100;">🔧 Layout Algorithm</h4>
             <select id="layoutSelector" onchange="changeLayout()" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ddd; font-size: 12px; background: white; cursor: pointer;">
+                <optgroup label="🔀 Type Mapping">
+                    <option value="mapping" {mapping_selected_attr}>Mapping ⭐⭐⭐⭐⭐ (layered L→R)</option>
+                </optgroup>
                 <optgroup label="🌟 Hierarchical">
                     <option value="dagre" {{'selected' if cytoscape_layout == 'dagre' else ''}}>Dagre ⭐⭐⭐⭐⭐</option>
                     <option value="klay" {{'selected' if cytoscape_layout == 'klay' else ''}}>KLay ⭐⭐⭐⭐</option>
@@ -5457,7 +5552,7 @@ class VisualizePath:
         let reciprocalOffset = defaultReciprocalOffset;
 
         // Initialize layout algorithm variable and configuration function
-        let currentLayoutAlgorithm = '{cytoscape_layout}';
+        let currentLayoutAlgorithm = '{js_layout_name}';
         let labelPosition = 'center';  // 'center' or 'outside'
         let labelsVisible = true;
         const hasHemisphereNodes = {'true' if has_hemi_controls else 'false'};
@@ -5468,6 +5563,12 @@ class VisualizePath:
         function getLayoutConfig(layoutName) {{
             // Configure layouts with optimal settings for crossing minimization
             const configs = {{
+                'mapping': {{
+                    name: 'preset',             // Positions precomputed by hop layer
+                    fit: true,
+                    animate: false,
+                    padding: 50
+                }},
                 'dagre': {{
                     name: 'dagre',
                     rankDir: 'TB',              // Top to bottom
@@ -5902,9 +6003,9 @@ class VisualizePath:
             
             // Highlight the current metric
             if (currentMetric === 'weight') {{
-                html += `<b>Weight:</b> <span style="color: #4CAF50; font-weight: bold;">${{displayWeight.toLocaleString()}} synapses ⬅ Current</span>`;
+                html += `<b>Weight:</b> <span style="color: #4CAF50; font-weight: bold;">${{displayWeight.toLocaleString()}} {self.edge_weight_label} ⬅ Current</span>`;
             }} else {{
-                html += `<b>Weight:</b> ${{displayWeight.toLocaleString()}} synapses`;
+                html += `<b>Weight:</b> ${{displayWeight.toLocaleString()}} {self.edge_weight_label}`;
             }}
             
             if (data.ratio && !isNaN(data.ratio)) {{
@@ -5933,7 +6034,7 @@ class VisualizePath:
                 html += `<br><span style="color: #888; font-size: 0.9em;">─────────────</span>`;
                 for (const [labelName, labelValue] of Object.entries(data.custom_labels)) {{
                     const formattedValue = typeof labelValue === 'number' ? labelValue.toLocaleString() : labelValue;
-                    html += `<br><b>${{escapeHtml(labelName)}}:</b> ${{escapeHtml(formattedValue)}}`;
+                    html += `<br><b>${{escapeHtml(labelName)}}:</b> <span style="white-space:pre-line">${{escapeHtml(formattedValue)}}</span>`;
                 }}
             }}
             
@@ -8972,7 +9073,15 @@ class VisualizePath:
         // and executes this function against headless Cytoscape.
         function buildEdgeListCSV() {{
             const header = ['source', 'target', 'weight', 'color', 'nt_type', 'nt_group',
-                            'source_group', 'target_group', 'custom_groups', 'ratio', 'probability'];
+                            'source_group', 'target_group', 'custom_groups', 'ratio', 'probability',
+                            'edge info', 'source info', 'target info'];
+            const edgeWeightLabelJS = '{self.edge_weight_label}';
+            // {{key:val; ...}} hover-info cells for the CSV round trip.
+            const formatInfoCell = (obj, extraEntries) => {{
+                const entries = [...(extraEntries || []), ...Object.entries(obj || {{}})];
+                if (!entries.length) return '';
+                return '{{' + entries.map(([k, v]) => k + ':' + v).join('; ') + '}}';
+            }};
             // element id -> names of the custom groups containing it
             const membership = {{}};
             Object.keys(customGroups).forEach(name => {{
@@ -9004,6 +9113,10 @@ class VisualizePath:
                 // as empty cells so re-import does not invent metrics
                 const ratio = edge.data('ratio');
                 const prob = edge.data('probability');
+                const edgeInfo = formatInfoCell(edge.data('custom_labels') || {{}},
+                    [['weight', weight + ' ' + edgeWeightLabelJS]]);
+                const sourceInfo = formatInfoCell(sourceNode.data('dataset_info') || {{}});
+                const targetInfo = formatInfoCell(targetNode.data('dataset_info') || {{}});
                 const row = [
                     labelOf(sourceNode),
                     labelOf(targetNode),
@@ -9015,7 +9128,10 @@ class VisualizePath:
                     targetNode.data('node_type') || 'intermediate',
                     (membership[edge.id()] || []).join(';'),
                     ratio ? ratio : '',
-                    prob ? prob : ''
+                    prob ? prob : '',
+                    edgeInfo,
+                    sourceInfo,
+                    targetInfo
                 ];
                 lines.push(row.map(csvEscapeField).join(','));
             }});

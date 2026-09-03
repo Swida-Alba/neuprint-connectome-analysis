@@ -177,6 +177,43 @@ class TestNeuronIndexData:
         body_sorted = query_neuron_index(index, sort_by="bodyId", page_size=4)
         assert [row["bodyId"] for row in body_sorted.rows] == ["100", "200", "300", "400"]
 
+    def test_include_all_rows_returns_full_filtered_set(
+        self, isolated_index_root
+    ):
+        """The matched-rows export path returns every matching row."""
+        from ui.neuron_index import load_cached_neuron_index, query_neuron_index
+
+        dataset = _write_paged_index(isolated_index_root, row_count=60)
+        index = load_cached_neuron_index(dataset, enrich=False)
+
+        all_rows = query_neuron_index(
+            index, search="aMe", page_size=10, include_all_rows=True)
+        assert all_rows.total == 60
+        assert all_rows.page == 1 and all_rows.pages == 1
+        assert len(all_rows.rows) == 60
+        # identical order to the paged traversal, just without the slice
+        paged_keys = [
+            row["__neuron_key"]
+            for page in range(1, 7)
+            for row in query_neuron_index(
+                index, search="aMe", page=page, page_size=10).rows
+        ]
+        assert [row["__neuron_key"] for row in all_rows.rows] == paged_keys
+
+        # the mapped-view query exports its complete type set too
+        typed = query_neuron_index(
+            index,
+            types_include=["aMe001", "aMe002"],
+            include_all_rows=True,
+        )
+        assert typed.total == 2
+        assert {row["type"] for row in typed.rows} == {"aMe001", "aMe002"}
+
+        # default behavior unchanged: the page slice still applies
+        paged_default = query_neuron_index(index, search="aMe", page_size=10)
+        assert len(paged_default.rows) == 10
+        assert paged_default.pages == 6
+
     def test_focus_key_returns_page_for_match_value_jump(self, isolated_index_root):
         from ui.neuron_index import load_cached_neuron_index, query_neuron_index
 
@@ -1791,3 +1828,124 @@ class TestNeuronIndexViewer:
         assert row["match_value"] == "DN1a"
         assert row["match_column_key"] == "type"
         assert row["__can_expand"] is False
+
+
+class TestBridgeBodyIdPooling:
+    """pool_bridge_body_ids: one-side pooling per standardized linker,
+    including the honest N-to-M mismatch between the two sides."""
+
+    def _index(self, tmp_path, dataset, rows):
+        import ui.neuron_index as neuron_index
+
+        folder = dataset.replace(":", "_").replace(".", "_")
+        cache_dir = tmp_path / "neuron_indexes" / folder
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame(rows).write_parquet(cache_dir / "neuron_index.parquet")
+        neuron_index.clear_neuron_index_cache()
+        return neuron_index.load_cached_neuron_index(dataset, enrich=False)
+
+    def test_two_to_four_mismatch_and_multipart_cells(
+            self, isolated_index_root, tmp_path):
+        from ui.neuron_index import pool_bridge_body_ids
+
+        source = self._index(tmp_path, "src:v1.0", {
+            "bodyId": ["1", "2", "9"],
+            "type": ["A", "A", "B"],
+            # bodyId 9 is type B and must NOT leak into A's pool
+            "flywireType": ["W", "W", "W"],
+        })
+        target = self._index(tmp_path, "tgt:v1.0", {
+            "bodyId": ["11", "12", "13", "14", "99"],
+            "type": ["B", "B", "B", "B", "C"],
+            # bodyId 99 is type C: the comma cell matches W but must be
+            # excluded by the endpoint type filter
+            "additional_type(s)": ["W", "W, V", " W ", "V, W", "W"],
+        })
+        linkers = [
+            {"column": "flywireType", "value": "W",
+             "home": "src:v1.0", "kind": "linker"},
+            {"column": "additional_type(s)", "value": "W",
+             "home": "tgt:v1.0", "kind": "linker"},
+        ]
+        pool = pool_bridge_body_ids(
+            "src:v1.0", "tgt:v1.0", linkers, "A", "B",
+            indexes={"src:v1.0": source, "tgt:v1.0": target})
+
+        # honest mismatch: 2 source bodyIds pool to 4 target bodyIds
+        assert pool["granularity"] == "2 to 4"
+        assert pool["source_body_ids"] == ["1", "2"]
+        assert pool["target_body_ids"] == ["11", "12", "13", "14"]
+        # comma/space multipart cells match per entry, never per substring
+        assert [l["body_ids"] for l in pool["per_linker"]] == [
+            ["1", "2"], ["11", "12", "13", "14"]]
+        # coverage states the partial target coverage
+        assert pool["coverage"] == "covered 4 of 4"
+
+    def test_no_linker_yields_full_endpoint_pools(self, isolated_index_root,
+                                                  tmp_path):
+        from ui.neuron_index import pool_bridge_body_ids
+
+        source = self._index(tmp_path, "s2:v1.0", {
+            "bodyId": ["1"], "type": ["A"], "flywireType": ["A"]})
+        target = self._index(tmp_path, "t2:v1.0", {
+            "bodyId": ["2"], "type": ["A"]})
+        pool = pool_bridge_body_ids(
+            "s2:v1.0", "t2:v1.0", [], "A", "A",
+            indexes={"s2:v1.0": source, "t2:v1.0": target})
+        # a bare same-name chain constrains neither side: both pools are
+        # the full endpoint types (the name equality IS the evidence)
+        assert pool["granularity"] == "1 to 1"
+        assert pool["source_body_ids"] == ["1"]
+        assert pool["target_body_ids"] == ["2"]
+        assert pool["per_linker"] == []
+
+
+def test_mapped_csv_extras_dedupe_and_via_note():
+    """mapped_csv_extras: bridge-<column> cells per standardized linker,
+    deduped values, via-note on indirect (hub) linkers, empty for
+    unmapped types (§9.3)."""
+    from ui.neuron_index import mapped_csv_extras
+
+    provenance = {
+        'CL125': [
+            {'foreign_type': 'APDN3', 'matched': "type · 'APDN3'",
+             'origins': [
+                 {'column': 'flywireType', 'value': 'LMTe01',
+                  'home': 'male-cns:v1.0', 'indirect': False,
+                  'text': "flywireType 'LMTe01'"},
+                 {'column': 'additional_type(s)', 'value': 'LMTe01',
+                  'home': 'flywire_FAFB_v783', 'indirect': False,
+                  'text': "additional_type(s) 'LMTe01'"},
+             ]},
+            # same pair via another route: the flywireType value repeats
+            {'foreign_type': 'APDN3', 'matched': "label · 'x'",
+             'origins': [
+                 {'column': 'flywireType', 'value': 'LMTe01',
+                  'indirect': False, 'text': "flywireType 'LMTe01'"},
+             ]},
+        ],
+        'SLP250': [
+            {'foreign_type': 'LTe71', 'matched': "type · 'LTe71'",
+             'origins': [
+                 {'column': 'additional_type(s)', 'value': 'APDN3',
+                  'indirect': True,
+                  'text': "additional_type(s) 'APDN3' (via FAFB)"},
+             ]},
+        ],
+    }
+    rows = [{'type': 'CL125', 'bodyId': 1},
+            {'type': 'SLP250', 'bodyId': 2},
+            {'type': 'UNMAPPED', 'bodyId': 3}]
+    fieldnames, extras = mapped_csv_extras(
+        rows, provenance, 'flywire_FAFB_v783')
+    assert fieldnames == [
+        'foreign_dataset', 'foreign_type(s)', 'matched column(s)',
+        'bridge-additional_type(s)', 'bridge-flywireType']
+    assert extras[0]['foreign_dataset'] == 'flywire_FAFB_v783'
+    assert extras[0]['foreign_type(s)'] == 'APDN3'
+    assert extras[0]['bridge-flywireType'] == 'LMTe01'  # deduped
+    assert extras[0]['bridge-additional_type(s)'] == 'LMTe01'
+    assert extras[1]['bridge-additional_type(s)'] == 'APDN3 (via FAFB)'
+    assert extras[1]['bridge-flywireType'] == ''
+    assert extras[2]['foreign_type(s)'] == ''
+    assert extras[2]['bridge-flywireType'] == ''

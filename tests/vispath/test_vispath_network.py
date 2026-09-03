@@ -357,9 +357,11 @@ class TestGeneratedHtmlStructure:
         assert "function getNtGroupCSV" in js
         assert "function csvEscapeField" in js
         # documented column order (source/target/weight re-importable, plus
-        # color, NT and grouping info)
+        # color, NT, grouping info and the {key:val; ...} hover-info cells)
         assert "'source', 'target', 'weight', 'color', 'nt_type', 'nt_group'," in js
-        assert "'source_group', 'target_group', 'custom_groups', 'ratio', 'probability'" in js
+        assert "'source_group', 'target_group', 'custom_groups', 'ratio', 'probability'," in js
+        assert "'edge info', 'source info', 'target info'" in js
+        assert "const formatInfoCell" in js
 
     def test_global_style_adjustments_recorded_in_history(self, network_html):
         """Every size/adjustment control must record a history entry: node
@@ -531,6 +533,7 @@ class TestEdgeListExportMatchesPathfindingInput:
         assert header == [
             "source", "target", "weight", "color", "nt_type", "nt_group",
             "source_group", "target_group", "custom_groups", "ratio", "probability",
+            "edge info", "source info", "target info",
         ]
         for r in rows[1:]:
             assert r[3].startswith("#"), f"color not a hex string: {r[3]}"
@@ -659,6 +662,47 @@ class TestExpandedEdgeListReimport:
         # grouping info columns never leak into conn_df as metrics
         assert "nt_group" not in conn.columns
         assert "custom_groups" not in conn.columns
+
+    def test_hover_info_columns_round_trip(self, tmp_path):
+        """The {key:val; ...} hover-info cells restore per-edge custom
+        labels and one unique-union info map per node."""
+        df = pd.DataFrame({
+            "source": ["S1", "S2"],
+            "target": ["T", "T"],
+            "weight": [4, 2],
+            "edge info": [
+                "{weight:4 neurons; maps via:S1[male-cns·type]}",
+                "{weight:2 neurons}",
+            ],
+            "source info": [
+                "{M:S1 · male-cns (4 neurons)}",
+                "{M:S2 · male-cns (2 neurons)}",
+            ],
+            "target info": [
+                "{F:T · fafb (9 neurons)}",
+                "{F:T · fafb (9 neurons)}",
+            ],
+        })
+        vp = VisualizePath(
+            path_file=df,
+            output_folder=str(tmp_path),
+            showfig=False,
+            verbose=False,
+        )
+        conn, G = vp.build_network()
+
+        # edge info restores the per-edge custom hover labels
+        assert vp.edge_labels[("S1", "T")]["maps via"] == "S1[male-cns·type]"
+        assert vp.edge_labels[("S1", "T")]["weight"] == "4 neurons"
+        assert "maps via" not in vp.edge_labels[("S2", "T")]
+        # node info is the unique union of every source/target info the
+        # node appears with (T occurs as target twice — one merged entry)
+        assert vp.node_dataset_info["S1"] == {"M": "S1 · male-cns (4 neurons)"}
+        assert vp.node_dataset_info["S2"] == {"M": "S2 · male-cns (2 neurons)"}
+        assert vp.node_dataset_info["T"] == {"F": "T · fafb (9 neurons)"}
+        # info columns never leak into conn_df as metrics
+        for column in ("edge info", "source info", "target info"):
+            assert column not in conn.columns
 
 
 # =============================================================================

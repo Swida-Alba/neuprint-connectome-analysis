@@ -2568,6 +2568,60 @@ class ComparisonAnalyzer:
                         filter_types=result_types if result_types else None
                     )
                     self._log_file(conflicts_path, "Type mapping conflicts")
+
+                # Bridge visualizations for the run's mapped pairs
+                try:
+                    mapper = self.parameters._auto_type_mapper
+                    flows = []
+                    seen_pairs = set()
+                    for result_type in (result_types or [])[:300]:
+                        source_ds = (
+                            mapper._detect_type_source(result_type)
+                            or (dataset_names[0] if dataset_names else "")
+                        )
+                        if not source_ds:
+                            continue
+                        for dataset_name in dataset_names:
+                            pair = (result_type, dataset_name)
+                            if pair in seen_pairs:
+                                continue
+                            bridges = mapper.get_type_bridges(
+                                result_type, source_ds, dataset_name
+                            )
+                            if not bridges:
+                                continue
+                            seen_pairs.add(pair)
+                            final = bridges[0][-1]["value"]
+                            target_key = mapper._get_type_mapping_key(dataset_name)
+                            count = len(
+                                mapper._dataset_types.get(target_key, {}).get(
+                                    bridges[0][-1]["value"], set())
+                            ) or 1
+                            flows.append({
+                                "source_dataset": source_ds,
+                                "target_dataset": dataset_name,
+                                "source_type": result_type,
+                                "source_count": count,
+                                "foreign_type": final,
+                                "foreign_count": count,
+                                "matched_origin": "auto type mapping",
+                                "bridges": bridges,
+                            })
+                    if flows:
+                        from comparison.mapping_visualization import (
+                            build_mapping_sankey_figure,
+                            write_mapping_network_html,
+                        )
+                        sankey_path = os.path.join(out_dir, "mapping_sankey.html")
+                        build_mapping_sankey_figure(flows).write_html(
+                            sankey_path, include_plotlyjs="cdn"
+                        )
+                        self._log_file(sankey_path, "Mapping bridge Sankey")
+                        network_path = os.path.join(out_dir, "mapping_network.html")
+                        write_mapping_network_html(flows, network_path, open_browser=False)
+                        self._log_file(network_path, "Mapping bridge network")
+                except Exception as map_exc:
+                    self._log(f"Mapping visualization skipped: {map_exc}")
             except Exception as e:
                 self._log(f"Warning: Failed to export auto type mapping: {e}", level='warn')
         

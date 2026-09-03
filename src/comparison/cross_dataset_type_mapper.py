@@ -30,7 +30,9 @@ Key Features:
 import os
 import warnings
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
+
+from utils.naming_utils import dataset_abbrev
 from collections import defaultdict
 import pandas as pd
 
@@ -96,6 +98,205 @@ FLYWIRE_TYPE_SOURCES = {
         'alt_column': 'Alternative Cell Type(s)',
     },
 }
+
+
+# Standardized linker decomposition per ordered dataset pair: the ordered
+# metadata columns that carry the bridge between the two `type` identities
+# (§4 of _plan/plan-type-mapping-bodyid-bridge.md). Pairs absent from the
+# registry derive their linkers from the chain hops.
+BRIDGE_STANDARD = {
+    ('male-cns:v1.0', 'flywire_FAFB_v783'): (
+        ('flywireType', 'male-cns:v1.0'),
+        ('additional_type(s)', 'flywire_FAFB_v783'),
+    ),
+    ('male-cns:v1.0', 'hemibrain:v1.2.1'): (
+        ('hemibrainType', 'male-cns:v1.0'),
+    ),
+    ('male-cns:v1.0', 'manc:v1.0'): (
+        ('mancType', 'male-cns:v1.0'),
+    ),
+    ('male-cns:v1.0', 'manc:v1.2.1'): (
+        ('mancType', 'male-cns:v1.0'),
+    ),
+    ('male-cns:v1.0', 'manc:v1.2.3'): (
+        ('mancType', 'male-cns:v1.0'),
+    ),
+    # BANC pairs map by type name (same-name or routed through FAFB), so
+    # their standard carries no own linker columns.
+}
+
+# One color per matched linker column (the detailed linker graph paints
+# each linker node by its column so same-named linkers disambiguate).
+LINKER_COLORS = {
+    'flywireType': '#f59e0b',
+    'additional_type(s)': '#a855f7',
+    'Alternative Cell Type(s)': '#c084fc',
+    'hemibrainType': '#14b8a6',
+    'mancType': '#ef4444',
+}
+
+
+CROSSWALK_COLUMNS = ("flywireType", "hemibrainType", "mancType")
+ANNOTATION_COLUMNS = ("additional_type(s)", "Alternative Cell Type(s)")
+
+
+def hop_home(hop: Dict[str, str], source_dataset: str) -> str:
+    """The dataset whose metadata physically holds a chain hop's column.
+
+    Crosswalk columns (flywireType/hemibrainType/mancType) physically
+    live in the SOURCE dataset's rows even though the walk attributes
+    the hop to the namespace it reaches; every other hop (``type``
+    identities in intermediate/final namespaces, annotation columns)
+    belongs to the dataset recorded on the hop itself.  Using the hop's
+    own dataset for ``type`` hops keeps transitive same-name chains
+    honest (e.g. DN1pA[MCNS·type] → DN1pA[FAFB·type], not two MCNS
+    hops) and never renames the final target identity.
+    """
+    if hop.get("column") in CROSSWALK_COLUMNS:
+        return source_dataset
+    return hop.get("dataset", source_dataset)
+
+
+def preferred_bridge_chain(chains, source_dataset: str,
+                           target_dataset: str):
+    """The most representative chain of one mapped pair.
+
+    Among the chains that end at the pair's foreign type, prefer the one
+    standardized with the most DIRECT (registry) linkers — the transitive
+    same-name routes (via other namespaces) and hub detours are kept as
+    alternative bridges but must not drive bodyId pooling or the
+    primary hover.  Ties: fewer linkers, then the shorter chain.
+    """
+    best = None
+    best_key = None
+    for chain in chains or []:
+        if not chain:
+            continue
+        linkers = standardize_bridge(chain, source_dataset, target_dataset)
+        direct = sum(1 for l in linkers
+                     if l["kind"] == "linker" and not l["indirect"])
+        total = len(linkers)
+        # bare name-equality chains sink below ANY linker chain — a
+        # metadata verification (even a non-registry crosswalk hop)
+        # always outranks the unverified name echo
+        key = (0 if total else 1, -direct, total, len(chain))
+        if best_key is None or key < best_key:
+            best, best_key = chain, key
+    return best
+
+
+def bridge_linker_text(chains: List[List[Dict[str, str]]],
+                       source_dataset: str, target_dataset: str,
+                       foreign_type: str) -> Dict[str, Any]:
+    """Deduplicated linker entries + display text for one mapped pair.
+
+    ``chains`` are the derivation chains for
+    ``(source_type → foreign_type)`` — only chains whose final hop lands
+    on ``foreign_type`` are used.  Returns ``{'entries': […],
+    'text': …}`` where each entry is a standardized linker
+    (``column``/``value``/``home``/``indirect``/``text``) deduplicated
+    by ``(column, value)``; indirect (hub-route) linkers sort last and
+    carry the hub note, e.g. ``additional_type(s) 'LTe71' (via FAFB)``.
+    The display text always includes the linker VALUES.
+    """
+    entries: List[Dict[str, Any]] = []
+    seen: Set[Tuple[str, str]] = set()
+    hubs: Set[str] = set()
+    usable = [c for c in chains or []
+              if c and c[-1].get("value") == foreign_type]
+    same_name_direct = False
+    for chain in usable:
+        # hub datasets: intermediate namespaces the route passes through
+        # (e.g. BANC routes through the FAFB annotation hub)
+        hubs.update(hop["dataset"] for hop in chain[1:-1]
+                    if hop["dataset"] not in (source_dataset, target_dataset))
+        linkers = standardize_bridge(chain, source_dataset, target_dataset)
+        if not linkers:
+            # a derivation-free chain: the two `type` identities agree
+            # directly — worth stating even when other chains add linkers
+            same_name_direct = True
+            continue
+        for linker in linkers:
+            if linker["kind"] != "linker":
+                hubs.add(linker.get("home", ""))
+                continue
+            key = (linker["column"], linker["value"])
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append(dict(linker))
+    entries.sort(key=lambda e: e["indirect"])
+    if same_name_direct:
+        entries.insert(0, {
+            "column": "type", "value": foreign_type,
+            "home": target_dataset, "kind": "same_name",
+            "indirect": False, "text": "same name",
+        })
+    for entry in entries:
+        base = f"{entry['column']} '{entry['value']}'"
+        if entry["kind"] == "same_name":
+            entry["text"] = "same name"
+            continue
+        if entry["indirect"] and hubs:
+            base += f" (via {'/'.join(sorted(hubs))})"
+        entry["text"] = base
+    if same_name_direct and not any(
+            e["kind"] == "linker" for e in entries):
+        # the ONLY evidence is name equality — tell the user to verify
+        display = "same name — no metadata verification " \
+                  "(please double check)"
+    else:
+        display = " + ".join(entry["text"] for entry in entries)
+    return {"entries": entries, "text": display}
+
+
+def standardize_bridge(chain, source_dataset: str,
+                       target_dataset: str) -> List[Dict[str, Any]]:
+    """Standardized linker nodes of one derivation chain.
+
+    The chain's two ends are always ``type`` identities; every middle hop
+    plus the final annotation hop's ``via`` becomes one linker node
+    ``{column, value, home, kind}``. Same-name middle hops are identity
+    pass-throughs (``kind: 'same_name_pass'``) — they continue the type
+    into a hub dataset and render as no extra node; annotation/crosswalk
+    linkers are ``kind: 'linker'`` and at most two per known pair (one
+    crosswalk + one annotation). Hops outside the pair registry are
+    flagged ``indirect``.
+    """
+    registry = BRIDGE_STANDARD.get((source_dataset, target_dataset), ())
+    registry_columns = {column for column, _home in registry}
+    linkers: List[Dict[str, Any]] = []
+    middle = chain[1:-1]
+    for hop in middle:
+        if hop['column'] == 'type':
+            linkers.append({
+                'column': 'type', 'value': hop['value'],
+                'home': hop['dataset'], 'kind': 'same_name_pass',
+                'indirect': True,
+            })
+            continue
+        linkers.append({
+            'column': hop['column'], 'value': hop['value'],
+            'home': hop_home(hop, source_dataset), 'kind': 'linker',
+            'indirect': hop['column'] not in registry_columns,
+        })
+    last = chain[-1] if chain else {}
+    if len(chain) >= 2 and last.get("column") in CROSSWALK_COLUMNS:
+        # crosswalk-arrival chain (e.g. [type, flywireType]): the terminal
+        # metadata hop IS the verification linker — a same-name pair is
+        # corroborated by the source's crosswalk cell naming the target.
+        linkers.append({
+            'column': last['column'], 'value': last['value'],
+            'home': hop_home(last, source_dataset), 'kind': 'linker',
+            'indirect': last['column'] not in registry_columns,
+        })
+    elif len(chain) >= 2 and last.get('via') and last.get('column') != 'type':
+        linkers.append({
+            'column': last['column'], 'value': last['via'],
+            'home': hop_home(last, source_dataset), 'kind': 'linker',
+            'indirect': last['column'] not in registry_columns,
+        })
+    return linkers
 
 
 class TypeMappingWarning(UserWarning):
@@ -194,6 +395,7 @@ class CrossDatasetTypeMapper:
         # {key: {additional_name: {candidate primary names}}}.  Only names
         # that are not themselves a primary type are indexed.
         self._flywire_alt_to_primary: Dict[str, Dict[str, Set[str]]] = {}
+        self._flywire_primary_to_alts: Dict[str, Dict[str, Set[str]]] = {}
 
         # Per FlyWire mapping key, the dataset's own primary type names.
         self._flywire_primaries: Dict[str, Set[str]] = {}
@@ -277,6 +479,13 @@ class CrossDatasetTypeMapper:
         tables only disable the rename resolution for that namespace.
         """
         self._flywire_alt_to_primary = {}
+        self._flywire_primary_to_alts = {}
+        # UNFILTERED annotation view (annotation value -> primaries): unlike
+        # ``_flywire_alt_to_primary`` it KEEPS values that are themselves
+        # primaries — FAFB rows typed C2 annotated 'C3' genuinely link the
+        # pair, and the annotation-reverse walk (MCNS C3 -> FAFB C2) needs
+        # it.  The filtered table stays authoritative for rename semantics.
+        self._flywire_annotation_primaries = {}
         self._flywire_primaries = {}
         for key in FLYWIRE_MAPPING_KEYS:
             path = self._flywire_neuron_df_paths.get(key)
@@ -315,6 +524,7 @@ class CrossDatasetTypeMapper:
             # in the dataset" check for alias candidates.
             self._flywire_primaries[key] = primaries
             alt_to_primary: Dict[str, Set[str]] = {}
+            annotation_primaries: Dict[str, Set[str]] = defaultdict(set)
             for cell, primary in zip(table[alt_column], table['type']):
                 names = self._split_type_cell(cell)
                 if not names or not isinstance(primary, str):
@@ -323,6 +533,9 @@ class CrossDatasetTypeMapper:
                 if not primary:
                     continue
                 for name in names:
+                    # The unfiltered annotation view keeps EVERY value —
+                    # including values that are themselves primaries.
+                    annotation_primaries.setdefault(name, set()).add(primary)
                     if name in primaries:
                         # A primary type keeps its own identity; the
                         # additional listing is just an alias.
@@ -330,6 +543,27 @@ class CrossDatasetTypeMapper:
                     alt_to_primary.setdefault(name, set()).add(primary)
 
             self._flywire_alt_to_primary[key] = alt_to_primary
+            self._flywire_annotation_primaries[key] = {
+                value: set(primaries_of_value)
+                for value, primaries_of_value in annotation_primaries.items()
+            }
+            # Inverse view: every primary type and the additional Type(S)
+            # values listed on its rows. The linker bridge walks these
+            # edges in BOTH directions — alt -> primary resolves a rename,
+            # primary -> alt pools the bodyIds whose annotation column
+            # carries the linked crosswalk value (e.g. BANC/FlyWire types
+            # routed through FAFB annotations into male-cns).
+            # The walker-facing reverse table uses the UNFILTERED
+            # annotation view: primary↔primary annotation links (e.g.
+            # FAFB pC2la rows annotated 'AVLP567') are real pair evidence
+            # and must be walkable.  ``_flywire_alt_to_primary`` stays
+            # filtered for rename-semantics consumers.
+            primary_to_alts: Dict[str, Set[str]] = {}
+            for alt, primaries_of_alt in self._flywire_annotation_primaries[
+                    key].items():
+                for primary in primaries_of_alt:
+                    primary_to_alts.setdefault(primary, set()).add(alt)
+            self._flywire_primary_to_alts[key] = primary_to_alts
             unambiguous = sum(1 for v in alt_to_primary.values() if len(v) == 1)
             self._log(
                 f"Indexed {len(primaries):,} primary types and "
@@ -413,6 +647,7 @@ class CrossDatasetTypeMapper:
         # Drop the alias-candidate lookup caches; they derive from the
         # conflicts rebuilt below.
         self._alias_n_to_1_cache = None
+        self._crosswalk_parts_cache = None
 
         df = self._neuron_df.copy()
         
@@ -1861,7 +2096,316 @@ class CrossDatasetTypeMapper:
                 'candidates': candidates,
             }
         return outcomes
-    
+
+    def _namespace_names(self, key: str) -> set:
+        """Every type name known to one namespace (mapping key)."""
+        names = set(self._dataset_types.get(key, {}))
+        names.update(self._flywire_primaries.get(key, ()))
+        for fw_key, alt_table in self._flywire_alt_to_primary.items():
+            if self._get_type_mapping_key(fw_key) == key:
+                names.update(alt_table)
+        return names
+
+    def _flywire_alt_column(self, fw_key: str) -> str:
+        """The additional Type(S) column name of one FlyWire namespace."""
+        return FLYWIRE_TYPE_SOURCES.get(fw_key, {}).get(
+            'alt_column', 'additional_type(s)')
+
+    def _name_neighbors(self, namespace: str, name: str):
+        """Derivation neighbors of ``(namespace, name)`` in the name graph.
+
+        Each neighbor is ``(neighbor_namespace, neighbor_name, column, via)``
+        where ``column`` names the dataset column that carries the link and
+        ``via`` the linking value (when it differs from the neighbor name).
+        """
+        key = self._get_type_mapping_key(namespace)
+        neighbors = []
+
+        # Same-name membership in other namespaces (the type columns agree).
+        # Sorted so the derivation walk (and every downstream chain order)
+        # is deterministic across processes.
+        for other_key in sorted(set(self._dataset_types)
+                                | set(self._flywire_primaries)):
+            if other_key == key:
+                continue
+            if name in self._dataset_types.get(other_key, ()) or name in self._flywire_primaries.get(other_key, ()):
+                neighbors.append((other_key, name, "type", name))
+
+        # Male-CNS crosswalk cells: one column per target namespace.
+        if key == "male-cns:v1.0":
+            for column, target_key in (
+                ("flywireType", "flywire_FAFB_v783"),
+                ("hemibrainType", "hemibrain:v1.2.1"),
+                ("mancType", "manc:v1.0"),
+            ):
+                for part in self._crosswalk_parts(name, column):
+                    neighbors.append((target_key, part, column, part))
+
+        # FlyWire additional-type columns: an alternative (old) name on rows
+        # typed with the primary name.
+        for fw_key, alt_table in self._flywire_alt_to_primary.items():
+            if key == fw_key:
+                for primary in sorted(
+                    alt_table.get(name, ())
+                ):
+                    neighbors.append((fw_key, primary,
+                                      self._flywire_alt_column(fw_key), name))
+        # FlyWire reverse annotation edges: a primary type whose rows list
+        # additional Type(S) values — the linker bridge walks these BOTH
+        # ways (alt -> primary resolves a rename; primary -> alt pools the
+        # bodyIds annotated with the linked crosswalk value, which is how
+        # BANC/FlyWire type names route into the male-cns crosswalk).
+        for fw_key, alt_table in self._flywire_primary_to_alts.items():
+            if key == fw_key:
+                for alt in sorted(
+                    alt_table.get(name, ())
+                ):
+                    neighbors.append((fw_key, alt,
+                                      self._flywire_alt_column(fw_key), name))
+        # Annotation-reverse edges from NON-FlyWire namespaces: when a
+        # FlyWire dataset's annotation cells name THIS type (e.g. FAFB
+        # rows typed APDN3 carry additional Type(S) 'CL125'), that is
+        # registry evidence for the pair and must be walkable from this
+        # side too — otherwise the MCNS→FAFB direction loses every
+        # mapping that only the FAFB→MCNS direction could see.
+        if key not in self._flywire_alt_to_primary:
+            for fw_key, alt_table in (
+                    self._flywire_annotation_primaries.items()):
+                for primary in sorted(alt_table.get(name, ())):
+                    neighbors.append(
+                        (fw_key, primary,
+                         self._flywire_alt_column(fw_key), name))
+        return neighbors
+
+    def get_type_bridges(
+        self,
+        source_type: str,
+        source_dataset: str,
+        target_dataset: str,
+        *,
+        max_bridges: int = 6,
+    ) -> List[List[Dict[str, str]]]:
+        """Derivation chains connecting one type name to a target dataset.
+
+        Every bridge is an ordered list of hops
+        ``{'dataset', 'column', 'value'}`` starting at the source type and
+        ending at a type of the target dataset — the full evidence chain
+        (e.g. male-cns ``type 'CL125'`` → ``flywireType 'LMTe01'`` → FAFB
+        ``additional_type(s) 'LMTe01'`` → ``type 'APDN3'``).  Chains are
+        searched up to four derivation hops, which covers same-name,
+        crosswalk-rename, additional-type-rename (both directions —
+        including FlyWire primary types routed through their rows'
+        additional Type(S) values, e.g. BANC type names into the male-cns
+        crosswalk), and hub-transitive pairs; ambiguous splits return one
+        candidate chain per split target.
+        """
+        if not self._loaded:
+            if not self.load():
+                return []
+        source_type = str(source_type or "").strip()
+        if not source_type:
+            return []
+        source_key = self._get_type_mapping_key(source_dataset)
+        target_key = self._get_type_mapping_key(target_dataset)
+        if source_key == target_key:
+            return [
+                [{"dataset": source_key, "column": "type", "value": source_type}]
+            ] if source_type in self._dataset_types.get(source_key, ()) or source_type in self._flywire_primaries.get(source_key, ()) else []
+
+        start = (source_key, source_type)
+        bridges: List[List[Dict[str, str]]] = []
+        seen_chains = set()
+
+        def _is_target(ns: str, name: str) -> bool:
+            if ns != target_key:
+                return False
+            if target_key in self._flywire_primaries:
+                # FlyWire endpoints must be real primary types, not
+                # additional-only names.
+                return name in self._flywire_primaries.get(target_key, ())
+            return name in self._dataset_types.get(target_key, ())
+
+        def _walk(node, chain, depth, visited, ann_chained=False):
+            ns, name = node
+            if depth > 0 and _is_target(ns, name):
+                # A chain that is NOTHING but type hops through more than
+                # one namespace (e.g. MCNS DN1pA -> BANC DN1pA -> FAFB
+                # DN1pA) is pure name transitivity — no crosswalk or
+                # annotation evidence, and redundant with the direct
+                # same-name chain that always exists when both endpoints
+                # carry the name.  Never offer it as a derivation.
+                if (len(chain) > 2
+                        and all(h["column"] == "type"
+                                for h in chain[1:])):
+                    return
+                chain_key = tuple(
+                    (h["dataset"], h["column"], h["value"]) for h in chain
+                )
+                if chain_key not in seen_chains:
+                    seen_chains.add(chain_key)
+                    bridges.append([dict(h) for h in chain])
+                # Arrival does NOT end the walk: the reached primary's own
+                # annotation edges continue the two-linker registry
+                # standard (crosswalk primary -> its annotated siblings,
+                # e.g. MCNS FB4A_a -> FAFB FB4A -> FAFB 4I1).  Deeper
+                # same-name hops stay blocked by the guard below, so the
+                # continuation is annotation-only and bounded by depth.
+            if depth >= 5:
+                # Depth 5 covers the full registry standard plus one hub
+                # routing leg (crosswalk -> additional -> same-name ->
+                # annotation); deeper chains carry no new evidence.
+                return
+            for nns, nname, column, via in self._name_neighbors(ns, name):
+                if (nns, nname) in visited:
+                    # simple paths only: the bidirectional annotation edges
+                    # (alt -> primary and primary -> alt) would otherwise
+                    # bounce between a primary and its own additional names.
+                    continue
+                if column == "type" and nns != target_key:
+                    # Same-name membership hops are hub legs: allowed at
+                    # the source fan-out (e.g. a BANC type routing through
+                    # the FAFB annotations) and as the arrival into the
+                    # target namespace, never as aimless mid-chain
+                    # wandering between uninvolved namespaces.  Registry
+                    # pairs are additionally scoped by linker relevance
+                    # (see the registry filter in get_type_bridges).
+                    if depth > 0:
+                        continue
+                prev_column = chain[-1]["column"] if chain else ""
+                if (column in ANNOTATION_COLUMNS
+                        and prev_column in ANNOTATION_COLUMNS
+                        and (nns != target_key or ann_chained)):
+                    # No annotation-to-annotation chaining mid-chain:
+                    # following a primary's own additional values with
+                    # another annotation hop on the same dataset is family
+                    # transitivity (T1 -> C2 -> C3 -> L4 ...), not pair
+                    # evidence.  The exception is an annotation hop that
+                    # ARRIVES in the target namespace (e.g. the BANC LTe71
+                    # hub route), which is real routing evidence.
+                    continue
+                hop = {"dataset": nns, "column": column, "value": nname}
+                if via != nname:
+                    hop["via"] = via
+                chain.append(hop)
+                visited.add((nns, nname))
+                chained = ann_chained or (
+                    column in ANNOTATION_COLUMNS
+                    and prev_column in ANNOTATION_COLUMNS)
+                _walk((nns, nname), chain, depth + 1, visited, chained)
+                visited.discard((nns, nname))
+                chain.pop()
+
+        chain0 = [{"dataset": source_key, "column": "type", "value": source_type}]
+        _walk(start, chain0, 0, {(source_key, source_type)})
+
+        # Registry scoping (§9F): for a pair with a BRIDGE_STANDARD
+        # registry, a chain's metadata hops must be the pair's own
+        # registry columns — a hemibrainType hop on a MCNS~FAFB chain
+        # (or a FAFB-annotation hop on a MCNS~HEMI chain) describes a
+        # THIRD dataset's naming and must not be offered as evidence.
+        # Registry-less (hub) pairs keep all chains, flagged indirect.
+        registry = BRIDGE_STANDARD.get((source_dataset, target_dataset), ())
+        if registry:
+            allowed = {column for column, _home in registry} | {"type"}
+            within = []
+            for chain in bridges:
+                if not all(hop["column"] in allowed for hop in chain[1:]):
+                    continue
+                # the two-linker standard is a hard cap: chained renames
+                # (vDeltaB -> vDeltaA -> vDelta ...) exceed the
+                # standardizable shape and are not offered
+                direct = sum(
+                    1 for l in standardize_bridge(
+                        chain, source_dataset, target_dataset)
+                    if l["kind"] == "linker" and not l["indirect"])
+                if direct <= 2:
+                    within.append(chain)
+            bridges = within
+
+        # Evidence subsumption: a bare same-name chain is IMPLIED by any
+        # linker-bearing chain to the same target type (the verification
+        # proves the pair; the name echo adds nothing).  When a target
+        # type has verified derivation(s), keep only those; the bare
+        # chain survives only for pairs with no corroboration at all.
+        by_end: Dict[str, List[List[Dict[str, str]]]] = {}
+        for chain in bridges:
+            by_end.setdefault(chain[-1]["value"], []).append(chain)
+        filtered: List[List[Dict[str, str]]] = []
+        for _end_value, group in by_end.items():
+            verified = [
+                chain for chain in group
+                if any(l["kind"] == "linker" for l in standardize_bridge(
+                    chain, source_dataset, target_dataset))
+            ]
+            filtered.extend(verified or group)
+        bridges = filtered
+        return bridges
+
+    def get_mapping_origins(
+        self,
+        local_type: str,
+        foreign_type: str,
+        foreign_dataset: str,
+    ) -> List[Dict[str, str]]:
+        """Condensed origin descriptors for one mapped pair.
+
+        Thin wrapper over :meth:`get_type_bridges`: every derivation hop
+        except the chain's endpoints becomes one
+        ``{'source': <column>, 'via': <value>}`` descriptor, matching the
+        historical format (e.g. ``additional_type(s) via 'LMTe01'``).
+        """
+        source_dataset = (
+            self._detect_type_source(local_type) or "male-cns:v1.0"
+        )
+        bridges = self.get_type_bridges(
+            local_type, source_dataset, foreign_dataset
+        )
+        origins: List[Dict[str, str]] = []
+        seen = set()
+        for bridge in bridges:
+            if len(bridge) == 2 and bridge[1]["column"] == "type":
+                # Same name in both datasets (primary on the foreign side).
+                if ("type",) not in seen:
+                    seen.add(("type",))
+                    origins.append({"source": "type"})
+                continue
+            if len(bridge) < 3:
+                continue
+            for hop in bridge[1:-1]:
+                key = (hop["column"], hop["value"])
+                if key not in seen:
+                    seen.add(key)
+                    origins.append({"source": hop["column"], "via": hop["value"]})
+            last = bridge[-1]
+            if last.get("via"):
+                key = (last["column"], last["via"])
+                if key not in seen:
+                    seen.add(key)
+                    origins.append({"source": last["column"], "via": last["via"]})
+        return origins
+
+    def _crosswalk_parts(self, local_type: str, crosswalk_col: str) -> List[str]:
+        """Distinct raw crosswalk-cell parts of one male-cns type (cached)."""
+        cache = getattr(self, '_crosswalk_parts_cache', None)
+        if cache is None:
+            cache = {}
+            self._crosswalk_parts_cache = cache
+        key = (crosswalk_col, local_type)
+        if key not in cache:
+            parts: set = set()
+            if (
+                self._neuron_df is not None
+                and crosswalk_col in self._neuron_df.columns
+                and 'type' in self._neuron_df.columns
+            ):
+                rows = self._neuron_df.loc[
+                    self._neuron_df['type'] == local_type, crosswalk_col
+                ]
+                for cell in rows.dropna().astype(str):
+                    parts.update(self._split_type_cell(cell))
+            cache[key] = parts
+        return sorted(cache[key])
+
     def get_canonical_type(self, type_name: str, source_dataset: Optional[str] = None) -> str:
         """
         Get the canonical (male-cns) type name for cross-dataset merging.

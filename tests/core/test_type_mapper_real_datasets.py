@@ -27,6 +27,12 @@ import pytest
 from comparison.cross_dataset_type_mapper import (
     CrossDatasetTypeMapper,
     get_type_mapper,
+    preferred_bridge_chain,
+    standardize_bridge,
+)
+from ui.neuron_index import (
+    collect_native_type_matches,
+    enrich_native_type_matches,
 )
 
 MCNS = 'male-cns:v1.0'
@@ -476,3 +482,349 @@ def test_get_alias_candidates_combined_cell_name_real(mapper):
         joined[ds]['outcome'] == 'no counterpart known'
         for ds in (MCNS, FW)
     )
+
+
+# =============================================================================
+# Round 1 of the bodyId-level bridge plan (_plan/plan-type-mapping-bodyid-bridge.md):
+# standardized linker extraction, the at-most-two-linker theorem, and the
+# BANC type-name routing through FAFB annotations into the male-cns crosswalk.
+# =============================================================================
+
+def test_standardize_bridge_real_anchors(mapper):
+    """CL125 / PLP080 / SLP250 chains standardize to the registry linkers."""
+    from comparison.cross_dataset_type_mapper import standardize_bridge
+
+    # CL125: the full two-linker standard (flywireType -> additional_type(s))
+    chains = mapper.get_type_bridges('CL125', MCNS, FW)
+    two_linker = next(
+        chain for chain in chains
+        if [('flywireType', 'LMTe01'), ('additional_type(s)', 'LMTe01')]
+        == [(l['column'], l['value'])
+            for l in standardize_bridge(chain, MCNS, FW)
+            if l['kind'] == 'linker'])
+    linkers = standardize_bridge(two_linker, MCNS, FW)
+    linker_only = [l for l in linkers if l['kind'] == 'linker']
+    assert sorted((l['column'], l['value']) for l in linker_only) == [
+        ('additional_type(s)', 'LMTe01'), ('flywireType', 'LMTe01')]
+    assert not any(l['indirect'] for l in linkers)
+
+    # PLP080: same two-linker shape with its own value — the literal
+    # PLP080 -- PLP080 (additional_type(s)) -- APDN3 path (located by
+    # signature: chain order varies with the pruned walk)
+    chains_plp = mapper.get_type_bridges('PLP080', MCNS, FW)
+    chain = next(
+        c for c in chains_plp
+        if [('flywireType', 'PLP080'), ('additional_type(s)', 'PLP080')]
+        == [(l['column'], l['value'])
+            for l in standardize_bridge(c, MCNS, FW)
+            if l['kind'] == 'linker'])
+    linker_only = [l for l in standardize_bridge(chain, MCNS, FW)
+                   if l['kind'] == 'linker']
+    assert [(l['column'], l['value']) for l in linker_only] == [
+        ('flywireType', 'PLP080'), ('additional_type(s)', 'PLP080')]
+
+    # SLP250: the preferred chain is the registry two-linker standard
+    chain = preferred_bridge_chain(
+        mapper.get_type_bridges('SLP250', MCNS, FW), MCNS, FW)
+    linker_only = [l for l in standardize_bridge(chain, MCNS, FW)
+                   if l['kind'] == 'linker']
+    # the annotation linker's value is the CELL entry on APDN3 rows:
+    # 'LTe71' (SLP250's own crosswalk name echoed in the annotation)
+    assert [(l['column'], l['value']) for l in linker_only] == [
+        ('flywireType', 'LTe71'), ('additional_type(s)', 'LTe71')]
+
+    # MDN -> BANC same-name chain: its crosswalk verification linker
+    # (flywireType 'MDN' — the male-cns cell names the BANC type itself)
+    chain = mapper.get_type_bridges('MDN', MCNS, BANC)[0]
+    linkers = [l for l in standardize_bridge(chain, MCNS, BANC)
+               if l['kind'] == 'linker']
+    assert [(l['column'], l['value']) for l in linkers] == [
+        ('flywireType', 'MDN')]
+    # registry-less (BANC) pairs flag every linker indirect — that is the
+    # designed honesty about the weaker evidence, not a defect
+    assert all(l['indirect'] for l in linkers)
+
+    # endpoints are always the two datasets' type identities
+    assert chain[0]['column'] == 'type' and chain[0]['dataset'] == MCNS
+    assert chain[-1]['dataset'] == BANC
+
+
+def test_banc_type_names_route_through_annotations(mapper):
+    """BANC type names map into male-cns through FAFB/BANC annotations.
+
+    DNp50 is a BANC v626 primary whose male-cns counterpart is MDN (a
+    rename): the chains must route through the additional Type(S)
+    annotations, and the ambiguity (several chains) is reported.
+    """
+    chains = mapper.get_type_bridges('DNp50', BANC, MCNS)
+    assert chains, 'DNp50 (BANC) must route into male-cns'
+    # every chain ends at a male-cns type identity
+    for chain in chains:
+        assert chain[0]['dataset'] == BANC and chain[0]['column'] == 'type'
+        assert chain[-1]['dataset'] == MCNS
+        assert chain[-1]['column'] == 'type'
+    # at least one chain routes through an annotation linker naming MDN
+    assert any(
+        any(hop['column'] in ('additional_type(s)', 'Alternative Cell Type(s)')
+            and hop.get('via') == 'DNp50' for hop in chain)
+        for chain in chains)
+    # DNp50 has no male-cns same-name (it is a rename), so EVERY chain must
+    # carry an annotation linker — the ambiguity is the chain count.
+    assert len(chains) >= 2
+    assert all(
+        any(hop['column'] in ('additional_type(s)',
+                              'Alternative Cell Type(s)')
+            for hop in chain)
+        for chain in chains)
+
+
+def test_two_linker_cap_over_sample_matrix(mapper):
+    """Every chain standardizes to at most two linker nodes (the theorem)."""
+    pairs = [
+        # registry pairs: the two-linker standard holds strictly
+        (MCNS, FW), (MCNS, HB),
+        # hub pairs (BANC routes through FAFB annotations): a third
+        # annotation hop is legitimate and every linker is flagged indirect
+        (MCNS, BANC), (BANC, MCNS), (FW, MCNS), (BANC, FW), (FW, BANC),
+    ]
+    types = ['MDN', 'CL125', 'APDN3', 'SLP249', 'aMe12', 'TmY9q', 'Dn3',
+             'vDeltaB', 'LC10', 'DNp50']
+    checked = 0
+    for src, tgt in pairs:
+        for type_name in types:
+            for chain in mapper.get_type_bridges(type_name, src, tgt):
+                linkers = standardize_bridge(chain, src, tgt)
+                # The two-linker standard binds the DIRECT (registry) linkers;
+                # deeper FAFB rename chains (e.g. vDeltaB -> vDeltaA ->
+                # vDeltaL into hemibrain) are legitimate but every extra
+                # linker is flagged indirect.
+                direct = [l for l in linkers
+                          if l['kind'] == 'linker' and not l['indirect']]
+                assert len(direct) <= 2, (src, tgt, type_name, chain)
+                checked += 1
+    assert checked > 20, f'sample too small: {checked} chains'
+
+
+def test_plp080_renamed_resolution_regression(mapper):
+    """The FAFB-side search for PLP080 (additional-only there) resolves to
+    APDN3 with the N-to-1 aggregates — preserved by the v2 changes."""
+    res = mapper.get_alias_candidates('PLP080', [FW])
+    info = res[FW]
+    assert info['outcome'] == 'matched'
+    assert [c['name'] for c in info['candidates']] == ['APDN3']
+    assert info['candidates'][0]['kind'] == 'renamed'
+    assert info['candidates'][0]['aggregates'] == [
+        'CL125', 'PLP080', 'SLP249', 'SLP250']
+
+
+def _entry(matches, dataset):
+    for entry in matches:
+        if entry['dataset'] == dataset:
+            return entry
+    return None
+
+
+def test_bridge_linker_text_values_and_hub_note(mapper):
+    """bridge_linker_text: values included, deduped, indirect (hub) linkers
+    last with the hub note."""
+    from comparison.cross_dataset_type_mapper import bridge_linker_text
+
+    chains = mapper.get_type_bridges('CL125', MCNS, FW)
+    info = bridge_linker_text(chains, MCNS, FW, 'APDN3')
+    # the FAFB APDN3 rows carry 'CL125' directly, so the deduplicated
+    # linker text is: direct annotation evidence first, then the
+    # two-linker crosswalk standard
+    assert info['text'] == (
+        "additional_type(s) 'CL125' + flywireType 'LMTe01' "
+        "+ additional_type(s) 'LMTe01'")
+    assert [e['value'] for e in info['entries']] == [
+        'CL125', 'LMTe01', 'LMTe01']
+    assert not any(e['indirect'] for e in info['entries'])
+
+    # the CL125 -> LTe71 (BANC) "hub chain" was pure transitivity noise
+    # (BANC LTe71's own Alternative cell names only itself) — pruned and
+    # stays pruned; indirect (hub-routed) linkers still occur on real pairs
+    hub_chains = mapper.get_type_bridges('CL125', MCNS, BANC)
+    assert not [c for c in hub_chains if c and c[-1]['value'] == 'LTe71']
+    indirect_found = any(
+        any(l['indirect'] for l in standardize_bridge(
+            chain, MCNS, BANC))
+        for type_name in ('l-LNv', 'DN1pA', 'CB3508')
+        for chain in mapper.get_type_bridges(type_name, MCNS, BANC))
+    assert indirect_found
+
+
+def test_mapping_sankey_figure_restored(mapper):
+    """The restored native sankey renders the standardized linker bands
+    with pooled-count ribbons and the CSV-notice title."""
+    import plotly.graph_objects as go
+
+    from comparison.mapping_visualization import (
+        build_mapping_flows,
+        build_mapping_sankey_figure,
+    )
+    from ui.neuron_index import (
+        load_cached_neuron_index,
+        pool_bridge_body_ids,
+    )
+
+    native = collect_native_type_matches(MCNS, 'APDN3', uncapped=True)
+    enrich_native_type_matches(native, MCNS)
+    entry = _entry(native, FW)
+    assert entry
+    index = load_cached_neuron_index(MCNS)
+    foreign_index = load_cached_neuron_index(FW)
+    flows = build_mapping_flows(
+        [entry], MCNS,
+        source_counts=count_types_in_index_map(index, entry))
+    assert flows
+    pools = {}
+    for flow in flows:
+        chain = preferred_bridge_chain(flow['bridges'], MCNS, FW)
+        if chain is None:
+            continue
+        pool = pool_bridge_body_ids(
+            MCNS, FW, standardize_bridge(chain, MCNS, FW),
+            flow['source_type'], flow['foreign_type'],
+            indexes={MCNS: index, FW: foreign_index})
+        pools[(flow['source_type'], flow['foreign_type'])] = pool
+
+    fig = build_mapping_sankey_figure(flows, pools=pools)
+    assert fig is not None and fig.data[0].type == 'sankey'
+    labels = list(fig.data[0].node['label'])
+    values = list(fig.data[0].link['value'])
+    # linker bands colored per column: amber flywireType + violet annotations
+    colors = list(fig.data[0].node['color'])
+    assert '#f59e0b' in colors and '#a855f7' in colors
+    # pooled ribbons: each drawn chain contributes its pooled count per
+    # hop — 4-bodyId bridges (CL125, SLP249) and 2-bodyId bridges
+    # (SLP250, PLP080); two derivation chains per flow survive (hops
+    # aggregate into 20 ribbons)
+    assert sorted(values) == [2] * 10 + [4] * 10
+    # no cap hit at 4 flows -> no notice; capped -> notice points to CSV
+    assert 'full mapping' not in fig.layout.title.text
+    capped = build_mapping_sankey_figure(flows, pools=pools, max_flows=2)
+    assert 'full mapping is in the CSV export' in capped.layout.title.text
+
+
+def count_types_in_index_map(index, entry):
+    from ui.neuron_index import count_types_in_index
+    return count_types_in_index(index, entry.get('mapped_type_names', []))
+
+
+def test_analyzer_mapping_export_imports():
+    """The Cross-Dataset run's mapping_sankey export imports cleanly
+    (regression: the removed plotly builder broke it silently)."""
+    import importlib
+
+    module = importlib.import_module('comparison.mapping_visualization')
+    assert hasattr(module, 'build_mapping_sankey_figure')
+    source = Path(  # the analyzer's lazy import names must all resolve
+        Path(__file__).resolve().parents[2]
+        / 'src' / 'comparison' / 'comparison_analyzer.py').read_text(
+        encoding='utf-8')
+    segment = source[source.index('build_mapping_sankey_figure'):]
+    assert 'write_mapping_network_html' in segment
+
+
+def test_mapping_type_sankey_and_in_memory_renderers(mapper):
+    """Type-level sankey bands (§9C.6) + the in-memory vispath renderers
+    (no repository writes — temp-dir render, HTML string back)."""
+    from comparison.mapping_visualization import (
+        build_mapping_flows,
+        build_mapping_type_sankey_figure,
+        render_bridge_linker_html,
+        render_mapping_network_html,
+    )
+    from ui.neuron_index import (
+        count_types_in_index,
+        load_cached_neuron_index,
+        pool_bridge_body_ids,
+    )
+
+    native = collect_native_type_matches(MCNS, 'APDN3', uncapped=True)
+    enrich_native_type_matches(native, MCNS)
+    entry = _entry(native, FW)
+    assert entry
+    index = load_cached_neuron_index(MCNS)
+    foreign_index = load_cached_neuron_index(FW)
+    flows = build_mapping_flows(
+        [entry], MCNS, source_counts=count_types_in_index(
+            index, entry.get('mapped_type_names', [])))
+    assert flows
+    pools = {}
+    for flow in flows:
+        chain = preferred_bridge_chain(flow['bridges'], MCNS, FW)
+        if chain is None:
+            continue
+        pools[(flow['source_type'], flow['foreign_type'])] = (
+            pool_bridge_body_ids(
+                MCNS, FW, standardize_bridge(chain, MCNS, FW),
+                flow['source_type'], flow['foreign_type'],
+                indexes={MCNS: index, FW: foreign_index}))
+
+    fig = build_mapping_type_sankey_figure(flows, pools=pools)
+    assert fig is not None and fig.data[0].type == 'sankey'
+    labels = list(fig.data[0].node['label'])
+    values = list(fig.data[0].link['value'])
+    # two bands only: the 4 mapped sources -> the single FAFB target,
+    # one aggregated ribbon per pair with the pooled granularity
+    assert len(labels) == len(flows) + 1
+    assert sorted(values) == sorted(
+        min(len(p['source_body_ids']), len(p['target_body_ids']))
+        or 1 for p in pools.values())
+    colors = set(list(fig.data[0].node['color']))
+    assert colors == {'#5b8cff', '#22c55e'}  # source blue / target green
+    # cap notice only when the cap trims flows
+    assert 'full mapping' not in fig.layout.title.text
+    capped = build_mapping_type_sankey_figure(flows, pools=pools,
+                                              max_flows=1)
+    assert 'full mapping is in the CSV export' in capped.layout.title.text
+
+    # in-memory renderers: strings, correct renderer, no repo writes
+    net_html = render_mapping_network_html(flows)
+    assert net_html and 'cytoscape' in net_html.lower()
+    linker_html = render_bridge_linker_html(
+        flows, source_dataset=MCNS, target_dataset=FW, pools=pools)
+    assert linker_html and 'cytoscape' in linker_html.lower()
+    assert 'flywireType' in linker_html
+
+
+def test_bridge_linker_text_warns_on_unverified_same_name():
+    """A same-name pair whose only chain is bare name equality states
+    'no metadata verification (please double check)'; a verified chain
+    overrides the warning (§9F)."""
+    from comparison.cross_dataset_type_mapper import bridge_linker_text
+
+    chains = [[{"dataset": MCNS, "column": "type", "value": "X"},
+               {"dataset": FW, "column": "type", "value": "X"}]]
+    info = bridge_linker_text(chains, MCNS, FW, "X")
+    assert info["text"] == ("same name — no metadata verification "
+                            "(please double check)")
+
+    # with a crosswalk-verification chain the warning is replaced by the
+    # linker facts (same name + the verification)
+    chains.append([{"dataset": MCNS, "column": "type", "value": "X"},
+                   {"dataset": FW, "column": "flywireType", "value": "X"}])
+    info = bridge_linker_text(chains, MCNS, FW, "X")
+    assert info["text"] == ("same name + flywireType 'X'")
+
+
+def test_dataset_abbreviations_and_version_suffixes():
+    """4-char dataset names: FAFB (never FLYW), and family collisions
+    (two male-cns or two BANC versions) get version suffixes."""
+    from utils.naming_utils import dataset_abbrev, make_unique_dataset_labels
+
+    assert dataset_abbrev('flywire_FAFB_v783') == 'FAFB'
+    assert dataset_abbrev('flywire_BANC_v888') == 'BANC'
+    assert dataset_abbrev('flywire_BANC_v626') == 'BANC'
+    assert dataset_abbrev('male-cns:v1.0') == 'MCNS'
+    assert dataset_abbrev('flywire') == 'FAFB'  # never the FLYW fallback
+
+    labels = make_unique_dataset_labels([
+        'male-cns:v1.0', 'male-cns:v0.9',
+        'flywire_BANC_v888', 'flywire_BANC_v626',
+        'flywire_FAFB_v783'])
+    # BOTH colliding labels get versions — a bare MCNS would stay ambiguous
+    assert labels == ['MCNS_v1_0', 'MCNS_v0_9', 'BANC_v888', 'BANC_v626',
+                      'FAFB']

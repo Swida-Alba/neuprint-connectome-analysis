@@ -167,7 +167,8 @@ const rows = parseCSV(csvText);
 console.log('EXPORTED_CSV_JSON::' + JSON.stringify(rows));
 
 const HEADER = ['source', 'target', 'weight', 'color', 'nt_type', 'nt_group',
-                'source_group', 'target_group', 'custom_groups', 'ratio', 'probability'];
+                'source_group', 'target_group', 'custom_groups', 'ratio', 'probability',
+                'edge info', 'source info', 'target info'];
 check('CSV header matches the documented columns',
     JSON.stringify(rows[0]) === JSON.stringify(HEADER),
     'got ' + JSON.stringify(rows[0]));
@@ -213,6 +214,11 @@ elements.edges.forEach((embedded, i) => {
     if (expected.probability === '' ? row[10] !== '' : Math.abs(parseFloat(row[10]) - parseFloat(expected.probability)) > 1e-9) {
         problems.push('probability ' + row[10] + ' != ' + expected.probability);
     }
+    // hover-info cells: {key:val; ...} JSON-like entries
+    if (!/^(\{.*\})?$/.test(row[11])) problems.push('edge info not {key:val; ...}: ' + row[11]);
+    if (!/^(\{.*\})?$/.test(row[12])) problems.push('source info not {key:val; ...}: ' + row[12]);
+    if (!/^(\{.*\})?$/.test(row[13])) problems.push('target info not {key:val; ...}: ' + row[13]);
+    if (row[11] !== '' && !/\{weight:[^;}]+/.test(row[11])) problems.push('edge info missing weight: ' + row[11]);
     if (problems.length > 0) {
         rowsMatchInput = false;
         rowDetail += 'edge ' + d.source + '->' + d.target + ': ' + problems.join('; ') + ' | ';

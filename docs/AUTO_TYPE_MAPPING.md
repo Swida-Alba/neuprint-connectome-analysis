@@ -125,6 +125,20 @@ exported to `auto_type_mapping.csv` (and conflicts to
    different datasets must not be mixed) — and the panel repeats the
    double-check recommendation.
 
+   Each dataset block also has a **"Show mapped types here (N types)"**
+   button. It runs the equivalent search in the selected dataset: the main
+   table switches to a *mapped-type view* listing the current dataset's
+   neurons of the mapped type names, with a prominent warning banner
+   ("automatic mapping — please double check") and a "Back to normal
+   search" exit. Three provenance columns are appended per row: the
+   **foreign type(s)** that mapped to it, the **map used column** (`type`,
+   `additional_type(s) · via '<old name>'`, or the `flywireType`
+   crosswalk), and the **matched column** that triggered the expansion
+   (e.g. `cell_type · circadian_clock`). Because the view queries the
+   *selected* dataset's index only, selection and add-to-query keep
+   working normally; any new query leaves the mapped view and returns to
+   the regular workflow.
+
 ### 4. Standardization Process
 
 When comparing profiles from different datasets:

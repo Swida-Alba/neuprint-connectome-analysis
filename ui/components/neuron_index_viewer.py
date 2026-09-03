@@ -3,18 +3,26 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
+import webbrowser
 from pathlib import Path
 from typing import Callable, List
 
 from nicegui import ui
 
 from ..config import PROJECT_ROOT
+from utils.naming_utils import dataset_abbrev
 from ..neuron_index import (
+    NO_DERIVATION_TEXT,
+    build_matches_csv,
     collect_zero_hit_matches,
+    count_types_in_index,
     load_cached_neuron_index,
+    mapped_csv_extras,
     neuron_index_path,
+    pool_bridge_body_ids,
     query_match_group_subtypes,
     query_neuron_index,
 )
@@ -546,6 +554,19 @@ def _render_index(
                 "descending": direction.value == "desc",
             }
 
+        def query_kwargs_with_mapped() -> dict:
+            """Query kwargs; in mapped view the type set replaces the search."""
+            if not mapped_view.get("active"):
+                return current_query_kwargs()
+            requested_sort = sort_column.value
+            if requested_sort in (None, "", "__match_value__"):
+                requested_sort = "type"
+            return {
+                "types_include": sorted(mapped_view["types"]),
+                "sort_by": requested_sort,
+                "descending": direction.value == "desc",
+            }
+
         def current_full_table_keys() -> dict[str, str]:
             """Lazily materialise every matching key->bodyId across all pages."""
             nonlocal full_table_all_keys
@@ -553,7 +574,7 @@ def _render_index(
                 full_table_all_keys = dict(
                     query_neuron_index(
                         index,
-                        **current_query_kwargs(),
+                        **query_kwargs_with_mapped(),
                         page=1,
                         page_size=50,
                         include_all_keys=True,
@@ -1244,6 +1265,58 @@ def _render_index(
                         next_button = ui.button(
                             "Next page", icon="chevron_right"
                         ).props("flat dense")
+                        # Global matched-rows export: works in any search
+                        # state (hits, zero hits, mapped view). Late-bound
+                        # like the banner buttons: the handler is defined
+                        # further down in this function.
+                        export_rows_button = ui.button(
+                            "Export matched rows (CSV)", icon="download"
+                        ).props("flat dense").on_click(
+                            lambda: _export_matched_rows()
+                        )
+                        export_rows_button.tooltip(
+                            "Download every row matching the current query, "
+                            "across all pages")
+                    with ui.element("section").classes(
+                        "w-full drocat-mapped-warning"
+                    ) as mapped_warning_section:
+                        with ui.row().classes("w-full items-center gap-2 no-wrap"):
+                            ui.icon("warning", color="warning")
+                            mapped_warning_label = ui.label("").classes(
+                                "text-subtitle2 text-warning flex-grow"
+                            )
+                            with ui.button(
+                                "View Sankey", icon="multiple_stop"
+                            ).props("flat dense"):
+                                with ui.menu():
+                                    ui.menu_item(
+                                        "Type-level",
+                                        on_click=lambda: (
+                                            _view_active_mapping(
+                                                "sankey", "type")))
+                                    ui.menu_item(
+                                        "Linker view",
+                                        on_click=lambda: (
+                                            _view_active_mapping(
+                                                "sankey", "linker")))
+                            with ui.button(
+                                "View Network", icon="account_tree"
+                            ).props("flat dense"):
+                                with ui.menu():
+                                    ui.menu_item(
+                                        "Type-level",
+                                        on_click=lambda: (
+                                            _view_active_mapping(
+                                                "network", "type")))
+                                    ui.menu_item(
+                                        "Linker view",
+                                        on_click=lambda: (
+                                            _view_active_mapping(
+                                                "network", "linker")))
+                            ui.button(
+                                "Back to normal search", icon="undo"
+                            ).props("flat dense").on_click(lambda: _exit_mapped_view())
+                    mapped_warning_section.set_visibility(False)
                 with ui.element("div").classes("w-full drocat-data-viewer-scroll"):
                     table = ui.table(
                         rows=initial.rows,
@@ -1264,7 +1337,7 @@ def _render_index(
                             'drocat-neuron-selected-row': props.selected,
                           }"
                         >
-                          <q-td auto-width>
+                          <q-td auto-width style="width: 48px; min-width: 48px;">
                             <q-checkbox v-model="props.selected" dense />
                           </q-td>
                           <q-td
@@ -1278,7 +1351,10 @@ def _render_index(
                               'drocat-neuron-secondary-hit-cell': (
                                 props.row.secondary_match_column_keys || []
                               ).includes(col.name),
+                              'drocat-neuron-map-cell': (col.name || '').startsWith('__map_'),
                             }"
+                            :style="col.style || ''"
+                            :title="(col.name || '').startsWith('__map_') ? (props.row.__map_bridge || '') : ''"
                             :data-match-column="(
                               props.row.match_column_keys || [props.row.match_column_key]
                             ).includes(col.name) ? col.name : null"
@@ -1286,8 +1362,18 @@ def _render_index(
                               props.row.secondary_match_column_keys || []
                             ).includes(col.name) ? 'secondary' : null"
                           >
+                            <div
+                              v-if="(col.name || '').startsWith('__map_')"
+                              class="drocat-neuron-map-value"
+                            >
+                              <span
+                                v-if="props.row.__highlighted_cells && props.row.__highlighted_cells[col.name]"
+                                v-html="props.row.__highlighted_cells[col.name]"
+                              ></span>
+                              <span v-else>{{ props.row[col.field] }}</span>
+                            </div>
                             <span
-                              v-if="props.row.__highlighted_cells && props.row.__highlighted_cells[col.name]"
+                              v-else-if="props.row.__highlighted_cells && props.row.__highlighted_cells[col.name]"
                               v-html="props.row.__highlighted_cells[col.name]"
                             ></span>
                             <span v-else>{{ props.row[col.field] }}</span>
@@ -1304,7 +1390,7 @@ def _render_index(
                         "header",
                         r"""
                         <q-tr :props="props">
-                          <q-th auto-width class="drocat-neuron-select-cell">
+                          <q-th auto-width class="drocat-neuron-select-cell" style="width: 48px; min-width: 48px;">
                             <q-checkbox
                               :model-value="props.selected"
                               :indeterminate="props.selected === null"
@@ -1316,8 +1402,16 @@ def _render_index(
                             v-for="col in props.cols"
                             :key="col.name"
                             :props="props"
+                            :class="{
+                              'drocat-neuron-map-cell': (col.name || '').startsWith('__map_'),
+                            }"
+                            :style="col.headerStyle || ''"
                           >
-                            {{ col.label }}
+                            <div
+                              v-if="(col.name || '').startsWith('__map_')"
+                              class="drocat-neuron-map-value"
+                            >{{ col.label }}</div>
+                            <template v-else>{{ col.label }}</template>
                           </q-th>
                         </q-tr>
                         """,
@@ -1334,11 +1428,104 @@ def _render_index(
             alias_container = ui.element("div").classes("w-full")
         alias_section.set_visibility(False)
 
+        def _export_matches_csv() -> None:
+            """Download every matched entry of the expansion as a CSV file.
+
+            Exported uncapped: all type/label matches (including the ones the
+            panel summarizes behind "+N more") plus the query-alias
+            candidates, for every dataset with native matches.
+            """
+            try:
+                csv_text = build_matches_csv(
+                    dataset, str(search_input.value or "").strip()
+                )
+            except Exception:
+                csv_text = ""
+            if not csv_text:
+                ui.notify("No matched entries to export.", type="info")
+                return
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            ui.download.content(
+                csv_text,
+                f"matched_entries_{dataset.replace(':', '_')}_{stamp}.csv",
+                "text/csv",
+            )
+
+        # Broad queries must not freeze the server building a giant CSV.
+        EXPORT_ROWS_CAP = 100_000
+
+        def _export_matched_rows() -> None:
+            """Download every row matching the current query (all pages).
+
+            Same filter/sort as the on-screen table (the mapped view exports
+            its type set); the CSV carries every retained metadata column.
+            """
+            try:
+                result = query_neuron_index(
+                    index,
+                    **query_kwargs_with_mapped(),
+                    page=1,
+                    page_size=50,
+                    include_all_rows=True,
+                )
+            except Exception as exc:
+                ui.notify(f"Export failed: {exc}", type="negative")
+                return
+            if result.total > EXPORT_ROWS_CAP:
+                ui.notify(
+                    f"{result.total:,} matching rows exceed the "
+                    f"{EXPORT_ROWS_CAP:,}-row export cap — refine the query.",
+                    type="warning",
+                )
+                return
+            if not result.rows:
+                ui.notify("No rows match the current search/filter.",
+                          type="info")
+                return
+            import csv
+            import io
+
+            # Mapped view: append the mapping provenance columns (§9.3) —
+            # the foreign dataset/types, the matched column, and one
+            # bridge-<column> cell per standardized linker column.
+            extra_fieldnames: List[str] = []
+            extras: List[Dict[str, str]] = []
+            if mapped_view.get("active"):
+                extra_fieldnames, extras = mapped_csv_extras(
+                    result.rows, mapped_view.get("provenance", {}),
+                    mapped_view.get("foreign_dataset", ""))
+            buffer = io.StringIO()
+            fieldnames = ([
+                column for column in columns if column in result.rows[0]
+            ] + extra_fieldnames)
+            writer = csv.DictWriter(
+                buffer, fieldnames=fieldnames, extrasaction="ignore"
+            )
+            writer.writeheader()
+            if extras:
+                for row, extra in zip(result.rows, extras):
+                    writer.writerow({**row, **extra})
+            else:
+                writer.writerows(result.rows)
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            ui.download.content(
+                buffer.getvalue(),
+                f"{dataset.replace(':', '_')}_matched_rows_{stamp}.csv",
+                "text/csv",
+            )
+
         def _search_local_alias(name: str) -> None:
             """Refill the local search with an alias found in this dataset."""
             if str(search_input.value or "").strip() == name:
+                # set_value would not fire the change handler for an equal
+                # value; refresh explicitly (and leave any mapped view).
+                mapped_view.clear()
+                _restore_map_columns()
+                mapped_warning_section.set_visibility(False)
                 refresh(reset_page=True)
             else:
+                # reset_and_refresh clears the mapped view via the value
+                # change handler.
                 search_input.set_value(name)
 
         def render_alias_matches() -> None:
@@ -1372,6 +1559,10 @@ def _render_index(
                         "No rows here. Cross-dataset matches — informational "
                         "only, please double check."
                     ).classes("text-subtitle2 font-bold")
+                    ui.button(
+                        "Export matched entries (CSV)",
+                        icon="download",
+                    ).props("flat dense").on_click(_export_matches_csv)
 
                 def _annotation_text(ann) -> str:
                     if not ann:
@@ -1381,7 +1572,9 @@ def _render_index(
                     if ann["kind"] == "renamed":
                         return "— here: maps to '" + ann["targets"][0] + "'"
                     if ann["kind"] == "same name":
-                        return "— same name in this dataset"
+                        return ("— same name in this dataset "
+                                "(no metadata verification — "
+                                "please double check)")
                     return f"— here: {ann['kind']} {', '.join(ann['targets'])}"
 
                 if native_useful:
@@ -1393,11 +1586,55 @@ def _render_index(
                     for entry in native:
                         if not (entry.get("types") or entry.get("labels")):
                             continue
+                        mapped_names = entry.get("mapped_type_names", [])
                         with ui.row().classes(
                             "w-full items-start gap-2 flex-wrap "
                             "drocat-neuron-alias-row"
                         ):
                             ui.badge(entry["dataset"]).props("outline")
+                            # The button sits beside its dataset badge so it
+                            # always names the block it expands.
+                            if mapped_names:
+                                ui.button(
+                                    f"Show mapped types here "
+                                    f"({len(mapped_names)} types)",
+                                    icon="table_view",
+                                ).props("flat dense").on_click(
+                                    lambda _e=None, entry_ref=entry:
+                                    _enter_mapped_view(entry_ref)
+                                )
+                                with ui.button(
+                                    "Sankey", icon="multiple_stop"
+                                ).props("flat dense"):
+                                    with ui.menu():
+                                        ui.menu_item(
+                                            "Type-level",
+                                            on_click=lambda _e=None,
+                                            ref=entry: (
+                                                _view_mapping_visualization(
+                                                    "sankey", "type", ref)))
+                                        ui.menu_item(
+                                            "Linker view",
+                                            on_click=lambda _e=None,
+                                            ref=entry: (
+                                                _view_mapping_visualization(
+                                                    "sankey", "linker", ref)))
+                                with ui.button(
+                                    "Network", icon="account_tree"
+                                ).props("flat dense"):
+                                    with ui.menu():
+                                        ui.menu_item(
+                                            "Type-level",
+                                            on_click=lambda _e=None,
+                                            ref=entry: (
+                                                _view_mapping_visualization(
+                                                    "network", "type", ref)))
+                                        ui.menu_item(
+                                            "Linker view",
+                                            on_click=lambda _e=None,
+                                            ref=entry: (
+                                                _view_mapping_visualization(
+                                                    "network", "linker", ref)))
                             with ui.element("div").classes("flex-grow"):
                                 for cand in entry.get("types", []):
                                     text = (
@@ -1454,6 +1691,9 @@ def _render_index(
                             ).props("outline")
                             for cand in entry["candidates"]:
                                 text = f"'{cand['name']}' — {cand['kind']}"
+                                if cand["kind"] == "same name":
+                                    text += (" (no metadata verification — "
+                                             "please double check)")
                                 if cand.get("aggregates"):
                                     text += (
                                         "; a match also covers: "
@@ -1490,6 +1730,317 @@ def _render_index(
                     ui.label(
                         "No known counterpart in: " + ", ".join(unknown)
                     ).classes("text-caption drocat-muted")
+
+        # Mapped-type view state: entered from the expansion panel's
+        # "Show mapped types here" buttons; cleared by any query change or
+        # the explicit exit button.  While active, the main table shows the
+        # current dataset's neurons of the mapped types with the two floating
+        # provenance columns (foreign types, matched column); the bridge
+        # derivation rides on the cells as a hover title.  Rows remain
+        # current-dataset neurons — selection adds them to the query
+        # normally; foreign data only appears in the provenance columns.
+        mapped_view: Dict[str, Any] = {}
+        map_columns = [
+            {"name": "__map_foreign", "label": "Foreign type(s)",
+             "field": "__map_foreign", "sortable": False, "align": "left"},
+            {"name": "__map_origin", "label": "Matched column",
+             "field": "__map_origin", "sortable": False, "align": "left"},
+        ]
+
+        def _restore_map_columns() -> None:
+            base = [c for c in table.columns
+                    if not str(c.get("name", "")).startswith("__map_")]
+            if len(base) != len(table.columns):
+                table.columns = base
+                table.update()
+
+        def _apply_map_columns() -> None:
+            foreign = mapped_view.get("foreign_dataset", "")
+            widths = mapped_view.get("widths", {})
+            foreign_w = widths.get("__map_foreign", 200)
+            origin_w = widths.get("__map_origin", 200)
+            styles = {
+                "__map_foreign": (
+                    f"position:sticky;right:{origin_w}px;z-index:6;"
+                    f"width:{foreign_w}px;min-width:{foreign_w}px;"
+                    f"max-width:{foreign_w}px;"
+                    "background: var(--drocat-map-cell-bg) !important;"
+                ),
+                "__map_origin": (
+                    "position:sticky;right:0px;z-index:6;"
+                    f"width:{origin_w}px;min-width:{origin_w}px;"
+                    f"max-width:{origin_w}px;"
+                    "background: var(--drocat-map-cell-bg) !important;"
+                ),
+            }
+            # Header cells carry the same sticky geometry; their background
+            # is left to the CSS rule so the distinct head tint applies.
+            header_styles = {
+                "__map_foreign": (
+                    f"position:sticky;right:{origin_w}px;z-index:9;"
+                    f"width:{foreign_w}px;min-width:{foreign_w}px;"
+                    f"max-width:{foreign_w}px;"
+                ),
+                "__map_origin": (
+                    "position:sticky;right:0px;z-index:9;"
+                    f"width:{origin_w}px;min-width:{origin_w}px;"
+                    f"max-width:{origin_w}px;"
+                ),
+            }
+            from utils.naming_utils import dataset_abbrev
+            map_columns[0]["label"] = (
+                f"Foreign type(s) · {dataset_abbrev(foreign)}")
+            for col in map_columns:
+                col["style"] = styles.get(col["name"], "")
+                col["headerStyle"] = header_styles.get(col["name"], "")
+            base = [c for c in table.columns
+                    if not str(c.get("name", "")).startswith("__map_")]
+            # the floating provenance columns are the table's LAST columns,
+            # pinned to the right edge of the scroll area
+            table.columns = base + map_columns
+            table.update()
+
+        def _exit_mapped_view() -> None:
+            was_active = bool(mapped_view.get("active"))
+            mapped_view.clear()
+            _restore_map_columns()
+            mapped_warning_section.set_visibility(False)
+            if was_active:
+                refresh(reset_page=True)
+
+        def _mapping_flows_and_pools(entry) -> tuple:
+            """Flows + per-bridge bodyId pools for one foreign block.
+
+            Flows drive every mapping artifact; pools (standardized
+            linkers → pooled bodyIds per (source type, foreign type))
+            feed the sankey ribbons and the linker-path graph.
+            """
+            from comparison.mapping_visualization import build_mapping_flows
+            from comparison.cross_dataset_type_mapper import (
+                preferred_bridge_chain,
+                standardize_bridge,
+            )
+
+            source_counts = count_types_in_index(
+                index, entry.get("mapped_type_names", []))
+            flows = build_mapping_flows(
+                [entry], dataset, source_counts=source_counts)
+            if not flows:
+                return [], {}
+            pools: Dict[tuple, Dict[str, Any]] = {}
+            foreign_index = None
+            foreign_ds = entry.get("dataset", "")
+            if foreign_ds:
+                try:
+                    from ..neuron_index import load_cached_neuron_index
+                    foreign_index = load_cached_neuron_index(foreign_ds)
+                except Exception:
+                    foreign_index = None
+            for flow in flows:
+                chains = [c for c in (flow.get("bridges") or [])
+                          if c and c[-1].get("value") == flow.get(
+                              "foreign_type")]
+                if not chains:
+                    continue
+                # pool through the most representative (most direct)
+                # chain — transitive/hub detours stay alternative bridges
+                chain = preferred_bridge_chain(chains, dataset, foreign_ds)
+                if chain is None:
+                    continue
+                linkers = standardize_bridge(chain, dataset, foreign_ds)
+                try:
+                    pools[(flow["source_type"], flow["foreign_type"])] = (
+                        pool_bridge_body_ids(
+                            dataset, foreign_ds, linkers,
+                            flow["source_type"], flow["foreign_type"],
+                            indexes={dataset: index,
+                                     foreign_ds: foreign_index}
+                            if foreign_index is not None else None))
+                except Exception:
+                    continue
+            return flows, pools
+
+        def _render_mapping_artifact(kind: str, variant: str,
+                                     flows, pools, foreign_ds: str
+                                     ) -> Optional[str]:
+            """Build one mapping artifact's HTML in memory.
+
+            (kind, variant) is one of: sankey/type (plotly two-band
+            type-level flows), sankey/linker (plotly standardized linker
+            bands), network/type (vispath type-level graph),
+            network/linker (vispath colored linker paths).  Nothing is
+            written to the repository.
+            """
+            from comparison.mapping_visualization import (
+                build_mapping_sankey_figure,
+                build_mapping_type_sankey_figure,
+                render_bridge_linker_html,
+                render_mapping_network_html,
+            )
+
+            if kind == "sankey":
+                fig = (
+                    build_mapping_sankey_figure(flows, pools=pools)
+                    if variant == "linker"
+                    else build_mapping_type_sankey_figure(flows, pools=pools)
+                )
+                if fig is None:
+                    return None
+                return fig.to_html(include_plotlyjs="cdn")
+            if variant == "linker":
+                return render_bridge_linker_html(
+                    flows, source_dataset=dataset,
+                    target_dataset=foreign_ds, pools=pools)
+            return render_mapping_network_html(flows)
+
+        def _build_mapping_visualization(kind: str, variant: str,
+                                         entry) -> Optional[tuple]:
+            """Build one mapping artifact for a foreign block.
+
+            Returns ``(html_text, file_name)``; delivery is a browser
+            download with a persistent banner, so no server-side file is
+            kept (the old ``outputs/`` writes are gone).
+            """
+            flows, pools = _mapping_flows_and_pools(entry)
+            if not flows:
+                return None
+            foreign_ds = entry.get("dataset", "")
+            html_text = _render_mapping_artifact(
+                kind, variant, flows, pools, foreign_ds)
+            if not html_text:
+                return None
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            foreign = foreign_ds.replace(":", "_") or "dataset"
+            name = f"mapping_{kind}_{variant}_{foreign}_{stamp}.html"
+            return html_text, name
+
+        def _deliver_mapping_visualization(html_text: str, name: str,
+                                           label: str) -> None:
+            """Browser download + persistent Read banner.  The copy lands
+            in the browser's default downloads folder; nothing is saved
+            server-side."""
+            ui.download.content(html_text, name, "text/html")
+            ui.notify(
+                f"{label} saved as {name} — check your browser's default "
+                "downloads folder. Informational only, please double check.",
+                type="info", multi_line=True, close_button='Read',
+                timeout=0)
+
+        def _view_mapping_visualization(kind: str, variant: str,
+                                        entry) -> None:
+            """Expansion-panel dispatch: build + deliver one artifact."""
+            label = f"{kind.capitalize()} ({variant} view)"
+            try:
+                built = _build_mapping_visualization(kind, variant, entry)
+            except Exception as exc:
+                ui.notify(f"{label} failed: {exc}", type="negative")
+                return
+            if not built:
+                ui.notify("Nothing to visualize.", type="info")
+                return
+            _deliver_mapping_visualization(built[0], built[1], label)
+
+        def _enter_mapped_view(entry) -> None:
+            """Run the equivalent search for a block's mapped types here.
+
+            The main table switches to the current dataset's neurons of the
+            mapped type names, with provenance columns.  Rows remain
+            current-dataset neurons — selection adds them to the query
+            normally; foreign data only appears in the provenance columns.
+            """
+            foreign = entry.get("dataset", "")
+            types = sorted(entry.get("mapped_type_names", []))
+            if not types:
+                return
+            written = entry.get("matched_written") or (
+                str(search_input.value or "").strip()
+            )
+            provenance: Dict[str, List[Dict[str, Any]]] = {}
+            column_texts: Dict[str, List[str]] = {
+                "__map_foreign": [], "__map_origin": [],
+            }
+
+            def _collect(items: List[Dict[str, Any]], matched_origin: str) -> None:
+                # Provenance per (local target, foreign type) pair, deduplicated
+                # and built from the standardized linkers so every dataset
+                # behaves identically (values included, hub routes flagged).
+                from comparison.cross_dataset_type_mapper import (
+                    bridge_linker_text,
+                    get_type_mapper,
+                )
+                mapper = get_type_mapper()
+                for item in items:
+                    ann = item.get("mapped")
+                    if not ann:
+                        continue
+                    for target in ann.get("targets", []):
+                        pair_key = (target, item["name"])
+                        if pair_key in provenance_pairs:
+                            continue
+                        provenance_pairs.add(pair_key)
+                        try:
+                            chains = mapper.get_type_bridges(
+                                target, dataset, foreign)
+                        except Exception:
+                            chains = []
+                        linker_info = bridge_linker_text(
+                            chains, dataset, foreign, item["name"])
+                        row_entry = {
+                            "foreign_type": item["name"],
+                            "matched": matched_origin,
+                            "origins": linker_info["entries"],
+                            "source_text": linker_info["text"] or
+                            NO_DERIVATION_TEXT,
+                            "entry_text": item["name"],
+                            "foreign_text": item["name"],
+                            "origin_text": matched_origin,
+                        }
+                        provenance.setdefault(target, []).append(row_entry)
+                        column_texts["__map_foreign"].append(
+                            row_entry["foreign_text"])
+                        column_texts["__map_origin"].append(
+                            row_entry["origin_text"])
+
+            provenance_pairs: set = set()
+            _collect(entry.get("types_all") or entry.get("types", []),
+                     f"type · '{written}'")
+            for label in (entry.get("labels_all")
+                          or entry.get("labels", [])):
+                # provenance must cover the FULL covered list (covered_all)
+                # — the display cap must not leave beyond-cap rows (e.g.
+                # DN1a, l-LNv, s-LNv) with empty provenance cells
+                _collect(label.get("covered_all")
+                         or label.get("types", []),
+                         f"{label['column']} · {label['label']}")
+
+            def _fit(texts: List[str], min_w: int, max_w: int) -> int:
+                longest = max((len(t) for t in texts), default=0)
+                return max(min_w, min(max_w, int(longest * 7.4) + 30))
+
+            widths = {
+                "__map_foreign": _fit(column_texts["__map_foreign"], 150, 320),
+                "__map_origin": _fit(column_texts["__map_origin"], 170, 360),
+            }
+            try:
+                from comparison.mapping_visualization import (
+                    build_mapping_flows,
+                )
+
+                flows, pools = _mapping_flows_and_pools(entry)
+            except Exception:
+                flows, pools = [], {}
+            mapped_view.clear()
+            mapped_view.update({
+                "active": True,
+                "foreign_dataset": foreign,
+                "types": set(types),
+                "provenance": provenance,
+                "widths": widths,
+                "flows": flows,
+                "pools": pools,
+            })
+            _apply_map_columns()
+            refresh(reset_page=True)
 
         # A QTable gesture may emit both a value-click and a selection event.
         # Coalesce those duplicate events by their exact anchor while still
@@ -1639,7 +2190,7 @@ def _render_index(
         def run_query(requested_page: int, requested_focus_key: str | None = None):
             return query_neuron_index(
                 index,
-                **current_query_kwargs(),
+                **query_kwargs_with_mapped(),
                 page=requested_page,
                 page_size=current_page_size,
                 focus_key=requested_focus_key,
@@ -1652,6 +2203,38 @@ def _render_index(
             result = run_query(result.focus_page)
         state["page"] = result.page
         current_rows[:] = list(result.rows)
+        if mapped_view.get("active"):
+            # Provenance columns: precomputed at enter time — which foreign
+            # types mapped to this row's type, and where the match came
+            # from. The bridge derivation rides on the floating cells as a
+            # hover title (__map_bridge).
+            provenance = mapped_view.get("provenance", {})
+            pools = mapped_view.get("pools", {})
+            for row in current_rows:
+                entries = provenance.get(str(row.get("type", "")), [])
+                if entries:
+                    row["__map_foreign"] = "; ".join(
+                        e["foreign_text"] for e in entries
+                    )
+                    row["__map_origin"] = "; ".join(
+                        e["origin_text"] for e in entries
+                    )
+                    # §9.4: the per-bridge pool granularity reads next to
+                    # the derivation (e.g. pool 4 to 4 bodyIds)
+                    hover_lines = []
+                    for e in entries:
+                        pool = pools.get(
+                            (str(row.get("type", "")),
+                             e.get("foreign_type", "")))
+                        gran = ""
+                        if pool:
+                            src = len(pool.get("source_body_ids") or [])
+                            tgt = len(pool.get("target_body_ids") or [])
+                            if src or tgt:
+                                gran = f" (pool {src} to {tgt} bodyIds)"
+                        hover_lines.append(
+                            f"{e['foreign_text']}: {e['source_text']}{gran}")
+                    row["__map_bridge"] = "\n".join(hover_lines)
         match_groups_all[:] = list(result.match_groups)
         current_group_body_ids.clear()
         current_group_body_ids.update({
@@ -1698,13 +2281,72 @@ def _render_index(
         else:
             page_info.text = "0 matching rows"
         page_info.update()
-        no_results.set_visibility(result.total == 0)
+        no_results.set_visibility(result.total == 0 and not mapped_view.get("active"))
+        if mapped_view.get("active"):
+            # Mapped-type view: the warning banner replaces the alias panel.
+            alias_section.set_visibility(False)
+            mapped_warning_label.text = (
+                f"Mapped-type view — showing {result.total:,} {dataset} "
+                f"neurons whose types map to "
+                f"{dataset_abbrev(mapped_view.get('foreign_dataset', ''))} types "
+                "(auto mapping + name similarity — please double check). "
+                "Selection adds these neurons to the query."
+            )
+            mapped_warning_label.update()
+            mapped_warning_section.set_visibility(True)
+            page_info.text = (
+                f"Mapped view — showing {result.total:,} neurons of "
+                f"{len(mapped_view.get('types', set()))} mapped types"
+            )
+            page_info.update()
+        elif result.total == 0:
+            render_alias_matches()
+            mapped_warning_section.set_visibility(False)
+        else:
+            alias_section.set_visibility(False)
+            mapped_warning_section.set_visibility(False)
         if result.total == 0:
             render_alias_matches()
         else:
             alias_section.set_visibility(False)
 
+    def _view_active_mapping(kind: str, variant: str) -> None:
+        """Mapped-view banner dispatch: render the stored flows + pools
+        and deliver (browser download + persistent banner)."""
+        flows = mapped_view.get("flows", [])
+        pools = mapped_view.get("pools", {})
+        foreign_ds = mapped_view.get("foreign_dataset", "")
+        if not flows:
+            ui.notify("Nothing to visualize.", type="info")
+            return
+        label = f"{kind.capitalize()} ({variant} view)"
+        try:
+            html_text = _render_mapping_artifact(
+                kind, variant, flows, pools, foreign_ds)
+        except Exception as exc:
+            ui.notify(f"{label} failed: {exc}", type="negative")
+            return
+        if not html_text:
+            ui.notify("Nothing to visualize.", type="info")
+            return
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        foreign = (foreign_ds or "dataset").replace(":", "_")
+        _deliver_mapping_visualization(
+            html_text, f"mapping_{kind}_{variant}_{foreign}_{stamp}.html",
+            label)
+
     def reset_and_refresh(_event=None):
+        # Any query change leaves the mapped-type view: the expansion panel
+        # re-evaluates from scratch on the next refresh.
+        if mapped_view.get("active"):
+            mapped_view.clear()
+            _restore_map_columns()
+            mapped_warning_section.set_visibility(False)
+        refresh(reset_page=True)
+
+    def display_refresh(_event=None):
+        """Sort / Order / Rows are display controls, not query changes:
+        the mapped-type view is a display state and must survive them."""
         refresh(reset_page=True)
 
     def request_focus(focus_keys, anchor_key: str | None = None) -> None:
@@ -1757,9 +2399,9 @@ def _render_index(
 
     target_column.on_value_change(handle_filter_column_change)
     filter_operator.on_value_change(reset_and_refresh)
-    sort_column.on_value_change(reset_and_refresh)
-    direction.on_value_change(reset_and_refresh)
-    page_size.on_value_change(reset_and_refresh)
+    sort_column.on_value_change(display_refresh)
+    direction.on_value_change(display_refresh)
+    page_size.on_value_change(display_refresh)
 
     def change_page(delta):
         state["page"] = max(1, state["page"] + delta)

@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .config import PROJECT_ROOT
 from .dataset_service import dataset_to_folder
@@ -1392,12 +1392,14 @@ def query_neuron_index(
     filter_column: Optional[str] = None,
     filter_text: str = "",
     filter_operator: str = "contains",
+    types_include: Optional[Sequence[str]] = None,
     sort_by: Optional[str] = None,
     descending: bool = False,
     page: int = 1,
     page_size: int = 50,
     focus_key: Optional[str] = None,
     include_all_keys: bool = False,
+    include_all_rows: bool = False,
 ) -> NeuronIndexPage:
     """Filter, sort, and page a cached index without sending all rows to JS.
 
@@ -1415,6 +1417,15 @@ def query_neuron_index(
     strict prefix versus substring, and finally matched value. The result
     also contains deduplicated matched-value groups plus primary/secondary
     relationships for the viewer's selection panel.
+
+    ``types_include`` restricts the result to rows whose ``type`` is one of
+    the given values (exact, case-sensitive). When provided it is the primary
+    filter and the text search is skipped — the mapped-type view uses it to
+    show the neurons of a set of mapped type names.
+
+    ``include_all_rows`` skips the pagination slice and returns every row
+    matching the current query (same filter, sort, and grouping) as one
+    full page — the matched-rows CSV export uses it.
     """
     import polars as pl
 
@@ -1436,6 +1447,11 @@ def query_neuron_index(
         ).alias("__neuron_key")
     )
     filtered = frame
+
+    include_types = [str(t) for t in (types_include or []) if str(t)]
+    types_filter_active = bool(include_types) and "type" in filtered.columns
+    if types_filter_active:
+        filtered = filtered.filter(pl.col("type").is_in(include_types))
 
     search_text = normalize_search_text(search)
     search_columns = _ordered_match_columns(columns)
@@ -1503,6 +1519,13 @@ def query_neuron_index(
             prefix_stage,
             substring_stage,
         )
+
+    if types_filter_active:
+        # The type set is the primary filter (mapped-type view); the text
+        # search is intentionally not applied on top of it.
+        search_text = ""
+        filter_text = ""
+        active_column_filter = False
 
     scoped_search = bool(search_text and search_target_columns)
     match_text = search_text or (filter_text if active_column_filter else "")
@@ -1842,17 +1865,42 @@ def query_neuron_index(
             ).alias("__secondary_match_value"),
         )
     else:
-        filtered = filtered.with_columns(
-            pl.lit(len(search_columns)).alias("__match_priority"),
-            pl.lit(1).alias("__match_kind_priority"),
-            pl.lit("").alias("match_column"),
-            pl.lit("").alias("match_column_key"),
-            pl.lit("").alias("match_value"),
-            pl.lit([], dtype=pl.List(pl.Utf8)).alias("match_column_keys"),
-            pl.lit([], dtype=pl.List(pl.Utf8)).alias("match_values"),
-            pl.lit([], dtype=pl.List(pl.Utf8)).alias("secondary_match_column_keys"),
-            pl.lit([], dtype=pl.List(pl.Utf8)).alias("secondary_match_values"),
-        )
+        if types_filter_active:
+            # Mapped-type view: each row's own type is its matched value, so
+            # the match panel lists the mapped types and type-level
+            # selection works exactly like a normal multi-group search.
+            type_value = (
+                pl.col("type").cast(pl.Utf8, strict=False).fill_null("")
+            )
+            filtered = filtered.with_columns(
+                pl.lit(len(search_columns)).alias("__match_priority"),
+                pl.lit(1).alias("__match_kind_priority"),
+                pl.lit("type").alias("match_column"),
+                pl.lit("type").alias("match_column_key"),
+                type_value.alias("match_value"),
+                pl.lit(["type"], dtype=pl.List(pl.Utf8)).alias(
+                    "match_column_keys"
+                ),
+                pl.concat_list([type_value]).alias("match_values"),
+                pl.lit([], dtype=pl.List(pl.Utf8)).alias(
+                    "secondary_match_column_keys"
+                ),
+                pl.lit([], dtype=pl.List(pl.Utf8)).alias(
+                    "secondary_match_values"
+                ),
+            )
+        else:
+            filtered = filtered.with_columns(
+                pl.lit(len(search_columns)).alias("__match_priority"),
+                pl.lit(1).alias("__match_kind_priority"),
+                pl.lit("").alias("match_column"),
+                pl.lit("").alias("match_column_key"),
+                pl.lit("").alias("match_value"),
+                pl.lit([], dtype=pl.List(pl.Utf8)).alias("match_column_keys"),
+                pl.lit([], dtype=pl.List(pl.Utf8)).alias("match_values"),
+                pl.lit([], dtype=pl.List(pl.Utf8)).alias("secondary_match_column_keys"),
+                pl.lit([], dtype=pl.List(pl.Utf8)).alias("secondary_match_values"),
+            )
 
     manual_match_value_sort = sort_by == "__match_value__"
     manual_sort = manual_match_value_sort or sort_by in columns
@@ -1930,8 +1978,6 @@ def query_neuron_index(
             focus_page = int(focus_positions[0]) // page_size + 1
 
     total = int(filtered.height)
-    pages = max(1, (total + page_size - 1) // page_size)
-    current_page = max(1, min(int(page or 1), pages))
     output_columns = [
         "__neuron_key",
         "match_column",
@@ -1943,12 +1989,21 @@ def query_neuron_index(
         "secondary_match_values",
         *columns,
     ]
-    rows = (
-        filtered
-        .select(output_columns)
-        .slice((current_page - 1) * page_size, page_size)
-        .to_dicts()
-    )
+    if include_all_rows:
+        # The matched-rows export consumes the complete filtered result set;
+        # paging metadata collapses to a single full page.
+        pages = 1
+        current_page = 1
+        rows = filtered.select(output_columns).to_dicts()
+    else:
+        pages = max(1, (total + page_size - 1) // page_size)
+        current_page = max(1, min(int(page or 1), pages))
+        rows = (
+            filtered
+            .select(output_columns)
+            .slice((current_page - 1) * page_size, page_size)
+            .to_dicts()
+        )
 
     def json_value(value):
         if value is None:
@@ -2519,6 +2574,259 @@ def count_type_in_index(index: "CachedNeuronIndex", type_name: str) -> Optional[
     return int(index.frame.filter(pl.col("type") == type_name).height)
 
 
+def count_types_in_index(index: "CachedNeuronIndex",
+                         type_names) -> Dict[str, int]:
+    """Exact neuron counts for several ``type`` values in one query.
+
+    The mapping-visualization flows use this for the source side, so an
+    edge shows each current-dataset type's own neuron count instead of
+    the foreign type's count.
+    """
+    names = sorted({str(n) for n in (type_names or ()) if str(n)})
+    if index is None or not names or "type" not in index.frame.columns:
+        return {}
+    import polars as pl
+
+    rows = (
+        index.frame
+        .filter(pl.col("type").is_in(names))
+        .group_by("type")
+        .len()
+        .to_dicts()
+    )
+    return {str(row["type"]): int(row["len"]) for row in rows}
+
+
+def mapped_csv_extras(rows, provenance, foreign_dataset: str) -> tuple:
+    """Per-row mapping columns for the mapped-view CSV export (§9.3).
+
+    ``provenance`` is the mapped-view state (target type → provenance
+    entries built from the standardized linkers).  Returns
+    ``(fieldnames, extras)`` aligned with ``rows``: the foreign dataset,
+    the matched foreign type(s), the matched column(s), and one
+    ``bridge-<column>`` cell per standardized linker column — deduped
+    values in chain order, indirect (hub-route) values carrying the
+    ``via`` note, empty when the row's type has no bridge through that
+    column.  Pure: no index access, UI-free.
+    """
+    import re
+
+    linker_columns: List[str] = []
+    seen_columns = set()
+    for entries in (provenance or {}).values():
+        for entry in entries or []:
+            for origin in entry.get("origins") or []:
+                column = str(origin.get("column", ""))
+                if column and column not in seen_columns:
+                    seen_columns.add(column)
+                    linker_columns.append(column)
+    linker_columns.sort()
+    fieldnames = (["foreign_dataset", "foreign_type(s)",
+                   "matched column(s)"]
+                  + [f"bridge-{column}" for column in linker_columns])
+
+    extras: List[Dict[str, str]] = []
+    for row in rows:
+        entries = ((provenance or {}).get(str(row.get("type", "")))
+                   or [])
+        foreign_types = sorted({str(e.get("foreign_type", ""))
+                                for e in entries
+                                if e.get("foreign_type")})
+        matched = sorted({str(e.get("matched", ""))
+                          for e in entries if e.get("matched")})
+        by_column: Dict[str, List[str]] = {
+            column: [] for column in linker_columns}
+        for entry in entries:
+            for origin in entry.get("origins") or []:
+                if origin.get("kind") not in (None, "linker"):
+                    continue  # 'same name' markers carry no bridge column
+                column = str(origin.get("column", ""))
+                if column not in by_column:
+                    continue
+                value = str(origin.get("value", ""))
+                if origin.get("indirect"):
+                    hub = re.search(r"\(via ([^)]+)\)",
+                                    str(origin.get("text", "")))
+                    value += (f" (via {hub.group(1)})" if hub
+                              else " (indirect)")
+                if value not in by_column[column]:
+                    by_column[column].append(value)
+        extra = {
+            "foreign_dataset": foreign_dataset or "",
+            "foreign_type(s)": "; ".join(foreign_types),
+            "matched column(s)": "; ".join(matched),
+        }
+        for column in linker_columns:
+            extra[f"bridge-{column}"] = "; ".join(by_column[column])
+        extras.append(extra)
+    return fieldnames, extras
+
+
+def _cell_contains(column_expr, value: str):
+    """Match a comma-separated annotation cell against one value.
+
+    ``additional_type(s)``-style cells list several names separated by
+    ','; the match is exact per entry after splitting and stripping.
+    """
+    import polars as pl
+
+    return (
+        column_expr.cast(pl.Utf8)
+        .str.split(",")
+        .list.eval(pl.element().str.strip_chars().str.to_lowercase())
+        .list.contains(value.casefold())
+    )
+
+
+def pool_bridge_body_ids(source_dataset: str, target_dataset: str,
+                         linkers, source_type: str, foreign_type: str,
+                         *, indexes: Optional[Dict[str,
+                                                   "CachedNeuronIndex"]]
+                         = None) -> Dict[str, Any]:
+    """One-side bodyId pools per standardized linker of a bridge.
+
+    ``linkers`` are ``standardize_bridge`` entries (``column``/``value``/
+    ``home``; same-name pass entries are ignored). Each linker pools the
+    bodyIds on its home side: the rows of that side's endpoint type whose
+    linker column carries the linker value (comma-split exact match).
+    For the male-cns↔manc pair the ``mancBodyid`` column additionally
+    joins bodyIds directly (99.7% resolution). Returns
+    ``{'per_linker': [...], 'source_body_ids': […], 'target_body_ids':
+    […], 'granularity': 'n to m', 'coverage': 'covered N of M'}`` —
+    strictly informational.
+    """
+    import polars as pl
+
+    datasets = {source_dataset, target_dataset}
+    loaded = dict(indexes or {})
+    for ds in datasets:
+        if ds not in loaded:
+            loaded[ds] = load_cached_neuron_index(ds)
+
+    side_type = {source_dataset: source_type, target_dataset: foreign_type}
+
+    def _resolve_home(column: str, claimed_home: str) -> str:
+        """The dataset whose index physically holds this linker column.
+
+        Chain hops attribute the crosswalk hop (``flywireType``) to the
+        foreign dataset although the physical column lives in male-cns;
+        trust the pair registry first, then plain column presence.
+        """
+        from comparison.cross_dataset_type_mapper import BRIDGE_STANDARD
+
+        for reg_column, reg_home in BRIDGE_STANDARD.get(
+                (source_dataset, target_dataset), ()):
+            if reg_column == column:
+                return reg_home
+        if claimed_home in datasets and column in loaded[
+                claimed_home].frame.columns:
+            return claimed_home
+        source_has = column in loaded[source_dataset].frame.columns
+        target_has = column in loaded[target_dataset].frame.columns
+        if source_has and not target_has:
+            return source_dataset
+        if target_has and not source_has:
+            return target_dataset
+        return claimed_home
+
+    per_linker = []
+    source_pool: List[str] = []
+    target_pool: List[str] = []
+    had_target_linker = False
+    had_source_linker = False
+
+    for linker in linkers or []:
+        if linker.get("kind") != "linker":
+            continue
+        column = str(linker.get("column", ""))
+        value = str(linker.get("value", ""))
+        home = _resolve_home(column, str(linker.get("home", "")))
+        if not column or not value or home not in datasets:
+            continue
+        index = loaded.get(home)
+        if index is None or column not in index.frame.columns:
+            continue
+        endpoint_type = side_type.get(home, "")
+        if not endpoint_type:
+            continue
+        frame = index.frame.filter(pl.col("type") == endpoint_type)
+        frame = frame.filter(_cell_contains(pl.col(column), value))
+        body_ids = [
+            str(b) for b in frame.select("bodyId").to_series().to_list()
+            if str(b).strip()
+        ]
+        per_linker.append({
+            "column": column, "value": value, "home": home,
+            "body_ids": body_ids,
+        })
+        if home == source_dataset:
+            had_source_linker = True
+            source_pool = body_ids
+        elif home == target_dataset:
+            had_target_linker = True
+            target_pool = body_ids
+
+    # Crosswalk-arrival chains (e.g. [DN1pB·type, flywireType 'DN1pB'])
+    # and bare same-name chains have NO per-side linker on one or both
+    # sides: the crosswalk cell (or the name equality itself) names that
+    # side's type identity, so the pool on an unconstrained side is the
+    # FULL endpoint type's bodyIds — not an empty pool.
+    if not had_target_linker:
+        target_index = loaded.get(target_dataset)
+        if target_index is not None and "type" in target_index.frame.columns:
+            frame = target_index.frame.filter(
+                pl.col("type") == foreign_type)
+            target_pool = [
+                str(b) for b in frame.select("bodyId").to_series().to_list()
+                if str(b).strip()
+            ]
+    if not had_source_linker:
+        source_index = loaded.get(source_dataset)
+        if source_index is not None and "type" in source_index.frame.columns:
+            frame = source_index.frame.filter(
+                pl.col("type") == source_type)
+            source_pool = [
+                str(b) for b in frame.select("bodyId").to_series().to_list()
+                if str(b).strip()
+            ]
+
+    # manc direct leg: male-cns rows carry the MANC bodyId itself, so the
+    # target pool can join on bodyIds instead of the value match.
+    mc_index = loaded.get("male-cns:v1.0")
+    if (mc_index is not None and source_dataset == "male-cns:v1.0"
+            and "mancBodyid" in mc_index.frame.columns):
+        mc_rows = mc_index.frame.filter(pl.col("type") == source_type)
+        if "mancBodyid" in mc_rows.columns:
+            direct = [
+                str(b).split(".")[0]
+                for b in mc_rows.select("mancBodyid").to_series().to_list()
+                if b is not None and str(b).strip() not in ("", "nan")
+            ]
+            manc_index = loaded.get(target_dataset)
+            if direct and manc_index is not None:
+                manc_ids = set(
+                    manc_index.frame.select("bodyId").to_series()
+                    .cast(pl.Utf8).to_list())
+                direct = [b for b in direct if b in manc_ids]
+            if direct:
+                target_pool = direct
+
+    granularity = f"{len(source_pool)} to {len(target_pool)}"
+    foreign_total = count_type_in_index(
+        loaded.get(target_dataset), foreign_type) if loaded.get(
+        target_dataset) is not None else None
+    coverage = ""
+    if foreign_total:
+        coverage = f"covered {len(target_pool)} of {foreign_total}"
+    return {
+        "per_linker": per_linker,
+        "source_body_ids": source_pool,
+        "target_body_ids": target_pool,
+        "granularity": granularity,
+        "coverage": coverage,
+    }
+
+
 def _load_alias_index(dataset: str) -> Optional["CachedNeuronIndex"]:
     """Load (and memoize) the cached index used for alias counting."""
     path = neuron_index_path(dataset)
@@ -2541,6 +2849,10 @@ def _load_alias_index(dataset: str) -> Optional["CachedNeuronIndex"]:
 
 # Caps for the native expansion.  Generous enough to keep reasonable entries
 # visible; anything beyond is summarized behind a "+N more" note.
+# pairs matched by name similarity with NO derivation chain, and
+# same-name pairs without any metadata verification, carry this
+# warning wherever their provenance text renders (§9F)
+NO_DERIVATION_TEXT = "no derivation chain — please double check"
 NATIVE_TYPE_MATCH_CAP = 16
 NATIVE_LABEL_MATCH_CAP = 8
 NATIVE_LABEL_TYPES_CAP = 8
@@ -2569,8 +2881,9 @@ def _native_type_matches(index: "CachedNeuronIndex", needle: str, cap: int):
     """Substring type matches in one index, exact matches ranked first.
 
     Returns ``(matches, truncated)`` where matches are
-    ``{'name', 'count', 'exact'}`` dicts sorted by exact-flag, count
-    (descending), then name.
+    ``{'name', 'count', 'exact', 'matched_written'}`` dicts sorted by
+    exact-flag, count (descending), then name.  ``matched_written`` is the
+    matched substring in the type's written case (``'apdn3'`` → ``'APDN3'``).
     """
     import polars as pl
 
@@ -2583,14 +2896,19 @@ def _native_type_matches(index: "CachedNeuronIndex", needle: str, cap: int):
     if hits.is_empty():
         return [], 0
     grouped = hits.group_by("type").len().sort("type").to_dicts()
-    matches = [
-        {
-            "name": str(row["type"]),
+    matches = []
+    for row in grouped:
+        name = str(row["type"])
+        if not name:
+            continue
+        matches.append({
+            "name": name,
             "count": int(row["len"]),
-            "exact": str(row["type"]).casefold() == needle.casefold(),
-        }
-        for row in grouped if row["type"]
-    ]
+            "exact": name.casefold() == needle.casefold(),
+            # The written form of the matched entry itself (e.g. searching
+            # 'apdn3' reports the type 'APDN3', not the typed substring).
+            "matched_written": name,
+        })
     matches.sort(key=lambda m: (not m["exact"], -m["count"], m["name"].casefold()))
     return matches[:cap], max(0, len(matches) - cap)
 
@@ -2618,20 +2936,26 @@ def _native_label_matches(index: "CachedNeuronIndex", needle: str, cap: int,
         )
         if label_rows.is_empty():
             continue
+        # Ties broken by the label name: parallel group_by does not
+        # guarantee an order, and the display cap must keep the same
+        # labels on every run.
         labels = (
             label_rows.group_by(column).len()
-            .sort("len", descending=True).to_dicts()
+            .sort(["len", column], descending=[True, False]).to_dicts()
         )
         for row in labels:
             label = str(row[column])
             if folded_needle not in label.casefold():
                 continue
+            matched_written = label
             types_frame = label_rows.filter(
                 pl.col(column) == row[column]
             )
+            # Same tie-break policy as the labels: parallel group_by is
+            # unordered, and the covered-types cap must be reproducible.
             type_groups = (
                 types_frame.group_by("type").len()
-                .sort("len", descending=True).to_dicts()
+                .sort(["len", "type"], descending=[True, False]).to_dicts()
                 if "type" in types_frame.columns else []
             )
             covered = [
@@ -2642,6 +2966,13 @@ def _native_label_matches(index: "CachedNeuronIndex", needle: str, cap: int,
                 "label": label,
                 "column": column,
                 "count": int(row["len"]),
+                "matched_written": matched_written,
+                # The display keeps the cap, but the FULL covered list is
+                # retained (``covered_all``) so the type-mapping enrich
+                # transfers EVERY covered type — the display cap must not
+                # silently drop same-name types like l-LNv/s-LNv from the
+                # mapped-type view.
+                "covered_all": covered,
                 "types": covered[:types_cap],
                 "types_truncated": max(0, len(covered) - types_cap),
             })
@@ -2654,6 +2985,8 @@ def collect_native_type_matches(
     dataset: str,
     search: str,
     datasets: Optional[List[str]] = None,
+    *,
+    uncapped: bool = False,
 ) -> List[Dict[str, Any]]:
     """Native type-name expansion for a zero-hit viewer search.
 
@@ -2661,6 +2994,7 @@ def collect_native_type_matches(
     substring against the ``type`` column and the taxonomy label columns of
     every *other* locally cached dataset's index.  Results are name-similar
     entries, not mapped equivalences, and stay strictly informational.
+    With ``uncapped=True`` every match is returned (used by the CSV export).
     """
     search = str(search or "").strip()
     if not search or search.isdigit() or "*" in search or len(search) < 2:
@@ -2673,22 +3007,42 @@ def collect_native_type_matches(
     ]
 
     matches = []
+    type_cap = 10 ** 9 if uncapped else NATIVE_TYPE_MATCH_CAP
+    label_cap = 10 ** 9 if uncapped else NATIVE_LABEL_MATCH_CAP
+    types_cap = 10 ** 9 if uncapped else NATIVE_LABEL_TYPES_CAP
     for ds in datasets:
         index = _load_alias_index(ds)
         if index is None:
             continue
-        types, types_truncated = _native_type_matches(
-            index, search, NATIVE_TYPE_MATCH_CAP)
-        labels, labels_truncated = _native_label_matches(
-            index, search, NATIVE_LABEL_MATCH_CAP, NATIVE_LABEL_TYPES_CAP)
+        # ALWAYS compute the full match lists; the caps trim only the
+        # DISPLAY lists (``types`` / ``labels``).  Every data consumer
+        # (enrich, mapped-view provenance, flows, CSV) reads the
+        # ``*_all`` lists — a display cap must never shrink the mapping.
+        types_all, _ = _native_type_matches(index, search, 10 ** 9)
+        labels_all, _ = _native_label_matches(
+            index, search, 10 ** 9, types_cap)
+        types = types_all[:type_cap]
+        labels = labels_all[:label_cap]
+        types_truncated = max(0, len(types_all) - len(types))
+        labels_truncated = max(0, len(labels_all) - len(labels))
         if types or labels:
+            matched_written = ""
+            for cand in types_all:
+                if cand.get("exact"):
+                    matched_written = cand["matched_written"]
+                    break
+            if not matched_written and types_all:
+                matched_written = types_all[0]["matched_written"]
             matches.append({
                 "dataset": ds,
                 "is_selected": False,
                 "types": types,
+                "types_all": types_all,
                 "types_truncated": types_truncated,
                 "labels": labels,
+                "labels_all": labels_all,
                 "labels_truncated": labels_truncated,
+                "matched_written": matched_written,
             })
     return matches
 
@@ -2748,11 +3102,67 @@ def enrich_native_type_matches(
         return annotation
 
     for entry in native_matches:
-        for cand in entry.get("types", []):
+        foreign_ds = entry.get("dataset", "")
+        mapped_names = set()
+        # full lists: the display-capped types/labels must never shrink
+        # the mapped-type set (the l-LNv/DN1a regression class)
+        types_iter = entry.get("types_all") or entry.get("types", [])
+        labels_iter = entry.get("labels_all") or entry.get("labels", [])
+
+        def _map_used(local_target: str, foreign_type: str) -> str:
+            """Human-readable 'map used' text for one mapped pair.
+
+            Same standardized-linker source as the provenance hover and
+            the CSV bridge columns (§9B.3 unification) — one consistent
+            derivation text across datasets and surfaces.
+            """
+            try:
+                from comparison.cross_dataset_type_mapper import (
+                    bridge_linker_text,
+                )
+
+                chains = mapper.get_type_bridges(
+                    local_target, selected_dataset, foreign_ds)
+                info = bridge_linker_text(
+                    chains, selected_dataset, foreign_ds, foreign_type)
+            except Exception:
+                return NO_DERIVATION_TEXT
+            return info["text"] or NO_DERIVATION_TEXT
+
+        for cand in types_iter:
             cand["mapped"] = _annotation(cand["name"])
-        for label in entry.get("labels", []):
-            for covered in label.get("types", []):
+            if cand["mapped"]:
+                mapped_names.update(cand["mapped"]["targets"])
+                cand["map_used"] = "; ".join(
+                    f"{target}: {_map_used(target, cand['name'])}"
+                    for target in cand["mapped"]["targets"]
+                )
+                cand["bridges_by_target"] = {
+                    bridge_target: mapper.get_type_bridges(
+                        bridge_target, selected_dataset, foreign_ds)
+                    for bridge_target in cand["mapped"]["targets"]
+                }
+        for label in labels_iter:
+            # Map the FULL covered list (covered_all): the display-capped
+            # ``types`` would silently drop tail types (lowercase names
+            # sort last) from the mapped-type view.
+            for covered in (label.get("covered_all")
+                            or label.get("types", [])):
                 covered["mapped"] = _annotation(covered["name"])
+                if covered["mapped"]:
+                    mapped_names.update(covered["mapped"]["targets"])
+                    covered["map_used"] = "; ".join(
+                        f"{bridge_target}: {_map_used(bridge_target, covered['name'])}"
+                        for bridge_target in covered["mapped"]["targets"]
+                    )
+                    covered["bridges_by_target"] = {
+                        bridge_target: mapper.get_type_bridges(
+                            bridge_target, selected_dataset, foreign_ds)
+                        for bridge_target in covered["mapped"]["targets"]
+                    }
+        # Current-dataset type names this block's matches map to — the
+        # mapped-type view's equivalent search set.
+        entry["mapped_type_names"] = sorted(mapped_names)
 
 
 def collect_alias_matches(
@@ -2852,3 +3262,139 @@ def collect_zero_hit_matches(
     except Exception:
         mapped = []
     return {"native": native, "mapped": mapped}
+
+
+def _bridge_cells(bridges_by_target, selected_dataset: str,
+                  foreign_ds: str, foreign_type: str) -> Dict[str, List[str]]:
+    """``bridge-<column>`` cell values for one matched entry (§9.3).
+
+    Chains are filtered to the entry's foreign type (a chain that walks
+    on to another primary — e.g. DN1pA → DN2 — describes a DIFFERENT
+    pair), standardized, and deduped per linker column; indirect
+    (hub-route) values carry the via note.
+    """
+    import re
+
+    from comparison.cross_dataset_type_mapper import bridge_linker_text
+
+    cells: Dict[str, List[str]] = {}
+    for chains in (bridges_by_target or {}).values():
+        usable = [c for c in (chains or [])
+                  if c and c[-1].get("value") == foreign_type]
+        if not usable:
+            continue
+        info = bridge_linker_text(
+            usable, selected_dataset, foreign_ds, foreign_type)
+        for entry in info["entries"]:
+            if entry.get("kind") not in (None, "linker"):
+                continue  # 'same name' markers carry no bridge column
+            column = f"bridge-{entry['column']}"
+            value = str(entry["value"])
+            if entry.get("indirect"):
+                hub = re.search(r"\(via ([^)]+)\)",
+                                str(entry.get("text", "")))
+                value += (f" (via {hub.group(1)})" if hub
+                          else " (indirect)")
+            bucket = cells.setdefault(column, [])
+            if value not in bucket:
+                bucket.append(value)
+    return cells
+
+
+def build_matches_csv(
+    dataset: str,
+    search: str,
+    datasets: Optional[List[str]] = None,
+) -> str:
+    """Build the CSV text of every matched entry for a zero-hit search.
+
+    The uncapped expansion (native type matches, taxonomy-label matches
+    with their covered types, and the query-alias candidates) is
+    exported in full — nothing hidden behind the panel's display caps.
+
+    Uniform schema (§9.3): one row per matched entry per foreign type —
+    labels are EXPLODED per covered type — with the standardized bridge
+    as named ``bridge-<column>`` columns.  Every row carries exactly the
+    same fields (readers like Tablecruncher reject ragged rows).
+
+    Returns the CSV text; empty string when there is nothing to export.
+    """
+    import csv
+    import io
+
+    if datasets is None:
+        datasets = datasets_with_cached_indexes()
+    native = collect_native_type_matches(dataset, search, datasets, uncapped=True)
+    enrich_native_type_matches(native, dataset)
+    try:
+        mapped = collect_alias_matches(dataset, search, datasets)
+    except Exception:
+        mapped = []
+
+    base_fields = [
+        "dataset", "entry_kind", "matched_column", "name",
+        "foreign_type", "neuron_count", "mapped_kind", "mapped_to",
+        "map_used",
+    ]
+    rows: List[Dict[str, Any]] = []
+    bridge_columns: List[str] = []
+    seen_bridge_columns = set()
+
+    def _row(entry_kind, matched_column, name, foreign_type, count,
+             ann, map_used, cells):
+        row = {
+            "dataset": ds,
+            "entry_kind": entry_kind,
+            "matched_column": matched_column,
+            "name": name,
+            "foreign_type": foreign_type,
+            "neuron_count": count,
+            "mapped_kind": (ann or {}).get("kind", ""),
+            "mapped_to": "; ".join((ann or {}).get("targets", [])),
+            "map_used": map_used or "",
+        }
+        for column, values in cells.items():
+            if column not in seen_bridge_columns:
+                seen_bridge_columns.add(column)
+                bridge_columns.append(column)
+            row[column] = "; ".join(values)
+        rows.append(row)
+
+    for entry in native:
+        ds = entry["dataset"]
+        for cand in (entry.get("types_all") or entry.get("types", [])):
+            cells = _bridge_cells(
+                cand.get("bridges_by_target"), dataset,
+                entry["dataset"], cand["name"])
+            _row("type", "type", cand["name"], cand["name"],
+                 cand["count"], cand.get("mapped"),
+                 cand.get("map_used", ""), cells)
+        for label in (entry.get("labels_all") or entry.get("labels", [])):
+            # exploded per covered type — the label total is the panel's
+            # business; the CSV is the per-type mapping table
+            for covered in (label.get("covered_all")
+                            or label.get("types", [])):
+                cells = _bridge_cells(
+                    covered.get("bridges_by_target"), dataset,
+                    entry["dataset"], covered["name"])
+                _row("label", label["column"], label["label"],
+                     covered["name"], covered.get("count", ""),
+                     covered.get("mapped"), covered.get("map_used", ""),
+                     cells)
+    for entry in mapped:
+        ds = entry["dataset"]
+        for cand in entry.get("candidates", []):
+            _row("query alias", "auto type mapping", cand["name"], "",
+                 cand.get("count", ""),
+                 {"kind": cand.get("kind", ""),
+                  "targets": cand.get("aggregates", []) or []},
+                 "", {})
+
+    if not rows:
+        return ""
+    fieldnames = base_fields + sorted(bridge_columns)
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(rows)
+    return buffer.getvalue()

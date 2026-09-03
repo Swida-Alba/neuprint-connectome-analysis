@@ -34,6 +34,8 @@ DATASET_ABBREVIATIONS = {
     "flywire_fafb": "FAFB",
     "fafb": "FAFB",
     "flywire_banc": "BANC",
+    # bare flywire identifiers refer to the FAFB dataset in DROCAT
+    "flywire": "FAFB",
 }
 
 
