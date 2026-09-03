@@ -2461,6 +2461,9 @@ def create_neuron_index_viewer_link(
     changing the viewer's query-selection semantics.
     """
     dialog = ui.dialog()
+    # Persistent: clicking the empty backdrop must not dismiss the panel;
+    # it closes only via its OK / 'x' buttons.
+    dialog.props("persistent")
     # Deferred apply: the OK / 'x' buttons commit the latest pending selection
     # once, then close. ``_render_index`` (re)sets the apply callback per open.
     _apply_holder: dict = {"fn": None}
