@@ -654,14 +654,14 @@ def test_bridge_linker_text_values_and_hub_note(mapper):
     assert indirect_found
 
 
-def test_mapping_sankey_figure_restored(mapper):
-    """The restored native sankey renders the standardized linker bands
-    with pooled-count ribbons and the CSV-notice title."""
-    import plotly.graph_objects as go
-
+def test_mapping_sankey_vispath_backend(mapper):
+    """The sankey uses the vispath backend: layered linker bands with
+    pooled-count ribbons and the shared interactive control panel
+    (user-adjustable node/edge colors)."""
     from comparison.mapping_visualization import (
         build_mapping_flows,
-        build_mapping_sankey_figure,
+        build_mapping_sankey_paths,
+        render_mapping_sankey_html,
     )
     from ui.neuron_index import (
         load_cached_neuron_index,
@@ -689,22 +689,38 @@ def test_mapping_sankey_figure_restored(mapper):
             indexes={MCNS: index, FW: foreign_index})
         pools[(flow['source_type'], flow['foreign_type'])] = pool
 
-    fig = build_mapping_sankey_figure(flows, pools=pools)
-    assert fig is not None and fig.data[0].type == 'sankey'
-    labels = list(fig.data[0].node['label'])
-    values = list(fig.data[0].link['value'])
-    # linker bands colored per column: amber flywireType + violet annotations
-    colors = list(fig.data[0].node['color'])
-    assert '#f59e0b' in colors and '#a855f7' in colors
+    rows = build_mapping_sankey_paths(flows, pools=pools)
     # pooled ribbons: each drawn chain contributes its pooled count per
     # hop — 4-bodyId bridges (CL125, SLP249) and 2-bodyId bridges
     # (SLP250, PLP080); two derivation chains per flow survive (hops
-    # aggregate into 20 ribbons)
-    assert sorted(values) == [2] * 10 + [4] * 10
-    # no cap hit at 4 flows -> no notice; capped -> notice points to CSV
-    assert 'full mapping' not in fig.layout.title.text
-    capped = build_mapping_sankey_figure(flows, pools=pools, max_flows=2)
-    assert 'full mapping is in the CSV export' in capped.layout.title.text
+    # aggregate into 20)
+    assert sorted(w for _names, ws in rows for w in ws) == (
+        [2] * 10 + [4] * 10)
+    # fan-in regression: ribbons are the PAIR's pooled granularity
+    # (min of the two sides), constant along the path — a shared target
+    # must never flatten fan-in edges to one identical weight
+    fan_in = [
+        {'source_dataset': MCNS, 'target_dataset': FW, 'source_type': s,
+         'foreign_type': 'APDN3', 'source_count': c, 'foreign_count': 12,
+         'matched_origin': f"type · '{s}'", 'bridges': [[
+             {'dataset': MCNS, 'column': 'type', 'value': s},
+             {'dataset': FW, 'column': 'type', 'value': 'APDN3'}]]}
+        for s, c in (('CL125', 8), ('PLP080', 2), ('SLP249', 4))]
+    fan_rows = build_mapping_sankey_paths(fan_in)
+    assert sorted(w for _n, ws in fan_rows for w in ws) == [2, 4, 8]
+    # linker bands carry the column tag and the 4-char dataset codes
+    assert any('LMTe01 · MCNS [flywireType]' in n
+               for names, _ws in rows for n in names)
+    assert all(any('· FAFB' in n for n in names) for names, _ws in rows)
+
+    html = render_mapping_sankey_html(flows, pools=pools)
+    assert html and 'sankey' in html.lower()
+    # the shared control panel: adjustable node/edge colors
+    assert 'Node Colors' in html and 'Edge Color' in html
+    assert 'APDN3' in html
+    # the flow cap trims rows (2 chains per flow maximum)
+    assert len(build_mapping_sankey_paths(
+        flows, pools=pools, max_flows=2)) <= 4
 
 
 def count_types_in_index_map(index, entry):
@@ -714,16 +730,17 @@ def count_types_in_index_map(index, entry):
 
 def test_analyzer_mapping_export_imports():
     """The Cross-Dataset run's mapping_sankey export imports cleanly
-    (regression: the removed plotly builder broke it silently)."""
+    (regression: the vispath-backend switch must not break the
+    analyzer)."""
     import importlib
 
     module = importlib.import_module('comparison.mapping_visualization')
-    assert hasattr(module, 'build_mapping_sankey_figure')
+    assert hasattr(module, 'render_mapping_sankey_html')
     source = Path(  # the analyzer's lazy import names must all resolve
         Path(__file__).resolve().parents[2]
         / 'src' / 'comparison' / 'comparison_analyzer.py').read_text(
         encoding='utf-8')
-    segment = source[source.index('build_mapping_sankey_figure'):]
+    segment = source[source.index('render_mapping_sankey_html'):]
     assert 'write_mapping_network_html' in segment
 
 
@@ -732,9 +749,10 @@ def test_mapping_type_sankey_and_in_memory_renderers(mapper):
     (no repository writes — temp-dir render, HTML string back)."""
     from comparison.mapping_visualization import (
         build_mapping_flows,
-        build_mapping_type_sankey_figure,
+        build_mapping_sankey_paths,
         render_bridge_linker_html,
         render_mapping_network_html,
+        render_mapping_sankey_html,
     )
     from ui.neuron_index import (
         count_types_in_index,
@@ -763,31 +781,143 @@ def test_mapping_type_sankey_and_in_memory_renderers(mapper):
                 flow['source_type'], flow['foreign_type'],
                 indexes={MCNS: index, FW: foreign_index}))
 
-    fig = build_mapping_type_sankey_figure(flows, pools=pools)
-    assert fig is not None and fig.data[0].type == 'sankey'
-    labels = list(fig.data[0].node['label'])
-    values = list(fig.data[0].link['value'])
+    rows = build_mapping_sankey_paths(flows, pools=pools, variant="type")
     # two bands only: the 4 mapped sources -> the single FAFB target,
-    # one aggregated ribbon per pair with the pooled granularity
-    assert len(labels) == len(flows) + 1
-    assert sorted(values) == sorted(
+    # one aggregated hop per pair with the pooled granularity
+    assert len(rows) == len(flows)
+    assert all(len(names) == 2 for names, _ws in rows)
+    assert sorted(w for _names, ws in rows for w in ws) == sorted(
         min(len(p['source_body_ids']), len(p['target_body_ids']))
         or 1 for p in pools.values())
-    colors = set(list(fig.data[0].node['color']))
-    assert colors == {'#5b8cff', '#22c55e'}  # source blue / target green
-    # cap notice only when the cap trims flows
-    assert 'full mapping' not in fig.layout.title.text
-    capped = build_mapping_type_sankey_figure(flows, pools=pools,
-                                              max_flows=1)
-    assert 'full mapping is in the CSV export' in capped.layout.title.text
+    # the cap trims rows to one per flow
+    assert len(build_mapping_sankey_paths(
+        flows, pools=pools, variant="type", max_flows=1)) == 1
+    html = render_mapping_sankey_html(
+        flows, pools=pools, variant="type")
+    assert html and 'Node Colors' in html
 
     # in-memory renderers: strings, correct renderer, no repo writes
-    net_html = render_mapping_network_html(flows)
+    net_html = render_mapping_network_html(flows, pools=pools)
     assert net_html and 'cytoscape' in net_html.lower()
+    # node hovers carry the pooled bodyId count next to the index
+    # neuron count (user report)
+    assert 'bodyIds' in net_html
     linker_html = render_bridge_linker_html(
         flows, source_dataset=MCNS, target_dataset=FW, pools=pools)
     assert linker_html and 'cytoscape' in linker_html.lower()
     assert 'flywireType' in linker_html
+    assert 'pool ' in linker_html and 'bodyIds' in linker_html
+    # per-dataset node groups (§13): every node is grouped and colored by
+    # its dataset — quick-action buttons + color/opacity dropdown + group
+    # ops cover the DATASETS (not the structural roles, which stay on the
+    # hovers); the footer legend carries one color chip per dataset and
+    # the dataset-code chips gain the matching color dot
+    for html in (net_html, linker_html):
+        assert "selectGroup('MCNS')" in html
+        assert "selectGroup('FAFB')" in html
+        assert '<option value="MCNS">MCNS Nodes</option>' in html
+        assert 'const extraNodeGroups' in html
+        assert 'legend-color' in html
+        assert 'border-radius:50%' in html  # dataset-code color dots
+        assert "selectGroup('linker')" not in html
+        assert "selectGroup('entry')" not in html
+    # the mapping preset is programmatic-only: listed (selected) ONLY in
+    # the linker-path document, never in the dagre-rendered network
+    assert 'value="mapping" selected' in linker_html
+    assert 'value="mapping"' not in net_html
+    # role survives on the hover via the node's 'role' data field
+    assert "data.role" in net_html
+
+
+def test_panel_chip_modes_and_origin_seeded_flows():
+    """§12: chip resolution under the standard filter modes + the
+    origin-seeded mapping (condition 1: the query lives where it
+    matched) + the mirror dedupe."""
+    from ui.neuron_index import (
+        count_types_in_index,
+        load_cached_neuron_index,
+        resolve_type_matches,
+    )
+    from comparison.mapping_visualization import (
+        dedupe_mirrored_pairs,
+        origin_seeded_flows,
+    )
+
+    datasets = [MCNS, FW]
+    indexes = {ds: load_cached_neuron_index(ds) for ds in datasets}
+
+    # exact: the reported explosion — 'aMe2' resolves to the single
+    # type in male-cns only (no aMe2_adpn/MeVPaMe2-style substring hits)
+    resolved = resolve_type_matches(['aMe2'], 'exact', datasets, indexes)
+    assert resolved['origins'] == {MCNS: ['aMe2']}
+    assert not resolved['fallback_chips']
+
+    # regex: the family in every dataset that has it (legacy 'aMe.*')
+    resolved = resolve_type_matches(['aMe.*'], 'regex', datasets, indexes)
+    assert len(resolved['origins'].get(MCNS, [])) > 5
+    assert len(resolved['origins'].get(FW, [])) > 5
+
+    # literal modes
+    assert resolve_type_matches(
+        ['aMe'], 'startswith', datasets, indexes)['origins']
+    assert resolve_type_matches(
+        ['e2'], 'contains', datasets, indexes)['origins']
+    assert resolve_type_matches(
+        ['2'], 'endswith', datasets, indexes)['origins']
+
+    # zero-hit under the mode -> fallback chip + visible note
+    resolved = resolve_type_matches(
+        ['circadian'], 'exact', datasets, indexes)
+    assert resolved['fallback_chips'] == ['circadian']
+    assert resolved['notes'] and 'labels' in resolved['notes'][0]
+    # invalid regex falls back too
+    resolved = resolve_type_matches(['aMe('], 'regex', datasets, indexes)
+    assert resolved['fallback_chips'] == ['aMe(']
+
+    # condition 1: exact type in FAFB -> flows FROM FAFB to the others
+    flows_m = origin_seeded_flows(FW, ['APDN3'], MCNS)
+    flows_b = origin_seeded_flows(FW, ['APDN3'], BANC)
+    assert flows_m and flows_b
+    assert all(f['source_dataset'] == FW for f in flows_m + flows_b)
+    assert {'CL125', 'PLP080', 'SLP249', 'SLP250'} <= {
+        f['foreign_type'] for f in flows_m}
+    assert any(f['foreign_type'] == 'APDN3' and f['source_type'] == 'APDN3'
+               for f in flows_b)  # the same-name route to the BANC
+    # supplied counts flow through to the flow dicts
+    counts = count_types_in_index(indexes[FW], ['APDN3'])
+    seeded = origin_seeded_flows(FW, ['APDN3'], MCNS,
+                                 source_counts=counts)
+    assert seeded and all(
+        f['source_count'] == counts.get('APDN3', 0) for f in seeded)
+
+    # mirror dedupe (type-pair granularity): the two directions of one
+    # equivalence collapse to ONE flow — the origin-source direction
+    # wins; a stripped same-name reverse loses to the linker-bearing
+    # forward
+    flow0 = flows_m[0]
+    reverse = [dict(flow0, source_dataset=MCNS, target_dataset=FW,
+                    source_type=flow0['foreign_type'],
+                    foreign_type=flow0['source_type'], bridges=[])]
+    kept = dedupe_mirrored_pairs(
+        {(FW, MCNS): flows_m, (MCNS, FW): reverse}, [FW])
+    assert set(kept) == {(FW, MCNS)}
+    kept = dedupe_mirrored_pairs(
+        {(FW, MCNS): flows_m, (MCNS, FW): reverse}, [FW, MCNS])
+    assert set(kept) == {(FW, MCNS)}
+    # asymmetric equivalences SURVIVE: a type pair only the reverse
+    # direction found is kept, not swallowed by the collapsed direction
+    # (the FAFB↔MCNS report: crosswalk evidence reads male-cns → FAFB,
+    # yet the equivalence must render from the other side too)
+    extra_rev = [dict(reverse[0], source_type='Zz', foreign_type='Yy')]
+    kept = dedupe_mirrored_pairs(
+        {(FW, MCNS): flows_m, (MCNS, FW): reverse + extra_rev}, [FW])
+    pairs = {(f['source_type'], f['foreign_type'])
+             for fl in kept.values() for f in fl}
+    assert ('Zz', 'Yy') in pairs
+    assert (flow0['source_type'], flow0['foreign_type']) in pairs
+    # single-direction pairs pass through unchanged
+    kept = dedupe_mirrored_pairs({(MCNS, FW): flows_m}, [])
+    assert set(kept) == {(MCNS, FW)}
 
 
 def test_bridge_linker_text_warns_on_unverified_same_name():

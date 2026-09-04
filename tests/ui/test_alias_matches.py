@@ -447,27 +447,19 @@ def test_mapping_visualizations_from_circadian_flows():
     assert all(f['source_count'] == source_counts[f['source_type']]
                for f in flows)
 
-    # Network: layered left-to-right type-mapping graph, bridges hidden
+    # Network: type-mapping graph, bridges hidden; dagre positions the
+    # layers in the renderer — the graph itself carries no custom layer
+    # map anymore
     graph = build_mapping_network_graph(flows)
     assert graph.number_of_nodes() > 10
     roles = {d.get('node_type') for _, d in graph.nodes(data=True)}
     assert {'source', 'target', 'entry'} <= roles
-    layer_x = {0: 0, 1: 380, 2: 760}
-    by_layer = {}
     for node, data in graph.nodes(data=True):
-        assert 'position' in data and 'title' in data
-        layer = int(str(node).split('|', 1)[0])
-        assert data['position']['x'] == layer_x[layer]
+        assert 'position' not in data and 'title' in data
         # rendered labels carry display values, no layer|dataset prefixes
         assert '|' not in str(data.get('label', ''))
         # bridge derivation never appears on node hover titles
         assert '[' not in str(data.get('title', ''))
-        by_layer.setdefault(layer, []).append(data['position']['y'])
-    # nodes are evenly distributed within each layer (uniform row gap)
-    for ys in by_layer.values():
-        ordered = sorted(ys, reverse=True)
-        gaps = {round(b - a, 6) for a, b in zip(ordered, ordered[1:])}
-        assert len(ordered) == 1 or gaps == {-70}
 
     # the CL125 -> APDN3 mapping is a direct type-level edge whose weight
     # is the SOURCE type's own neuron count (correct neuron number)
@@ -496,37 +488,6 @@ def test_mapping_visualizations_from_circadian_flows():
     assert len(with_text) >= len(pair_edges) - 2
     assert all(not d['bridge_texts']
                for s, t, d in graph.edges(data=True) if t.startswith('2|'))
-
-    # barycenter ordering minimizes edge crossings: the optimized layout
-    # must not have more layer0->layer1 crossings than the plain
-    # weight-descending order it started from
-    def _crossings(order_rows):
-        layer1 = [(order_rows[s], t_rows[t]) for s, t, _d in pair_edges]
-        count = 0
-        for i in range(len(layer1)):
-            for j in range(i + 1, len(layer1)):
-                a1, b1 = layer1[i]
-                a2, b2 = layer1[j]
-                if (a1 - a2) * (b1 - b2) < 0:
-                    count += 1
-        return count
-
-    t_rows = {n: -d['position']['y']
-              for n, d in graph.nodes(data=True)
-              if d['node_type'] == 'target'}
-    pair_edges = [(s, t, d) for s, t, d in graph.edges(data=True)
-                  if s.startswith('0|')]
-    final_order = {n: -d['position']['y']
-                   for n, d in graph.nodes(data=True)
-                   if d['node_type'] == 'source'}
-    weight_order = dict(sorted(final_order.items(),
-                               key=lambda kv: -sum(
-                                   dd['weight'] for s, t, dd
-                                   in graph.edges(data=True)
-                                   if s == kv[0] or t == kv[0])))
-    assert _crossings(final_order) <= _crossings(weight_order), (
-        f"optimized {_crossings(final_order)} > "
-        f"weight-order {_crossings(weight_order)}")
 
     # bridge text renders the full chain with type-identity endpoints,
     # names glued to their 4-char source, and the annotation hop carrying
@@ -726,14 +687,23 @@ def test_linker_html_carries_column_colors(tmp_path):
     match = re.search(r"nodes:\s*(\[.*?\])\s*,\s*\n\s*edges:", html, re.S)
     assert match, "elements JSON not found in the linker HTML"
     nodes = json.loads(match.group(1))
-    by_type = {}
+    by_role = {}
+    by_group = {}
     for node in nodes:
-        by_type.setdefault(node["data"].get("node_type", ""), []).append(
-            node["data"].get("color"))
-    # linkers colored per column; endpoints keep the type palette
-    assert set(by_type.get("linker", [])) == {"#f59e0b", "#a855f7"}
-    assert set(by_type.get("source", [])) == {"#5b8cff"}
-    assert set(by_type.get("target", [])) == {"#22c55e"}
+        data = node["data"]
+        by_role.setdefault(data.get("role") or data.get("node_type", ""),
+                           []).append(data.get("color"))
+        by_group.setdefault(data.get("group", ""), []).append(data)
+    # per-dataset groups (§13): node_type carries the dataset code and
+    # every node is tagged with it; the structural role lives in 'role'
+    assert set(by_group) == {"MCNS", "FAFB"}
+    assert all(d.get("node_type") in ("MCNS", "FAFB")
+               for d in by_group["MCNS"] + by_group["FAFB"])
+    # linkers colored per column (the explicit per-node color attribute
+    # still wins over the group color); endpoints keep the type palette
+    assert set(by_role.get("linker", [])) == {"#f59e0b", "#a855f7"}
+    assert set(by_role.get("source", [])) == {"#2563eb"}   # MCNS group color
+    assert set(by_role.get("target", [])) == {"#16a34a"}   # FAFB group color
     # bridge COLUMN names are never abbreviated (only dataset names use
     # the 4-char abbreviations)
     for column in ("flywireType", "additional_type(s)"):

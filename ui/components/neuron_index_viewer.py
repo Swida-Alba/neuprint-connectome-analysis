@@ -1865,33 +1865,28 @@ def _render_index(
                                      ) -> Optional[str]:
             """Build one mapping artifact's HTML in memory.
 
-            (kind, variant) is one of: sankey/type (plotly two-band
-            type-level flows), sankey/linker (plotly standardized linker
-            bands), network/type (vispath type-level graph),
+            (kind, variant) is one of: sankey/type (two-band type-level
+            flows) and sankey/linker (standardized linker bands) — both
+            through the vispath sankey backend with the shared
+            interactive control panel (user-adjustable node/edge
+            colors) —, network/type (vispath dagre type-level graph),
             network/linker (vispath colored linker paths).  Nothing is
             written to the repository.
             """
             from comparison.mapping_visualization import (
-                build_mapping_sankey_figure,
-                build_mapping_type_sankey_figure,
                 render_bridge_linker_html,
                 render_mapping_network_html,
+                render_mapping_sankey_html,
             )
 
             if kind == "sankey":
-                fig = (
-                    build_mapping_sankey_figure(flows, pools=pools)
-                    if variant == "linker"
-                    else build_mapping_type_sankey_figure(flows, pools=pools)
-                )
-                if fig is None:
-                    return None
-                return fig.to_html(include_plotlyjs="cdn")
+                return render_mapping_sankey_html(
+                    flows, pools=pools, variant=variant)
             if variant == "linker":
                 return render_bridge_linker_html(
                     flows, source_dataset=dataset,
                     target_dataset=foreign_ds, pools=pools)
-            return render_mapping_network_html(flows)
+            return render_mapping_network_html(flows, pools=pools)
 
         def _build_mapping_visualization(kind: str, variant: str,
                                          entry) -> Optional[tuple]:

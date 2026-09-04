@@ -2609,14 +2609,17 @@ class ComparisonAnalyzer:
                             })
                     if flows:
                         from comparison.mapping_visualization import (
-                            build_mapping_sankey_figure,
+                            render_mapping_sankey_html,
                             write_mapping_network_html,
                         )
                         sankey_path = os.path.join(out_dir, "mapping_sankey.html")
-                        build_mapping_sankey_figure(flows).write_html(
-                            sankey_path, include_plotlyjs="cdn"
-                        )
-                        self._log_file(sankey_path, "Mapping bridge Sankey")
+                        sankey_html = render_mapping_sankey_html(flows)
+                        if sankey_html:
+                            with open(sankey_path, "w",
+                                      encoding="utf-8") as handle:
+                                handle.write(sankey_html)
+                            self._log_file(sankey_path,
+                                           "Mapping bridge Sankey")
                         network_path = os.path.join(out_dir, "mapping_network.html")
                         write_mapping_network_html(flows, network_path, open_browser=False)
                         self._log_file(network_path, "Mapping bridge network")

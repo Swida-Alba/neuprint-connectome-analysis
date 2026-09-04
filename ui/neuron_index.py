@@ -2981,6 +2981,110 @@ def _native_label_matches(index: "CachedNeuronIndex", needle: str, cap: int,
     return matches[:cap], truncated_labels
 
 
+def _type_match_expression(chip: str, mode: str):
+    """Polars expression matching a lowercased ``type`` column (§12).
+
+    Modes follow the ``apply_filter_mode`` vocabulary (exact / startswith
+    / endswith / contains / regex); matching is case-insensitive by
+    lowering both sides — the written-case names are recovered from the
+    index rows.  Regex chips translate bare ``*`` wildcards (the legacy
+    list format) to ``.*`` while keeping explicit ``.*`` meta sequences
+    intact, so mixed patterns like ``A*B.*`` translate the wildcard only.
+    Returns None for an invalid regex so the caller can fall back to the
+    staged native search.
+    """
+    mode = str(mode or "exact").strip().lower().replace(" ", "")
+    aliases = {"startswith": "startswith", "startwith": "startswith",
+               "endswith": "endswith", "endwith": "endswith",
+               "contains": "contains", "regex": "regex"}
+    mode = aliases.get(mode, "exact")
+    import polars as pl
+
+    def _folded():
+        return pl.col("type").cast(pl.Utf8, strict=False).str.to_lowercase()
+
+    # `.lower()` on both sides (not casefold): polars lowers the column
+    # with to_lowercase, so a casefolded chip (ß → ss) would never match
+    # its lowercased counterpart.
+    needle = chip.lower()
+
+    if mode == "exact":
+        return _folded() == needle
+    if mode == "startswith":
+        return _folded().str.starts_with(needle)
+    if mode == "endswith":
+        return _folded().str.ends_with(needle)
+    if mode == "contains":
+        return _folded().str.contains(needle, literal=True)
+    # regex: bare '*' wildcards translate like the legacy list format
+    # ('*' not already preceded by a '.'); the pattern is lowered to
+    # match the lowered column (documented case-insensitive semantics)
+    pattern = re.sub(r"(?<!\.)\*", ".*", chip)
+    pattern = pattern.lower()
+    try:
+        re.compile(pattern)
+    except re.error:
+        return None
+    return _folded().str.contains(pattern, literal=False)
+
+
+def resolve_type_matches(queries, mode: str, datasets,
+                         indexes: Optional[Dict[str, Any]] = None
+                         ) -> Dict[str, Any]:
+    """Resolve panel chips to written type names per dataset (§12).
+
+    Every chip is matched against each selected dataset's cached index
+    ``type`` column under the active filter mode (see
+    ``_type_match_expression``).  Returns::
+
+        {'origins': {dataset: [written type names]},
+         'fallback_chips': [chips that matched NOTHING anywhere],
+         'notes': [human-readable resolution notes]}
+
+    The fallback chips go through the staged native search (substring
+    types + taxonomy labels → pooled nodes) so coarse queries and the
+    label-pooling feature keep working under explicit modes.
+    """
+    import polars as pl
+
+    indexes = dict(indexes or {})
+    origins: Dict[str, List[str]] = {ds: [] for ds in datasets}
+    fallback_chips: List[str] = []
+    notes: List[str] = []
+    for chip in [str(q).strip() for q in (queries or []) if str(q).strip()]:
+        expr = _type_match_expression(chip, mode)
+        matched_any = False
+        if expr is not None:
+            for ds in datasets:
+                index = indexes.get(ds) or load_cached_neuron_index(ds)
+                if index is None or "type" not in index.frame.columns:
+                    continue
+                folded = pl.col("type").cast(
+                    pl.Utf8, strict=False).str.to_lowercase()
+                hits = index.frame.filter(
+                    folded.is_not_null() & expr)
+                # dedupe INSIDE polars — a wide `contains` can match tens
+                # of thousands of rows and to_dicts materializes each one
+                names = sorted({
+                    str(row["type"])
+                    for row in hits.select("type").unique().to_dicts()
+                    if row["type"]})
+                if names:
+                    matched_any = True
+                    origins[ds].extend(names)
+        if not matched_any:
+            fallback_chips.append(chip)
+            notes.append(
+                f"'{chip}' matched no type under the active filter — "
+                "resolved via labels/substring (please double check)")
+    return {
+        "origins": {ds: sorted(set(v))
+                    for ds, v in origins.items() if v},
+        "fallback_chips": fallback_chips,
+        "notes": notes,
+    }
+
+
 def collect_native_type_matches(
     dataset: str,
     search: str,
