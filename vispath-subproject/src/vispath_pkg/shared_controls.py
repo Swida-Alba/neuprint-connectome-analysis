@@ -160,41 +160,45 @@ function showStatusInContainer(containerId, message, type) {
     setTimeout(function () { el.textContent = ''; }, 3000);
 }
 
-/* Background controller (White / Dark / Custom). Applies through the
+/* Background controller (presets, e.g. White / Dark). Applies through the
    per-visualization applyFn and remembers the current color so exports
-   reproduce the visible background (PPT-safe). */
+   reproduce the visible background (PPT-safe). The toggle button cycles
+   the presets and previews each with its own fill (contrast-aware text);
+   the custom color box beside it is a separate always-visible control
+   that applies immediately and never relabels the button. */
 function createBackgroundController(colors, labels, applyFn) {
     let mode = 0;
     let currentColor = colors[0];
+    function paintButton() {
+        const btn = document.getElementById('bgToggleBtn');
+        if (!btn) { return; }
+        btn.style.background = currentColor;
+        btn.style.color = isColorDark(currentColor) ? '#e5e7eb' : '#1f2937';
+        btn.style.border = '1px solid #9ca3af';
+    }
+    paintButton();
     return {
         getColor: function () { return currentColor; },
         toggle: function (labelPrefix) {
-            mode = (mode + 1) % 3;
+            mode = (mode + 1) % colors.length;
             const btn = document.getElementById('bgToggleBtn');
-            const picker = document.getElementById('customBgColor');
-            if (mode === 2) {
-                picker.style.display = 'inline-block';
-                btn.textContent = (labelPrefix || '') + labels[2];
-                this.applyCustom();
-            } else {
-                picker.style.display = 'none';
-                btn.textContent = (labelPrefix || '') + labels[mode];
-                currentColor = colors[mode];
-                applyFn(colors[mode]);
-            }
+            if (btn) { btn.textContent = (labelPrefix || '') + labels[mode]; }
+            currentColor = colors[mode];
+            paintButton();
+            applyFn(colors[mode]);
         },
         applyCustom: function () {
             const picker = document.getElementById('customBgColor');
+            if (!picker) { return; }
             currentColor = picker.value;
             applyFn(currentColor);
         },
         reset: function (labelPrefix) {
             mode = 0;
             const btn = document.getElementById('bgToggleBtn');
-            const picker = document.getElementById('customBgColor');
-            if (picker) { picker.style.display = 'none'; }
             if (btn) { btn.textContent = (labelPrefix || '') + labels[0]; }
             currentColor = colors[0];
+            paintButton();
             applyFn(colors[0]);
         }
     };

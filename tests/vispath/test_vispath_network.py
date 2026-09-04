@@ -513,12 +513,16 @@ class TestPanelCollapseAndRegrouping:
         Connection Metric."""
         html = network_html.read_text(encoding="utf-8")
         js = _script_text(network_html)
+        # Refresh Layout is a STANDALONE top-bar button (cross-tab), not a
+        # Canvas-group member: it renders before the Layout page content.
+        assert html.index('id="refreshLayoutTopBtn"') < html.index('id="pageLayout"')
+        layout_segment = html[html.index('id="pageLayout"'):html.index('id="pageFilter"')]
+        assert 'onclick="refreshLayout()"' not in layout_segment
         order = [
             html.index('id="rotateSlider"'),
             html.index('id="toggleLabelsBtn"'),
             html.index('id="toggleEdgeWeightsBtn"'),
             html.index('onclick="fitGraph()"'),
-            html.index('onclick="refreshLayout()"'),
             html.index('id="pageFilter"'),
         ]
         assert order == sorted(order), "Labels group not between Rotate and Canvas on the Layout page"
@@ -583,9 +587,9 @@ class TestPanelCollapseAndRegrouping:
         assert ".vp-mini-label" in html
 
     def test_appearance_card_groups_style_controls(self, network_html):
-        """Edge-width scale, size spinners, reciprocal offset,
-        refresh-edges and background live in ONE Style ribbon page (the
-        metric moved to the Filter page)."""
+        """Edge-width scale, size spinners, reciprocal offset and the
+        background/font color controls live in ONE Style ribbon page (the
+        metric moved to the Filter page; the refresh-edges card is gone)."""
         html = network_html.read_text(encoding="utf-8")
         order = [
             html.index('id="pageStyle"'),

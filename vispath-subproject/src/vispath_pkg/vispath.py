@@ -3361,8 +3361,8 @@ class VisualizePath:
                 </div>
                 
                 <div class="btn-group">
-                    <button id="bgToggleBtn" class="btn-secondary" onclick="toggleBackground()" title="Toggle background color">🎨 BG: White</button>
-                    <input type="color" id="customBgColor" value="#f5f5f5" style="width: 30px; height: 28px; border: 1px solid #ddd; border-radius: 3px; cursor: pointer; display: none;" onchange="applyCustomBackground()">
+                    <button id="bgToggleBtn" class="btn-secondary" onclick="toggleBackground()" title="Cycle the canvas background between the white and dark presets">White</button>
+                    <input type="color" id="customBgColor" value="#f5f5f5" style="width: 30px; height: 28px; border: 1px solid #ddd; border-radius: 3px; cursor: pointer;" onchange="applyCustomBackground()">
                 </div>
                 
                 <div class="btn-group">
@@ -3681,7 +3681,7 @@ class VisualizePath:
             labelsVisible = true;
             const labelsBtn = document.getElementById('toggleLabelsBtn');
             if (labelsBtn) labelsBtn.textContent = '🏷️ Hide Labels';
-            if (typeof bgCtrl !== 'undefined' && bgCtrl.reset) bgCtrl.reset('🎨 BG: ');
+            if (typeof bgCtrl !== 'undefined' && bgCtrl.reset) bgCtrl.reset();
             
             showAll();
         }}
@@ -3889,10 +3889,10 @@ class VisualizePath:
         }}
         
         // Background color toggle (shared controller)
-        const bgCtrl = createBackgroundController(['#ffffff', '#000000', 'custom'], ['White', 'Dark', 'Custom'], applyBackground);
+        const bgCtrl = createBackgroundController(['#ffffff', '#000000'], ['White', 'Black'], applyBackground);
         
         function toggleBackground() {{
-            bgCtrl.toggle('🎨 BG: ');
+            bgCtrl.toggle();
         }}
         
         function applyBackground(color) {{
@@ -5615,6 +5615,7 @@ class VisualizePath:
             <button type="button" id="tabShare" class="vp-tab" style="--vp-tab-accent: var(--vp-accent-share);" onclick="switchTab('share')" title="Import & export: images, graph, layouts, edge list (click again to collapse the ribbon)">💾 Import & Export</button>
         </div>
         <span class="vp-flex-spacer"></span>
+        <button id="refreshLayoutTopBtn" class="panelbar-btn" onclick="refreshLayout()" title="Re-run the current layout algorithm — available from every tool tab">🔄 Refresh Layout</button>
         <div class="vp-search">
             <input type="text" id="nodeSearchInput" placeholder="🔍 Find node…" autocomplete="off" oninput="onSearchInput(this.value)" onkeydown="onSearchKeydown(event)" title="Search nodes by id or label — Enter selects and centers, ↑/↓ cycle matches, Esc clears" aria-label="Find node">
             <span id="nodeSearchCount" aria-live="polite"></span>
@@ -5690,7 +5691,6 @@ class VisualizePath:
             <label class="vp-group-title">Canvas</label>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
                 <button class="btn" onclick="fitGraph()" style="background: #2196f3; font-size: 12px; padding: 6px; width: 100%;" title="Zoom and pan so all visible nodes fit the canvas">⛶ Fit</button>
-                <button class="btn" onclick="refreshLayout()" style="background: #00bcd4; font-size: 12px; padding: 6px; width: 100%;" title="Re-apply the current layout to the visible nodes only">🔄 Refresh Layout</button>
             </div>
             </div>
             {hemisphere_group_html}
@@ -5772,16 +5772,12 @@ class VisualizePath:
                 <span class="vp-unit">px</span>
             </div>
             </div>
-            <div class="vp-ribbon-group" style="min-width: 150px;">
-            <label class="vp-group-title">Edges</label>
-            <button class="btn" onclick="refreshEdgeStyles()" style="background: #9c27b0; font-size: 12px; padding: 6px; width: 100%;" title="Re-apply edge styles (widths, colors, curves) after size or metric changes">🔄 Refresh Edges</button>
-            </div>
-            <div class="vp-ribbon-group" style="min-width: 170px;">
-            <label class="vp-group-title">Background & Font</label>
+            <div class="vp-ribbon-group" style="width: 258px;">
+            <label class="vp-group-title">Background & Font color</label>
             <div style="display: flex; gap: 8px; align-items: center;">
                 <span class="vp-mini-label">Background</span>
-                <button id="bgToggleBtn" class="btn" onclick="toggleBackground()" style="flex: 0 0 auto; padding: 4px 8px; font-size: 11px; background: #795548;" title="Cycle the canvas background: white, dark, or custom color (exports match the visible background)">White</button>
-                <input type="color" id="customBgColor" value="#f5f5f5" style="width: 35px; height: 28px; border: 1px solid var(--vp-border); border-radius: 3px; cursor: pointer; display: none;" title="Custom background color for the third background mode" onchange="applyCustomBackground()">
+                <button id="bgToggleBtn" class="btn" onclick="toggleBackground()" style="flex: 0 0 auto; width: auto; padding: 4px 8px; font-size: 11px; background: #ffffff; color: #1f2937; border: 1px solid #9ca3af;" title="Cycle the canvas background between the white and dark presets (the button previews the preset; exports match the visible background)">White</button>
+                <input type="color" id="customBgColor" value="#f5f5f5" style="width: 35px; height: 28px; border: 1px solid var(--vp-border); border-radius: 3px; cursor: pointer;" title="Custom background color — applies immediately (exports match the visible background)" onchange="applyCustomBackground()">
                 <span class="vp-mini-label" style="margin-left: 2px;">Font</span>
                 <input type="color" id="labelFontColor" value="#000000" style="width: 35px; height: 28px; border: 1px solid var(--vp-border); border-radius: 3px; cursor: pointer;" title="Node label text color (node labels never have a background)" onchange="applyLabelFontColor(this.value)">
             </div>
@@ -8551,10 +8547,10 @@ class VisualizePath:
         }}
         
         // Background color toggle (shared controller)
-        const bgCtrl = createBackgroundController(['#ffffff', '#000000', 'custom'], ['White', 'Dark', 'Custom'], applyBackground);
+        const bgCtrl = createBackgroundController(['#ffffff', '#000000'], ['White', 'Black'], applyBackground);
         
         function toggleBackground() {{
-            bgCtrl.toggle('🎨 BG: ');
+            bgCtrl.toggle();
         }}
         
         function applyBackground(color) {{
@@ -13232,7 +13228,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=Tr
                     <h3>🎨 Background</h3>
                     <div style="display: flex; gap: 6px; align-items: center;">
                         <button id="bgToggleBtn" onclick="toggleBackground()" style="flex: 1; padding: 6px; font-size: 11px;">White</button>
-                        <input type="color" id="customBgColor" value="#f5f5f5" style="width: 35px; height: 28px; border: 1px solid #ddd; border-radius: 3px; cursor: pointer; display: none;" onchange="applyCustomBackground()">
+                        <input type="color" id="customBgColor" value="#f5f5f5" style="width: 35px; height: 28px; border: 1px solid #ddd; border-radius: 3px; cursor: pointer;" onchange="applyCustomBackground()">
                     </div>
                 </div>
             </div>
@@ -15766,7 +15762,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=Tr
         // Background color toggle (shared controller)
         // White maps to #ffffff for parity with the network/Sankey templates
         // (the page CSS default of #f5f5f5 remains until the first toggle).
-        const bgCtrl = createBackgroundController(['#ffffff', '#000000', 'custom'], ['White', 'Dark', 'Custom'], applyBackground);
+        const bgCtrl = createBackgroundController(['#ffffff', '#000000'], ['White', 'Black'], applyBackground);
         
         function toggleBackground() {{
             bgCtrl.toggle('');
