@@ -44,6 +44,21 @@ def create_inter_dataset_tab():
             datasets_select = dataset_multi_selector(
                 label="Datasets to compare (one dataset with multiple thresholds is also supported)",
             )
+            # Round 2 entrance: the standalone type-mapping preview. The
+            # button stays disabled until >= 2 selected datasets have
+            # cached neuron indexes; the popup composes the mapping across
+            # every ordered pair of the selection (informational only).
+            from ..components.type_mapping_panel import create_type_mapping_entry
+
+            with ui.row().classes("items-center gap-4 flex-wrap"):
+                type_mapping_button = create_type_mapping_entry(
+                    lambda: list(datasets_select.value or []))
+
+            def _sync_type_mapping_state(_e=None):
+                type_mapping_button.refresh_state()
+
+            datasets_select.on_value_change(_sync_type_mapping_state)
+            _sync_type_mapping_state()
             output_dir = dir_input(scope="inter_dataset")
 
         with ui.card().classes("w-full drocat-card").props('id="card-interdataset-neurons"'):
