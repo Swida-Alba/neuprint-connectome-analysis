@@ -84,8 +84,11 @@ def create_nb_colabel_tab():
                     dataset_watchers=[dataset],
                 )
 
-            # --- Advanced Settings (collapsed) ---
-            with ui.expansion("Advanced Settings", icon="settings_suggest").classes("w-full"):
+        # --- Advanced Settings (kept at the bottom, in its own card) ---
+        with ui.card().classes("w-full drocat-card").props('id="card-nb-colabel-advanced"'):
+            with ui.expansion(
+                "Advanced Settings", icon="settings_suggest",
+            ).classes("w-full drocat-section-expansion"):
                 with ui.row().classes("gap-4"):
                     gen_heatmap = checkbox_input("Heatmaps", True, hint="Generate interactive heatmap visualizations.")
                     gen_report = checkbox_input("HTML Report", True, hint="Generate comprehensive HTML analysis report.")

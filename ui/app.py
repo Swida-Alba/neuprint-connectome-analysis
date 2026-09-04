@@ -2232,6 +2232,10 @@ html, body {
 .drocat-file-row:hover .drocat-file-open { color: var(--drocat-cobalt); }
 .drocat-expansion { border: 1px solid var(--drocat-line); border-radius: 12px; margin-bottom: 8px; overflow: hidden; }
 .drocat-expansion .q-expansion-item__container { background: var(--drocat-surface); }
+/* Section-header expansions (collapsible blocks inside drocat-cards, e.g.
+   Visualization > Skeleton): the title doubles as the section header, so it
+   is rendered slightly larger than Quasar's inherited 14px default. */
+.drocat-section-expansion .q-item__label { font-size: 18px; }
 
 /* ---------- Status rows ---------- */
 .drocat-status-row { padding: 6px 8px; border-radius: 10px; }

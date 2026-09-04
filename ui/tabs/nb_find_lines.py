@@ -67,27 +67,6 @@ def create_nb_find_lines_tab():
                     ),
                 )
 
-            # --- Advanced Settings (collapsed) ---
-            with ui.expansion("Advanced Settings", icon="settings_suggest").classes("w-full"):
-                separate_split = checkbox_input(
-                    "Separate Split-GAL4 Results", True,
-                    hint="Generate separate summary CSVs for GAL4/LexA vs Split-GAL4 lines.",
-                )
-                with param_grid(3):
-                    region = select_input(
-                        "Region", ["Brain", "VNC", "All"], "Brain",
-                        hint="Anatomical region filter for image downloads.",
-                    )
-                    max_workers = number_input(
-                        "Max Workers", 8, 1, 32,
-                        hint="Parallel workers for API searches (lower if rate-limited).",
-                    )
-                    sort_by = select_input(
-                        "Sort By", ["max", "completeness"], "max",
-                        hint="'max': score-weighted matches (score × coverage). "
-                             "'completeness': best coverage of all queries.",
-                    )
-
         with ui.card().classes("w-full drocat-card").props('id="card-nb-image-download"'):
             section_header("Image Download", "image")
             with ui.row().classes("gap-4"):
@@ -148,6 +127,30 @@ def create_nb_find_lines_tab():
                     "Organize by Region", False,
                     hint="Group downloaded FlyLight images into Brain/VNC subfolders.",
                 )
+
+        # --- Advanced Settings (kept at the bottom, in its own card) ---
+        with ui.card().classes("w-full drocat-card").props('id="card-nb-findlines-advanced"'):
+            with ui.expansion(
+                "Advanced Settings", icon="settings_suggest",
+            ).classes("w-full drocat-section-expansion"):
+                separate_split = checkbox_input(
+                    "Separate Split-GAL4 Results", True,
+                    hint="Generate separate summary CSVs for GAL4/LexA vs Split-GAL4 lines.",
+                )
+                with param_grid(3):
+                    region = select_input(
+                        "Region", ["Brain", "VNC", "All"], "Brain",
+                        hint="Anatomical region filter for image downloads.",
+                    )
+                    max_workers = number_input(
+                        "Max Workers", 8, 1, 32,
+                        hint="Parallel workers for API searches (lower if rate-limited).",
+                    )
+                    sort_by = select_input(
+                        "Sort By", ["max", "completeness"], "max",
+                        hint="'max': score-weighted matches (score × coverage). "
+                             "'completeness': best coverage of all queries.",
+                    )
 
     with results_col:
         output_panel.create(run_label="Find Driver Lines", run_icon="play_arrow")

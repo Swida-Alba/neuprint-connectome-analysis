@@ -125,22 +125,68 @@ def create_inter_dataset_tab():
                 hint="Build reciprocal graphs and include them in reports.",
             )
 
-            # --- Advanced Settings (collapsed) ---
-            with ui.expansion("Advanced Settings", icon="settings_suggest").classes("w-full"):
-                edge_limit_bodyid_hint = None
+        with ui.card().classes("w-full drocat-card").props('id="card-interdataset-hemisphere"'):
+            section_header("Hemisphere Analysis", "sync_alt")
+            with ui.row().classes("items-center gap-4 flex-wrap"):
+                separate_hemi = checkbox_input(
+                    "Hemisphere-aware", False,
+                    hint="Split type/group aggregation into _L/_R/_U hemisphere labels.",
+                ).props('id=checkbox-separate-hemi')
+            with ui.row().classes("items-center gap-4 flex-wrap"):
+                symmetry_analysis = checkbox_input(
+                    "Symmetry Analysis", True,
+                    hint="Generate per-dataset hemisphere symmetry summaries (auto-enabled with Hemisphere-aware).",
+                ).props('id=checkbox-symmetry')
+            with ui.row().classes("items-center gap-4 flex-wrap"):
+                keep_hemi_conserved = checkbox_input(
+                    "Keep Only Hemisphere-Conserved Edges", False,
+                    hint="Keep only edges conserved between hemispheres (requires Hemisphere-aware).",
+                ).props('id=checkbox-hemi-conserved')
+            def _sync_hemisphere_options():
+                if separate_hemi.value:
+                    keep_hemi_conserved.enable()
+                    symmetry_analysis.enable()
+                    # auto-enabled with Hemisphere-aware (per the hint)
+                    symmetry_analysis.value = True
+                else:
+                    # uncheck + disable the hemisphere-dependent options so a
+                    # greyed-out True is never passed to the backend
+                    keep_hemi_conserved.disable()
+                    keep_hemi_conserved.value = False
+                    symmetry_analysis.disable()
+                    symmetry_analysis.value = False
+            separate_hemi.on_value_change(lambda _e: _sync_hemisphere_options())
+            _sync_hemisphere_options()
+
+        # --- Advanced Settings (kept at the bottom, in its own card) ---
+        with ui.card().classes("w-full drocat-card").props('id="card-interdataset-advanced"'):
+            with ui.expansion(
+                "Advanced Settings", icon="settings_suggest",
+            ).classes("w-full drocat-section-expansion"):
                 with param_grid(2):
                     pathfinding = select_input(
                         "Pathfinding Algorithm", PATHFINDING_ALGORITHMS, get_user_default("pathfinding"),
-                        hint="MemoizedDFS: recommended default (fastest measured at all depths, no graph copy). DFS: backward memoized, best with few targets. MeetInMiddle: shallow queries. DP: robust. Bidirectional: shortest-first but high memory.",
+                        hint="StrongestFirst (default): emits intact paths strongest-first; "
+                             "at Max Paths it keeps ALL paths above the reported strength "
+                             "cutoff instead of truncating arbitrarily. MemoizedDFS/DP/DFS/"
+                             "MeetInMiddle/Bidirectional: complete unordered enumeration.",
                         help_doc="pathfinding_algorithms.html",
+                    )
+                    max_paths_bodyid = number_input(
+                        "Max Paths (BodyId)", get_user_default("max_paths_bodyid"), 0, 100000000,
+                        hint="Path budget for StrongestFirst enumeration: when the search "
+                             "exceeds it, the strongest paths are kept and the achieved "
+                             "strength cutoff (tau) is reported in the run notes. "
+                             "0 = auto (StrongestFirst: 1M budget; complete "
+                             "enumerators: unbounded).",
                     )
                     top_edges = number_input(
                         "Top Edges in Analysis Reports", 500, 10, 5000,
                         hint="Limits top-edge comparison/overlap results and edge/path "
                              "presence-matrix rows and the path-presence data used by "
                              "comparison summary plots. It does not trim the pathfinding "
-                             "graph or set the per-visualization drawn-edge cap: use "
-                             "Edge Limit – BodyIds for graph trimming and Visualization "
+                             "graph or set the per-visualization drawn-edge cap: see "
+                             "Max Paths (BodyId) for the path budget and Visualization "
                              "Edge Limit for plotted edges.",
                     )
                 search_columns = select_input(
@@ -181,40 +227,14 @@ def create_inter_dataset_tab():
                         hint="Number of parallel workers (only used when Parallel Processing is on).",
                     )
                 with param_grid(2):
-                    edge_limit_bodyid = number_input(
-                        "Edge Limit – BodyIds", 1000000, 0, 1000000000,
-                        hint="Top-N strongest non-reserved edges kept in the bodyId-level "
-                             "graph of the FindAllPath runs (source/target edges are always "
-                             "kept in addition). Applied only when Layers ≥ 3 (deep searches); "
-                             "shallow runs keep the complete graph. 0 = unlimited.",
-                    )
+                    # Fix C: the lossy bodyId edge limit was removed — the
+                    # StrongestFirst path budget above is the single knob.
                     edge_limit_viz = number_input(
                         "Visualization Edge Limit", get_user_default("edgeN_limit"), 10, 5000,
                         hint="Maximum edges drawn per visualization (network / Sankey / "
                              "heatmap) in the FindAllPath runs. Limits memory usage for "
                              "highly connected neurons. Same default as the Complete Paths tab.",
                     )
-                    # the bodyId edge limit only applies to deep searches
-                    # ('all' mode); in shortest mode it is an explicit opt-in
-                    # (default off - trimming can inflate shortest distances)
-                    def _sync_bodyid_edge_limit():
-                        enabled = (
-                            path_mode.value == 'shortest'
-                            or (max_interlayer.value or 0) >= 3
-                        )
-                        edge_limit_bodyid.set_enabled(enabled)
-                        if edge_limit_bodyid_hint is not None:
-                            edge_limit_bodyid_hint.set_visibility(not enabled)
-
-                    _sync_bodyid_edge_limit()
-                    max_interlayer.on_value_change(lambda _e: _sync_bodyid_edge_limit())
-
-                edge_limit_bodyid_hint = ui.label(
-                    "Unavailable for shallow searches (Max Intermediate Layers 0–2); "
-                    "set Max Intermediate Layers to 3+ to enable BodyId edge trimming."
-                ).classes("text-caption drocat-muted").set_visibility(
-                    path_mode.value != 'shortest' and (max_interlayer.value or 0) < 3
-                )
 
                 def _apply_path_mode_defaults(notify=False):
                     """A mode switch resets the mode-specific defaults:
@@ -223,14 +243,10 @@ def create_inter_dataset_tab():
                     searches). The user is warned their values were reset."""
                     if path_mode.value == 'shortest':
                         pathfinding.disable()
-                        edge_limit_bodyid.set_enabled(True)
-                        edge_limit_bodyid.value = 0
                         max_interlayer.value = 8
                     else:
                         pathfinding.enable()
-                        edge_limit_bodyid.value = 1000000
                         max_interlayer.value = 2
-                    _sync_bodyid_edge_limit()
                     if notify:
                         ui.notify(
                             f"Path Enumeration switched to '{path_mode.value}': "
@@ -240,39 +256,6 @@ def create_inter_dataset_tab():
                         )
                 path_mode.on_value_change(lambda _e: _apply_path_mode_defaults(notify=True))
                 _apply_path_mode_defaults()
-
-        with ui.card().classes("w-full drocat-card").props('id="card-interdataset-hemisphere"'):
-            section_header("Hemisphere Analysis", "sync_alt")
-            with ui.row().classes("items-center gap-4 flex-wrap"):
-                separate_hemi = checkbox_input(
-                    "Hemisphere-aware", False,
-                    hint="Split type/group aggregation into _L/_R/_U hemisphere labels.",
-                ).props('id=checkbox-separate-hemi')
-            with ui.row().classes("items-center gap-4 flex-wrap"):
-                symmetry_analysis = checkbox_input(
-                    "Symmetry Analysis", True,
-                    hint="Generate per-dataset hemisphere symmetry summaries (auto-enabled with Hemisphere-aware).",
-                ).props('id=checkbox-symmetry')
-            with ui.row().classes("items-center gap-4 flex-wrap"):
-                keep_hemi_conserved = checkbox_input(
-                    "Keep Only Hemisphere-Conserved Edges", False,
-                    hint="Keep only edges conserved between hemispheres (requires Hemisphere-aware).",
-                ).props('id=checkbox-hemi-conserved')
-            def _sync_hemisphere_options():
-                if separate_hemi.value:
-                    keep_hemi_conserved.enable()
-                    symmetry_analysis.enable()
-                    # auto-enabled with Hemisphere-aware (per the hint)
-                    symmetry_analysis.value = True
-                else:
-                    # uncheck + disable the hemisphere-dependent options so a
-                    # greyed-out True is never passed to the backend
-                    keep_hemi_conserved.disable()
-                    keep_hemi_conserved.value = False
-                    symmetry_analysis.disable()
-                    symmetry_analysis.value = False
-            separate_hemi.on_value_change(lambda _e: _sync_hemisphere_options())
-            _sync_hemisphere_options()
 
     with results_col:
         output_panel.create(run_label="Run Comparison", run_icon="play_arrow")
@@ -328,7 +311,10 @@ def create_inter_dataset_tab():
             "max_interlayer": int(max_interlayer.value),
             "thresholds": thresholds,
             "top_edges": int(top_edges.value),
-            "graph_edge_limit_bodyid": int(edge_limit_bodyid.value),
+            # Fix C: graph_edge_limit_bodyid is deprecated/ignored by the
+            # FindAllPath pipeline — pass 0 (never trim).
+            "graph_edge_limit_bodyid": 0,
+            "max_paths_bodyid": int(max_paths_bodyid.value) or None,
             "edgeN_limit": int(edge_limit_viz.value),
             "pathfinding": pathfinding.value,
             "search_columns": search_columns.value,

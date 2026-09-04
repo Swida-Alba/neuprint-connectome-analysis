@@ -57,14 +57,18 @@
   <p>Three segmented buttons on one row (<b>Standard</b>, <b>Advanced</b>,
     <b>File upload</b>) pick how the neuron layers and their colors are
     defined, and a <b>Synapse Mode</b> box plus <b>Synapse Threshold</b> sit
-    directly below them. Only <b>Standard</b> mode uses the on-screen color
-    palette editors (Neuron Colors / Synapse Colors / ROI Colors); the other
-    two modes take colors from the in-file settings.</p>
+    directly below them. Only <b>Standard</b> mode uses the on-screen
+    <b>Neuron Colors</b> / <b>Synapse Colors</b> palette editors; the other
+    two modes take neuron/synapse colors from the in-file settings. The
+    <b>Brain Region ROIs</b> panel (including <b>ROI Colors</b>) is
+    independent of the layer editor — the editor defines neurons and
+    synapses, never ROI meshes — and is identical in every mode.</p>
   <ul>
     <li><b>Standard</b> — the classic drag-and-drop layer rows (add neurons to
       a row, drag rows to reorder, drag chips between rows). An <b>Export
       CSV</b> button writes the current order to the layer-map CSV format
-      (<code>layer,neuron</code>). The color palette editors are shown here.</li>
+      (<code>layer,neuron</code>). The Neuron Colors / Synapse Colors palette
+      editors are shown here.</li>
     <li><b>Advanced</b> — selecting it shows the editable layer editor table
       directly (it is not collapsed). Each row's <b>Layer</b> cell is a
       selection box that starts at 1 for a new table and only offers the
@@ -82,10 +86,12 @@
       the next layer; the Add Row neuron field also provides dataset-aware
       suggestions. Rows are auto-saved to
       disk as you edit; use <b>Export CSV</b> to download, or
-      <b>Upload CSV</b> to load a file into the table. The color palette
-      editors are hidden (colors come from the file).</li>
+      <b>Upload CSV</b> to load a file into the table. The Neuron Colors /
+      Synapse Colors palette editors are hidden (colors come from the file);
+      the Brain Region ROIs panel stays available.</li>
     <li><b>File upload</b> — upload a custom-layer CSV directly. Its color
-      columns are used as-is (no editable table, no color palette editors).</li>
+      columns are used as-is (no editable table; the Neuron Colors / Synapse
+      Colors palette editors are hidden, ROI Colors stay available).</li>
   </ul>
   <p>The same custom-layer CSV can also be produced/edited by hand. It has a
     <code>layer</code> column (numbers may start at <b>0 or 1</b>; the lowest
@@ -162,7 +168,10 @@
           (view PNGs, per-neuron files, video) keep the fixed background, and
           neuron/synapse colors stay as generated.</li>
         <li><b>Brain Mesh</b>: template, whole, or none; <b>VNC Mesh</b>
-          toggle for male-cns/manc.</li>
+          toggle for male-cns/manc. <b>Brain Mesh Color</b> defaults to
+          <b>Auto</b> (adaptive: light tone on white background, dark tone on
+          black); uncheck it to pick a fixed outline color, with opacity
+          defaulting to 5% (half the original auto setting's subtlety).</li>
       </ul>
     </div>
     <div class="card">
@@ -249,7 +258,6 @@
         <li>Each resolved ROI mesh, including bilateral expansions, is a
           separate trace and legend entry.</li>
         <li><b>ROI Mesh Opacity</b>.</li>
-        <li><b>Brain Mesh Color</b>: swatch picker with custom color.</li>
       </ul>
     </div>
   </div>

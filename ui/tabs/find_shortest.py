@@ -142,54 +142,6 @@ def create_find_shortest_tab():
                 hint="Enrich the path graph with reciprocal direct connections.",
             )
 
-            # --- Advanced Settings (collapsed) ---
-            with ui.expansion("Advanced Settings", icon="settings_suggest").classes("w-full"):
-                keyword_filter = neuron_list_input(
-                    label="Keywords to Exclude from Paths",
-                    show_filter=False,
-                    show_upload=False,
-                    hint="Paths containing these keywords in neuron types will be removed. "
-                         "Type a keyword and press Enter (or leave the field) to add it as a chip.",
-                )
-
-                with param_grid(3):
-                    min_ratio = number_input(
-                        "Min Connection Ratio", get_user_default("min_ratio"), 0, 1, 0.01,
-                        hint="Minimum weight/post ratio (0-1). Higher = stronger connections only. 0 = include all.",
-                    )
-                    min_traversal = number_input(
-                        "Min Traversal Prob.", get_user_default("min_traversal_probability"), 0, 1, 0.01,
-                        hint="Minimum traversal probability (ratio/0.3, capped at 1.0). Controls path confidence threshold.",
-                    )
-                    edge_limit_bodyid = number_input(
-                        "Edge Limit – BodyIds", 0, 0, 1000000000,
-                        hint="Off by default — shortest-path results need no path-count bound, "
-                             "and trimming can inflate reported distances. Set only to cap "
-                             "memory on extremely large graphs (distances then become "
-                             "shortest-within-trimmed-graph).",
-                    )
-                search_columns = select_input(
-                    "Search Columns", SEARCH_COLUMNS, get_user_default("search_columns"),
-                    hint="Which columns to search when resolving neuron names. "
-                         "'auto': all columns (bodyId -> type -> instance -> flywireType/others). "
-                         "Use 'type'/'instance'/'bodyId' to restrict the search.",
-                )
-                filter_by = select_input(
-                    "Filter By", FILTER_OPTIONS, get_user_default("filter_by"),
-                    hint="'bodyId': filter at individual neuron level. 'type': aggregate by neuron type.",
-                )
-
-                with ui.row().classes("gap-4"):
-                    use_cache = checkbox_input(
-                        "Use Cache", get_user_default("use_cache"),
-                        hint="Cache neuron data locally for 10-100x speedup on repeated runs.",
-                    )
-                    cache_only = checkbox_input(
-                        "Cache Only (Offline)", get_user_default("cache_only"),
-                        hint="Use only local cache and never contact the server. "
-                             "Requires the cache to be pre-built.",
-                    )
-
         with ui.card().classes("w-full drocat-card").props('id="card-findshortest-output"'):
             section_header("Output Options", "output")
             with param_grid(2):
@@ -267,6 +219,53 @@ def create_find_shortest_tab():
                     hemi_filter.set_enabled(False)
             separate_hemi.on_value_change(lambda _e: _sync_hemisphere_options())
             _sync_hemisphere_options()
+
+        # --- Advanced Settings (kept at the bottom, in its own card) ---
+        with ui.card().classes("w-full drocat-card").props('id="card-findshortest-advanced"'):
+            with ui.expansion(
+                "Advanced Settings", icon="settings_suggest",
+            ).classes("w-full drocat-section-expansion"):
+                keyword_filter = neuron_list_input(
+                    label="Keywords to Exclude from Paths",
+                    show_filter=False,
+                    show_upload=False,
+                    hint="Paths containing these keywords in neuron types will be removed. "
+                         "Type a keyword and press Enter (or leave the field) to add it as a chip.",
+                )
+
+                with param_grid(3):
+                    min_ratio = number_input(
+                        "Min Connection Ratio", get_user_default("min_ratio"), 0, 1, 0.01,
+                        hint="Minimum weight/post ratio (0-1). Higher = stronger connections only. 0 = include all.",
+                    )
+                    min_traversal = number_input(
+                        "Min Traversal Prob.", get_user_default("min_traversal_probability"), 0, 1, 0.01,
+                        hint="Minimum traversal probability (ratio/0.3, capped at 1.0). Controls path confidence threshold.",
+                    )
+                    # Fix C: the lossy bodyId edge limit is deprecated and
+                    # ignored — shortest paths are always complete.
+
+                search_columns = select_input(
+                    "Search Columns", SEARCH_COLUMNS, get_user_default("search_columns"),
+                    hint="Which columns to search when resolving neuron names. "
+                         "'auto': all columns (bodyId -> type -> instance -> flywireType/others). "
+                         "Use 'type'/'instance'/'bodyId' to restrict the search.",
+                )
+                filter_by = select_input(
+                    "Filter By", FILTER_OPTIONS, get_user_default("filter_by"),
+                    hint="'bodyId': filter at individual neuron level. 'type': aggregate by neuron type.",
+                )
+
+                with ui.row().classes("gap-4"):
+                    use_cache = checkbox_input(
+                        "Use Cache", get_user_default("use_cache"),
+                        hint="Cache neuron data locally for 10-100x speedup on repeated runs.",
+                    )
+                    cache_only = checkbox_input(
+                        "Cache Only (Offline)", get_user_default("cache_only"),
+                        hint="Use only local cache and never contact the server. "
+                             "Requires the cache to be pre-built.",
+                    )
 
     def _update_source_type_warning(_event=None):
         """Keep the source-size advisory visible while the query is edited."""
@@ -349,7 +348,8 @@ def create_find_shortest_tab():
             "min_traversal_probability": float(min_traversal.value),
             "max_interlayer": 0 if (src_all or tgt_all) else int(max_interlayer.value),
             "filter_by": filter_by.value,
-            "graph_edge_limit_bodyid": int(edge_limit_bodyid.value),
+            # Fix C: deprecated/ignored — shortest mode never trims.
+            "graph_edge_limit_bodyid": 0,
             # Shortest Paths no longer exposes the early network preview in
             # the UI; keep the backend behavior explicitly disabled.
             "visualize_before_reconstruct": False,

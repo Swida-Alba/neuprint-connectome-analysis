@@ -67,8 +67,11 @@ def create_nb_find_neuron_tab():
                     default_export_views=True,
                 )
 
-            # --- Other Advanced Settings (collapsed) ---
-            with ui.expansion("Advanced Settings", icon="settings_suggest").classes("w-full"):
+        # --- Advanced Settings (kept at the bottom, in its own card) ---
+        with ui.card().classes("w-full drocat-card").props('id="card-nb-findneuron-advanced"'):
+            with ui.expansion(
+                "Advanced Settings", icon="settings_suggest",
+            ).classes("w-full drocat-section-expansion"):
                 with param_grid(2):
                     sort_by = select_input(
                         "Sort By", ["max_score", "type_avg_score"], "max_score",

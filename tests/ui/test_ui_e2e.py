@@ -2337,7 +2337,7 @@ class TestDatasetService:
 
     def test_flywire_identifier_does_not_match_neuprint_banc(self):
         from ui.dataset_service import is_flywire_dataset
-        assert is_flywire_dataset("flywire_BANC_v626") is True
+        assert is_flywire_dataset("banc_v626") is True
         assert is_flywire_dataset("flywire_FAFB_v783") is True
         assert is_flywire_dataset("banc:v888") is False
 
@@ -3187,16 +3187,16 @@ class TestDatasetService:
 
         service = DatasetService()
         service._datasets_dir = tmp_path / "datasets"
-        dataset_path = service._datasets_dir / "flywire_BANC_v888"
+        dataset_path = service._datasets_dir / "banc_v888"
         dataset_path.mkdir(parents=True)
         pl.DataFrame(
             {
                 "bodyId": list(range(7)),
                 "type": ["a", "b", None, "", "c", "d", "e"],
             }
-        ).write_parquet(dataset_path / "flywire_BANC_v888_allneurons_neuron_df.parquet")
+        ).write_parquet(dataset_path / "banc_v888_allneurons_neuron_df.parquet")
 
-        total, typed = service._load_local_neuron_counts("flywire_BANC_v888")
+        total, typed = service._load_local_neuron_counts("banc_v888")
         assert total == 7
         assert typed == 5
 
@@ -3283,7 +3283,7 @@ class TestDatasetService:
         assert "flywire_FAFB_v783/flywire_FAFB_v783_allneurons_neuron_df.csv" not in guide
         assert "datasets/flywire_FAFB_v783/downloads/" in embedded_guide
         assert "connections_princeton_no_threshold.csv.gz" in embedded_guide
-        assert "flywire_BANC_v888" in embedded_guide
+        assert "banc_v888" in embedded_guide
 
     def test_dataset_info_dataclass(self):
         from ui.dataset_service import DatasetInfo
@@ -3554,8 +3554,8 @@ class TestTabs:
         ]
         for header in (
             "General Appearance",
-            "Neuron Colors",
-            "Synapse Colors",
+            "Neuron Skeleton Appearance",
+            "Synapse Appearance",
             "Brain Region ROIs (independent)",
         ):
             assert header in texts, f"missing block header: {header}"
@@ -3572,6 +3572,15 @@ class TestTabs:
         ):
             assert block_id in ids, f"missing block card: {block_id}"
 
+        # The brain outline color lives in General Appearance (Auto checkbox
+        # + color input); the ROI card hosts only the palette editor, no
+        # swatch-picker row.
+        assert "Brain Mesh Color" in labels
+        assert not any(
+            "drocat-swatch-row" in getattr(el, "_classes", [])
+            for el in client.elements.values()
+        ), "swatch picker rows should be gone from the Skeleton tab"
+
         # Neuron palette defaults to Category10 (background is white);
         # the synapse palette defaults to Dark2.
         editors = [
@@ -3580,6 +3589,107 @@ class TestTabs:
         ]
         assert any(el.get_value() == "Category10" for el in editors)
         assert any(el.get_value() == "Dark2" for el in editors)
+
+    def test_skeleton_tab_keeps_roi_panel_mode_independent(self):
+        """The Brain Region ROIs panel (its palette editor included) is
+        identical in every layer-editor mode: the layer editor defines
+        neurons and synapses only, never ROI meshes. Switching to Advanced
+        or File upload hides the Neuron/Synapse palettes but must keep the
+        ROI palette visible (the run handler consults it in every mode)."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.visualization import create_skeleton_tab
+
+        client = Client(page("/skeleton-roi-mode-independence"))
+        with client:
+            create_skeleton_tab()
+
+        palettes = {
+            "neuron": "card-skeleton-neuron-palette",
+            "synapse": "card-skeleton-synapse-palette",
+            "roi": "card-skeleton-roi-palette",
+        }
+
+        def palette_visible(name: str) -> bool:
+            target = next(
+                el for el in client.elements.values()
+                if getattr(el, "_props", {}).get("id") == palettes[name]
+            )
+            return bool(target.visible)
+
+        def set_mode(mode: str) -> None:
+            btn = next(
+                el for el in client.elements.values()
+                if type(el).__name__ == "Button" and getattr(el, "text", "") == mode
+            )
+            click_listener = next(iter(btn._event_listeners.values()))
+            click_listener.handler(None)
+
+        set_mode("Advanced")
+        assert not palette_visible("neuron")
+        assert not palette_visible("synapse")
+        assert palette_visible("roi"), "ROI palette must stay visible in Advanced mode"
+
+        set_mode("File upload")
+        assert not palette_visible("neuron")
+        assert not palette_visible("synapse")
+        assert palette_visible("roi"), "ROI palette must stay visible in File upload mode"
+
+        set_mode("Standard")
+        assert palette_visible("neuron")
+        assert palette_visible("synapse")
+        assert palette_visible("roi")
+
+    def test_all_tabs_put_advanced_settings_last_in_own_card(self):
+        """Every tool tab keeps its Advanced Settings expansion at the very
+        bottom of the form column, wrapped in its own drocat-card (same
+        pattern as the 3D Skeleton tab), and styles the header with the
+        shared drocat-section-expansion class."""
+        from nicegui import Client
+        from nicegui.page import page
+
+        builders = [
+            ("skeleton", "ui.tabs.visualization", "create_skeleton_tab"),
+            ("find_path", "ui.tabs.find_path", "create_find_path_tab"),
+            ("find_shortest", "ui.tabs.find_shortest", "create_find_shortest_tab"),
+            ("network", "ui.tabs.network", "create_network_tab"),
+            ("inter_dataset", "ui.tabs.inter_dataset", "create_inter_dataset_tab"),
+            ("connectivity", "ui.tabs.connectivity", "create_connectivity_tab"),
+            ("morphology", "ui.tabs.morphology", "create_morphology_tab"),
+            ("nb_find_lines", "ui.tabs.nb_find_lines", "create_nb_find_lines_tab"),
+            ("nb_find_neuron", "ui.tabs.nb_find_neuron", "create_nb_find_neuron_tab"),
+            ("nb_colabel", "ui.tabs.nb_colabel", "create_nb_colabel_tab"),
+        ]
+        import importlib
+
+        for name, module_name, func_name in builders:
+            module = importlib.import_module(module_name)
+            builder = getattr(module, func_name)
+            client = Client(page(f"/advanced-bottom-{name}"))
+            with client:
+                builder()
+
+            cards = [
+                el for el in client.elements.values()
+                if "drocat-card" in getattr(el, "_classes", [])
+                and str(getattr(el, "_props", {}).get("id", "")).endswith("-advanced")
+            ]
+            assert len(cards) == 1, f"{name}: expected exactly one advanced card"
+            card = cards[0]
+
+            expansion = next(iter(card), None)
+            assert expansion is not None, f"{name}: advanced card is empty"
+            assert getattr(expansion, "text", "") == "Advanced Settings"
+            assert "drocat-section-expansion" in getattr(expansion, "_classes", []), (
+                f"{name}: advanced expansion must use drocat-section-expansion"
+            )
+
+            parent = card.parent_slot.parent
+            last_child = list(parent)[-1] if list(parent) else None
+            assert last_child is card, (
+                f"{name}: the advanced card must be the last block of its "
+                "form column"
+            )
 
     def test_skeleton_tab_keeps_method_selectable_for_flywire(self):
         """Tube-mode FlyWire/FAFB renders can choose their pipeline."""
@@ -3674,8 +3784,9 @@ class TestTabs:
 
     def test_skeleton_tab_export_and_grouping_controls(self):
         """The 3D Skeleton tab exposes the drag-and-drop layer tree editor,
-        the individual-profile export controls (outside Advanced Settings, in
-        the Export card), and the legend-mode grouping notice."""
+        the individual-profile export controls (collapsed entries above the
+        Advanced Settings expansion, which closes the tab), and the
+        legend-mode grouping notice."""
         from nicegui import Client
         from nicegui.page import page
         from ui.tabs.visualization import create_skeleton_tab
@@ -3730,12 +3841,14 @@ class TestTabs:
                    for t in texts), "layer tree hint missing"
 
         # the profiles controls live in the export card (outside Advanced
-        # Settings): the export card must be an independent block
+        # Settings): the export card and the Advanced Settings card must be
+        # independent blocks
         ids = [
             getattr(el, "_props", {}).get("id", "")
             for el in client.elements.values()
         ]
         assert "card-skeleton-export-video" in ids
+        assert "card-skeleton-advanced" in ids
 
     def test_find_path_tab_exposes_path_cap_control(self):
         """The Find All Paths tab exposes the per-source path cap (the

@@ -393,8 +393,14 @@ def create_morphology_tab():
                              "scores (large types are truncated; the member "
                              "list is written to members.csv).",
                     )
-                with ui.expansion("Advanced Settings",
-                                  icon="settings_suggest").classes("w-full"):
+
+            # --- Advanced Settings (kept at the bottom, in its own card) ---
+            with ui.card().classes("w-full drocat-card").props(
+                'id="card-morphology-advanced"'
+            ):
+                with ui.expansion(
+                    "Advanced Settings", icon="settings_suggest",
+                ).classes("w-full drocat-section-expansion"):
                     comparison_fetch = checkbox_input(
                         "Fetch Missing Skeletons Online", True,
                         hint="Pull skeletons for neurons missing from the "

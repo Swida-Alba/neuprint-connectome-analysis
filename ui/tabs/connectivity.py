@@ -227,54 +227,6 @@ def create_connectivity_tab():
                         hint="Minimum unique partner types. If top_k yields fewer, K is expanded.",
                     )
 
-                # --- Advanced Settings (collapsed) ---
-                with ui.expansion("Advanced Settings", icon="settings_suggest").classes("w-full"):
-                    with ui.row().classes("gap-4"):
-                        analyze_upstream = checkbox_input("Upstream", True, hint="Include presynaptic (input) partners in profile.")
-                        analyze_downstream = checkbox_input("Downstream", True, hint="Include postsynaptic (output) partners in profile.")
-
-                    ui.separator()
-                    ui.label(
-                        "All six similarity matrices are generated: overall, Jaccard, "
-                        "weighted Jaccard, cosine, rank correlation, and rank-correlation "
-                        "union (same metric set as the Find Similar sub-tab). Overall "
-                        "combines upstream and downstream connectivity."
-                    ).classes("text-caption drocat-muted")
-                    cluster_heatmap = checkbox_input(
-                        "Generate Heatmaps", True,
-                        hint="Create VisPath heatmaps for editing and Plotly heatmaps in the report.",
-                    )
-                    with param_grid(3):
-                        min_synapse_threshold_cmp = number_input(
-                            "Min Synapse Threshold", get_user_default("min_synapse_num"), 1, 100,
-                            hint="Minimum synapse count for a connection to enter a profile.",
-                        )
-                        aggregation_level = select_input(
-                            "Aggregation Level", ["type", "bodyid", "custom group"], "type",
-                            hint="'type': each matched neuron type is one row — patterns like "
-                                 "'aMe.*' or name-filter inputs expand into their independent "
-                                 "types. 'bodyid': every individual neuron is one row. "
-                                 "'custom group': rows come from the LabelMapper preset below.",
-                        ).props('id=select-aggregation')
-                        skip_bodyid_level = select_input(
-                            "BodyId-Level Computation", ["auto", "skip", "compute"], "auto",
-                            hint="'auto': skip bodyId matrices only when >1000 bodyIds. "
-                                 "'skip': type-level only. 'compute': always include bodyId "
-                                 "and type-average-bodyId matrices. Type and bodyId levels "
-                                 "are both available in the comparison output.",
-                        )
-                    with ui.row().classes("gap-4"):
-                        show_figures = checkbox_input(
-                            "Show Figures", False,
-                            hint="Open generated heatmaps in the browser.",
-                        )
-                    full_cache_cmp = checkbox_input(
-                        "Pre-build Full Dataset Cache", False,
-                        hint="Fetch connections for EVERY uncached neuron before comparing. "
-                             "Very slow on first use (can take hours); leave off to use the "
-                             "connections already cached.",
-                    )
-
                 # Custom grouping via LabelMapper presets (only for the
                 # 'custom group' aggregation level)
                 custom_group_box = ui.card().classes("w-full drocat-card").props('id=card-custom-group')
@@ -296,6 +248,59 @@ def create_connectivity_tab():
                         "The neuron query above is ignored in this mode."
                     ).classes("text-caption drocat-muted")
                 custom_group_box.set_visibility(False)
+
+                # --- Advanced Settings (kept at the bottom, in its own card) ---
+                with ui.card().classes("w-full drocat-card").props(
+                    'id="card-connectivity-advanced"'
+                ):
+                    with ui.expansion(
+                        "Advanced Settings", icon="settings_suggest",
+                    ).classes("w-full drocat-section-expansion"):
+                        with ui.row().classes("gap-4"):
+                            analyze_upstream = checkbox_input("Upstream", True, hint="Include presynaptic (input) partners in profile.")
+                            analyze_downstream = checkbox_input("Downstream", True, hint="Include postsynaptic (output) partners in profile.")
+
+                        ui.separator()
+                        ui.label(
+                            "All six similarity matrices are generated: overall, Jaccard, "
+                            "weighted Jaccard, cosine, rank correlation, and rank-correlation "
+                            "union (same metric set as the Find Similar sub-tab). Overall "
+                            "combines upstream and downstream connectivity."
+                        ).classes("text-caption drocat-muted")
+                        cluster_heatmap = checkbox_input(
+                            "Generate Heatmaps", True,
+                            hint="Create VisPath heatmaps for editing and Plotly heatmaps in the report.",
+                        )
+                        with param_grid(3):
+                            min_synapse_threshold_cmp = number_input(
+                                "Min Synapse Threshold", get_user_default("min_synapse_num"), 1, 100,
+                                hint="Minimum synapse count for a connection to enter a profile.",
+                            )
+                            aggregation_level = select_input(
+                                "Aggregation Level", ["type", "bodyid", "custom group"], "type",
+                                hint="'type': each matched neuron type is one row — patterns like "
+                                     "'aMe.*' or name-filter inputs expand into their independent "
+                                     "types. 'bodyid': every individual neuron is one row. "
+                                     "'custom group': rows come from the LabelMapper preset below.",
+                            ).props('id=select-aggregation')
+                            skip_bodyid_level = select_input(
+                                "BodyId-Level Computation", ["auto", "skip", "compute"], "auto",
+                                hint="'auto': skip bodyId matrices only when >1000 bodyIds. "
+                                     "'skip': type-level only. 'compute': always include bodyId "
+                                     "and type-average-bodyId matrices. Type and bodyId levels "
+                                     "are both available in the comparison output.",
+                            )
+                        with ui.row().classes("gap-4"):
+                            show_figures = checkbox_input(
+                                "Show Figures", False,
+                                hint="Open generated heatmaps in the browser.",
+                            )
+                        full_cache_cmp = checkbox_input(
+                            "Pre-build Full Dataset Cache", False,
+                            hint="Fetch connections for EVERY uncached neuron before comparing. "
+                                 "Very slow on first use (can take hours); leave off to use the "
+                                 "connections already cached.",
+                        )
 
                 aggregation_level.on_value_change(
                     lambda e: custom_group_box.set_visibility(

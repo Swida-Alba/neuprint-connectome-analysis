@@ -83,34 +83,6 @@ def create_network_tab():
                 hint="Minimum number of synapses for a connection to be included. Filters out weak/noisy connections.",
             )
 
-            # --- Advanced Settings (collapsed) ---
-            with ui.expansion("Advanced Settings", icon="settings_suggest").classes("w-full"):
-                with param_grid(2):
-                    min_ratio = number_input(
-                        "Min Connection Ratio", get_user_default("min_ratio"), 0, 1, 0.01,
-                        hint="Minimum weight/post ratio (0-1). Higher = stronger connections only. 0 = include all.",
-                    )
-                    min_traversal = number_input(
-                        "Min Traversal Prob.", get_user_default("min_traversal_probability"), 0, 1, 0.01,
-                        hint="Minimum traversal probability (ratio/0.3, capped at 1.0). Controls connection confidence threshold.",
-                    )
-                search_columns = select_input(
-                    "Search Columns", SEARCH_COLUMNS, get_user_default("search_columns"),
-                    hint="Which columns to search when resolving neuron names. "
-                         "'auto': all columns (bodyId -> type -> instance -> flywireType/others). "
-                         "Use 'type'/'instance'/'bodyId' to restrict the search.",
-                )
-                with ui.row().classes("gap-4"):
-                    use_cache = checkbox_input(
-                        "Use Cache", get_user_default("use_cache"),
-                        hint="Cache neuron data locally for 10-100x speedup on repeated runs.",
-                    )
-                    cache_only = checkbox_input(
-                        "Cache Only (Offline)", get_user_default("cache_only"),
-                        hint="Use only local cache and never contact the server. "
-                             "Requires the cache to be pre-built.",
-                    )
-
         with ui.card().classes("w-full drocat-card").props('id="card-network-output"'):
             section_header("Output Options", "output")
             with param_grid(2):
@@ -174,6 +146,37 @@ def create_network_tab():
                     hemi_filter.set_enabled(False)
             separate_hemi.on_value_change(lambda _e: _sync_hemisphere_options())
             _sync_hemisphere_options()
+
+        # --- Advanced Settings (kept at the bottom, in its own card) ---
+        with ui.card().classes("w-full drocat-card").props('id="card-network-advanced"'):
+            with ui.expansion(
+                "Advanced Settings", icon="settings_suggest",
+            ).classes("w-full drocat-section-expansion"):
+                with param_grid(2):
+                    min_ratio = number_input(
+                        "Min Connection Ratio", get_user_default("min_ratio"), 0, 1, 0.01,
+                        hint="Minimum weight/post ratio (0-1). Higher = stronger connections only. 0 = include all.",
+                    )
+                    min_traversal = number_input(
+                        "Min Traversal Prob.", get_user_default("min_traversal_probability"), 0, 1, 0.01,
+                        hint="Minimum traversal probability (ratio/0.3, capped at 1.0). Controls connection confidence threshold.",
+                    )
+                search_columns = select_input(
+                    "Search Columns", SEARCH_COLUMNS, get_user_default("search_columns"),
+                    hint="Which columns to search when resolving neuron names. "
+                         "'auto': all columns (bodyId -> type -> instance -> flywireType/others). "
+                         "Use 'type'/'instance'/'bodyId' to restrict the search.",
+                )
+                with ui.row().classes("gap-4"):
+                    use_cache = checkbox_input(
+                        "Use Cache", get_user_default("use_cache"),
+                        hint="Cache neuron data locally for 10-100x speedup on repeated runs.",
+                    )
+                    cache_only = checkbox_input(
+                        "Cache Only (Offline)", get_user_default("cache_only"),
+                        hint="Use only local cache and never contact the server. "
+                             "Requires the cache to be pre-built.",
+                    )
 
     with results_col:
         output_panel.create(run_label="Find Network", run_icon="schema")

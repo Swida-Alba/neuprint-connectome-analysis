@@ -103,90 +103,17 @@ def create_find_path_tab():
                 "⚠️ Layers ≥ 4: the path count grows combinatorially (branching^depth) — "
                 "reconstruction can take hours and produce billions of paths. Raise "
                 "Min Synapse Count / Min Connection Ratio / Min Traversal Prob., "
-                "tighten the Graph Edge Limit in Advanced Settings, or minimize/"
-                "batch the source and target sets."
+                "lower Max Paths (BodyId) so StrongestFirst keeps only the "
+                "strongest routes, or minimize/batch the source and target sets."
             ).classes("text-caption text-amber-8").set_visibility(False)
             find_reciprocal = checkbox_input(
                 "Find Reciprocal Connections", False,
                 hint="Enrich the path graph with reciprocal direct connections.",
             )
-            edge_limit_bodyid_hint = None
-
             def _on_max_interlayer_change(e):
                 interlayer_warning.set_visibility((e.value or 0) >= 4)
-                # the bodyId edge limit only applies to deep searches
-                enabled = (e.value or 0) >= 3
-                edge_limit_bodyid.set_enabled(enabled)
-                if edge_limit_bodyid_hint is not None:
-                    edge_limit_bodyid_hint.set_visibility(not enabled)
 
             max_interlayer.on_value_change(_on_max_interlayer_change)
-
-            # --- Advanced Settings (collapsed) ---
-            with ui.expansion("Advanced Settings", icon="settings_suggest").classes("w-full"):
-                keyword_filter = neuron_list_input(
-                    label="Keywords to Exclude from Paths",
-                    show_filter=False,
-                    show_upload=False,
-                    hint="Paths containing these keywords in neuron types will be removed. "
-                         "Type a keyword and press Enter (or leave the field) to add it as a chip.",
-                )
-
-                with param_grid(3):
-                    min_ratio = number_input(
-                        "Min Connection Ratio", get_user_default("min_ratio"), 0, 1, 0.01,
-                        hint="Minimum weight/post ratio (0-1). Higher = stronger connections only. 0 = include all.",
-                    )
-                    min_traversal = number_input(
-                        "Min Traversal Prob.", get_user_default("min_traversal_probability"), 0, 1, 0.01,
-                        hint="Minimum traversal probability (ratio/0.3, capped at 1.0). Controls path confidence threshold.",
-                    )
-                    pathfinding_algo = select_input(
-                        "Algorithm", PATHFINDING_ALGORITHMS, get_user_default("pathfinding"),
-                        hint="MemoizedDFS: recommended default (fastest measured at all depths, no graph copy). DFS: backward memoized, best with few targets. MeetInMiddle: shallow queries. DP: robust. Bidirectional: shortest-first but high memory.",
-                        help_doc="pathfinding_algorithms.html",
-                    )
-                with ui.row().classes("gap-4"):
-                    with ui.column().classes("gap-0"):
-                        edge_limit_bodyid = number_input(
-                            "Edge Limit – BodyIds", 1000000, 0, 1000000000,
-                            hint="Top-N strongest non-reserved edges kept in the bodyId-level "
-                                 "graph (source/target edges are always kept in addition). "
-                                 "Applied only when Layers ≥ 3 (deep searches, where the path "
-                                 "count grows combinatorially); shallow runs keep the complete "
-                                 "graph. Type-level and custom-group paths are derived from the "
-                                 "discovered bodyId paths and need no edge limit. "
-                                 "0 = unlimited (can be very slow for deep layers).",
-                        )
-                        edge_limit_bodyid_hint = ui.label(
-                            "Unavailable for shallow searches (max intermediate layers 0–2); "
-                            "set Max Intermediate Layers to 3+ to enable BodyId edge trimming."
-                        ).classes("text-caption drocat-muted").set_visibility(
-                            (max_interlayer.value or 0) < 3
-                        )
-                    # enabled only for deep searches (max_interlayer >= 3)
-                    edge_limit_bodyid.set_enabled((max_interlayer.value or 0) >= 3)
-                search_columns = select_input(
-                    "Search Columns", SEARCH_COLUMNS, get_user_default("search_columns"),
-                    hint="Which columns to search when resolving neuron names. "
-                         "'auto': all columns (bodyId -> type -> instance -> flywireType/others). "
-                         "Use 'type'/'instance'/'bodyId' to restrict the search.",
-                )
-                filter_by = select_input(
-                    "Filter By", FILTER_OPTIONS, get_user_default("filter_by"),
-                    hint="'bodyId': filter at individual neuron level. 'type': aggregate by neuron type.",
-                )
-
-                with ui.row().classes("gap-4"):
-                    use_cache = checkbox_input(
-                        "Use Cache", get_user_default("use_cache"),
-                        hint="Cache neuron data locally for 10-100x speedup on repeated runs.",
-                    )
-                    cache_only = checkbox_input(
-                        "Cache Only (Offline)", get_user_default("cache_only"),
-                        hint="Use only local cache and never contact the server. "
-                             "Requires the cache to be pre-built.",
-                    )
 
         with ui.card().classes("w-full drocat-card").props('id="card-findpath-output"'):
             section_header("Output Options", "output")
@@ -266,6 +193,67 @@ def create_find_path_tab():
             separate_hemi.on_value_change(lambda _e: _sync_hemisphere_options())
             _sync_hemisphere_options()
 
+        # --- Advanced Settings (kept at the bottom, in its own card) ---
+        with ui.card().classes("w-full drocat-card").props('id="card-findpath-advanced"'):
+            with ui.expansion(
+                "Advanced Settings", icon="settings_suggest",
+            ).classes("w-full drocat-section-expansion"):
+                keyword_filter = neuron_list_input(
+                    label="Keywords to Exclude from Paths",
+                    show_filter=False,
+                    show_upload=False,
+                    hint="Paths containing these keywords in neuron types will be removed. "
+                         "Type a keyword and press Enter (or leave the field) to add it as a chip.",
+                )
+
+                with param_grid(3):
+                    min_ratio = number_input(
+                        "Min Connection Ratio", get_user_default("min_ratio"), 0, 1, 0.01,
+                        hint="Minimum weight/post ratio (0-1). Higher = stronger connections only. 0 = include all.",
+                    )
+                    min_traversal = number_input(
+                        "Min Traversal Prob.", get_user_default("min_traversal_probability"), 0, 1, 0.01,
+                        hint="Minimum traversal probability (ratio/0.3, capped at 1.0). Controls path confidence threshold.",
+                    )
+                    pathfinding_algo = select_input(
+                        "Algorithm", PATHFINDING_ALGORITHMS, get_user_default("pathfinding"),
+                        hint="StrongestFirst (default): emits intact paths strongest-first; at Max Paths it keeps ALL paths above the reported strength cutoff instead of truncating arbitrarily. MemoizedDFS/DP/DFS/MeetInMiddle/Bidirectional: complete unordered enumeration.",
+                        help_doc="pathfinding_algorithms.html",
+                    )
+                with ui.row().classes("gap-4"):
+                    with ui.column().classes("gap-0"):
+                        max_paths_bodyid = number_input(
+                            "Max Paths (BodyId)", get_user_default("max_paths_bodyid"),
+                            0, 100000000,
+                            hint="Path budget for StrongestFirst enumeration: when the "
+                                 "search exceeds it, the strongest paths are kept and the "
+                                 "achieved strength cutoff (tau) is reported. "
+                                 "0 = auto (StrongestFirst: 1M budget; complete "
+                                 "enumerators: unbounded). Replaces the deprecated "
+                                 "bodyId edge limit.",
+                        )
+                search_columns = select_input(
+                    "Search Columns", SEARCH_COLUMNS, get_user_default("search_columns"),
+                    hint="Which columns to search when resolving neuron names. "
+                         "'auto': all columns (bodyId -> type -> instance -> flywireType/others). "
+                         "Use 'type'/'instance'/'bodyId' to restrict the search.",
+                )
+                filter_by = select_input(
+                    "Filter By", FILTER_OPTIONS, get_user_default("filter_by"),
+                    hint="'bodyId': filter at individual neuron level. 'type': aggregate by neuron type.",
+                )
+
+                with ui.row().classes("gap-4"):
+                    use_cache = checkbox_input(
+                        "Use Cache", get_user_default("use_cache"),
+                        hint="Cache neuron data locally for 10-100x speedup on repeated runs.",
+                    )
+                    cache_only = checkbox_input(
+                        "Cache Only (Offline)", get_user_default("cache_only"),
+                        hint="Use only local cache and never contact the server. "
+                             "Requires the cache to be pre-built.",
+                    )
+
     with results_col:
         output_panel.create(run_label="Complete Paths", run_icon="account_tree")
 
@@ -327,7 +315,9 @@ def create_find_path_tab():
             "max_interlayer": 0 if (src_all or tgt_all) else int(max_interlayer.value),
             "filter_by": filter_by.value,
             "pathfinding": pathfinding_algo.value,
-            "graph_edge_limit_bodyid": int(edge_limit_bodyid.value),
+            # Fix C: the lossy bodyId edge limit is deprecated/ignored.
+            "graph_edge_limit_bodyid": 0,
+            "max_paths_bodyid": int(max_paths_bodyid.value) or None,
             # Complete Paths no longer exposes the early network preview in
             # the UI; keep the backend behavior explicitly disabled.
             "visualize_before_reconstruct": False,

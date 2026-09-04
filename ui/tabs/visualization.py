@@ -37,7 +37,6 @@ from ..components.layer_style_editor import layer_style_editor
 from ..components.palette_picker import (
     palette_picker,
     palette_editor,
-    color_swatch_picker,
     assign_palette_colors,
     notify_empty_custom_palettes,
 )
@@ -191,12 +190,25 @@ def create_skeleton_tab():
 
         with ui.card().classes("w-full drocat-card").props('id="card-skeleton-dataset"'):
             section_header("Dataset", "storage")
-            dataset = dataset_selector(disable_banc=True)
+            dataset = dataset_selector()
             output_dir = dir_input(scope="visualization_skeleton")
-            skeleton_dataset_warning = ui.label(
-                "⚠️ BANC skeleton visualization is unavailable because FlyWire "
-                "does not provide BANC skeletons. Select a non-BANC dataset."
-            ).classes("text-caption text-amber-8").set_visibility(False)
+            banc_resolution = select_input(
+                "BANC Skeleton Resolution",
+                ["l2", "full", "full_auto"], "l2",
+                hint="Public-bucket SWC resolution for BANC datasets. "
+                     "'l2': coarse skeletons for every neuron (fast). "
+                     "'full': full-resolution proofread skeletons. "
+                     "'full_auto': prefer full, fall back to L2. "
+                     "Ignored for non-BANC datasets.",
+            )
+            banc_resolution.set_visibility(False)
+
+            def _set_banc_resolution_visible(visible: bool) -> None:
+                """Toggle the whole select wrapper (column) with fallback."""
+                try:
+                    banc_resolution.parent.set_visibility(visible)
+                except Exception:
+                    banc_resolution.set_visibility(visible)
 
         # ================= 3D Skeleton panel =================
         with ui.card().classes("w-full drocat-card").props('id="card-3d"'):
@@ -204,7 +216,10 @@ def create_skeleton_tab():
             # The three layer/color input modes are mutually exclusive and are
             # chosen with segmented buttons (mirroring the Similar Neurons tab).
             layer_editor_mode = {"value": "Standard"}
-            color_editor_refs = {"neuron": None, "synapse": None, "roi": None}
+            # Neuron/Synapse palette editors are hidden outside the Standard
+            # mode; the ROI palette is mode-independent (the layer editor
+            # defines neurons and synapses, never ROI meshes).
+            color_editor_refs = {"neuron": None, "synapse": None}
             file_upload_path = {"path": None}
             # The Advanced editor is constructed before the shared Search
             # Columns control below; initialize the closure so suggestion
@@ -338,10 +353,14 @@ def create_skeleton_tab():
                 # collapsed behind its expansion header) when Advanced is active.
                 if active == "Advanced" and layer_style.expansion is not None:
                     layer_style.expansion.set_value(True)
-                # The color palette editors are only used by the Standard mode;
-                # the Advanced table / uploaded CSV supply their own color columns.
+                # The Neuron/Synapse color palette editors are only used by
+                # the Standard mode; the Advanced table / uploaded CSV supply
+                # their own color columns. The ROI palette is independent of
+                # the layer editor (it defines neurons and synapses, never
+                # ROI meshes) and stays visible in every mode.
                 show_colors = active == "Standard"
-                for _handle in color_editor_refs.values():
+                for _name in ("neuron", "synapse"):
+                    _handle = color_editor_refs[_name]
                     if _handle is not None:
                         _handle.set_visibility(show_colors)
 
@@ -429,9 +448,65 @@ def create_skeleton_tab():
                         "Brain Mesh", BRAIN_MESH_OPTIONS, get_user_default("brain_mesh"),
                         hint="'template': brain outline. 'whole': full brain surface. 'none': no mesh.",
                     )
+
+                # Mesh extras share one compact row: the VNC toggle plus the
+                # brain outline color (Auto follows the background
+                # adaptively; unchecking pins the picked color + opacity).
+                # Per-ROI colors live in the ROI panel's palette editor.
+                with ui.row().classes("w-full items-end gap-6 flex-wrap"):
                     vnc_mesh = checkbox_input(
                         "VNC Mesh", False,
                         hint="Show the ventral nerve cord mesh (male-cns / manc datasets).",
+                    )
+                    brain_mesh_color = ui.color_input(
+                        "Brain Mesh Color", value="#94a3b8",
+                    ).props("dense").classes("drocat-input").style("width: 11rem")
+                    brain_mesh_color_opacity = number_input(
+                        "Opacity", 0.05, 0, 1, 0.05,
+                        hint=(
+                            "Outline opacity for the picked color. Defaults "
+                            "to 0.05 — half the original auto setting's 10% "
+                            "subtlety (1 = opaque). Only used when Auto is off."
+                        ),
+                    ).props("dense").classes("drocat-input").style("width: 7rem")
+                    brain_mesh_color_auto = checkbox_input(
+                        "Auto", True,
+                        hint=(
+                            "Adaptive outline color: light tone on a white "
+                            "background, dark tone on black. Uncheck to use "
+                            "the picked color and opacity for the brain "
+                            "outline mesh."
+                        ),
+                    )
+                    brain_mesh_color.disable()
+                    brain_mesh_color_opacity.disable()
+
+                    def _brain_mesh_color_value() -> str:
+                        """Compose the backend brain_mesh_color: 'auto' while
+                        Auto is on, otherwise the picked color with the chosen
+                        opacity baked in as rgba()."""
+                        if brain_mesh_color_auto.value:
+                            return "auto"
+                        hex_color = str(brain_mesh_color.value or "#94a3b8").strip()
+                        opacity = float(brain_mesh_color_opacity.value or 1.0)
+                        if opacity >= 1.0:
+                            return hex_color
+                        digits = hex_color[1:]
+                        if len(digits) == 3:
+                            digits = "".join(ch * 2 for ch in digits)
+                        try:
+                            r, g, b = (int(digits[i:i + 2], 16) for i in (0, 2, 4))
+                        except (ValueError, IndexError):
+                            return hex_color
+                        return f"rgba({r}, {g}, {b}, {opacity:g})"
+
+                    def _sync_brain_mesh_color_inputs():
+                        enabled = not brain_mesh_color_auto.value
+                        brain_mesh_color.set_enabled(enabled)
+                        brain_mesh_color_opacity.set_enabled(enabled)
+
+                    brain_mesh_color_auto.on_value_change(
+                        lambda _e: _sync_brain_mesh_color_inputs()
                     )
 
             def _default_synapse_shapes_for_skeleton_mode(mode=None):
@@ -453,7 +528,7 @@ def create_skeleton_tab():
             )
 
             # ------------------------------------------------------------------
-            # Neuron Colors (independent block)
+            # Neuron Skeleton Appearance (collapsible block)
             # ------------------------------------------------------------------
             # Default neuron palette follows the background color: Category10
             # on white, Set3 on black.  Once the user picks a palette card
@@ -470,94 +545,98 @@ def create_skeleton_tab():
             bg_color.on_value_change(lambda _e: _sync_palette_to_background())
 
             with ui.card().classes("w-full drocat-card").props('id="card-skeleton-neuron-colors"'):
-                section_header("Neuron Colors", "palette")
-                neuron_palette = palette_editor(
-                    "Neuron Colors",
-                    value="Category10",
-                    include_auto=False,
-                    on_change=lambda: palette_locked.__setitem__("locked", True),
-                )
-                neuron_palette.props('id="card-skeleton-neuron-palette"')
-                color_editor_refs["neuron"] = neuron_palette
-                neuron_alpha = number_input(
-                    "Neuron Opacity", 0.2, 0, 1, 0.1,
-                    hint=(
-                        "Global fallback opacity for skeletons (0=invisible, 1=solid). "
-                        "A color with an explicit opacity channel overrides it; colors "
-                        "without opacity inherit this value."
-                    ),
-                ).classes("w-48")
-                ui.label(
-                    "The default follows the background (Category10 on white, "
-                    "Set3 on black) until a palette is picked manually. Custom colors "
-                    "may include per-layer opacity; colors without an explicit "
-                    "opacity channel use Neuron Opacity."
-                ).classes("text-caption drocat-muted")
+                with ui.expansion(
+                    "Neuron Skeleton Appearance", icon="palette",
+                ).classes("w-full drocat-section-expansion"):
+                    neuron_palette = palette_editor(
+                        "Neuron Colors",
+                        value="Category10",
+                        include_auto=False,
+                        on_change=lambda: palette_locked.__setitem__("locked", True),
+                    )
+                    neuron_palette.props('id="card-skeleton-neuron-palette"')
+                    color_editor_refs["neuron"] = neuron_palette
+                    neuron_alpha = number_input(
+                        "Neuron Opacity", 0.2, 0, 1, 0.1,
+                        hint=(
+                            "Global fallback opacity for skeletons (0=invisible, 1=solid). "
+                            "A color with an explicit opacity channel overrides it; colors "
+                            "without opacity inherit this value."
+                        ),
+                    ).classes("w-48")
+                    ui.label(
+                        "The default follows the background (Category10 on white, "
+                        "Set3 on black) until a palette is picked manually. Custom colors "
+                        "may include per-layer opacity; colors without an explicit "
+                        "opacity channel use Neuron Opacity."
+                    ).classes("text-caption drocat-muted")
 
             # ------------------------------------------------------------------
-            # Synapse Colors + synapse options (independent block)
+            # Synapse Appearance + synapse options (collapsible block)
             # ------------------------------------------------------------------
             with ui.card().classes("w-full drocat-card").props('id="card-skeleton-synapse-colors"'):
-                section_header("Synapse Colors", "bubble_chart")
-                synapse_palette = palette_editor(
-                    "Synapse Colors",
-                    value="Dark2",
-                    include_auto=False,
-                )
-                synapse_palette.props('id="card-skeleton-synapse-palette"')
-                color_editor_refs["synapse"] = synapse_palette
-                ui.label(
-                    "Colors are assigned per connection between consecutive layers "
-                    "(one fewer than the number of neuron layers). Custom opacity "
-                    "overrides Synapse Opacity per connection layer."
-                ).classes("text-caption drocat-muted")
-                ui.label("Synapse options").classes("drocat-mini-label")
-                # Marker-shape sub-selectors (shown for the chosen mode).
-                with ui.row().classes("w-full items-center gap-4 flex-wrap"):
-                    synapse_shape = select_input(
-                        "Synapse Shape",
-                        [m for m in SYNAPSE_MODE_OPTIONS if m != "pre_post"],
-                        default_synapse_shape,
-                        hint="'cone'/'sphere'/'tetrahedron': solid markers. 'scatter': "
-                             "simple points.",
-                    ).props("outlined")
-                    pre_post_shape = select_input(
-                        "Pre/post shape", PRE_POST_SHAPES, default_pre_post_shape,
-                        hint="'solid (spheres + cones)': post/input sites as solid "
-                             "spheres, pre/output sites as cones. 'scatter (circles + "
-                             "diamonds)': post/input as circles, pre/output as diamonds "
-                             "(lighter HTML; size adjustable via the figure slider).",
-                    ).props("outlined")
-                with param_grid(3):
-                    synapse_size = combo_input(
-                        "Synapse Size", SYNAPSE_SIZE_OPTIONS,
-                        get_user_default("synapse_size") or "1",
-                        hint=(
-                            "Marker size (1-12). Defaults per mode: 1 px for "
-                            "scatter, 3x real for mesh (sphere/cone/tetrahedron "
-                            "and solid pre/post). Scatter uses it as a pixel size; "
-                            "mesh modes use it as a multiplier over the real "
-                            "pre→post distance. Type any integer 1-12."
-                        ),
+                with ui.expansion(
+                    "Synapse Appearance", icon="bubble_chart",
+                ).classes("w-full drocat-section-expansion"):
+                    synapse_palette = palette_editor(
+                        "Synapse Colors",
+                        value="Dark2",
+                        include_auto=False,
                     )
-                    uniform_synapse_size = checkbox_input(
-                        "Uniform Synapse Size",
-                        get_user_default("uniform_synapse_size"),
-                        hint=(
-                            "Use the median pre→post distance for every "
-                            "synapse marker so all paired markers share one size. "
-                            "Pre/post site mode is always uniform and uses its "
-                            "mean real-distance estimate."
-                        ),
-                    )
-                    synapse_alpha = number_input(
-                        "Synapse Opacity", 0.6, 0, 1, 0.1,
-                        hint=(
-                            "Global fallback opacity for synapse markers. A color with "
-                            "an explicit opacity channel overrides it; colors without "
-                            "opacity inherit it."
-                        ),
-                    )
+                    synapse_palette.props('id="card-skeleton-synapse-palette"')
+                    color_editor_refs["synapse"] = synapse_palette
+                    ui.label(
+                        "Colors are assigned per connection between consecutive layers "
+                        "(one fewer than the number of neuron layers). Custom opacity "
+                        "overrides Synapse Opacity per connection layer."
+                    ).classes("text-caption drocat-muted")
+                    ui.label("Synapse options").classes("drocat-mini-label")
+                    # Marker-shape sub-selectors (shown for the chosen mode).
+                    with ui.row().classes("w-full items-center gap-4 flex-wrap"):
+                        synapse_shape = select_input(
+                            "Synapse Shape",
+                            [m for m in SYNAPSE_MODE_OPTIONS if m != "pre_post"],
+                            default_synapse_shape,
+                            hint="'cone'/'sphere'/'tetrahedron': solid markers. 'scatter': "
+                                 "simple points.",
+                        ).props("outlined")
+                        pre_post_shape = select_input(
+                            "Pre/post shape", PRE_POST_SHAPES, default_pre_post_shape,
+                            hint="'solid (spheres + cones)': post/input sites as solid "
+                                 "spheres, pre/output sites as cones. 'scatter (circles + "
+                                 "diamonds)': post/input as circles, pre/output as diamonds "
+                                 "(lighter HTML; size adjustable via the figure slider).",
+                        ).props("outlined")
+                    with param_grid(3):
+                        synapse_size = combo_input(
+                            "Synapse Size", SYNAPSE_SIZE_OPTIONS,
+                            get_user_default("synapse_size") or "1",
+                            hint=(
+                                "Marker size (1-12). Defaults per mode: 1 px for "
+                                "scatter, 3x real for mesh (sphere/cone/tetrahedron "
+                                "and solid pre/post). Scatter uses it as a pixel size; "
+                                "mesh modes use it as a multiplier over the real "
+                                "pre→post distance. Type any integer 1-12."
+                            ),
+                        )
+                        uniform_synapse_size = checkbox_input(
+                            "Uniform Synapse Size",
+                            get_user_default("uniform_synapse_size"),
+                            hint=(
+                                "Use the median pre→post distance for every "
+                                "synapse marker so all paired markers share one size. "
+                                "Pre/post site mode is always uniform and uses its "
+                                "mean real-distance estimate."
+                            ),
+                        )
+                        synapse_alpha = number_input(
+                            "Synapse Opacity", 0.6, 0, 1, 0.1,
+                            hint=(
+                                "Global fallback opacity for synapse markers. A color with an "
+                                "explicit opacity channel overrides it; colors without "
+                                "opacity inherit it."
+                            ),
+                        )
 
             # Shape sub-selectors + warning follow the selected synapse mode.
             def _synapse_mode_is_scatter() -> bool:
@@ -609,191 +688,201 @@ def create_skeleton_tab():
             layer_style.set_synapse_mode(synapse_view_mode.value)
 
             # ------------------------------------------------------------------
-            # Brain Region ROIs + ROI Colors (independent block)
+            # Brain Region ROIs + ROI Colors (collapsible block)
             # ------------------------------------------------------------------
             with ui.card().classes("w-full drocat-card").props('id="card-skeleton-roi-colors"'):
-                section_header("Brain Region ROIs (independent)", "view_in_ar")
-                roi_select = multi_select_input(
-                    "Mesh ROIs",
-                    COMMON_ROIS,
-                    default=[],
-                    hint=(
-                        "Select brain regions to show as meshes. No ROI meshes are "
-                        "selected by default. Type any ROI name or regex (e.g. "
-                        "ME.*, all, primary) and press Enter to add it."
-                    ),
-                ).props("outlined").props('new-value-mode="add-unique"')
-                roi_detail_hint = ui.label(
-                    "Primary ROI suggestions load the selected dataset's metadata."
-                ).classes("text-caption drocat-muted")
-                with ui.row().classes("w-full items-center gap-6"):
-                    include_lr = checkbox_input(
-                        "Include L/R variants",
-                        False,
+                with ui.expansion(
+                    "Brain Region ROIs (independent)", icon="view_in_ar",
+                ).classes("w-full drocat-section-expansion"):
+                    roi_select = multi_select_input(
+                        "Mesh ROIs",
+                        COMMON_ROIS,
+                        default=[],
                         hint=(
-                            "Keep explicit (L)/(R) entries in the primary list. "
-                            "When off, bilateral pairs are shown once without "
-                            "the suffix."
+                            "Select brain regions to show as meshes. No ROI meshes are "
+                            "selected by default. Type any ROI name or regex (e.g. "
+                            "ME.*, all, primary) and press Enter to add it."
                         ),
+                    ).props("outlined").props('new-value-mode="add-unique"')
+                    roi_detail_hint = ui.label(
+                        "Primary ROI suggestions load the selected dataset's metadata."
+                    ).classes("text-caption drocat-muted")
+                    with ui.row().classes("w-full items-center gap-6"):
+                        include_lr = checkbox_input(
+                            "Include L/R variants",
+                            False,
+                            hint=(
+                                "Keep explicit (L)/(R) entries in the primary list. "
+                                "When off, bilateral pairs are shown once without "
+                                "the suffix."
+                            ),
+                        )
+                        include_subprimary = checkbox_input(
+                            "Include sub-primary ROIs",
+                            False,
+                            hint=(
+                                "Append non-primary ROI names from the local "
+                                "available-ROI inventory to the primary list."
+                            ),
+                        )
+                    with param_grid(1):
+                        mesh_alpha = number_input(
+                            "ROI Mesh Opacity", 0.1, 0, 1, 0.05,
+                            hint=(
+                                "Global fallback opacity for ROI meshes. A color with an "
+                                "explicit opacity channel overrides it; colors without "
+                                "opacity inherit it."
+                            ),
+                        )
+                    roi_palette = palette_editor(
+                        "ROI Colors",
+                        value="Cool",
+                        include_auto=True,
                     )
-                    include_subprimary = checkbox_input(
-                        "Include sub-primary ROIs",
-                        False,
-                        hint=(
-                            "Append non-primary ROI names from the local "
-                            "available-ROI inventory to the primary list."
-                        ),
-                    )
-                with param_grid(1):
-                    mesh_alpha = number_input(
-                        "ROI Mesh Opacity", 0.1, 0, 1, 0.05,
-                        hint=(
-                            "Global fallback opacity for ROI meshes. A color with an "
-                            "explicit opacity channel overrides it; colors without "
-                            "opacity inherit it."
-                        ),
-                    )
-                roi_palette = palette_editor(
-                    "ROI Colors",
-                    value="Cool",
-                    include_auto=True,
-                )
-                roi_palette.props('id="card-skeleton-roi-palette"')
-                color_editor_refs["roi"] = roi_palette
-                ui.label(
-                    "Colors are assigned in the displayed order; every resolved ROI mesh "
-                    "has its own legend entry. Use Custom colors for per-ROI opacity overrides."
-                ).classes("text-caption drocat-muted")
-                brain_mesh_picker = color_swatch_picker("Brain Mesh Color", value="auto")
-
-            with ui.expansion("Advanced Settings", icon="settings_suggest").classes("w-full"):
-                ui.label("Data & Rendering").classes("drocat-mini-label")
-                with ui.row().classes("gap-4"):
-                    cache_neurons = checkbox_input(
-                        "Cache Neurons", get_user_default("cache_neurons"),
-                        hint="Cache fetched skeletons as portable .swc.zst "
-                             "files in the shared cache for faster repeat "
-                             "renders.",
-                    )
-                    cache_default_state = {"user_changed": False, "updating": False}
-
-                    def on_cache_neurons_change(_event):
-                        if not cache_default_state["updating"]:
-                            cache_default_state["user_changed"] = True
-
-                    cache_neurons.on_value_change(on_cache_neurons_change)
-                    cache_synapses = checkbox_input(
-                        "Cache Synapses", get_user_default("cache_synapses"),
-                        hint="Cache fetched synapse data locally.",
-                    )
-                with ui.row().classes("gap-4"):
-                    simplification_method = select_input(
-                        "Simplification Method",
-                        ["fast", "fine", "artistic"],
-                        get_user_default("simplification_method"),
-                        hint=(
-                            "NeuPrint tube rendering: 'fast' (default) reads "
-                            "the shared raw level-0 skeleton source, then "
-                            "applies direct mesh decimation in memory plus "
-                            "the FAFB fast node-reduction stage; 'fine' "
-                            "smooths/resamples with the accelerated FAFB "
-                            "radius profile; 'artistic' uses vertex-cluster "
-                            "mesh decimation. All methods use batched "
-                            "parallel online fetching and are available for "
-                            "NeuPrint and FlyWire/FAFB tube renders; line "
-                            "mode bypasses the method."
-                        ),
-                    )
-                    default_simplification = checkbox_input(
-                        "Use Default Mesh Simplification", True,
-                        hint="Use the method default: fast removes 0.90 of faces; "
-                             "fine/artistic remove 0.95 for NeuPrint and "
-                             "FlyWire/FAFB. Uncheck to set the value below.",
-                    )
-                    mesh_simplification = number_input(
-                        "Mesh Simplification (faces removed)",
-                        default_skeleton_tab_simplification(
-                            dataset.value, simplification_method.value,
-                        ),
-                        0.0, 0.99, 0.05,
-                        hint="Fraction of tube-mesh faces REMOVED for rendering: "
-                             "0.95 = keep 5%. Higher = faster/coarser, lower = "
-                             "more detailed but slower.",
-                    )
-                    mesh_simplification.set_enabled(False)
-
-                ui.label("Export").classes("drocat-mini-label")
-                with param_grid(3):
-                    export_method = select_input(
-                        "Export Method", ["webdriver", "kaleido"], "webdriver",
-                        hint="'webdriver': fast, needs Chrome 109+. 'kaleido': slower but stable fallback.",
-                    )
-                    export_scale = number_input(
-                        "Export Scale", 3, 1, 5,
-                        hint="Resolution multiplier for PNG exports (higher = sharper).",
-                    )
-                with ui.row().classes("gap-4"):
-                    show_fig = checkbox_input(
-                        "Show Figure",
-                        # The Skeleton tab is the one place that still opens
-                        # the figure by default; the global default (and all
-                        # analysis tabs) start unchecked unless the user saved
-                        # an explicit override here in Settings.
-                        get_user_default("show_fig_skeleton")
-                        if has_user_default("show_fig_skeleton") else True,
-                        hint="Open the 3D HTML visualization after rendering.",
-                    )
-                    export_views = checkbox_input(
-                        "Export Views", get_user_default("export_views"),
-                        hint="Export PNG screenshots from 6 angles.",
-                    )
+                    roi_palette.props('id="card-skeleton-roi-palette"')
+                    ui.label(
+                        "Colors are assigned in the displayed order; every resolved ROI mesh "
+                        "has its own legend entry. Use Custom colors for per-ROI opacity "
+                        "overrides. The brain outline mesh color lives in General Appearance."
+                    ).classes("text-caption drocat-muted")
 
             # ------------------------------------------------------------------
-            # Export Video / GIF + Individual Profiles (independent block,
-            # outside advanced settings)
+            # Export Video / GIF + Individual Profiles (collapsible blocks;
+            # the Advanced Settings expansion follows below them)
             # ------------------------------------------------------------------
             with ui.card().classes("w-full drocat-card").props('id="card-skeleton-export-video"'):
-                section_header("Export Video / GIF", "videocam")
-                with ui.row().classes("gap-4"):
-                    export_video = checkbox_input(
-                        "Export Video", False,
-                        hint="Render a rotating video of the 3D scene (needs Chrome/WebDriver).",
-                    )
-                    rotate = select_input(
-                        "Rotate", ["horizontal", "vertical"], "horizontal",
-                    )
-                    export_gif = checkbox_input(
-                        "Also Export GIF", True,
-                        hint="Convert the video to a small GIF as well.",
-                    )
-                with param_grid(3):
-                    fps = number_input("FPS", 30, 5, 60, 5)
-                    degree_per_frame = number_input("Degrees / Frame", 1.0, 0.1, 5.0, 0.1)
-                    gif_scale = number_input("GIF Scale", 0.2, 0.05, 1.0, 0.05)
+                with ui.expansion(
+                    "Export Video / GIF", icon="videocam",
+                ).classes("w-full drocat-section-expansion"):
+                    with ui.row().classes("gap-4"):
+                        export_video = checkbox_input(
+                            "Export Video", False,
+                            hint="Render a rotating video of the 3D scene (needs Chrome/WebDriver).",
+                        )
+                        rotate = select_input(
+                            "Rotate", ["horizontal", "vertical"], "horizontal",
+                        )
+                        export_gif = checkbox_input(
+                            "Also Export GIF", True,
+                            hint="Convert the video to a small GIF as well.",
+                        )
+                    with param_grid(3):
+                        fps = number_input("FPS", 30, 5, 60, 5)
+                        degree_per_frame = number_input("Degrees / Frame", 1.0, 0.1, 5.0, 0.1)
+                        gif_scale = number_input("GIF Scale", 0.2, 0.05, 1.0, 0.05)
 
-                ui.separator().classes("my-2")
-                section_header("Individual Profiles (PDF / PPTX)", "photo_library")
-                with ui.row().classes("gap-4"):
-                    export_individual_profiles = checkbox_input(
-                        "Export Individual Profiles", False,
-                        hint="After rendering, generate a PDF/PPTX with per-neuron profile plots.",
-                    )
-                    summary_format = multi_select_input(
-                        "Summary Format", ["pdf", "pptx"], ["pdf"],
-                        hint="Output formats for the individual-profile summary.",
-                    )
-                with param_grid(3):
-                    profile_cols = number_input("Images Per Page (cols)", 3, 1, 6)
-                    profile_rows = number_input("Images Per Page (rows)", 2, 1, 6)
-                    profile_views = multi_select_input(
-                        "Profile Views", ["front", "side", "top", "back", "bottom"], ["front"],
-                        hint="Camera views included in each individual profile.",
-                    )
-                ui.label(
-                    "Each individual profile follows the Neuron Legend Mode: "
-                    "'single' = one profile per neuron, 'type' = one profile per type "
-                    "(all layers combined), 'layer' = one profile per layer / custom group."
-                ).classes("text-caption drocat-muted")
+                with ui.expansion(
+                    "Individual Profiles (PDF / PPTX)", icon="photo_library",
+                ).classes("w-full drocat-section-expansion"):
+                    with ui.row().classes("gap-4"):
+                        export_individual_profiles = checkbox_input(
+                            "Export Individual Profiles", False,
+                            hint="After rendering, generate a PDF/PPTX with per-neuron profile plots.",
+                        )
+                        summary_format = multi_select_input(
+                            "Summary Format", ["pdf", "pptx"], ["pdf"],
+                            hint="Output formats for the individual-profile summary.",
+                        )
+                    with param_grid(3):
+                        profile_cols = number_input("Images Per Page (cols)", 3, 1, 6)
+                        profile_rows = number_input("Images Per Page (rows)", 2, 1, 6)
+                        profile_views = multi_select_input(
+                            "Profile Views", ["front", "side", "top", "back", "bottom"], ["front"],
+                            hint="Camera views included in each individual profile.",
+                        )
+                    ui.label(
+                        "Each individual profile follows the Neuron Legend Mode: "
+                        "'single' = one profile per neuron, 'type' = one profile per type "
+                        "(all layers combined), 'layer' = one profile per layer / custom group."
+                    ).classes("text-caption drocat-muted")
+
+            # ------------------------------------------------------------------
+            # Advanced Settings (kept at the bottom, below the export blocks)
+            # ------------------------------------------------------------------
+            with ui.card().classes("w-full drocat-card").props('id="card-skeleton-advanced"'):
+                with ui.expansion(
+                    "Advanced Settings", icon="settings_suggest",
+                ).classes("w-full drocat-section-expansion"):
+                    ui.label("Data & Rendering").classes("drocat-mini-label")
+                    with ui.row().classes("gap-4"):
+                        cache_neurons = checkbox_input(
+                            "Cache Neurons", get_user_default("cache_neurons"),
+                            hint="Cache fetched skeletons as portable .swc.zst "
+                                 "files in the shared cache for faster repeat "
+                                 "renders.",
+                        )
+                        cache_default_state = {"user_changed": False, "updating": False}
+
+                        def on_cache_neurons_change(_event):
+                            if not cache_default_state["updating"]:
+                                cache_default_state["user_changed"] = True
+
+                        cache_neurons.on_value_change(on_cache_neurons_change)
+                        cache_synapses = checkbox_input(
+                            "Cache Synapses", get_user_default("cache_synapses"),
+                            hint="Cache fetched synapse data locally.",
+                        )
+                    with ui.row().classes("gap-4"):
+                        simplification_method = select_input(
+                            "Simplification Method",
+                            ["fast", "fine", "artistic"],
+                            get_user_default("simplification_method"),
+                            hint=(
+                                "NeuPrint tube rendering: 'fast' (default) reads "
+                                "the shared raw level-0 skeleton source, then "
+                                "applies direct mesh decimation in memory plus "
+                                "the FAFB fast node-reduction stage; 'fine' "
+                                "smooths/resamples with the accelerated FAFB "
+                                "radius profile; 'artistic' uses vertex-cluster "
+                                "mesh decimation. All methods use batched "
+                                "parallel online fetching and are available for "
+                                "NeuPrint and FlyWire/FAFB tube renders; line "
+                                "mode bypasses the method."
+                            ),
+                        )
+                        default_simplification = checkbox_input(
+                            "Use Default Mesh Simplification", True,
+                            hint="Use the method default: fast removes 0.90 of faces; "
+                                 "fine/artistic remove 0.95 for NeuPrint and "
+                                 "FlyWire/FAFB. Uncheck to set the value below.",
+                        )
+                        mesh_simplification = number_input(
+                            "Mesh Simplification (faces removed)",
+                            default_skeleton_tab_simplification(
+                                dataset.value, simplification_method.value,
+                            ),
+                            0.0, 0.99, 0.05,
+                            hint="Fraction of tube-mesh faces REMOVED for rendering: "
+                                 "0.95 = keep 5%. Higher = faster/coarser, lower = "
+                                 "more detailed but slower.",
+                        )
+                        mesh_simplification.set_enabled(False)
+
+                    ui.label("Export").classes("drocat-mini-label")
+                    with param_grid(3):
+                        export_method = select_input(
+                            "Export Method", ["webdriver", "kaleido"], "webdriver",
+                            hint="'webdriver': fast, needs Chrome 109+. 'kaleido': slower but stable fallback.",
+                        )
+                        export_scale = number_input(
+                            "Export Scale", 3, 1, 5,
+                            hint="Resolution multiplier for PNG exports (higher = sharper).",
+                        )
+                    with ui.row().classes("gap-4"):
+                        show_fig = checkbox_input(
+                            "Show Figure",
+                            # The Skeleton tab is the one place that still opens
+                            # the figure by default; the global default (and all
+                            # analysis tabs) start unchecked unless the user saved
+                            # an explicit override here in Settings.
+                            get_user_default("show_fig_skeleton")
+                            if has_user_default("show_fig_skeleton") else True,
+                            hint="Open the 3D HTML visualization after rendering.",
+                        )
+                        export_views = checkbox_input(
+                            "Export Views", get_user_default("export_views"),
+                            hint="Export PNG screenshots from 6 angles.",
+                        )
 
         def _sync_simplification_controls():
             is_line = skeleton_mode.value == "line"
@@ -865,17 +954,15 @@ def create_skeleton_tab():
                     options.append(value)
             roi_select.set_options(options)
 
-        def _sync_skeleton_dataset_warning():
-            skeleton_dataset_warning.set_visibility(
-                is_banc_dataset(dataset.value)
-            )
+        def _sync_banc_resolution_visibility():
+            _set_banc_resolution_visible(is_banc_dataset(dataset.value))
 
         include_lr.on_value_change(lambda _e: _sync_roi_options())
         include_subprimary.on_value_change(lambda _e: _sync_roi_options())
         dataset.on_value_change(lambda _e: _sync_roi_options())
-        dataset.on_value_change(lambda _e: _sync_skeleton_dataset_warning())
+        dataset.on_value_change(lambda _e: _sync_banc_resolution_visibility())
         _sync_roi_options()
-        _sync_skeleton_dataset_warning()
+        _sync_banc_resolution_visibility()
 
     with results_col:
         skeleton_output.create(run_label="Generate 3D Skeleton", run_icon="view_in_ar")
@@ -910,13 +997,6 @@ def create_skeleton_tab():
         return result
 
     async def run_skeleton():
-        if is_banc_dataset(dataset.value):
-            _sync_skeleton_dataset_warning()
-            ui.notify(
-                "BANC skeleton visualization is unavailable; select a non-BANC dataset.",
-                type="warning",
-            )
-            return
         editor_mode = layer_editor_mode["value"]
         rois = roi_select.value or []
 
@@ -1056,6 +1136,7 @@ def create_skeleton_tab():
 
         constructor_params = {
             "dataset": dataset.value,
+            "banc_skeleton_resolution": banc_resolution.value,
             "neuron_layers": neuron_layers,
             "search_columns": search_columns.value,
             "hemisphere": hemisphere.value,
@@ -1088,7 +1169,7 @@ def create_skeleton_tab():
             "export_scale": int(export_scale.value),
             "export_views": export_views.value,
             "show_fig": show_fig.value,
-            "brain_mesh_color": brain_mesh_picker.get_value(),
+            "brain_mesh_color": _brain_mesh_color_value(),
             "neuprint_skeleton_pipeline": simplification_method.value,
             "skeleton_mesh_simplification": (
                 default_skeleton_tab_simplification(
