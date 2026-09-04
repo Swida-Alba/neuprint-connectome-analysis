@@ -113,6 +113,7 @@ function makeExporter(cy, customGroups) {
         extractFunction('extractColorHex', html) + '\n' +
         extractFunction('csvEscapeField', html) + '\n' +
         extractFunction('getNtGroupCSV', html) + '\n' +
+        extractFunction('groupMembers', html) + '\n' +
         extractFunction('buildEdgeListCSV', html) + '\n';
     return new Function('cy', 'customGroups', src +
         '\nreturn { init: initializeEdgeBaseStyles, build: buildEdgeListCSV, ntGroup: getNtGroupCSV };')(cy, customGroups);
@@ -264,13 +265,16 @@ if (elements.edges.length > 0) {
     // Recolor the edge the way the color controls do (base appearance).
     e0.data('__baseColor', '#123456');
     // Relabel a node with comma + quotes to exercise CSV escaping, and
-    // re-group another node the way editNodeProperties does.
+    // re-group another node the way the group-assignment flow does (single
+    // assigned_group membership; node_type stays immutable).
     srcNode.data('label', 'S,R "renamed"');
     if (edges.length > 1) {
-        eLast.source().data('node_type', 'target');
+        eLast.source().data('assigned_group', 'target');
     }
-    // Put one edge into a custom group.
-    customGroups['MyGroup'] = { ids: [eLast.id()], color: '#000000', opacity: 100 };
+    // Put the last edge's TARGET node into a custom group (membership is a
+    // live node field; the CSV custom_groups column derives from endpoints).
+    customGroups['MyGroup'] = { label: 'MyGroup', color: '#000000', opacity: 100 };
+    eLast.target().data('assigned_group', 'MyGroup');
 
     const editedRows = parseCSV(exporter.build());
     const r0 = editedRows[1];

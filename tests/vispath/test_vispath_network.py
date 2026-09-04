@@ -30,6 +30,7 @@ import re
 import shutil
 import subprocess
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pandas as pd
@@ -83,6 +84,28 @@ def _build_network_html(output_path):
 def network_html(tmp_path_factory):
     out = tmp_path_factory.mktemp("vispath_html") / "network_test.html"
     return _build_network_html(out)
+
+
+@pytest.fixture(scope="module")
+def declared_html(tmp_path_factory):
+    """Network HTML in mapping-view mode: declared dataset groups replace
+    the structural roles everywhere (legend, dropdown, quick actions)."""
+    out = tmp_path_factory.mktemp("vispath_declared") / "declared_test.html"
+    df = pd.DataFrame({"path_block": ["S>A>T"], "weights": [[5]]})
+    vp = VisualizePath(
+        path_file=df, output_folder=str(out.parent), showfig=False,
+        verbose=False, network_layout="dagre",
+        node_groups=[
+            {"name": "F", "label": "FAFB", "color": "#22c55e"},
+            {"name": "M", "label": "MCNS", "color": "#3b82f6"},
+        ],
+    )
+    G = FastGraph()
+    G.add_edge("S", "T", 5)
+    G.node_attrs["S"] = {"node_type": "intermediate", "group": "F"}
+    G.node_attrs["T"] = {"node_type": "intermediate", "group": "M"}
+    vp._plot_cytoscape_network(G, output_path=str(out), layout="dagre", open_browser=False)
+    return out
 
 
 @pytest.fixture(scope="module")
@@ -405,6 +428,540 @@ class TestGeneratedHtmlStructure:
         assert js.count("refreshEdgeStyles(false);") >= 3
 
 
+class TestPanelCollapseAndRegrouping:
+    """Panel collapse/show (top + right), the functional regrouping of the
+    control cards, the compact export row, and systematic hover labels."""
+
+    def test_panel_bar_present(self, network_html):
+        html = network_html.read_text(encoding="utf-8")
+        js = _script_text(network_html)
+        assert 'id="panelBar"' in html
+        assert 'id="toggleControlsBtn"' in html
+        assert 'id="togglePanelBtn"' in html
+        assert 'onclick="toggleTopControls()"' in html
+        assert 'onclick="toggleRightPanel()"' in html
+        # both toggle functions exist and re-measure the canvas
+        assert "function toggleTopControls" in js
+        assert "function toggleRightPanel" in js
+        assert "function initPanelBar" in js
+        assert js.count("cy.resize()") >= 2
+        # collapse classes exist in the stylesheet and are applied via JS
+        assert ".controls.collapsed" in html
+        assert ".main.palette-hidden" in html
+        assert "body.controls-collapsed #cy" in html
+        assert "classList.toggle('collapsed'" in js
+        assert "classList.toggle('palette-hidden'" in js
+        # panel preference persisted and restored
+        assert "vispath_network_panels" in js
+        assert "function persistPanelState" in js
+        assert "initPanelBar();" in js
+
+    def test_spacing_rotation_controls_live_in_layout_card(self, network_html):
+        """The Horizontal/Vertical gap and Rotate spinners sit in the Layout
+        ribbon page, directly after the layout algorithm selector (between the
+        pageLayout and pageFilter containers). Gaps are absolute px distances
+        with the icon inline in the label."""
+        html = network_html.read_text(encoding="utf-8")
+        js = _script_text(network_html)
+        order = [
+            html.index('id="pageLayout"'),
+            html.index('id="layoutSelector"'),
+            html.index('id="nodeGapHSlider"'),
+            html.index('id="nodeGapVSlider"'),
+            html.index('id="rotateSlider"'),
+            html.index('id="pageFilter"'),
+        ]
+        assert order == sorted(order), "spinners not between layoutSelector and the next card"
+        for elem_id in ("nodeGapHSlider", "nodeGapVSlider", "rotateSlider"):
+            tag = f'id="{elem_id}"'
+            assert tag in html
+            # spinner (number input), not a capped range slider
+            seg = html[html.index(tag) - 60: html.index(tag) + 240]
+            assert 'type="number"' in seg, f"{elem_id} is not a number spinner"
+        # icon travels with the label text on one line
+        assert ">Horizontal ↔</label>" in html
+        assert ">Vertical ↕</label>" in html
+        assert ">Rotate ↻</label>" in html
+        assert 'onclick="resetSpacing()"' in html
+        # single counter-clockwise button: each click applies -90°, repeated
+        # clicks accumulate; snapRotation was removed with the 4-snap row
+        assert 'onclick="rotateCounterClockwise()"' in html
+        assert "function rotateCounterClockwise" in js
+        assert "lastRotationDeg - 90" in js
+        assert "snapRotation" not in html and "snapRotation" not in js
+
+    def test_visibility_card_groups_hide_controls(self, network_html):
+        """Connection Metric sits at the TOP of the Filter ribbon page,
+        directly above the Hide Edges input, with Hide Orphans / Self-Loops /
+        Dead Ends on the same page (Labels moved to the Layout page)."""
+        html = network_html.read_text(encoding="utf-8")
+        order = [
+            html.index('id="pageFilter"'),
+            html.index('id="metricSelect"'),
+            html.index('id="ignoreEdgesInput"'),
+            html.index('id="hideOrphansBtn"'),
+            html.index('id="hideSelfLoopsBtn"'),
+            html.index('id="hideDeadEndsBtn"'),
+            html.index('id="pageStyle"'),
+        ]
+        assert order == sorted(order), "metric + hide toggles not grouped in the Filter card"
+
+    def test_labels_on_layout_and_canvas_simplification(self, network_html):
+        """Labels (node labels + edge weights) live on the Layout page
+        between Rotate and Canvas; the Canvas group is just Fit + Refresh
+        Layout (the Reset button was removed); edge labels follow the active
+        Connection Metric."""
+        html = network_html.read_text(encoding="utf-8")
+        js = _script_text(network_html)
+        order = [
+            html.index('id="rotateSlider"'),
+            html.index('id="toggleLabelsBtn"'),
+            html.index('id="toggleEdgeWeightsBtn"'),
+            html.index('onclick="fitGraph()"'),
+            html.index('onclick="refreshLayout()"'),
+            html.index('id="pageFilter"'),
+        ]
+        assert order == sorted(order), "Labels group not between Rotate and Canvas on the Layout page"
+        # Reset button removed from the Canvas group
+        assert 'onclick="resetLayout()"' not in html
+        # the Filter page no longer hosts the Labels group
+        filter_seg = html[html.index('id="pageFilter"'): html.index('id="pageStyle"')]
+        assert 'toggleLabelsBtn' not in filter_seg
+        # metric-following edge labels
+        assert "function updateEdgeMetricLabels" in js
+        assert js.count("updateEdgeMetricLabels();") >= 2  # toggle + updateMetric
+        assert "'label': 'data(display_label)'" in js
+
+    def test_label_font_color_and_no_label_background(self, network_html):
+        """Node labels never render a background: applyBackground no longer
+        injects text-background-*. A Font Color control beside the background
+        color drives the node label text color and adapts on theme flips
+        unless the user chose a color."""
+        html = network_html.read_text(encoding="utf-8")
+        js = _script_text(network_html)
+        assert 'id="labelFontColor"' in html
+        assert "applyLabelFontColor(this.value)" in html
+        assert "let customLabelColor = null;" in js
+        assert "if (!customLabelColor) {" in js
+        assert "cy.nodes().style('color', isDark ? '#e5e7eb' : '#000000')" in js
+        # the old readability background is gone from applyBackground
+        assert "text-background-color': isDark" not in js
+        # persisted with the graph export and restored on import
+        assert "labelFontColor: customLabelColor || ''" in js
+        assert "if (settings.labelFontColor) {" in js
+
+    def test_tab_cards_and_edge_label_cleanup(self, network_html):
+        """Tabs use a light card background; each ribbon group is a standalone
+        outlined card (no divider rules); edge weight labels are bare numbers
+        (integer-safe, no unit, no background/outline box); Background and
+        Font carry two distinct mini labels."""
+        html = network_html.read_text(encoding="utf-8")
+        js = _script_text(network_html)
+        # tabs: light card background, hover strengthens
+        tab_rule = re.search(r"\.vp-tab \{[^}]*\}", html).group(0)
+        assert "background: var(--vp-card-bg)" in tab_rule
+        # ribbon groups: standalone outlined cards, divider rule gone
+        group_rule = re.search(r"\.vp-ribbon-group \{[^}]*\}", html).group(0)
+        assert "border: 1px solid var(--vp-border)" in group_rule
+        assert "border-radius: 6px" in group_rule
+        assert ".vp-ribbon-group:last-child" not in html
+        assert "min-height: 127px" in html
+        # edge labels: bare numbers, integer-safe (no '.0'), no unit
+        assert "raw.toLocaleString('en-US')" in js
+        assert "Number(edge.data('original_weight'))" in js
+        # no edge label background/outline box
+        assert "'text-background-color': '#fff'" not in js
+        assert "'text-border-color': '#999'" not in js
+        # Background & Font: two distinct mini labels
+        assert ">Background</span>" in html
+        assert ">Font</span>" in html
+        assert ".vp-mini-label" in html
+
+    def test_appearance_card_groups_style_controls(self, network_html):
+        """Edge-width scale, size spinners, reciprocal offset,
+        refresh-edges and background live in ONE Style ribbon page (the
+        metric moved to the Filter page)."""
+        html = network_html.read_text(encoding="utf-8")
+        order = [
+            html.index('id="pageStyle"'),
+            html.index('id="edgeWidthScale"'),
+            html.index('id="fontSizeSlider"'),
+            html.index('id="nodeSizeSlider"'),
+            html.index('id="edgeWidthSlider"'),
+            html.index('id="arrowSizeSlider"'),
+            html.index('id="reciprocalOffsetControls"'),
+            html.index('id="bgToggleBtn"'),
+            html.index('id="pageShare"'),
+        ]
+        assert order == sorted(order), "style controls not grouped in the Style card"
+
+    def test_layout_persistence_grouped_with_exports(self, network_html):
+        """Layout persistence (Save/Load browser storage, Export/Import
+        Layout file) lives in the Import & Export ribbon page, grouped
+        after Export/Import Graph and before the Edge List CSV."""
+        html = network_html.read_text(encoding="utf-8")
+        order = [
+            html.index('id="pageShare"'),
+            html.index('onclick="exportGraph()"'),
+            html.index('onclick="saveLayout()"'),
+            html.index('onclick="loadLayout()"'),
+            html.index('onclick="exportLayout()"'),
+            html.index('onclick="importLayout()"'),
+            html.index('onclick="exportEdgeListCSV()"'),
+        ]
+        assert order == sorted(order), "layout persistence not grouped in the Import & Export page"
+        # the Layout ribbon page keeps only layout actions (no persistence rows)
+        layout_page = html[html.index('id="pageLayout"'):html.index('id="pageFilter"')]
+        assert 'onclick="saveLayout()"' not in layout_page
+        assert 'onclick="exportLayout()"' not in layout_page
+
+    def test_export_row_compact(self, network_html):
+        """The narrowed scale input shares ONE flex row with the PNG and
+        SVG buttons (buttons to the RIGHT of the input, not below it)."""
+        html = network_html.read_text(encoding="utf-8")
+        row_start = html.index('id="exportScale"')
+        row_open = html.rindex("<div", 0, row_start)
+        row_close = html.index("</div>", row_start)
+        row = html[row_open:row_close]
+        assert "exportPNG()" in row
+        assert "exportSVG()" in row
+        assert ">PNG<" in row and ">SVG<" in row
+        assert "width: 56px" in row  # narrowed input
+        assert "display: flex" in row
+
+    def test_history_section_replaces_view_controls(self, network_html):
+        """The right panel is three accordion sections (Edit / History /
+        Selection & Color); the old View Controls section and the flat
+        Color Settings stack are gone."""
+        html = network_html.read_text(encoding="utf-8")
+        assert "👁️ View Controls" not in html
+        assert "🎨 Color Settings" not in html
+        hist = html.index(">↩️ History<")
+        assert hist < html.index('id="undoBtn"') < html.index('id="redoBtn"') \
+            < html.index('id="historyList"')
+        # Selection & Color accordion with live chip after History
+        selection = html.index(">🎛️ Selection & Color<")
+        assert hist < selection
+        assert selection < html.index('id="selectionSummary"') < html.index('id="selectedInfo"')
+
+    def test_every_control_has_hover_label(self, network_html):
+        """Systematic hover labels: every button, select and input in the
+        generated network page carries a non-empty title attribute."""
+        html = network_html.read_text(encoding="utf-8")
+
+        class _Collector(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.missing = []
+
+            def handle_starttag(self, tag, attrs):
+                if tag not in ("button", "select", "input"):
+                    return
+                attr = dict(attrs)
+                if not (attr.get("title") or "").strip():
+                    self.missing.append(
+                        (tag, attr.get("id") or attr.get("onclick") or attr.get("oninput") or "?")
+                    )
+
+        collector = _Collector()
+        collector.feed(html)
+        assert collector.missing == [], f"controls without title: {collector.missing}"
+
+    def test_layout_transform_history_recorded(self, network_html):
+        """Spacing/rotation slider interactions commit ONE history entry per
+        drag (pre-state captured on first input, pushed on change)."""
+        js = _script_text(network_html)
+        assert "pushStateHistory('Adjust node spacing', pendingTransformState)" in js
+        assert "pushStateHistory('Rotate layout', pendingTransformState)" in js
+        assert "pushHistory('Reset spacing')" in js
+        assert "function onSpacingInput" in js
+        assert "function onSpacingChange" in js
+        assert "function onRotationInput" in js
+        assert "function onRotationChange" in js
+        # snapshots carry the transform trackers for exact undo/redo
+        assert "spacingX: lastGapX" in js
+        assert "spacingY: lastGapY" in js
+        assert "rotation: lastRotationDeg" in js
+        assert "resetLayoutTransformTrackers();" in js
+        # layout re-runs reset the trackers (algorithm regenerates positions)
+        assert js.count("resetLayoutTransformTrackers();") >= 5
+
+    def test_layout_transforms_respect_visibility(self, network_html):
+        """The transforms filter through the same isVisibleElement rule as
+        the layout re-runs and operate via cy.batch()."""
+        js = _script_text(network_html)
+        assert js.count("cy.nodes().filter(isVisibleElement).forEach") >= 2
+        assert "function visibleNodeCentroid" in js
+        assert "function measureAxisGap" in js
+        assert "function applyNodeGap" in js
+        assert "function applyRotationDelta" in js
+
+
+class TestUiRedesign:
+    """Full UI redesign: theme tokens, toast feedback, in-page dialogs,
+    command-strip search, help overlay, accordions, edit-mode affordance."""
+
+    def test_theme_tokens_and_dark_mode(self, network_html):
+        html = network_html.read_text(encoding="utf-8")
+        js = _script_text(network_html)
+        # custom properties defined for light + dark
+        assert "--vp-card-bg" in html and "--vp-border" in html
+        assert "body.vp-dark" in html
+        # the ribbon derives from tokens via the shared page class
+        assert ".vp-ribbon-page" in html and 'id="pageLayout"' in html
+        # applyBackground flips the whole UI via the dark class
+        assert "body.classList.toggle('vp-dark', isDark)" in js
+        # the old per-selector label patching is gone
+        assert "querySelectorAll('.info, .legend span, .controls label')" not in js
+
+    def test_ribbon_tabs(self, network_html):
+        html = network_html.read_text(encoding="utf-8")
+        js = _script_text(network_html)
+        # four tabs on the command strip
+        for tab in ("tabLayout", "tabFilter", "tabStyle", "tabShare"):
+            assert f'id="{tab}"' in html
+        assert html.count('onclick="switchTab(') == 4
+        assert "function switchTab" in js
+        # exactly one page open by default (Layout), the others hidden
+        assert 'id="pageLayout" class="vp-ribbon-page open"' in html or \
+            'class="vp-ribbon-page open" id="pageLayout"' in html
+        for pid in ("pageFilter", "pageStyle", "pageShare"):
+            seg_start = html.index(f'id="{pid}"')
+            assert 'open' not in html[seg_start - 40:seg_start + 40].split('id=')[0], \
+                f"{pid} should not be open by default"
+        # active tab + collapsed ribbon persist; clicking the active tab
+        # toggles the ribbon (first click collapses, the next expands) through
+        # the same helper as the ⚙️ button
+        assert "activeTab: activeTabName" in js
+        assert "saved.activeTab" in js
+        assert "ribbonCollapsed" in js
+        assert "applyTopControlsCollapsed(!ribbon.classList.contains('collapsed'))" in js
+
+    def test_div_balance(self, network_html):
+        """Every opened div must be closed — a nesting slip (e.g. a group
+        escaping its ribbon page) breaks tab switching while all regex
+        tests on ids still pass."""
+        html = network_html.read_text(encoding="utf-8")
+        opens, closes = html.count("<div"), html.count("</div>")
+        assert opens == closes, f"unbalanced divs: {opens} opens vs {closes} closes"
+
+    def test_toast_system(self, network_html):
+        html = network_html.read_text(encoding="utf-8")
+        js = _script_text(network_html)
+        assert 'id="toastStack"' in html
+        assert 'aria-live="polite"' in html
+        assert "function createToastQueue" in js
+        assert "function showToast" in js
+        assert "function renderToasts" in js
+        # legacy status channel delegates to toasts (hover box is
+        # element-tooltips-only, written by the mouseover handlers)
+        assert "function updateHoverInfo(text) {\n            showToast(text);" in js
+        assert "document.getElementById('hoverInfo').textContent" not in js
+        # layoutStatus line is gone; save/load report via toasts
+        assert 'id="layoutStatus"' not in network_html.read_text(encoding="utf-8")
+        assert "showToast('Layout saved', 'success')" in js
+        assert "function showLayoutStatus" not in js
+
+    def test_no_native_modals_left(self, network_html):
+        """The network page must not open native prompt/confirm dialogs.
+        The single remaining native confirm( is inside the embedded shared
+        helper getExportScale (shared_controls.py, out of scope) — unused
+        by the redesign's flows (they use the in-page dialog)."""
+        js = _script_text(network_html)
+        assert "prompt(" not in js
+        # a native confirm is `confirm('...')` / `confirm("...")` — the
+        # in-page confirmDialog()/confirm() calls never take a literal arg
+        assert re.search(r"confirm\(['\"]", js) is None, "native confirm() call found"
+        assert "function getExportScale" in js  # present but unused by flows
+
+    def test_dialog_system(self, network_html):
+        html = network_html.read_text(encoding="utf-8")
+        js = _script_text(network_html)
+        assert 'id="vpDialogOverlay"' in html
+        assert "function createDialogController" in js
+        assert "function showDialog" in js
+        assert "function confirmDialog" in js
+        assert "function cancelDialog" in js
+        # flows migrated to dialogs
+        assert "function editNodeProperties" in js and "showDialog({" in js
+        for flow in ("editNodeProperties", "editEdgeProperties", "addNode", "deleteCustomGroup"):
+            start = js.index(f"function {flow}")
+            body = js[start:start + 2400]
+            assert "showDialog(" in body, f"{flow} does not open a dialog"
+        # deletes are undoable via history, so they toast instead of asking
+        assert "⌘Z/⌃Z to undo" in js
+        # import layout offers Fit as a toast action
+        assert "'Fit', onClick" in js or 'label: \'Fit\'' in js
+
+    def test_command_strip_search(self, network_html):
+        html = network_html.read_text(encoding="utf-8")
+        js = _script_text(network_html)
+        assert 'id="nodeSearchInput"' in html
+        assert 'id="nodeSearchCount"' in html
+        assert "function matchNodes" in js
+        assert "function onSearchInput" in js
+        assert "function onSearchKeydown" in js
+        assert "function applySearchMatch" in js
+
+    def test_metric_drives_edge_filter(self, network_html):
+        """The Connection Metric lives in the Filter card and the edge
+        filter evaluates the ACTIVE metric (weight / ratio / probability);
+        changing the metric re-applies the filter and adapts the input
+        placeholder to the filtered unit."""
+        html = network_html.read_text(encoding="utf-8")
+        js = _script_text(network_html)
+        # metric sits in the Filter card, directly above the hide input
+        assert html.index(">👁️ Filter<") < html.index('id="metricSelect"') \
+            < html.index('id="ignoreEdgesInput"')
+        # metric-aware value + re-apply on change
+        assert "function metricEdgeValue" in js
+        assert "shouldIgnoreEdge(metricEdgeValue(edge))" in js
+        start = js.index("function updateMetric")
+        body = js[start:js.index("function updateEdgeWidths")]
+        assert "applyEdgeFilter();" in body
+        assert "updateIgnoredEdgesPlaceholder();" in body
+        assert "function updateIgnoredEdgesPlaceholder" in js
+        assert "ratio: 'OR: <0.2, >0.8 | AND: (>=0.1, <=0.5)'" in js
+
+    def test_help_overlay(self, network_html):
+        html = network_html.read_text(encoding="utf-8")
+        js = _script_text(network_html)
+        assert 'id="helpOverlay"' in html
+        assert 'id="helpBtn"' in html
+        assert "function openHelp" in js
+        assert "function closeHelp" in js
+        assert "function toggleHelp" in js
+        assert "e.key === '?'" in js
+        assert "Press <strong>?</strong> for help" in html
+        # filter card links into the recipes section
+        assert "openHelp('recipes')" in html
+
+    def test_accordions_and_persistence(self, network_html):
+        html = network_html.read_text(encoding="utf-8")
+        js = _script_text(network_html)
+        for acc in ("accEdit", "accHistory", "accSelection"):
+            assert f'id="{acc}"' in html
+        assert "function toggleAccordion" in js
+        # accordion flags persist with the other panel preferences
+        assert "accordions: {" in js
+        assert "saved.accordions" in js
+        # live selection chip wired into selection changes
+        assert 'id="selectionSummary"' in html
+        assert "function updateSelectionChip" in js
+        assert js.count("updateSelectionChip();") >= 3
+        # history entries get category icons (labels unchanged)
+        assert "function historyIcon" in js
+        assert "historyIcon(item.label)" in js
+
+    def test_edit_mode_canvas_affordance(self, network_html):
+        html = network_html.read_text(encoding="utf-8")
+        js = _script_text(network_html)
+        assert 'id="editBadge"' in html
+        assert "vp-editmode" in html
+        assert "classList.add('vp-editmode')" in js
+        assert "classList.remove('vp-editmode')" in js
+        assert "document.getElementById('editBadge').style.display" in js
+
+    def test_single_letter_shortcuts_skip_inputs_and_dialogs(self, network_html):
+        js = _script_text(network_html)
+        # H/E/L handlers ignore keystrokes while typing and while a dialog
+        # is open (the E and L guards were missing before the redesign).
+        assert js.count("if (dialogCtl.isActive()) return;") >= 4
+        # the global Esc/? capture handler exists
+        assert "dialogCtl.isActive()" in js
+        assert "e.key === 'Escape'" in js
+
+
+class TestGroupMembership:
+    """Groups are live node memberships: every node carries a single-valued
+    assigned_group field ('' = Unassigned), custom groups are look-only
+    definitions, and the footer legend is rebuilt dynamically from that
+    state (colors follow recoloring, chips include custom groups)."""
+
+    def test_membership_field_and_helpers(self, network_html):
+        html = network_html.read_text(encoding="utf-8")
+        js = _script_text(network_html)
+        # server-side seed: every generated node carries its structural group
+        # (the generated HTML embeds the nodes as JSON)
+        assert '"assigned_group"' in html
+        # JS backfill for imports of older exports
+        assert "function normalizeAssignedGroups" in js
+        assert "normalizeAssignedGroups();" in js
+        # membership accessor + assignment pipeline
+        assert "function groupMembers" in js
+        assert "function assignNodesToGroup" in js
+        assert "function assignSelectedToGroup" in js
+        # group ops select via the membership field, not node_type
+        assert "groupMembers('source')" in js
+        assert "groupMembers('intermediate')" in js
+        assert "groupMembers('target')" in js
+        assert 'cy.nodes().filter(\'[node_type = "source"]\')' not in js
+        assert 'cy.nodes().filter(\'[node_type = "intermediate"]\')' not in js
+        assert 'cy.nodes().filter(\'[node_type = "target"]\')' not in js
+        assert '[node_type = "\' + group' not in js
+
+    def test_dynamic_legend_and_assign_row(self, network_html):
+        html = network_html.read_text(encoding="utf-8")
+        js = _script_text(network_html)
+        # legend containers: group chips rebuilt live, dataset chips static
+        assert 'id="groupLegend"' in html
+        assert 'id="datasetLegend"' in html
+        assert 'data-group="source"' in html  # static seed for no-JS readers
+        assert "function refreshLegend" in js
+        # refreshLegend is wired into every color/membership mutation
+        assert js.count("refreshLegend();") >= 4
+        assert "function legendChip" in js
+        # assign row in the Selected element(s) section
+        assert 'id="assignGroupSelect"' in html
+        assert 'onclick="assignSelectedToGroup()"' in html
+        assert "function rebuildAssignSelect" in js
+        assert "function syncAssignSelectToSelection" in js
+        # Unassigned surfaces only when it has members
+        assert "'unassigned'" in js
+        assert "'Unassigned ('" in js
+        # hover shows the group only when it differs from the structural type
+        assert "data.assigned_group !== data.node_type" in js
+
+    def test_custom_groups_are_definitions_only(self, network_html):
+        html = network_html.read_text(encoding="utf-8")
+        js = _script_text(network_html)
+        # definitions carry look, not membership: the static ids list is gone
+        assert "ids: ids" not in js
+        assert "customGroups[groupName].ids" not in js
+        # creation seeds a reset target (Reset All Colors restores it)
+        assert "defaultColor: color" in js
+        # Reset All Colors keeps groups/memberships — no more wipe
+        assert "Object.keys(customGroups).forEach(key => delete customGroups[key]);" not in js
+        # legacy exports: static id lists are re-materialized on import
+        assert "(def.ids || [])" in js
+        # edit-mode Add Node dialog carries a group choice
+        assert "key: 'group', label: 'Group'" in js
+        assert "assigned_group: assignedGroup" in js
+        # Edge List CSV: group columns read the membership field
+        assert "sourceNode.data('assigned_group') ?? sourceNode.data('node_type')" in js
+        assert "membership[sourceNode.id()]" in js
+
+    def test_declared_groups_replace_structural_roles(self, declared_html):
+        """Mapping-view mode: declared dataset groups take over the node
+        grouping — the structural role options disappear from the Groups
+        dropdown (user convention), the legend seeds declared chips, and the
+        JS switches to declared-only group lists."""
+        html = declared_html.read_text(encoding="utf-8")
+        js = _script_text(declared_html)
+        # no template leakage; structural options are gone from the dropdown
+        assert "standard_group_options_html" not in html
+        assert '<option value="source">Source Nodes</option>' not in html
+        # declared chips seed the legend with their group identity
+        assert 'data-group="F"' in html
+        assert 'data-group="M"' in html
+        # structural role chips are not rendered in declared mode
+        assert 'data-group="source"' not in html
+        assert "const declaredGroupsActive = true;" in js
+        # nodes carry their declared group as the initial membership
+        assert '"assigned_group": "F"' in html
+        assert '"assigned_group": "M"' in html
+
+
 # =============================================================================
 # Node-based logic tests (real functions extracted from the generated HTML)
 # =============================================================================
@@ -441,6 +998,53 @@ class TestGlobalStyleHistoryNode:
             f"global-style harness failed:\n{res.stdout}\n{res.stderr}"
         )
         assert "ALL GLOBAL-STYLE TESTS PASSED" in res.stdout
+
+
+class TestLayoutTransformsNode:
+    """The inter-node spacing and rotation transforms extracted from the
+    generated HTML: delta-multiplier semantics around the visible bounding
+    box center, rotation composition, visible-only participation and the
+    inverse reset."""
+
+    def test_all_layout_transform_scenarios(self, network_html, node_cache):
+        node = _ensure_node_with_cytoscape(node_cache)
+        res = _run_node_harness(node, "layout_transform_harness.js", network_html, node_cache)
+        assert res.returncode == 0, (
+            f"layout-transform harness failed:\n{res.stdout}\n{res.stderr}"
+        )
+        assert "ALL LAYOUT-TRANSFORM TESTS PASSED" in res.stdout
+
+
+class TestUiFeedbackNode:
+    """The redesign's pure helpers extracted from the generated HTML: the
+    toast queue (cap + ttl expiry), the dialog controller promise state
+    machine, and the node-search matcher."""
+
+    def test_all_ui_feedback_scenarios(self, network_html, node_cache):
+        node = _ensure_node_with_cytoscape(node_cache)
+        res = _run_node_harness(node, "ui_feedback_harness.js", network_html, node_cache)
+        assert res.returncode == 0, (
+            f"ui-feedback harness failed:\n{res.stdout}\n{res.stderr}"
+        )
+        assert "ALL UI-FEEDBACK TESTS PASSED" in res.stdout
+
+    def test_whole_page_script_parses(self, network_html, node_cache):
+        """The ENTIRE inline script must parse as JavaScript. A single bad
+        escape (e.g. a raw newline inside a string literal) kills the whole
+        page while every regex/structural test stays green — only a real
+        JS parse catches this class of bug."""
+        node = _ensure_node_with_cytoscape(node_cache)
+        script = _script_text(network_html)
+        script_file = network_html.parent / "network_script_check.js"
+        script_file.write_text(script, encoding="utf-8")
+        res = subprocess.run(
+            [node, "--check", str(script_file)],
+            capture_output=True, text=True, timeout=120,
+            encoding="utf-8", errors="replace",
+        )
+        assert res.returncode == 0, (
+            f"inline network script has JS syntax errors:\n{res.stderr[-800:]}"
+        )
 
 
 class TestEdgeListExportNode:

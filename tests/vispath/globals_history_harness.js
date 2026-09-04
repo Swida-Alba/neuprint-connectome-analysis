@@ -34,6 +34,12 @@ const FUNCTIONS = [
     'updateUndoRedoButtons', 'updateHistoryList',
     'restoreGlobalStyles', 'updateNodeSize', 'updateEdgeWidth',
     'updateFontSize', 'updateArrowSize', 'updateMetric', 'updateEdgeWidths',
+    'syncTransformInputs', 'measureAxisGap', 'isVisibleElement', 'metricEdgeValue',
+    'updateEdgeMetricLabels',
+    'applyEdgeFilter', 'updateIgnoredEdgesPlaceholder',
+    'shouldIgnoreEdge', 'evaluateEdgeCondition',
+    'reapplyDeadEndHiding', 'reapplyOrphanHiding',
+    'updateSelectionChip', 'historyIcon',
     'refreshEdgeStyles', 'clearEdgeEndpointOverrides', 'applyStraightEdgeStyle',
 ];
 
@@ -56,6 +62,17 @@ function buildScope(cy) {
         let globalEdgeWidthScale = 'log_e';
         let reciprocalOffset = 5;
         let restoringHistoryState = false;
+        // Edge-filter groups (referenced by applyEdgeFilter / shouldIgnoreEdge)
+        let edgeFilterGroups = [];
+        // Layout transform trackers mirrored by captureState's globalStyles
+        // (absolute inter-node gaps in px + rotation base).
+        let lastGapX = null;
+        let lastGapY = null;
+        let baselineGapX = null;
+        let baselineGapY = null;
+        let lastRotationDeg = 0;
+        // Operation feedback is a toast now; updateHoverInfo delegates to it.
+        function showToast(message, type, action) {}
         let straightReciprocalEdgesEnabled = true;
         // Visibility/label flags referenced by captureState/restoreState
         let selfLoopsHidden = false;

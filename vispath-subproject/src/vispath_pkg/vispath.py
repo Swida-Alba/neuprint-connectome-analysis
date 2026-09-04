@@ -291,6 +291,7 @@ class VisualizePath:
         color_edges_by_nt=False, # NEW: Color edges by neurotransmitter type
         dataset_legend=None,    # NEW: Dataset short code legend {code: full_name} for display names
         node_dataset_info=None, # NEW: Node-level dataset info {node_label: {code: name_in_dataset}}
+        node_groups=None,       # NEW: Declared node groups [{name,label,color}] (dataset groups in the mapping views)
         separate_hemispheres=False,  # NEW: Enable hemisphere-aware coloring/layout
         hemisphere_desaturate_side='R',  # NEW: Hemisphere to desaturate ('L' or 'R')
         hemisphere_desaturate_factor=0.4,  # NEW: Desaturation blend factor (0-1)
@@ -522,6 +523,14 @@ class VisualizePath:
         # Node-level dataset info for hover labels
         # Format: {node_label: {code: name_in_that_dataset}} e.g., {'MeVP(MTe07)': {'M': 'MeVP', 'F': 'MTe07'}}
         self.node_dataset_info = node_dataset_info or {}
+        # Declared node groups: [{name, label, color}].  When set, nodes
+        # carrying a matching 'group' attribute are grouped and colored BY
+        # GROUP (per-dataset groups in the type-mapping views) — quick
+        # actions, the color/opacity dropdown, selection, reset, and the
+        # footer legend all follow the declared list; the structural
+        # node_type role is preserved on the node's 'role' data field for
+        # the hover.
+        self.node_groups = [dict(g) for g in (node_groups or [])]
         # Unit label shown with the edge weight (e.g. 'synapses' for
         # connectome graphs, 'neurons' for type-mapping graphs).
         self.edge_weight_label = str(edge_weight_label or 'synapses')
@@ -4406,6 +4415,23 @@ class VisualizePath:
             if override:
                 base_color = override
 
+            # Declared groups: the node's 'group' attribute names a
+            # declared group (the dataset code in the mapping views).  The
+            # group name becomes the grouping identity — it drives every
+            # [node_type = "..."] group operation — and supplies the
+            # color; the structural role is kept in 'role' for the hover.
+            role = node_type
+            group_name = ''
+            if self.node_groups:
+                declared = next(
+                    (g for g in self.node_groups
+                     if g.get('name') == G.nodes[node].get('group')), None)
+                if declared is not None:
+                    group_name = str(declared.get('name') or '')
+                    node_type = group_name
+                    if not override:
+                        base_color = declared.get('color', base_color)
+
             base_name, hemisphere = _extract_hemisphere(str(node))
             if hemisphere:
                 has_hemisphere_nodes = True
@@ -4425,6 +4451,12 @@ class VisualizePath:
                     'id': node,
                     'label': G.nodes[node].get('label', node),
                     'node_type': node_type,
+                    'group': group_name,
+                    'role': role,
+                    # Single-valued live group membership ('' = Unassigned);
+                    # seeded with the structural/declared identity so the
+                    # load-time look is unchanged. node_type stays immutable.
+                    'assigned_group': node_type,
                     'hemisphere': hemisphere if hemisphere else '',
                     'base_name': base_name,
                     'color': color,
@@ -4437,6 +4469,62 @@ class VisualizePath:
                 'position': G.nodes[node].get('position') or {},
                 'classes': ''  # For CSS classes
             })
+
+        # Node groups beyond the standard three (the type-mapping views'
+        # 'linker' and 'entry' nodes) become first-class groups in the
+        # network UI: quick-action button, color/opacity dropdown entry,
+        # selection, and reset all honor them — without this, group
+        # operations silently skip those nodes.
+        standard_node_groups = ('source', 'intermediate', 'target')
+        extra_node_groups: list = []
+        if self.node_groups:
+            # Declared groups are authoritative: dataset groups in the
+            # mapping views, with the labels/colors as declared.  Names
+            # are restricted to the same selector-safe charset as custom
+            # groups — they end up in HTML attributes, onclick strings
+            # and cytoscape attribute selectors; labels keep their raw
+            # form for the JSON/DOM paths and are html-escaped at the
+            # direct template injections below.
+            for g in self.node_groups:
+                name = re.sub(r'[^A-Za-z0-9_-]', '_',
+                              str(g.get('name') or ''))
+                if not name or any(x['name'] == name
+                                   for x in extra_node_groups):
+                    continue
+                extra_node_groups.append({
+                    'name': name,
+                    'label': str(g.get('label') or name),
+                    'color': str(g.get('color') or '#94a3b8'),
+                })
+        else:
+            for nd in nodes_data:
+                nt = nd['data'].get('node_type')
+                if not nt or nt in standard_node_groups:
+                    continue
+                if all(g['name'] != nt for g in extra_node_groups):
+                    extra_node_groups.append({
+                        'name': nt,
+                        'label': str(nt).capitalize(),
+                        'color': nd['data'].get('color', '#94a3b8'),
+                    })
+        extra_node_group_options = ''.join(
+            f'<option value="{g["name"]}">{html_escape(g["label"])} Nodes</option>'
+            for g in extra_node_groups)
+        extra_group_buttons = ''.join(
+            f'<button class="btn" onclick="selectGroup(\'{g["name"]}\')" '
+            f'title="Select all {html_escape(g["label"].lower())} nodes" '
+            f'style="font-size: 10px; padding: 5px; background: {g["color"]};">'
+            f'{html_escape(g["label"])}</button>'
+            for g in extra_node_groups)
+        if extra_group_buttons:
+            extra_group_buttons = (
+                '<div style="display: grid; grid-template-columns: 1fr 1fr; '
+                'gap: 6px; margin-bottom: 8px;">' + extra_group_buttons + '</div>')
+        extra_group_defaults_js = (
+            'const extraNodeGroups = ' + json.dumps(extra_node_groups) + ';\n'
+            '        extraNodeGroups.forEach(g => {\n'
+            '            originalGroupDefaults[g.name] = { color: g.color, opacity: 100 };\n'
+            '        });')
         
         # Build NT type lookup from conn_df if available
         nt_lookup = {}
@@ -4508,6 +4596,9 @@ class VisualizePath:
                     'target': target,
                     'weight': abs_weight,  # Store positive for Cytoscape
                     'original_weight': weight,  # Store original for hover modification
+                    # Preformatted on-edge label (shown when the edge has
+                    # the 'wlabel' class — the Edge Weights toggle)
+                    'weight_label': f"{weight:,} {self.edge_weight_label}",
                     'is_negative': 1 if is_negative else 0,  # Use 1/0 instead of True/False for JavaScript
                     'nt_type': nt_type if nt_type else '',  # Store NT type for CSS styling
                     'color': edge_color,  # Per-edge color (file color or link_color fallback)
@@ -4559,15 +4650,20 @@ class VisualizePath:
         cytoscape_layout = layout_map.get(layout, 'dagre')
         # JS-facing layout name: the dropdown option value getLayoutConfig
         # is keyed by. The mapping bridges keep their friendly name so the
-        # selector highlights the Mapping option and the initial re-layout
-        # re-applies the embedded per-node positions (preset) instead of
-        # silently falling back to dagre.
+        # The mapping preset is programmatic-only: dagre is the mapping
+        # default, so the dropdown lists it ONLY in documents rendered
+        # with the preset (the linker-path view) — selected, so
+        # changeLayout()/reset and the initial selector assignment stay
+        # consistent.
         js_layout_name = (
             layout if cytoscape_layout == 'preset' else cytoscape_layout
         )
-        mapping_selected_attr = (
-            "selected" if js_layout_name == "mapping" else ""
-        )
+        mapping_layout_optgroup = ""
+        if js_layout_name == "mapping":
+            mapping_layout_optgroup = (
+                '<optgroup label="🔀 Type Mapping (preset)">'
+                '<option value="mapping" selected>'
+                'Mapping (layered L→R, preset)</option></optgroup>')
         
         # Generate NT-based edge styles if enabled
         nt_edge_styles = ""
@@ -4580,8 +4676,7 @@ class VisualizePath:
                 nt_color_rgba = get_nt_color(nt, opacity=1.0)
                 # Extract hex color from rgba
                 if nt_color_rgba.startswith('rgba'):
-                    # Convert rgba to hex for Cytoscape
-                    import re
+                    # Convert rgba to hex for Cytoscape (module-level re)
                     match = re.match(r'rgba\((\d+),\s*(\d+),\s*(\d+)', nt_color_rgba)
                     if match:
                         r, g, b = int(match.group(1)), int(match.group(2)), int(match.group(3))
@@ -4607,6 +4702,7 @@ class VisualizePath:
         has_hemi_controls = self.separate_hemispheres and has_hemisphere_nodes
         hemisphere_group_options = ""
         hemisphere_controls_html = ""
+        hemisphere_group_html = ""
         if has_hemi_controls:
             hemisphere_group_options = """
                                 <optgroup label="Hemispheres">
@@ -4616,29 +4712,93 @@ class VisualizePath:
                                 </optgroup>
             """
             hemisphere_controls_html = """
-                        <button class="btn" id="mirrorHemiBtn" onclick="toggleHemisphereMirror()" style="font-size: 11px; padding: 6px; background: #64748b;">
+                        <button class="btn" id="mirrorHemiBtn" onclick="toggleHemisphereMirror()" title="Arrange left/right hemisphere neurons as mirrored panels" style="font-size: 11px; padding: 6px; background: #64748b;">
                             🪞 Mirror Hemispheres
                         </button>
             """
 
+            hemisphere_group_html = (
+                '<div class="vp-ribbon-group">'
+                + hemisphere_controls_html
+                + '</div>'
+            ) if hemisphere_controls_html.strip() else ''
+
         # Generate dataset legend HTML for cross-dataset type name display
-        # Shows one-character codes and their corresponding dataset names
+        # Shows one-character codes and their corresponding dataset names;
+        # each chip carries its group's color dot when the code is a
+        # declared group (§13).
+        group_color_map = {g['name']: g['color'] for g in extra_node_groups}
         dataset_legend_html = ""
         if self.dataset_legend:
             legend_items = []
             for code, full_name in sorted(self.dataset_legend.items()):
+                dot = ""
+                dot_color = group_color_map.get(code)
+                if dot_color:
+                    dot = (
+                        '<span style="display:inline-block;width:9px;'
+                        'height:9px;border-radius:50%;background:'
+                        f'{dot_color};margin-right:4px;"></span>')
                 legend_items.append(
-                    f'<div class="legend-item" title="{full_name}">'
+                    f'<div class="legend-item" data-dataset="{code}" title="{full_name}">{dot}'
                     f'<span style="font-weight: bold; color: #666;">{code}:</span> '
                     f'<span style="font-size: 11px;">{full_name}</span>'
                     f'</div>'
                 )
             if legend_items:
+                # Compact single-line legend: each chip already carries the
+                # full dataset name in its hover title, so only a short hint
+                # trails the chips instead of a dedicated header row.
                 dataset_legend_html = (
-                    '<div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #ddd;">'
-                    '<span style="font-size: 10px; color: #888;">Dataset codes in node names:</span>'
-                    '</div>' + ''.join(legend_items)
+                    ''.join(legend_items)
+                    + '<span style="font-size: 10px; color: var(--vp-text-2);" '
+                    'title="These short codes prefix node names to mark the '
+                    'dataset each node comes from">dataset codes in node names</span>'
                 )
+        # Footer legends: with declared groups the structural role
+        # swatches (source/intermediate/target) are REPLACED by the group
+        # legend — one color chip per declared group (datasets in the
+        # mapping views); roles stay on the node hovers.
+        role_legend_html = ""
+        group_legend_html = ""
+        standard_group_options_html = (
+            '<option value="source">Source Nodes</option>'
+            '<option value="intermediate">Intermediate Nodes</option>'
+            '<option value="target">Target Nodes</option>')
+        if self.node_groups:
+            # dataset groups replace the structural roles everywhere:
+            # legend, quick actions, and the group dropdown
+            standard_group_options_html = ""
+            group_legend_html = "".join(
+                f'<div class="legend-item" data-group="{g["name"]}" title="{html_escape(g["label"])}">'
+                f'<div class="legend-color" style="background: {g["color"]};"></div>'
+                f'<span>{html_escape(g["label"])}</span></div>'
+                for g in extra_node_groups)
+            # roles move to the hovers: no Source/Intermed./Target
+            # quick-action buttons when dataset groups are declared
+            role_quick_actions_html = ""
+        else:
+            role_legend_html = (
+                '<div class="legend-item" data-group="source">'
+                f'<div class="legend-color" style="background: {self.node_color[0]};"></div>'
+                '<span>Source</span>'
+                '</div>'
+                '<div class="legend-item" data-group="intermediate">'
+                f'<div class="legend-color" style="background: {self.node_color[1]};"></div>'
+                '<span>Intermediate</span>'
+                '</div>'
+                '<div class="legend-item" data-group="target">'
+                f'<div class="legend-color" style="background: {self.target_color};"></div>'
+                '<span>Target</span>'
+                '</div>')
+            role_quick_actions_html = (
+                '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px;">'
+                f'<button class="btn" onclick="selectGroup(\'source\')" title="Select all source nodes" style="font-size: 10px; padding: 5px; background: {self.node_color[0]};">Source</button>'
+                f'<button class="btn" onclick="selectGroup(\'intermediate\')" title="Select all intermediate nodes" style="font-size: 10px; padding: 5px; background: {self.node_color[1]};">Intermed.</button>'
+                '</div>'
+                '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px;">'
+                f'<button class="btn" onclick="selectGroup(\'target\')" title="Select all target nodes" style="font-size: 10px; padding: 5px; background: {self.target_color};">Target</button>'
+                '</div>')
 
         # Keep the browser-side NT lookup in sync with the Python palette used
         # to color the default network edges. The hover label uses this same
@@ -4688,15 +4848,57 @@ class VisualizePath:
         }}
     </script>
     <style>
+        /* ===== Theme tokens: every surface derives from these so the
+           White/Dark/Custom background modes flip the whole UI at once. */
+        :root {{
+            --vp-panel-bg: #ffffff;
+            --vp-card-bg: #fafafa;
+            --vp-input-bg: #ffffff;
+            --vp-border: #ddd;
+            --vp-text-1: #333;
+            --vp-text-2: #666;
+            --vp-hover-bg: rgba(255, 255, 255, 0.97);
+            --vp-selected-bg: #f0f8ff;
+            --vp-focus: #2196f3;
+            --vp-accent-arrange: #1976d2;
+            --vp-accent-filter: #2e7d32;
+            --vp-accent-style: #7b1fa2;
+            --vp-accent-share: #e65100;
+            --vp-accent-edit: #ff9800;
+        }}
+        body.vp-dark {{
+            --vp-panel-bg: #252525;
+            --vp-card-bg: #2b2b2b;
+            --vp-input-bg: #1f1f1f;
+            --vp-border: #454545;
+            --vp-text-1: #e0e0e0;
+            --vp-text-2: #a0a0a0;
+            --vp-hover-bg: rgba(37, 37, 37, 0.97);
+            --vp-selected-bg: #1d3346;
+        }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
             margin: 0;
             padding: 0;
             background: #f5f5f5;
+            color: var(--vp-text-1);
             user-select: text;
             -webkit-user-select: text;
             -moz-user-select: text;
             -ms-user-select: text;
+        }}
+        select,
+        input[type="text"],
+        input[type="number"] {{
+            background: var(--vp-input-bg);
+            color: var(--vp-text-1);
+            border: 1px solid var(--vp-border);
+        }}
+        button:focus-visible,
+        input:focus-visible,
+        select:focus-visible {{
+            outline: 2px solid var(--vp-focus);
+            outline-offset: 1px;
         }}
         #cy {{
             width: 100%;
@@ -4707,22 +4909,115 @@ class VisualizePath:
             overflow: hidden;
         }}
         .controls {{
-            padding: 15px;
-            background: white;
-            border-bottom: 1px solid #ddd;
+            padding: 6px 296px 6px 10px;
+            background: var(--vp-panel-bg);
+            border-bottom: 1px solid var(--vp-border);
             display: flex;
             gap: 10px;
-            align-items: center;
+            align-items: stretch;
             flex-wrap: wrap;
+            /* Constant ribbon height across tabs: switching tabs no longer
+               makes the footer and the canvas jump (PPT-style fixed ribbon). */
+            min-height: 127px;
+            box-sizing: border-box;
+        }}
+        body.palette-hidden #ribbon,
+        body.palette-hidden .controls {{
+            padding-right: 10px;
+        }}
+        /* Ribbon: one horizontal tool row per active tab (PPT-style). */
+        .vp-ribbon-page {{
+            display: none;
+            flex: 1 1 100%;
+            flex-wrap: wrap;
+            gap: 6px 12px;
+            align-items: flex-start;
+            align-content: flex-start;
+            /* Pack groups left: space-between stretched sparse wrapped rows
+               into huge ragged holes mid-row. */
+            justify-content: flex-start;
+        }}
+        .vp-ribbon-page.open {{ display: flex; }}
+        .vp-ribbon-group {{
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 4px;
+            /* Standalone outlined card per group (PPT group boxes). */
+            padding: 4px 10px;
+            border: 1px solid var(--vp-border);
+            border-radius: 6px;
+            min-width: 0;
+        }}
+        .vp-mini-label {{
+            font-size: 10px;
+            color: var(--vp-text-2);
+            white-space: nowrap;
+        }}
+        .vp-group-title {{
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+            color: var(--vp-text-2);
+            margin-bottom: 1px;
+        }}
+        /* Uniform compact control heights inside the ribbon. !important is
+           required to beat the inline paddings on the generated controls. */
+        #ribbon select,
+        #ribbon input[type="text"] {{
+            height: 26px;
+            padding: 3px 8px !important;
+            box-sizing: border-box;
+        }}
+        #ribbon input[type="number"] {{
+            height: 24px;
+            padding: 2px 4px !important;
+            box-sizing: border-box;
+        }}
+        #ribbon .btn {{
+            min-height: 26px;
+            padding-top: 4px !important;
+            padding-bottom: 4px !important;
+            white-space: nowrap;
+        }}
+        /* Ribbon tabs (PPT-style) on the command strip. */
+        .vp-tabs {{
+            display: flex;
+            align-items: stretch;
+            gap: 2px;
+            margin-left: 8px;
+        }}
+        .vp-tab {{
+            background: var(--vp-card-bg);
+            border: 1px solid var(--vp-border);
+            border-radius: 14px;
+            padding: 4px 12px;
+            font-size: 12px;
+            font-weight: 600;
+            line-height: 1.3;
+            color: var(--vp-text-2);
+            cursor: pointer;
+            white-space: nowrap;
+        }}
+        .vp-tab:hover {{
+            color: var(--vp-text-1);
+            background: var(--vp-input-bg);
+        }}
+        .vp-tab.active {{
+            color: var(--vp-tab-accent, var(--vp-focus));
+            border-color: var(--vp-tab-accent, var(--vp-focus));
         }}
         .btn {{
-            padding: 8px 16px;
+            padding: 5px 10px;
+            min-height: 28px;
+            box-sizing: border-box;
             background: #4CAF50;
             color: white;
             border: none;
             border-radius: 4px;
             cursor: pointer;
-            font-size: 14px;
+            font-size: 12px;
             transition: background 0.3s;
             width: 100%;
             text-align: center;
@@ -4736,34 +5031,86 @@ class VisualizePath:
         .btn.secondary:hover {{
             background: #0b7dda;
         }}
-        .slider-container {{
+        /* Spinner row: label (icon + text, never wraps) + number input with
+           native up/down arrows + unit. The value applies LIVE on every
+           arrow step ('input' event); no upper cap is imposed. */
+        /* Spinner mini: label stacked above the input so several spinners
+           share one ribbon row (.vp-spinner-row). */
+        .vp-spinner {{
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 2px 4px;
+            /* Cap the spinner: a wrap container's max-content sums label +
+               input + unit on one line, which otherwise inflates every
+               spinner to ~140px and forces the ribbon groups to wrap. */
+            max-width: 88px;
+        }}
+        .vp-spinner label {{
+            flex: 1 1 100%;
+            min-width: 0;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--vp-text-2);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }}
+        .vp-spinner input[type="number"] {{
+            flex: 1 1 auto;
+            width: 56px;
+            min-width: 0;
+            padding: 3px 4px;
+            font-size: 12px;
+            border-radius: 4px;
+            text-align: right;
+        }}
+        /* Inline variant: label left of the spinner (Sizes group) keeps the
+           control row a single 26px line so the Style tab fits the shared
+           ribbon height. */
+        .vp-spinner-inline {{ max-width: none; }}
+        .vp-spinner-inline label {{ flex: 0 0 auto; }}
+        .vp-spinner-row {{
+            display: flex;
+            align-items: flex-end;
+            flex-wrap: wrap;
+            gap: 6px 10px;
+        }}
+        .vp-unit {{
+            flex: 0 0 auto;
+            font-size: 11px;
+            color: var(--vp-text-2);
+        }}
+        /* Legend + canvas info footer: separated from the tool ribbon. */
+        .vp-footer {{
             display: flex;
             align-items: center;
-            gap: 10px;
+            flex-wrap: wrap;
+            gap: 4px 22px;
+            padding: 6px 296px 6px 12px;
+            background: var(--vp-panel-bg);
+            border-bottom: 1px solid var(--vp-border);
+            font-size: 11px;
+            line-height: 18px;
+            color: var(--vp-text-2);
+            box-sizing: border-box;
         }}
-        .slider-container label {{
-            font-size: 13px;
-            color: #666;
-            min-width: 80px;
+        body.palette-hidden .vp-footer {{
+            padding-right: 12px;
         }}
-        .slider-container input[type="range"] {{
-            width: 120px;
-        }}
-        .slider-container span {{
-            font-size: 13px;
-            font-weight: bold;
-            min-width: 35px;
-        }}
+        .vp-footer .legend {{ margin: 0; gap: 4px 14px; }}
+        .vp-footer .info {{ font-size: 11px; }}
         .info {{
-            color: #666;
+            color: var(--vp-text-2);
             font-size: 14px;
             text-align: left;
         }}
         .legend {{
             display: flex;
-            flex-direction: column;
-            gap: 8px;
-            align-items: flex-start;
+            flex-direction: row;
+            flex-wrap: wrap;
+            gap: 4px 16px;
+            align-items: center;
             font-size: 13px;
             margin: 10px 0;
         }}
@@ -4781,24 +5128,25 @@ class VisualizePath:
             display: none;
         }}
         
-        /* Hover Info Box - Fixed at bottom-left */
+        /* Hover Info Box - Fixed at bottom-left; element tooltips ONLY
+           (operation feedback uses the toast stack). */
         #hoverInfo {{
             position: fixed;
             bottom: 15px;
             left: 15px;
             z-index: 10000;
-            background: rgba(255, 255, 255, 0.95);
+            background: var(--vp-hover-bg);
             padding: 12px 15px;
             border-radius: 8px;
             box-shadow: 0 4px 12px rgba(0,0,0,0.15);
             font-size: 13px;
-            color: #333;
+            color: var(--vp-text-1);
             line-height: 1.6;
             max-width: 400px;
-            border: 1px solid rgba(0,0,0,0.1);
+            border: 1px solid var(--vp-border);
         }}
         #hoverInfo b {{
-            color: #000;
+            color: var(--vp-text-1);
             font-weight: 600;
         }}
         
@@ -4818,8 +5166,8 @@ class VisualizePath:
             position: fixed;  /* Fixed positioning to overlay everything */
             top: 0;  /* Start from very top of page */
             right: 0;  /* Anchor to right side */
-            background: white;
-            border-left: 2px solid #eee;
+            background: var(--vp-panel-bg);
+            border-left: 2px solid var(--vp-border);
             padding: 15px;
             box-shadow: -2px 0 8px rgba(0,0,0,0.1);  /* Add shadow for depth */
             z-index: 1000;  /* High z-index to overlay controls */
@@ -4831,12 +5179,12 @@ class VisualizePath:
         .color-palette h3 {{
             margin: 0 0 10px 0;
             font-size: 14px;
-            color: #333;
+            color: var(--vp-text-1);
         }}
         .palette-section {{
             margin-bottom: 20px;
             padding-bottom: 15px;
-            border-bottom: 1px solid #eee;
+            border-bottom: 1px solid var(--vp-border);
         }}
         .palette-section:last-child {{
             border-bottom: none;
@@ -4844,9 +5192,53 @@ class VisualizePath:
         .palette-section h4 {{
             margin: 0 0 10px 0;
             font-size: 12px;
-            color: #666;
+            color: var(--vp-text-2);
             text-transform: uppercase;
             font-weight: 600;
+        }}
+        /* Accordion sections (right panel): header button toggles body. */
+        .vp-acc {{
+            padding-bottom: 10px;
+        }}
+        .vp-acc-header {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            width: 100%;
+            padding: 2px 0 8px 0;
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--vp-text-1);
+            text-align: left;
+        }}
+        .vp-acc-header .vp-acc-chevron {{
+            transition: transform 0.15s ease;
+            font-size: 12px;
+            color: var(--vp-text-2);
+        }}
+        .vp-acc.open .vp-acc-header .vp-acc-chevron {{
+            transform: rotate(180deg);
+        }}
+        .vp-acc-body {{ display: none; }}
+        .vp-acc.open .vp-acc-body {{ display: block; }}
+        .vp-acc .palette-section {{
+            border-bottom: none;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+        }}
+        /* Selection summary chip (live state, replaces static hint text). */
+        .vp-chip {{
+            display: inline-block;
+            background: var(--vp-selected-bg);
+            border: 1px solid var(--vp-border);
+            border-radius: 10px;
+            padding: 3px 10px;
+            font-size: 11px;
+            color: var(--vp-text-1);
+            margin-bottom: 8px;
         }}
         .color-group {{
             margin-bottom: 12px;
@@ -4854,7 +5246,7 @@ class VisualizePath:
         .color-group label {{
             display: block;
             font-size: 11px;
-            color: #666;
+            color: var(--vp-text-2);
             margin-bottom: 5px;
             font-weight: 500;
         }}
@@ -4866,14 +5258,15 @@ class VisualizePath:
         .color-input-group input[type="color"] {{
             width: 40px;
             height: 30px;
-            border: 1px solid #ddd;
+            border: 1px solid var(--vp-border);
             border-radius: 4px;
             cursor: pointer;
+            background: var(--vp-input-bg);
         }}
         .color-input-group input[type="text"] {{
             width: 70px;
             padding: 5px;
-            border: 1px solid #ddd;
+            border: 1px solid var(--vp-border);
             border-radius: 4px;
             font-size: 11px;
         }}
@@ -4883,23 +5276,26 @@ class VisualizePath:
         .color-input-group select {{
             width: 130px;
             padding: 5px;
-            border: 1px solid #ddd;
+            border: 1px solid var(--vp-border);
             border-radius: 4px;
             font-size: 11px;
-            background: white;
+            background: var(--vp-input-bg);
+            color: var(--vp-text-1);
             cursor: pointer;
         }}
         .alpha-value {{
             font-size: 11px;
-            color: #666;
+            color: var(--vp-text-2);
             min-width: 35px;
         }}
         .font-select {{
             width: 100%;
             padding: 5px;
-            border: 1px solid #ddd;
+            border: 1px solid var(--vp-border);
             border-radius: 4px;
             font-size: 11px;
+            background: var(--vp-input-bg);
+            color: var(--vp-text-1);
         }}
         .apply-btn {{
             width: 100%;
@@ -4917,12 +5313,12 @@ class VisualizePath:
             background: #45a049;
         }}
         .selected-info {{
-            background: #f0f8ff;
+            background: var(--vp-selected-bg);
             padding: 8px;
             border-radius: 4px;
             margin-bottom: 10px;
             font-size: 11px;
-            color: #333;
+            color: var(--vp-text-1);
         }}
         .selected-info strong {{
             color: #2196F3;
@@ -4941,53 +5337,295 @@ class VisualizePath:
         .clear-selection-btn:hover {{
             background: #f57c00;
         }}
+
+        /* Panel bar: slim always-visible strip above the controls, used to
+           collapse/show the two tool panels (top controls + right palette).
+           Doubles as the command strip: node search + help live here. */
+        #panelBar {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            /* Right padding clears the fixed 280px palette so the search
+               box and help button are never covered by it. */
+            padding: 4px 296px 4px 10px;
+            background: var(--vp-panel-bg);
+            border-bottom: 1px solid var(--vp-border);
+            min-height: 34px;
+            box-sizing: border-box;
+        }}
+        body.palette-hidden #panelBar {{
+            padding-right: 10px;
+        }}
+        .panelbar-btn {{
+            padding: 4px 10px;
+            font-size: 12px;
+            border: 1px solid var(--vp-border);
+            border-radius: 4px;
+            background: var(--vp-input-bg);
+            color: var(--vp-text-1);
+            cursor: pointer;
+            transition: background 0.2s;
+        }}
+        .panelbar-btn:hover {{
+            background: var(--vp-card-bg);
+        }}
+        .vp-flex-spacer {{
+            flex: 1;
+        }}
+        /* Node search (command strip). */
+        .vp-search {{
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }}
+        #nodeSearchInput {{
+            width: 150px;
+            padding: 4px 8px;
+            font-size: 12px;
+            border-radius: 4px;
+        }}
+        #nodeSearchInput:focus {{
+            width: 200px;
+        }}
+        #nodeSearchCount {{
+            font-size: 11px;
+            color: var(--vp-text-2);
+            min-width: 34px;
+            text-align: right;
+        }}
+        /* Toast stack: operation feedback (success/info/warn/error),
+           bottom-left above the hover info box. aria-live=polite. */
+        #toastStack {{
+            position: fixed;
+            bottom: 100px;
+            left: 15px;
+            z-index: 10001;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            max-width: 420px;
+            pointer-events: none;
+        }}
+        .vp-toast {{
+            background: var(--vp-hover-bg);
+            color: var(--vp-text-1);
+            border: 1px solid var(--vp-border);
+            border-left-width: 4px;
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 12.5px;
+            line-height: 1.45;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            pointer-events: auto;
+        }}
+        .vp-toast.vp-toast-success {{ border-left-color: #2e7d32; }}
+        .vp-toast.vp-toast-info    {{ border-left-color: #2196f3; }}
+        .vp-toast.vp-toast-warn    {{ border-left-color: #e65100; }}
+        .vp-toast.vp-toast-error   {{ border-left-color: #c62828; }}
+        .vp-toast .vp-toast-action {{
+            margin-left: 8px;
+            padding: 2px 8px;
+            font-size: 11px;
+            border: 1px solid var(--vp-border);
+            border-radius: 4px;
+            background: var(--vp-input-bg);
+            color: var(--vp-text-1);
+            cursor: pointer;
+        }}
+
+        /* In-page dialog (replaces native prompt/confirm). */
+        #vpDialogOverlay {{
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.45);
+            z-index: 20000;
+            display: none;
+            align-items: center;
+            justify-content: center;
+        }}
+        #vpDialogOverlay.open {{ display: flex; }}
+        .vp-dialog {{
+            background: var(--vp-panel-bg);
+            color: var(--vp-text-1);
+            border: 1px solid var(--vp-border);
+            border-radius: 8px;
+            box-shadow: 0 8px 30px rgba(0,0,0,0.3);
+            min-width: 320px;
+            max-width: 460px;
+            padding: 14px 16px;
+        }}
+        .vp-dialog h3 {{ margin: 0 0 10px 0; font-size: 15px; }}
+        .vp-dialog .vp-dialog-message {{
+            font-size: 13px;
+            color: var(--vp-text-2);
+            margin: 0 0 10px 0;
+            line-height: 1.5;
+        }}
+        .vp-dialog .vp-dialog-field {{ margin-bottom: 10px; }}
+        .vp-dialog .vp-dialog-field label {{
+            display: block;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--vp-text-2);
+            margin-bottom: 4px;
+        }}
+        .vp-dialog .vp-dialog-field input,
+        .vp-dialog .vp-dialog-field select {{
+            width: 100%;
+            padding: 6px 8px;
+            font-size: 13px;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }}
+        .vp-dialog .vp-dialog-actions {{
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+            margin-top: 12px;
+        }}
+        .vp-dialog .vp-dialog-btn {{
+            padding: 6px 14px;
+            font-size: 12px;
+            border-radius: 4px;
+            border: 1px solid var(--vp-border);
+            background: var(--vp-input-bg);
+            color: var(--vp-text-1);
+            cursor: pointer;
+        }}
+        .vp-dialog .vp-dialog-btn.vp-primary {{
+            background: #2196f3;
+            border-color: #2196f3;
+            color: white;
+        }}
+        .vp-dialog .vp-dialog-btn.vp-danger {{
+            background: #c62828;
+            border-color: #c62828;
+            color: white;
+        }}
+
+        /* Help overlay (? key / ❓ button). */
+        #helpOverlay {{
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.45);
+            z-index: 19000;
+            display: none;
+            align-items: center;
+            justify-content: center;
+        }}
+        #helpOverlay.open {{ display: flex; }}
+        .vp-help-card {{
+            background: var(--vp-panel-bg);
+            color: var(--vp-text-1);
+            border: 1px solid var(--vp-border);
+            border-radius: 8px;
+            box-shadow: 0 8px 30px rgba(0,0,0,0.3);
+            width: min(880px, 92vw);
+            max-height: 86vh;
+            overflow-y: auto;
+            padding: 16px 18px;
+            position: relative;
+        }}
+        .vp-help-card h3 {{ margin: 0 0 12px 0; font-size: 16px; }}
+        .vp-help-card #helpCloseBtn {{
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            padding: 2px 10px;
+            font-size: 13px;
+            border: 1px solid var(--vp-border);
+            border-radius: 4px;
+            background: var(--vp-input-bg);
+            color: var(--vp-text-1);
+            cursor: pointer;
+        }}
+        .vp-help-cols {{
+            display: grid;
+            grid-template-columns: 1fr 1fr 1.2fr;
+            gap: 16px;
+            font-size: 12.5px;
+            line-height: 1.55;
+        }}
+        .vp-help-cols h4 {{
+            margin: 0 0 6px 0;
+            font-size: 13px;
+            color: var(--vp-accent-arrange);
+        }}
+        .vp-help-cols table {{ border-collapse: collapse; }}
+        .vp-help-cols td {{
+            padding: 2px 8px 2px 0;
+            vertical-align: top;
+            color: var(--vp-text-1);
+        }}
+        .vp-help-cols td.vp-key {{
+            white-space: nowrap;
+            font-weight: 600;
+            color: var(--vp-text-2);
+        }}
+        .vp-help-cols code {{
+            background: var(--vp-card-bg);
+            border: 1px solid var(--vp-border);
+            border-radius: 3px;
+            padding: 0 4px;
+        }}
+
+        /* Edit-mode canvas affordance. */
+        #cy.vp-editmode {{
+            border: 2px dashed var(--vp-accent-edit);
+        }}
+        #editBadge {{
+            position: absolute;
+            top: 8px;
+            left: 8px;
+            z-index: 50;
+            background: var(--vp-accent-edit);
+            color: #fff;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 3px 10px;
+            border-radius: 10px;
+            display: none;
+            pointer-events: none;
+        }}
+
+        /* Collapsed states: hide the top control bar and reclaim the right
+           palette column so the canvas grows into the freed space. */
+        .controls.collapsed {{
+            display: none;
+        }}
+        .main.palette-hidden {{
+            grid-template-columns: 1fr 0;
+        }}
+        body.controls-collapsed #cy {{
+            height: calc(100vh - 76px);
+        }}
     </style>
 </head>
 <body>
-    <div class="controls">
-        <!-- Layout Controls -->
-        <div style="padding: 10px; background: #e3f2fd; border-radius: 5px; margin-bottom: 8px;">
-            <h4 style="margin: 0 0 8px 0; font-size: 14px; color: #1976d2;">📐 Layout</h4>
-            
-            <!-- Control Buttons -->
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px;">
-                <button class="btn" onclick="resetLayout()" style="background: #4caf50; font-size: 12px; padding: 6px; width: 100%;">🔄 Reset</button>
-                <button class="btn" onclick="fitGraph()" style="background: #2196f3; font-size: 12px; padding: 6px; width: 100%;">⛶ Fit</button>
-            </div>
-            
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px;">
-                <button class="btn secondary" id="toggleLabelsBtn" onclick="toggleLabels()" style="font-size: 12px; padding: 6px; width: 100%;">🏷️ Hide Labels</button>
-                <button class="btn" id="showAllBtn" onclick="showAllNodes()" style="background: #ff9800; font-size: 12px; padding: 6px; width: 100%; display: none;">👁️ Show All</button>
-            </div>
-            
-            <div style="display: grid; grid-template-columns: 1fr; gap: 6px; margin-bottom: 8px;">
-                <button class="btn" onclick="refreshEdgeStyles()" style="background: #9c27b0; font-size: 12px; padding: 6px; width: 100%;">🔄 Refresh Edges</button>
-            </div>
-
-            <div id="reciprocalOffsetControls" class="slider-container" style="margin-bottom: 8px; display: none;">
-                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
-                    <label for="reciprocalOffsetSlider" style="margin: 0;">Reciprocal Offset</label>
-                    <button id="reciprocalModeToggle" onclick="toggleReciprocalMode()" style="padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid #ddd; background: #4caf50; color: white; cursor: pointer;">Straight</button>
-                </div>
-                <input type="range" id="reciprocalOffsetSlider" min="0" max="40" step="1" value="5">
-                <span id="reciprocalOffsetValue">5px</span>
-            </div>
-            
-            <!-- Save/Load -->
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding-top: 8px; border-top: 1px solid #ddd;">
-                <button class="btn" onclick="saveLayout()" style="background: #4caf50; font-size: 12px; padding: 6px; width: 100%;">💾 Save</button>
-                <button class="btn" onclick="loadLayout()" style="background: #2196f3; font-size: 12px; padding: 6px; width: 100%;">📂 Load</button>
-            </div>
-            <div id="layoutStatus" style="font-size: 11px; color: #666; min-height: 18px; margin-top: 8px; text-align: center;"></div>
+    <!-- Panel bar / command strip: panel toggles + ribbon tabs + search + help -->
+    <div id="panelBar">
+        <div class="vp-tabs" role="tablist" aria-label="Tool tabs">
+            <button type="button" id="tabLayout" class="vp-tab active" style="--vp-tab-accent: var(--vp-accent-arrange);" onclick="switchTab('layout')" title="Layout tools: algorithm, node gaps, rotation (click again to collapse the ribbon)">🔧 Layout</button>
+            <button type="button" id="tabFilter" class="vp-tab" style="--vp-tab-accent: var(--vp-accent-filter);" onclick="switchTab('filter')" title="Filter tools: connection metric, hide edges/labels/orphans (click again to collapse the ribbon)">👁️ Filter</button>
+            <button type="button" id="tabStyle" class="vp-tab" style="--vp-tab-accent: var(--vp-accent-style);" onclick="switchTab('style')" title="Style tools: sizes, width scale, reciprocal offset, background (click again to collapse the ribbon)">🎨 Style</button>
+            <button type="button" id="tabShare" class="vp-tab" style="--vp-tab-accent: var(--vp-accent-share);" onclick="switchTab('share')" title="Import & export: images, graph, layouts, edge list (click again to collapse the ribbon)">💾 Import & Export</button>
         </div>
-        
-        <!-- Layout Algorithm Selector -->
-        <div style="padding: 10px; background: #fff3e0; border-radius: 5px; margin-bottom: 8px; max-width: 185px;">
-            <h4 style="margin: 0 0 8px 0; font-size: 14px; color: #e65100;">🔧 Layout Algorithm</h4>
-            <select id="layoutSelector" onchange="changeLayout()" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ddd; font-size: 12px; background: white; cursor: pointer;">
-                <optgroup label="🔀 Type Mapping">
-                    <option value="mapping" {mapping_selected_attr}>Mapping ⭐⭐⭐⭐⭐ (layered L→R)</option>
-                </optgroup>
+        <span class="vp-flex-spacer"></span>
+        <div class="vp-search">
+            <input type="text" id="nodeSearchInput" placeholder="🔍 Find node…" autocomplete="off" oninput="onSearchInput(this.value)" onkeydown="onSearchKeydown(event)" title="Search nodes by id or label — Enter selects and centers, ↑/↓ cycle matches, Esc clears" aria-label="Find node">
+            <span id="nodeSearchCount" aria-live="polite"></span>
+        </div>
+        <button id="toggleControlsBtn" class="panelbar-btn" onclick="toggleTopControls()" title="Collapse or show the ribbon (all tool tabs)">⚙️ Hide Ribbon</button>
+        <button id="togglePanelBtn" class="panelbar-btn" onclick="toggleRightPanel()" title="Collapse or show the right side panel">🎨 Hide Panel</button>
+        <button id="helpBtn" class="panelbar-btn" onclick="toggleHelp()" title="Help: mouse gestures, keyboard shortcuts, recipes (?)">❓</button>
+    </div>
+    <!-- Ribbon: one horizontal tool row per active tab -->
+    <div class="controls" id="ribbon">
+        <div class="vp-ribbon-page open" id="pageLayout">
+            <div class="vp-ribbon-group" style="min-width: 250px;">
+            <label class="vp-group-title" for="layoutSelector">Layout Algorithm</label>
+            <select id="layoutSelector" onchange="changeLayout()" title="Layout algorithm used to arrange the nodes" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ddd; font-size: 12px; background: white; cursor: pointer;">
+                {mapping_layout_optgroup}
                 <optgroup label="🌟 Hierarchical">
                     <option value="dagre" {{'selected' if cytoscape_layout == 'dagre' else ''}}>Dagre ⭐⭐⭐⭐⭐</option>
                     <option value="klay" {{'selected' if cytoscape_layout == 'klay' else ''}}>KLay ⭐⭐⭐⭐</option>
@@ -5008,205 +5646,255 @@ class VisualizePath:
                     <option value="concentric" {{'selected' if cytoscape_layout == 'concentric' else ''}}>Concentric ⭐⭐</option>
                 </optgroup>
             </select>
-            <div id="layoutInfo" style="font-size: 10px; color: #666; margin-top: 8px; line-height: 1.4; word-wrap: break-word; white-space: normal;">
-                💡 Dagre uses Sugiyama's algorithm for optimal edge crossing minimization in hierarchical graphs
+            </div>
+            <div class="vp-ribbon-group" style="min-width: 290px;">
+            <label class="vp-group-title">Inter-node Gap</label>
+            <div class="vp-spinner-row">
+                <div class="vp-spinner vp-spinner-inline">
+                    <label for="nodeGapHSlider" title="Horizontal center-to-center distance between neighboring columns">Horizontal ↔</label>
+                    <input type="number" id="nodeGapHSlider" min="0" step="1" value="100" oninput="onSpacingInput('x', this.value)" onchange="onSpacingChange()" title="Horizontal center-to-center distance between neighboring nodes in px (node size unchanged)">
+                    <span class="vp-unit">px</span>
+                </div>
+                <div class="vp-spinner vp-spinner-inline">
+                    <label for="nodeGapVSlider" title="Vertical center-to-center distance between neighboring rows">Vertical ↕</label>
+                    <input type="number" id="nodeGapVSlider" min="0" step="1" value="100" oninput="onSpacingInput('y', this.value)" onchange="onSpacingChange()" title="Vertical center-to-center distance between neighboring nodes in px (node size unchanged)">
+                    <span class="vp-unit">px</span>
+                </div>
+                <button class="btn" onclick="resetSpacing()" style="align-self: flex-end; background: #607d8b; font-size: 11px; padding: 5px 10px; width: auto; min-width: 0;" title="Restore the inter-node gaps captured at the last layout run">↺ Reset Spacing</button>
+            </div>
+            </div>
+            <div class="vp-ribbon-group" style="min-width: 160px;">
+            <label class="vp-group-title">Rotate</label>
+            <div class="vp-spinner-row">
+                <div class="vp-spinner vp-spinner-inline">
+                    <label for="rotateSlider" title="Rotation angle of the whole layout">Rotate ↻</label>
+                    <input type="number" id="rotateSlider" step="5" value="0" oninput="onRotationInput(this.value)" onchange="onRotationChange()" title="Rotate the current layout around its centroid in degrees (labels stay horizontal; distances are conserved)">
+                    <span class="vp-unit">°</span>
+                </div>
+                <button class="btn" onclick="rotateCounterClockwise()" style="align-self: flex-end; font-size: 13px; padding: 4px 9px; width: auto; min-width: 0; line-height: 1.2;" title="Rotate the layout 90° counter-clockwise per click (the angle display wraps mod 360; any angle can also be typed in the Rotate field)">↺</button>
+            </div>
+            </div>
+            <div class="vp-ribbon-group" style="min-width: 170px;">
+            <label class="vp-group-title">Labels</label>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+                <button class="btn secondary" id="toggleLabelsBtn" onclick="toggleLabels()" style="font-size: 12px; padding: 6px; width: 100%;" title="Show or hide node labels (shortcut: L)">🏷️ Hide Labels</button>
+                <button class="btn" id="showAllBtn" onclick="showAllNodes()" style="background: #ff9800; font-size: 12px; padding: 6px; width: 100%; display: none;" title="Restore all manually hidden nodes">👁️ Show All</button>
+                <button class="btn secondary" id="toggleEdgeWeightsBtn" onclick="toggleEdgeWeightLabels()" data-showing="0" style="font-size: 12px; padding: 6px; width: 100%;" title="Show or hide the value painted on each edge (follows the active Connection Metric)">🏋️ Edge Weights</button>
+            </div>
+            </div>
+            <div class="vp-ribbon-group" style="min-width: 120px;">
+            <label class="vp-group-title">Canvas</label>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+                <button class="btn" onclick="fitGraph()" style="background: #2196f3; font-size: 12px; padding: 6px; width: 100%;" title="Zoom and pan so all visible nodes fit the canvas">⛶ Fit</button>
+                <button class="btn" onclick="refreshLayout()" style="background: #00bcd4; font-size: 12px; padding: 6px; width: 100%;" title="Re-apply the current layout to the visible nodes only">🔄 Refresh Layout</button>
+            </div>
+            </div>
+            {hemisphere_group_html}
+        </div>
+
+        <div class="vp-ribbon-page" id="pageFilter">
+            <div class="vp-ribbon-group" style="min-width: 150px;">
+            <label class="vp-group-title">Connection Metric</label>
+            <select id="metricSelect" onchange="updateMetric()" title="Value used by the edge filter below AND by the edge widths: synapse count, connection ratio, or traversal probability" style="width: 100%; padding: 5px;">
+                <option value="weight">Synapse Count</option>
+                <option value="ratio">Connection Ratio</option>
+                <option value="probability">Traversal Probability</option>
+            </select>
+            </div>
+            <div class="vp-ribbon-group" style="min-width: 215px;">
+            <label class="vp-group-title" for="ignoreEdgesInput">Hide Edges (by metric)</label>
+            <input type="text" id="ignoreEdgesInput" placeholder="OR: <5, >100 | AND: (>=5, <=10)" style="width: 100%; padding: 5px; font-size: 11px; border-radius: 3px; box-sizing: border-box;" oninput="updateIgnoredEdges()" title="Hide edges whose ACTIVE metric value matches. Comma = OR, parentheses = AND, e.g. under 5, over 100, (at least 10 and at most 20)">
+            <div style="font-size: 9px; color: var(--vp-text-2); line-height: 1.2;">
+                Comma = OR, Parentheses = AND · <a href="#" onclick="openHelp('recipes'); return false;" title="Open the filter-syntax recipes in the help overlay" style="color: var(--vp-accent-filter);">…more</a>
+            </div>
+            </div>
+            <div class="vp-ribbon-group" style="min-width: 230px;">
+            <label class="vp-group-title">Auto-hide</label>
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px;">
+                <button class="btn" id="hideOrphansBtn" onclick="toggleOrphanNodes()" style="font-size: 10px; padding: 6px; background: #9c27b0;" title="Show or hide nodes with no connections">👻 Hide Orphans</button>
+                <button class="btn" id="hideSelfLoopsBtn" onclick="toggleSelfLoops()" style="font-size: 10px; padding: 6px; background: #ff5722;" title="Show or hide edges from a node to itself">🔁 Hide Self-Loops</button>
+                <button class="btn" id="hideDeadEndsBtn" onclick="toggleDeadEnds()" style="font-size: 10px; padding: 6px; background: #607d8b;" title="Show or hide out-only non-source / in-only non-target nodes">💀 Hide Dead Ends</button>
+            </div>
+            <div style="font-size: 10px; color: var(--vp-text-2); line-height: 1.3;">
+                • Orphans: nodes with no connections<br>
+                • Self-Loops: edges from a node to itself<br>
+                • Dead Ends: out-only non-source / in-only non-target nodes
+            </div>
             </div>
         </div>
-        
-        <!-- Three-column layout for controls -->
-        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; margin: 15px 0;">
-            <!-- Column 1: Edge Controls -->
-            <div style="padding: 10px; background: #f5f5f5; border-radius: 5px;">
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: bold; font-size: 13px;">Connection Metric:</label>
-                    <select id="metricSelect" onchange="updateMetric()" style="width: 100%; padding: 5px;">
-                        <option value="weight">Synapse Count</option>
-                        <option value="ratio">Connection Ratio</option>
-                        <option value="probability">Traversal Probability</option>
-                    </select>
+
+        <div class="vp-ribbon-page" id="pageStyle">
+            <div class="vp-ribbon-group" style="min-width: 170px;">
+            <label class="vp-group-title" for="edgeWidthScale">Edge Width Scale</label>
+            <select id="edgeWidthScale" onchange="updateEdgeWidths()" title="How edge weights map to widths (linear, logarithmic, square root, or constant)" style="width: 100%; padding: 5px;">
+                <option value="linear" {'selected' if self.edge_width_scale == 'linear' else ''}>Linear</option>
+                <option value="log_e" {'selected' if self.edge_width_scale == 'log' and str(self.edge_width_log_base) not in ('2', '10') else ''}>Logarithmic (ln)</option>
+                <option value="log_2" {'selected' if self.edge_width_scale == 'log' and str(self.edge_width_log_base) == '2' else ''}>Logarithmic (log₂)</option>
+                <option value="log_10" {'selected' if self.edge_width_scale == 'log' and str(self.edge_width_log_base) == '10' else ''}>Logarithmic (log₁₀)</option>
+                <option value="sqrt" {'selected' if self.edge_width_scale == 'sqrt' else ''}>Square Root</option>
+                <option value="none" {'selected' if self.edge_width_scale == 'none' else ''}>None (Constant)</option>
+            </select>
+            </div>
+            <div class="vp-ribbon-group">
+            <label class="vp-group-title">Sizes</label>
+            <div class="vp-spinner-row">
+                <div class="vp-spinner vp-spinner-inline">
+                    <label for="fontSizeSlider" title="Text size of the node labels">Font Size</label>
+                    <input type="number" id="fontSizeSlider" min="1" step="1" value="12" oninput="updateFontSize(this.value)" title="Text size of the node labels in px">
+                    <span class="vp-unit">px</span>
                 </div>
-                
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: bold; font-size: 13px;">Edge Width Scale:</label>
-                    <select id="edgeWidthScale" onchange="updateEdgeWidths()" style="width: 100%; padding: 5px;">
-                        <option value="linear" {'selected' if self.edge_width_scale == 'linear' else ''}>Linear</option>
-                        <option value="log_e" {'selected' if self.edge_width_scale == 'log' and str(self.edge_width_log_base) not in ('2', '10') else ''}>Logarithmic (ln)</option>
-                        <option value="log_2" {'selected' if self.edge_width_scale == 'log' and str(self.edge_width_log_base) == '2' else ''}>Logarithmic (log₂)</option>
-                        <option value="log_10" {'selected' if self.edge_width_scale == 'log' and str(self.edge_width_log_base) == '10' else ''}>Logarithmic (log₁₀)</option>
-                        <option value="sqrt" {'selected' if self.edge_width_scale == 'sqrt' else ''}>Square Root</option>
-                        <option value="none" {'selected' if self.edge_width_scale == 'none' else ''}>None (Constant)</option>
-                    </select>
+                <div class="vp-spinner vp-spinner-inline">
+                    <label for="nodeSizeSlider" title="Diameter of the nodes">Node Size</label>
+                    <input type="number" id="nodeSizeSlider" min="1" step="1" value="40" oninput="updateNodeSize(this.value)" title="Diameter of the nodes in px">
+                    <span class="vp-unit">px</span>
                 </div>
-                
-                <div style="margin-top: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: bold; font-size: 13px;">Hide Edges (weight):</label>
-                    <input type="text" id="ignoreEdgesInput" placeholder="OR: <5, >100 | AND: (>=5, <=10)" style="width: 100%; padding: 5px; font-size: 11px; border: 1px solid #ddd; border-radius: 3px; box-sizing: border-box;" oninput="updateIgnoredEdges()">
-                    <div style="font-size: 9px; color: #666; margin-top: 3px; line-height: 1.2;">
-                        Comma = OR, Parentheses = AND. E.g., &lt;5, (&gt;=10, &lt;=20), &gt;100
-                    </div>
+                <div class="vp-spinner vp-spinner-inline">
+                    <label for="edgeWidthSlider" title="Base thickness of the edges">Edge Width</label>
+                    <input type="number" id="edgeWidthSlider" min="0.5" step="0.5" value="3" oninput="updateEdgeWidth(this.value)" title="Base thickness of the edges in px">
+                    <span class="vp-unit">px</span>
+                </div>
+                <div class="vp-spinner vp-spinner-inline">
+                    <label for="arrowSizeSlider" title="Size of the arrowheads on directed edges">Arrow Size</label>
+                    <input type="number" id="arrowSizeSlider" min="1" step="1" value="9" oninput="updateArrowSize(this.value)" title="Size of the arrowheads on directed edges in px">
+                    <span class="vp-unit">px</span>
                 </div>
             </div>
-            
-            <!-- Column 2: Font & Node Controls -->
-            <div style="padding: 10px; background: #f5f5f5; border-radius: 5px;">
-                <div class="slider-container" style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: bold; font-size: 13px;">Font Size: <span id="fontSizeValue" style="display: inline-block; min-width: 45px;">12px</span></label>
-                    <input type="range" id="fontSizeSlider" min="{self.min_font_size}" max="{self.max_font_size}" value="12" step="1" oninput="updateFontSize(this.value)" style="width: 100%;">
-                </div>
-                
-                <div class="slider-container" style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: bold; font-size: 13px;">Node Size: <span id="nodeSizeValue" style="display: inline-block; min-width: 45px;">40px</span></label>
-                    <input type="range" id="nodeSizeSlider" min="{self.min_node_size}" max="{self.max_node_size}" value="40" step="5" oninput="updateNodeSize(this.value)" style="width: 100%;">
-                </div>
-                
-                <div class="slider-container" style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: bold; font-size: 13px;">Edge Width: <span id="edgeWidthValue" style="display: inline-block; min-width: 45px;">3px</span></label>
-                    <input type="range" id="edgeWidthSlider" min="{self.min_edge_width}" max="{self.max_edge_width}" value="3" step="0.5" oninput="updateEdgeWidth(this.value)" style="width: 100%;">
-                </div>
-                
-                <div class="slider-container">
-                    <label style="display: block; margin-bottom: 5px; font-weight: bold; font-size: 13px;">Arrow Size: <span id="arrowSizeValue" style="display: inline-block; min-width: 45px;">9px</span></label>
-                    <input type="range" id="arrowSizeSlider" min="3" max="20" value="9" step="1" oninput="updateArrowSize(this.value)" style="width: 100%;">
-                </div>
             </div>
-            
-            <!-- Column 3: Export Controls -->
-            <div style="padding: 10px; background: #f5f5f5; border-radius: 5px;">
-                <h4 style="margin: 0 0 10px 0; font-size: 14px; color: #333;">💾 Export</h4>
-                
-                <div style="margin-bottom: 10px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: bold; font-size: 13px;">Image Scale:</label>
-                    <input type="number" id="exportScale" min="1" max="10" value="2" step="0.5" style="width: 100%; padding: 5px; box-sizing: border-box;">
-                </div>
-                
-                <div style="display: flex; gap: 6px; margin-bottom: 10px;">
-                    <button class="btn" onclick="exportPNG()" style="flex: 1; padding: 6px; font-size: 12px;">PNG</button>
-                    <button class="btn" onclick="exportSVG()" style="flex: 1; padding: 6px; font-size: 12px;">SVG</button>
-                </div>
-                
-                <div style="display: flex; gap: 6px; margin-bottom: 6px;">
-                    <button class="btn" onclick="exportGraph()" style="flex: 1; padding: 6px; font-size: 11px; background: #9c27b0;">📤 Export Graph</button>
-                    <button class="btn" onclick="importGraph()" style="flex: 1; padding: 6px; font-size: 11px; background: #9c27b0;">📥 Import Graph</button>
-                </div>
-                
-                <div style="display: flex; gap: 6px; margin-bottom: 6px;">
-                    <button class="btn" onclick="exportLayout()" style="flex: 1; padding: 6px; font-size: 11px; background: #607d8b;">📤 Export Layout</button>
-                    <button class="btn" onclick="importLayout()" style="flex: 1; padding: 6px; font-size: 11px; background: #607d8b;">📥 Import Layout</button>
-                </div>
-                
-                <div style="display: flex; gap: 6px; margin-bottom: 6px;">
-                    <button class="btn" onclick="exportEdgeListCSV()" title="Export every edge as CSV (source, target, weight, color, NT, grouping)" style="flex: 1; padding: 6px; font-size: 11px; background: #2e7d32;">📋 Edge List CSV</button>
-                </div>
-                
-                <!-- Background Color Toggle -->
-                <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #ddd;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: bold; font-size: 13px;">🎨 Background:</label>
-                    <div style="display: flex; gap: 6px; align-items: center;">
-                        <button id="bgToggleBtn" class="btn" onclick="toggleBackground()" style="flex: 1; padding: 6px; font-size: 11px; background: #795548;">White</button>
-                        <input type="color" id="customBgColor" value="#f5f5f5" style="width: 35px; height: 28px; border: 1px solid #ddd; border-radius: 3px; cursor: pointer; display: none;">
-                    </div>
-                </div>
-                
-                <input type="file" id="graphFileInput" accept=".json" style="display: none;" onchange="loadGraphFile(event)">
-                <input type="file" id="layoutFileInput" accept=".json" style="display: none;" onchange="loadLayoutFile(event)">
+            <div id="reciprocalOffsetControls" class="vp-ribbon-group" style="display: none;">
+            <label class="vp-group-title" for="reciprocalOffsetSlider">Reciprocal Offset</label>
+            <div class="vp-spinner-row">
+                <button id="reciprocalModeToggle" onclick="toggleReciprocalMode()" title="Draw reciprocal edge pairs curved (offset) or straight on top of each other" style="padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid var(--vp-border); background: #4caf50; color: white; cursor: pointer; flex: 0 0 auto;">Straight</button>
+                <input type="number" id="reciprocalOffsetSlider" min="0" step="1" value="5" title="Separation in pixels between the opposite edges of a reciprocal pair (live; bound by initializeReciprocalOffsetControls)">
+                <span class="vp-unit">px</span>
+            </div>
+            </div>
+            <div class="vp-ribbon-group" style="min-width: 150px;">
+            <label class="vp-group-title">Edges</label>
+            <button class="btn" onclick="refreshEdgeStyles()" style="background: #9c27b0; font-size: 12px; padding: 6px; width: 100%;" title="Re-apply edge styles (widths, colors, curves) after size or metric changes">🔄 Refresh Edges</button>
+            </div>
+            <div class="vp-ribbon-group" style="min-width: 170px;">
+            <label class="vp-group-title">Background & Font</label>
+            <div style="display: flex; gap: 8px; align-items: center;">
+                <span class="vp-mini-label">Background</span>
+                <button id="bgToggleBtn" class="btn" onclick="toggleBackground()" style="flex: 0 0 auto; padding: 4px 8px; font-size: 11px; background: #795548;" title="Cycle the canvas background: white, dark, or custom color (exports match the visible background)">White</button>
+                <input type="color" id="customBgColor" value="#f5f5f5" style="width: 35px; height: 28px; border: 1px solid var(--vp-border); border-radius: 3px; cursor: pointer; display: none;" title="Custom background color for the third background mode" onchange="applyCustomBackground()">
+                <span class="vp-mini-label" style="margin-left: 2px;">Font</span>
+                <input type="color" id="labelFontColor" value="#000000" style="width: 35px; height: 28px; border: 1px solid var(--vp-border); border-radius: 3px; cursor: pointer;" title="Node label text color (node labels never have a background)" onchange="applyLabelFontColor(this.value)">
+            </div>
             </div>
         </div>
-        
+
+        <div class="vp-ribbon-page" id="pageShare">
+            <div class="vp-ribbon-group">
+            <label class="vp-group-title">Image</label>
+            <div style="display: flex; gap: 6px; align-items: center;">
+                <label for="exportScale" style="font-weight: bold; font-size: 13px; white-space: nowrap;" title="Image export magnification">Scale:</label>
+                <input type="number" id="exportScale" min="1" max="10" value="2" step="0.5" style="width: 56px; padding: 5px; box-sizing: border-box;" title="Image export magnification (1–10; very large values may fail)">
+                <button class="btn" onclick="exportPNG()" style="flex: 1; padding: 6px; font-size: 12px;" title="Export the current view as a PNG image at the chosen scale">PNG</button>
+                <button class="btn" onclick="exportSVG()" style="flex: 1; padding: 6px; font-size: 12px;" title="Export the current view as a vector SVG image">SVG</button>
+            </div>
+            </div>
+            <div class="vp-ribbon-group">
+            <label class="vp-group-title">Graph</label>
+            <div style="display: flex; gap: 6px;">
+                <button class="btn" onclick="exportGraph()" style="flex: 1; padding: 6px; font-size: 11px; background: #9c27b0;" title="Download the full graph (nodes, edges, styles, positions) as JSON">📤 Export Graph</button>
+                <button class="btn" onclick="importGraph()" style="flex: 1; padding: 6px; font-size: 11px; background: #9c27b0;" title="Replace the canvas with a previously exported graph JSON">📥 Import Graph</button>
+            </div>
+            </div>
+            <div class="vp-ribbon-group">
+            <label class="vp-group-title">Layout Persistence</label>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+                <button class="btn" onclick="saveLayout()" style="background: #4caf50; font-size: 12px; padding: 6px; width: 100%;" title="Save current node positions to this browser's storage for this file">💾 Save</button>
+                <button class="btn" onclick="loadLayout()" style="background: #2196f3; font-size: 12px; padding: 6px; width: 100%;" title="Load node positions saved earlier from browser storage">📂 Load</button>
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+                <button class="btn" onclick="exportLayout()" style="padding: 6px; font-size: 11px; background: #607d8b; width: 100%;" title="Download current node positions as a JSON layout file">📤 Export Layout</button>
+                <button class="btn" onclick="importLayout()" style="padding: 6px; font-size: 11px; background: #607d8b; width: 100%;" title="Apply node positions from a previously exported JSON layout file">📥 Import Layout</button>
+            </div>
+            </div>
+            <div class="vp-ribbon-group" style="min-width: 220px;">
+            <label class="vp-group-title">Data</label>
+            <div style="display: flex; gap: 6px;">
+                <button class="btn" onclick="exportEdgeListCSV()" title="Export every edge as CSV (source, target, weight, color, NT, grouping)" style="flex: 1; padding: 6px; font-size: 11px; background: #2e7d32;">📋 Edge List CSV</button>
+            </div>
+            <input type="file" id="graphFileInput" accept=".json" style="display: none;" onchange="loadGraphFile(event)" title="Hidden file picker used by Import Graph">
+            <input type="file" id="layoutFileInput" accept=".json" style="display: none;" onchange="loadLayoutFile(event)" title="Hidden file picker used by Import Layout">
+            </div>
+        </div>
+    </div>
+    <!-- Legend + canvas info footer: separated from the tool ribbon; stays
+         visible even when the ribbon is collapsed -->
+    <div class="vp-footer">
         <div class="legend">
-            <div class="legend-item">
-                <div class="legend-color" style="background: {self.node_color[0]};"></div>
-                <span>Source</span>
-            </div>
-            <div class="legend-item">
-                <div class="legend-color" style="background: {self.node_color[1]};"></div>
-                <span>Intermediate</span>
-            </div>
-            <div class="legend-item">
-                <div class="legend-color" style="background: {self.target_color};"></div>
-                <span>Target</span>
-            </div>
-            {dataset_legend_html}
+            <!-- Group chips are rebuilt live by refreshLegend(); the dataset
+                 chips are static and never touched by it. -->
+            <span id="groupLegend" style="display: contents;">{role_legend_html}{group_legend_html}</span>
+            <span id="datasetLegend" style="display: contents;">{dataset_legend_html}</span>
         </div>
-        
         <div class="info">
-            <strong>{G.number_of_nodes()}</strong> nodes, <strong>{G.number_of_edges()}</strong> connections | 
-            Press 'H' to hide nodes, 'E' to hide edges, 'L' to toggle label position | Right-click to hide | 
-            <strong>Shift+Click</strong> for multi-selection | Double-click to highlight |
-            <strong>⌘Z/⌃Z</strong> undo, <strong>⌘⇧Z/⌃Y</strong> redo | History: pick an entry in the right panel
+            <strong>{G.number_of_nodes()}</strong> nodes, <strong>{G.number_of_edges()}</strong> connections ·
+            Press <strong>?</strong> for help
         </div>
     </div>
     
     <!-- Color Palette Panel -->
     <div class="main">
-        <div id="cy"></div>
+        <div id="cy"><div id="editBadge">✏️ EDIT MODE</div></div>
         <div class="color-palette" id="colorPalette">
             <div class="palette-content">
-                <!-- Edit Mode Section -->
-                <div class="palette-section" style="border-bottom: 2px solid #ddd; padding-bottom: 15px; margin-bottom: 15px;">
-                    <h3>✏️ Edit Mode</h3>
-                    
-                    <button class="btn" id="editModeBtn" onclick="toggleEditMode()" style="width: 100%; margin-bottom: 10px; background: #ff9800;">
+                <!-- Edit accordion (collapsed by default) -->
+                <div class="palette-section vp-acc" id="accEdit">
+                    <button class="vp-acc-header" onclick="toggleAccordion('edit')" title="Show or hide the edit-mode tools">
+                        <span>✏️ Edit</span><span class="vp-acc-chevron">▾</span>
+                    </button>
+                    <div class="vp-acc-body" id="accEditBody">
+                    <button class="btn" id="editModeBtn" onclick="toggleEditMode()" title="Toggle manual editing: add/delete nodes and drag to connect" style="width: 100%; margin-bottom: 10px; background: #ff9800;">
                         ✏️ Enable Edit Mode
                     </button>
                     
                     <div id="editControls" style="display: none; margin-bottom: 10px;">
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 6px;">
-                            <button class="btn" onclick="addNode()" style="font-size: 11px; padding: 6px; background: #4caf50;">➕ Node</button>
-                            <button class="btn" onclick="deleteSelected()" style="font-size: 11px; padding: 6px; background: #f44336;">🗑️ Delete</button>
+                            <button class="btn" onclick="addNode()" title="Add a new node at the center of the view (edit mode)" style="font-size: 11px; padding: 6px; background: #4caf50;">➕ Node</button>
+                            <button class="btn" onclick="deleteSelected()" title="Delete the selected elements (edit mode; right-click also deletes)" style="font-size: 11px; padding: 6px; background: #f44336;">🗑️ Delete</button>
                         </div>
-                        <div style="font-size: 10px; color: #666; line-height: 1.3;">
+                        <div style="font-size: 10px; color: var(--vp-text-2); line-height: 1.3;">
                             • Click node → drag to connect<br>
                             • <strong>Double-click to edit properties</strong><br>
                             • Right-click to delete
                         </div>
                     </div>
+                    </div>
                 </div>
                 
-                <!-- View Controls Section -->
-                <div class="palette-section" style="border-bottom: 2px solid #ddd; padding-bottom: 15px; margin-bottom: 15px;">
-                    <h3>👁️ View Controls</h3>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-bottom: 6px;">
-                        <button class="btn" id="hideOrphansBtn" onclick="toggleOrphanNodes()" style="font-size: 11px; padding: 6px; background: #9c27b0;">
-                            👻 Hide Orphans
-                        </button>
-                        <button class="btn" id="hideSelfLoopsBtn" onclick="toggleSelfLoops()" style="font-size: 11px; padding: 6px; background: #ff5722;">
-                            🔁 Hide Self-Loops
-                        </button>
-                        <button class="btn" id="hideDeadEndsBtn" onclick="toggleDeadEnds()" style="font-size: 11px; padding: 6px; background: #607d8b;">
-                            💀 Hide Dead Ends
-                        </button>
-                    </div>
-                    <div style="display: grid; grid-template-columns: 1fr; gap: 6px; margin-bottom: 6px;">
-                        <button class="btn" onclick="refreshLayout()" style="font-size: 11px; padding: 6px; background: #00bcd4;">
-                            🔄 Refresh Layout
-                        </button>
-                    </div>
+                <!-- History accordion (expanded by default) -->
+                <div class="palette-section vp-acc open" id="accHistory">
+                    <button class="vp-acc-header" onclick="toggleAccordion('history')" title="Show or hide the undo/redo history">
+                        <span>↩️ History</span><span class="vp-acc-chevron">▾</span>
+                    </button>
+                    <div class="vp-acc-body" id="accHistoryBody">
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 6px;">
-                        <button class="btn" id="undoBtn" onclick="undo()" style="font-size: 11px; padding: 6px; background: #6b7280;">↩️ Undo</button>
-                        <button class="btn" id="redoBtn" onclick="redo()" style="font-size: 11px; padding: 6px; background: #6b7280;">↪️ Redo</button>
+                        <button class="btn" id="undoBtn" onclick="undo()" style="font-size: 11px; padding: 6px; background: #6b7280;" title="Undo the last operation (⌘Z / ⌃Z)">↩️ Undo</button>
+                        <button class="btn" id="redoBtn" onclick="redo()" style="font-size: 11px; padding: 6px; background: #6b7280;" title="Redo the last undone operation (⌘⇧Z / ⌃Y)">↪️ Redo</button>
                     </div>
-                    <div style="display: grid; grid-template-columns: 1fr; gap: 6px; margin-bottom: 6px;">
-                        <select id="historyList" onchange="jumpToHistory(this.selectedIndex)" title="Operation history — every action is recorded; select an entry to undo/redo to it" style="width: 100%; font-size: 11px; padding: 4px; border: 1px solid #ddd; border-radius: 3px; background: #fff; color: #333;">
+                    <div style="display: grid; grid-template-columns: 1fr; gap: 6px;">
+                        <select id="historyList" onchange="jumpToHistory(this.selectedIndex)" title="Operation history — every action is recorded; select an entry to undo/redo to it" style="width: 100%; font-size: 11px; padding: 4px; border-radius: 3px;">
                             <option disabled>▶ Current state</option>
                         </select>
                     </div>
-                    {hemisphere_controls_html}
-                    <div style="font-size: 10px; color: #666; line-height: 1.3;">
-                        • Orphans: nodes with no connections<br>
-                        • Self-Loops: edges from a node to itself<br>
-                        • Dead Ends: out-only non-source / in-only non-target nodes<br>
-                        • Refresh: re-apply layout after hiding/filtering<br>
-                        • Undo/Redo: ⌘Z/⌘⇧Z (macOS) or ⌃Z/⌃Y (Windows/Linux)<br>
-                        • History: every operation is recorded — select an entry to jump
                     </div>
                 </div>
                 
-                <h3>🎨 Color Settings</h3>
-                
+                <!-- Selection & Color accordion (expanded by default) -->
+                <div class="palette-section vp-acc open" id="accSelection">
+                    <button class="vp-acc-header" onclick="toggleAccordion('selection')" title="Show or hide the selection and color tools">
+                        <span>🎛️ Selection & Color</span><span class="vp-acc-chevron">▾</span>
+                    </button>
+                    <div class="vp-acc-body" id="accSelectionBody">
+                    <div id="selectionSummary" class="vp-chip">Nothing selected</div>
                 <!-- Individual Selection Section -->
                 <div class="palette-section">
-                    <h4>Selected Element(s)</h4>
-                    <div id="selectedInfo" class="selected-info">
+                    <h4>Selected element(s)</h4>
+                    <div id="selectedInfo" class="selected-info vp-chip">
                         Click on a node or edge to customize its color<br>
                         <em>Hold Shift to select multiple elements</em>
                     </div>
@@ -5214,15 +5902,22 @@ class VisualizePath:
                         <div class="color-group">
                             <label>Color:</label>
                             <div class="color-input-group">
-                                <input type="color" id="individualColor" value="#3498db">
-                                <input type="text" id="individualColorText" value="#3498db" readonly>
+                                <input type="color" id="individualColor" value="#3498db" title="Color for the selected element(s)">
+                                <input type="text" id="individualColorText" value="#3498db" readonly title="Selected color in hex">
                             </div>
                         </div>
                         <div class="color-group">
                             <label>Opacity:</label>
                             <div class="color-input-group">
-                                <input type="range" id="individualOpacity" min="0" max="100" value="100" oninput="updateOpacityDisplay('individual', this.value)">
+                                <input type="number" id="individualOpacity" min="0" max="100" step="1" value="100" oninput="updateOpacityDisplay('individual', this.value)" title="Opacity for the selected element(s)">
                                 <span class="alpha-value" id="individualOpacityValue">100%</span>
+                            </div>
+                        </div>
+                        <div class="color-group" id="assignGroupRow">
+                            <label>Group:</label>
+                            <div style="display: flex; gap: 6px; align-items: center;">
+                                <select id="assignGroupSelect" title="Target group for the selected nodes (every node belongs to exactly one group)" style="flex: 1; width: auto;"></select>
+                                <button class="apply-btn" onclick="assignSelectedToGroup()" title="Move the selected nodes into this group; Unassigned empties them from every group" style="flex: 0 0 auto; background: #2196f3; padding: 5px 8px;">Assign</button>
                             </div>
                         </div>
                         <!-- Geometry: precise numeric size/position editing -->
@@ -5230,44 +5925,43 @@ class VisualizePath:
                             <label>Position / Size (node):</label>
                             <div style="display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 4px; align-items: center; font-size: 10px; color: #555;">
                                 <span>X</span>
-                                <input type="number" id="selGeomX" step="1" style="width: 100%; padding: 3px; border: 1px solid #ddd; border-radius: 3px; font-size: 11px;">
+                                <input type="number" id="selGeomX" step="1" style="width: 100%; padding: 3px; border-radius: 3px; font-size: 11px;" title="Precise X position of the selected node">
                                 <span>Y</span>
-                                <input type="number" id="selGeomY" step="1" style="width: 100%; padding: 3px; border: 1px solid #ddd; border-radius: 3px; font-size: 11px;">
+                                <input type="number" id="selGeomY" step="1" style="width: 100%; padding: 3px; border-radius: 3px; font-size: 11px;" title="Precise Y position of the selected node">
                             </div>
                             <div style="display: grid; grid-template-columns: auto 1fr; gap: 4px; align-items: center; margin-top: 4px; font-size: 10px; color: #555;">
                                 <span>Size&nbsp;(px)</span>
-                                <input type="number" id="selGeomSize" min="1" step="1" style="width: 100%; padding: 3px; border: 1px solid #ddd; border-radius: 3px; font-size: 11px;">
+                                <input type="number" id="selGeomSize" min="1" step="1" style="width: 100%; padding: 3px; border-radius: 3px; font-size: 11px;" title="Size in pixels of the selected node">
                             </div>
                         </div>
                         <div class="color-group" id="geomEdgeGroup" style="display: none;">
                             <label>Width (edge):</label>
                             <div style="display: grid; grid-template-columns: auto 1fr; gap: 4px; align-items: center; font-size: 10px; color: #555;">
                                 <span>Width&nbsp;(px)</span>
-                                <input type="number" id="selGeomWidth" min="0.5" step="0.5" style="width: 100%; padding: 3px; border: 1px solid #ddd; border-radius: 3px; font-size: 11px;">
+                                <input type="number" id="selGeomWidth" min="0.5" step="0.5" style="width: 100%; padding: 3px; border-radius: 3px; font-size: 11px;" title="Width in pixels of the selected edge">
                             </div>
-                            <div style="font-size: 9px; color: #888; margin-top: 3px;">Edges are anchored to their endpoints — no free position.</div>
+                            <div style="font-size: 9px; color: var(--vp-text-2); margin-top: 3px;">Edges are anchored to their endpoints — no free position.</div>
                         </div>
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px;">
                             <button class="btn" id="alignHBtn" onclick="alignSelectedNodes('h')" title="Align selected nodes horizontally (same Y)" style="font-size: 10px; padding: 5px; background: #00897b; opacity: 0.4;">⇔ Align H</button>
                             <button class="btn" id="alignVBtn" onclick="alignSelectedNodes('v')" title="Align selected nodes vertically (same X)" style="font-size: 10px; padding: 5px; background: #00897b; opacity: 0.4;">⇕ Align V</button>
                         </div>
-                        <button class="apply-btn" onclick="applyIndividualColor()">Apply to Selected</button>
-                        <button class="apply-btn" id="applyGeometryBtn" onclick="applySelectedGeometry()" style="background: #00838f;">Apply Size/Position</button>
-                        <button class="clear-selection-btn" onclick="clearSelection()">Clear Selection</button>
+                        <button class="apply-btn" onclick="applyIndividualColor()" title="Apply the chosen color and opacity to the selected elements">Apply to Selected</button>
+                        <button class="apply-btn" id="applyGeometryBtn" onclick="applySelectedGeometry()" title="Apply the numeric position/size values to the selected element" style="background: #00838f;">Apply Size/Position</button>
+                        <button class="clear-selection-btn" onclick="clearSelection()" title="Deselect all elements">Clear Selection</button>
                     </div>
                 </div>
                 
-                <!-- Group Selection Section (replaces fixed Node Type Colors) -->
+                <!-- Groups Section -->
                 <div class="palette-section">
-                    <h4>🎯 Edit by Group</h4>
+                    <h4>🎯 Groups</h4>
                     <div class="color-group">
                         <label>Select Group:</label>
                         <div class="color-input-group">
-                            <select id="groupSelector" onchange="updateGroupControls()" style="width: 100%;">
+                            <select id="groupSelector" onchange="updateGroupControls()" title="Choose which group of elements to edit" style="width: 100%;">
                                 <optgroup label="Nodes">
-                                    <option value="source">Source Nodes</option>
-                                    <option value="intermediate">Intermediate Nodes</option>
-                                    <option value="target">Target Nodes</option>
+                                    {standard_group_options_html}
+                                    {extra_node_group_options}
                                     <option value="all_nodes">All Nodes</option>
                                 </optgroup>
                                 <optgroup label="Edges">
@@ -5285,19 +5979,19 @@ class VisualizePath:
                     <div class="color-group">
                         <label id="groupColorLabel">Color:</label>
                         <div class="color-input-group">
-                            <input type="color" id="groupColor" value="{self.node_color[0]}">
-                            <input type="text" id="groupColorText" value="{self.node_color[0]}" readonly>
+                            <input type="color" id="groupColor" value="{self.node_color[0]}" title="Color to apply to the chosen group">
+                            <input type="text" id="groupColorText" value="{self.node_color[0]}" readonly title="Group color in hex">
                         </div>
                     </div>
                     <div class="color-group">
                         <label>Opacity:</label>
                         <div class="color-input-group">
-                            <input type="range" id="groupOpacity" min="0" max="100" value="100" oninput="updateOpacityDisplay('group', this.value)">
+                            <input type="number" id="groupOpacity" min="0" max="100" step="1" value="100" oninput="updateOpacityDisplay('group', this.value)" title="Opacity to apply to the chosen group">
                             <span class="alpha-value" id="groupOpacityValue">100%</span>
                         </div>
                     </div>
-                    <button class="apply-btn" onclick="applyGroupColor()">Apply to Group</button>
-                    <div style="font-size: 10px; color: #666; margin-top: 8px; line-height: 1.3;">
+                    <button class="apply-btn" onclick="applyGroupColor()" title="Apply the chosen color and opacity to every element in the group">Apply to Group</button>
+                    <div style="font-size: 10px; color: var(--vp-text-2); margin-top: 8px; line-height: 1.3;">
                         💡 Use dropdown to select which group to edit.<br>
                         Changes apply to all elements in the group.
                     </div>
@@ -5305,44 +5999,102 @@ class VisualizePath:
                 
                 <!-- Custom Groups Section -->
                 <div class="palette-section">
-                    <h4>📁 Custom Groups</h4>
-                    <div style="font-size: 11px; color: #666; margin-bottom: 8px;">
-                        Create groups from selected elements
+                    <h4>📁 Custom groups</h4>
+                    <div style="font-size: 11px; color: var(--vp-text-2); margin-bottom: 8px;">
+                        Create node groups from selected nodes (single membership;
+                        edges cannot join)
                     </div>
                     <div class="color-group">
                         <label>Group Name:</label>
-                        <input type="text" id="customGroupName" placeholder="My Group" style="width: 100%; padding: 4px; border: 1px solid #ddd; border-radius: 3px;">
+                        <input type="text" id="customGroupName" placeholder="My Group" style="width: 100%; padding: 4px; border-radius: 3px;" title="Name for the new custom group">
                     </div>
                     <div style="display: flex; gap: 6px; margin-top: 8px;">
-                        <button class="apply-btn" onclick="createCustomGroup()" style="flex: 1; background: #2196F3;">➕ Create</button>
-                        <button class="apply-btn" onclick="deleteCustomGroup()" style="flex: 1; background: #f44336;">🗑️ Delete</button>
+                        <button class="apply-btn" onclick="createCustomGroup()" title="Create a custom group from the currently selected elements" style="flex: 1; background: #2196F3;">➕ Create</button>
+                        <button class="apply-btn" onclick="deleteCustomGroup()" title="Delete the selected custom group" style="flex: 1; background: #f44336;">🗑️ Delete</button>
                     </div>
-                    <select id="customGroupList" style="width: 100%; margin-top: 8px; padding: 4px; display: none;">
+                    <select id="customGroupList" style="width: 100%; margin-top: 8px; padding: 4px; display: none;" title="Saved custom groups">
                         <option value="">-- Custom Groups --</option>
                     </select>
                 </div>
                 
                 <!-- Quick Actions Section -->
                 <div class="palette-section">
-                    <h4>⚡ Quick Actions</h4>
+                    <h4>⚡ Quick actions</h4>
+                    {role_quick_actions_html}
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px;">
-                        <button class="btn" onclick="selectGroup('source')" style="font-size: 10px; padding: 5px; background: {self.node_color[0]};">Select Source</button>
-                        <button class="btn" onclick="selectGroup('intermediate')" style="font-size: 10px; padding: 5px; background: {self.node_color[1]};">Select Intermed.</button>
+                        <button class="btn" onclick="selectGroup('all_edges')" title="Select all edges" style="font-size: 10px; padding: 5px; background: {self.edge_color};">All edges</button>
                     </div>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px;">
-                        <button class="btn" onclick="selectGroup('target')" style="font-size: 10px; padding: 5px; background: {self.target_color};">Select Target</button>
-                        <button class="btn" onclick="selectGroup('all_edges')" style="font-size: 10px; padding: 5px; background: {self.edge_color};">Select All Edges</button>
+                    {extra_group_buttons}
+                    <button class="apply-btn" onclick="applyGlobalColors()" title="Restore the default colors for every node and edge group" style="background: #9c27b0;">🔄 Reset All Colors</button>
+                </div>
                     </div>
-                    <button class="apply-btn" onclick="applyGlobalColors()" style="background: #9c27b0;">🔄 Reset All Colors</button>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- Hover Info Display (Bottom-Left) -->
+    <!-- Hover Info Display (Bottom-Left): element tooltips ONLY -->
     <div id="hoverInfo">
-        💡 <b>Hover over nodes or edges</b> to see details<br>
-        <b>Drag nodes</b> to reposition • <b>Scroll</b> to zoom • <b>Double-click</b> to highlight
+        💡 <b>Hover over nodes or edges</b> for details · Press <b>?</b> for help
+    </div>
+
+    <!-- Toast stack: operation feedback (success/info/warn/error) -->
+    <div id="toastStack" aria-live="polite" aria-label="Operation notifications"></div>
+
+    <!-- In-page dialog (replaces native prompt/confirm); content built per open -->
+    <div id="vpDialogOverlay" role="dialog" aria-modal="true" aria-labelledby="vpDialogTitle" onclick="if (event.target === this) cancelDialog()">
+        <div class="vp-dialog">
+            <h3 id="vpDialogTitle"></h3>
+            <div id="vpDialogMessage" class="vp-dialog-message" style="display: none;"></div>
+            <div id="vpDialogBody"></div>
+            <div class="vp-dialog-actions">
+                <button type="button" id="vpDialogCancel" class="vp-dialog-btn" onclick="cancelDialog()" title="Cancel this dialog (Esc)">Cancel</button>
+                <button type="button" id="vpDialogConfirm" class="vp-dialog-btn vp-primary" onclick="confirmDialog()" title="Confirm this dialog (Enter)">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Help overlay (? key / ❓ button) -->
+    <div id="helpOverlay" role="dialog" aria-modal="true" aria-label="Help: gestures, shortcuts, recipes" onclick="if (event.target === this) closeHelp()">
+        <div class="vp-help-card">
+            <button type="button" id="helpCloseBtn" onclick="closeHelp()" title="Close help (Esc)">✕</button>
+            <h3>Help</h3>
+            <div class="vp-help-cols">
+                <div id="helpMouse">
+                    <h4>🖱️ Mouse</h4>
+                    <table>
+                        <tr><td class="vp-key">Click</td><td>Select a node / edge</td></tr>
+                        <tr><td class="vp-key">Shift+Click / drag</td><td>Multi-select (box select)</td></tr>
+                        <tr><td class="vp-key">Double-click</td><td>Highlight a node's connections</td></tr>
+                        <tr><td class="vp-key">Right-click</td><td>Hide node / edge</td></tr>
+                        <tr><td class="vp-key">Drag node</td><td>Move it (undoable)</td></tr>
+                        <tr><td class="vp-key">Scroll / drag bg</td><td>Zoom / pan</td></tr>
+                        <tr><td class="vp-key">Edit mode</td><td>Click two nodes to draw an edge; double-click to edit properties; right-click deletes</td></tr>
+                    </table>
+                </div>
+                <div id="helpKeyboard">
+                    <h4>⌨️ Keyboard</h4>
+                    <table>
+                        <tr><td class="vp-key">H</td><td>Hide selected nodes</td></tr>
+                        <tr><td class="vp-key">E</td><td>Hide selected edges</td></tr>
+                        <tr><td class="vp-key">L</td><td>Toggle label position (center / outside)</td></tr>
+                        <tr><td class="vp-key">?</td><td>Toggle this help</td></tr>
+                        <tr><td class="vp-key">⌘Z / ⌃Z</td><td>Undo</td></tr>
+                        <tr><td class="vp-key">⌘⇧Z / ⌃Y</td><td>Redo</td></tr>
+                        <tr><td class="vp-key">Enter / Esc</td><td>Confirm / cancel dialogs, clear search</td></tr>
+                    </table>
+                </div>
+                <div id="helpRecipes">
+                    <h4>📖 Recipes</h4>
+                    <p><strong>Hide edges by weight</strong> — comma = OR, parentheses = AND:<br>
+                    <code>&lt;5, &gt;100</code> hides weak and very strong edges;<br>
+                    <code>(&gt;=10, &lt;=20)</code> keeps only a weight band.</p>
+                    <p><strong>Save vs Export Layout</strong> — Save keeps positions in this browser for this file; Export Layout downloads them as JSON to share or re-import elsewhere.</p>
+                    <p><strong>Horizontal/Vertical Gap &amp; Rotate</strong> — set the center-to-center distance between neighboring nodes in px (node size unchanged); rotation turns the whole arrangement around its center; both reset when the layout re-runs and are undoable.</p>
+                    <p><strong>Panels</strong> — ⚙️ hides the top tool panel, 🎨 the right panel; both states are remembered.</p>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -5455,13 +6207,6 @@ class VisualizePath:
                         'label': '',
                         'font-size': '10px',
                         'font-family': "-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif",
-                        'text-background-color': '#fff',
-                        'text-background-opacity': 0.95,
-                        'text-background-padding': '8px',
-                        'text-background-shape': 'roundrectangle',
-                        'text-border-color': '#999',
-                        'text-border-width': 1,
-                        'text-border-opacity': 0.5,
                         'text-wrap': 'wrap',
                         'text-max-width': '150px',
                         'text-halign': 'left',
@@ -5476,6 +6221,19 @@ class VisualizePath:
                     style: {{
                         'line-color': '#4A90E2',  // Light blue for negative
                         'target-arrow-color': '#4A90E2'
+                    }}
+                }},
+                {{
+                    // On-edge weight labels — applied via the 'wlabel'
+                    // class (the Edge Weights toggle in the Filter tab);
+                    // the shared text stack (background pill, border,
+                    // wrap) comes from the base edge style.
+                    selector: 'edge.wlabel',
+                    style: {{
+                        'label': 'data(display_label)',
+                        'text-rotation': 'autorotate',
+                        'font-size': '9px',
+                        'color': '#333'
                     }}
                 }},
                 {nt_edge_styles}
@@ -5559,6 +6317,30 @@ class VisualizePath:
         let hemisphereMirrorEnabled = {'true' if self.hemisphere_mirror_default and has_hemi_controls else 'false'};
         let originalHemispherePositions = null;
         let hemisphereTemplateSide = null;
+
+        // Layout transforms: the inter-node gap is an ABSOLUTE center-to-
+        // center distance in px (the median neighbor distance along the
+        // axis), independent of node size; rotation composes by applying
+        // (target - lastApplied) around the visible centroid. Both
+        // transforms anchor on the centroid, which neither moves, so they
+        // compose without drift and rotation conserves every pairwise
+        // distance (the H and V gap axes swap under a 90-degree rotation).
+        // Baseline gaps are captured at each layout run for Reset Spacing.
+        let lastGapX = null;
+        let lastGapY = null;
+        let baselineGapX = null;
+        let baselineGapY = null;
+        let lastRotationDeg = 0;
+        // Pre-transform snapshot captured at the FIRST 'input' of a slider
+        // drag and committed to history on 'change' (release), so one slider
+        // interaction produces ONE history entry instead of dozens.
+        let pendingTransformState = null;
+        // Per-drag dirty gates: an 'input' that never altered geometry
+        // (e.g. a full-turn rotation wrap) commits no history on 'change'.
+        // Declared WITH the tracker state because the initial-layout call
+        // below resets them during script evaluation.
+        let spacingDirtySinceInput = false;
+        let rotationDirtySinceInput = false;
         
         function getLayoutConfig(layoutName) {{
             // Configure layouts with optimal settings for crossing minimization
@@ -5939,6 +6721,7 @@ class VisualizePath:
         // Apply the initial layout using proper configuration
         const initialLayout = getLayoutConfig(currentLayoutAlgorithm);
         cy.layout(initialLayout).run();
+        resetLayoutTransformTrackers();
         setTimeout(() => {{
             cacheHemispherePositions();
             if (hemisphereMirrorEnabled) runHemisphereMirrorLayout();
@@ -5973,7 +6756,9 @@ class VisualizePath:
             const info = document.getElementById('hoverInfo');
             let html = `
                 <b>Node:</b> ${{escapeHtml(data.label)}}<br>
-                <b>Type:</b> ${{escapeHtml(data.node_type)}}<br>
+                <b>Type:</b> ${{escapeHtml(data.role || data.node_type)}}<br>
+                ${{data.group ? `<b>Dataset:</b> ${{escapeHtml(data.group)}}<br>` : ''}}
+                ${{(data.assigned_group !== undefined && data.assigned_group !== '' && data.assigned_group !== data.node_type) ? `<b>Group:</b> ${{escapeHtml(groupLabel(data.assigned_group))}}<br>` : ''}}
                 <b>Color:</b> ${{escapeHtml(data.color)}}
             `;
             if (data.hemisphere) {{
@@ -6098,6 +6883,7 @@ class VisualizePath:
                 return;
             }}
             if (e.key === 'h' || e.key === 'H') {{
+                if (dialogCtl.isActive()) return;
                 const selected = cy.$('node:selected');
                 if (selected.length > 0) {{
                     pushHistory('Hide nodes');
@@ -6111,6 +6897,11 @@ class VisualizePath:
 
         // Keyboard shortcut: E to hide selected edges
         document.addEventListener('keydown', function(e) {{
+            const tag = e.target && e.target.tagName;
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable)) {{
+                return;
+            }}
+            if (dialogCtl.isActive()) return;
             if (e.key === 'e' || e.key === 'E') {{
                 const selected = cy.$('edge:selected');
                 if (selected.length > 0) {{
@@ -6133,6 +6924,11 @@ class VisualizePath:
 
         // Keyboard shortcut: L to toggle label position (center/outside)
         document.addEventListener('keydown', function(e) {{
+            const tag = e.target && e.target.tagName;
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable)) {{
+                return;
+            }}
+            if (dialogCtl.isActive()) return;
             if (e.key === 'l' || e.key === 'L') {{
                 pushHistory('Toggle label position');
                 if (labelPosition === 'center') {{
@@ -6167,6 +6963,11 @@ class VisualizePath:
             // Add animation for reset
             config.animate = true;
             config.animationDuration = 500;
+            // Animated layouts interpolate positions asynchronously, so the
+            // tracker reset must wait for layoutstop — measuring right after
+            // run() captures the OLD arrangement (stale gap spinners and a
+            // Reset-Spacing baseline from the previous layout).
+            cy.one('layoutstop', () => {{ resetLayoutTransformTrackers(); }});
             cy.layout(config).run();
         }}
         
@@ -6177,7 +6978,6 @@ class VisualizePath:
             currentLayoutAlgorithm = newLayout;
             
             // Update info text based on selected layout
-            const infoDiv = document.getElementById('layoutInfo');
             const layoutInfos = {{
                 'dagre': '💡 Dagre uses Sugiyama\\'s algorithm for optimal edge crossing minimization in hierarchical graphs',
                 'klay': '💡 KLay provides layer-based layout with advanced crossing reduction techniques',
@@ -6191,7 +6991,9 @@ class VisualizePath:
                 'hemi-dagre': '🪞 Hemisphere-aware Dagre: layouts L/R neurons in mirrored panels',
                 'hemi-fcose': '🪞 Hemisphere-aware fCoSE: layouts L/R neurons in mirrored panels'
             }};
-            infoDiv.textContent = layoutInfos[newLayout] || '';
+            // The layout description surfaces as an operation toast (the
+            // old #layoutInfo div was permanently hidden).
+            showToast(layoutInfos[newLayout] || '', 'info');
             
             // Check if this is a hemisphere-aware layout
             const isHemiLayout = newLayout.startsWith('hemi-');
@@ -6209,6 +7011,7 @@ class VisualizePath:
                 }}
                 if (!originalHemispherePositions) cacheHemispherePositions();
                 runHemisphereMirrorLayout();
+                resetLayoutTransformTrackers();
                 updateHoverInfo(`🪞 Hemisphere-mirrored ${{baseLayout}} layout applied`);
                 return;
             }}
@@ -6226,6 +7029,10 @@ class VisualizePath:
             const config = getLayoutConfig(newLayout);
             config.animate = true;
             config.animationDuration = 500;
+            // Animated layouts interpolate positions asynchronously — defer
+            // the tracker reset to layoutstop so the gap spinners and the
+            // Reset-Spacing baseline describe the NEW arrangement.
+            cy.one('layoutstop', () => {{ resetLayoutTransformTrackers(); }});
             visibleElements.layout(config).run();
             
             updateHoverInfo(`🔄 Layout changed to ${{newLayout}}`);
@@ -6240,9 +7047,643 @@ class VisualizePath:
             if (visible.length > 0) cy.fit(visible, 80);
         }}
 
-        // Export functions (shared backend)
-        function exportPNG() {{
-            const scale = getExportScale('exportScale', 2, 4);
+        // ===== LAYOUT TRANSFORMS: inter-node gap + rotation =====
+        // Both transforms are pure geometry on the CURRENT node positions,
+        // anchored on the visible CENTROID (mean position). The centroid is
+        // preserved by scaling-around-itself and by rotation, so gap and
+        // rotation compose without drift. Hidden nodes are excluded (same
+        // isVisibleElement rule as the layout re-runs); node size, labels
+        // and edge widths never change.
+
+        // Mean position of the visible nodes — the transform anchor.
+        function visibleNodeCentroid() {{
+            const visNodes = cy.nodes().filter(isVisibleElement);
+            if (visNodes.length === 0) return null;
+            let sx = 0, sy = 0;
+            visNodes.forEach(n => {{
+                sx += n.position().x;
+                sy += n.position().y;
+            }});
+            return {{ x: sx / visNodes.length, y: sy / visNodes.length }};
+        }}
+
+        // Median successive difference of the visible coordinates on one
+        // axis — the center-to-center gap between neighboring rows/columns.
+        function measureAxisGap(axis) {{
+            const coords = [];
+            cy.nodes().filter(isVisibleElement).forEach(n => {{
+                coords.push(axis === 'x' ? n.position().x : n.position().y);
+            }});
+            if (coords.length < 2) return 0;
+            coords.sort((a, b) => a - b);
+            const diffs = [];
+            for (let i = 1; i < coords.length; i++) {{
+                const d = coords[i] - coords[i - 1];
+                if (d > 0.01) diffs.push(d);
+            }}
+            if (diffs.length === 0) return 0;
+            diffs.sort((a, b) => a - b);
+            return diffs[Math.floor(diffs.length / 2)];
+        }}
+
+        // Set the inter-node gap on one axis to an ABSOLUTE center-to-center
+        // distance (px): scales the offsets from the visible centroid so the
+        // median neighbor distance along that axis equals targetPx. Node
+        // sizes are irrelevant — only positions participate.
+        function applyNodeGap(axis, targetPx) {{
+            const target = Number(targetPx);
+            if (!isFinite(target) || target <= 0) return false;
+            const current = measureAxisGap(axis);
+            if (current <= 0.01) return false;  // single row/column
+            const factor = target / current;
+            const anchor = visibleNodeCentroid();
+            cy.batch(() => {{
+                cy.nodes().filter(isVisibleElement).forEach(n => {{
+                    const p = n.position();
+                    n.position({{
+                        x: axis === 'x' ? anchor.x + (p.x - anchor.x) * factor : p.x,
+                        y: axis === 'y' ? anchor.y + (p.y - anchor.y) * factor : p.y
+                    }});
+                }});
+            }});
+            if (axis === 'x') lastGapX = target; else lastGapY = target;
+            return true;
+        }}
+
+        // Rotate visible node positions around the visible centroid by the
+        // delta between the target angle and the last applied angle. The
+        // centroid and every pairwise distance are conserved, so the node
+        // gaps survive rotation (the H and V axes swap at 90 degrees).
+        // Write the normalized tracker into the Rotate field unless the user
+        // is editing it right now.
+        function syncRotateDisplay() {{
+            const rs = document.getElementById('rotateSlider');
+            if (rs && document.activeElement !== rs) rs.value = Math.round(lastRotationDeg);
+        }}
+
+        function applyRotationDelta(targetDeg) {{
+            const raw = Number(targetDeg);
+            if (!isFinite(raw)) return false;
+            // Angles wrap mod 360: the applied delta stays exact (± full
+            // turns are geometrically identical), while the tracker and the
+            // Rotate field are kept in [0, 360) so repeated ↺ clicks read
+            // 270 → 180 → 90 → 0 instead of drifting to -1440.
+            const delta = (raw - lastRotationDeg) * Math.PI / 180;
+            if (Math.abs(delta % (2 * Math.PI)) < 1e-9) {{
+                lastRotationDeg = ((raw % 360) + 360) % 360;
+                syncRotateDisplay();
+                return false;
+            }}
+            const center = visibleNodeCentroid();
+            if (!center) return false;
+            const cos = Math.cos(delta), sin = Math.sin(delta);
+            cy.batch(() => {{
+                cy.nodes().filter(isVisibleElement).forEach(n => {{
+                    const p = n.position();
+                    const dx = p.x - center.x, dy = p.y - center.y;
+                    n.position({{
+                        x: center.x + dx * cos - dy * sin,
+                        y: center.y + dx * sin + dy * cos
+                    }});
+                }});
+            }});
+            lastRotationDeg = ((raw % 360) + 360) % 360;
+            syncRotateDisplay();
+            return true;
+        }}
+
+        // Sync the gap/rotation spinners with the MEASURED geometry (the
+        // gap axes swap under a 90-degree rotation; layouts regenerate the
+        // gaps entirely).
+        function syncTransformInputs() {{
+            const gx = measureAxisGap('x');
+            const gy = measureAxisGap('y');
+            if (gx > 0) lastGapX = gx;
+            if (gy > 0) lastGapY = gy;
+            const gh = document.getElementById('nodeGapHSlider');
+            const gv = document.getElementById('nodeGapVSlider');
+            const rs = document.getElementById('rotateSlider');
+            if (gh && lastGapX) gh.value = Math.round(lastGapX * 10) / 10;
+            if (gv && lastGapY) gv.value = Math.round(lastGapY * 10) / 10;
+            if (rs) rs.value = Math.round(lastRotationDeg);
+        }}
+
+        // Slider live preview ('input'): capture the pre-transform state once
+        // per drag, then apply as the value changes. A change that did not
+        // alter geometry (e.g. a 0 or empty value) commits no history.
+        function onSpacingInput(axis, value) {{
+            if (!pendingTransformState) pendingTransformState = captureState();
+            spacingDirtySinceInput = applyNodeGap(axis, parseFloat(value)) || spacingDirtySinceInput;
+        }}
+
+        function onRotationInput(value) {{
+            if (!pendingTransformState) pendingTransformState = captureState();
+            rotationDirtySinceInput = applyRotationDelta(parseFloat(value)) || rotationDirtySinceInput;
+        }}
+
+        // Slider release ('change'): commit ONE history entry with the
+        // pre-drag snapshot (same contract as the drag history).
+        function onSpacingChange() {{
+            if (pendingTransformState && spacingDirtySinceInput) {{
+                pushStateHistory('Adjust node spacing', pendingTransformState);
+                pendingTransformState = null;
+            }}
+            spacingDirtySinceInput = false;
+        }}
+
+        function onRotationChange() {{
+            // Same no-op contract as spacing: an edit that did not alter
+            // geometry (full-turn wrap, same angle retyped) commits no
+            // history.
+            if (pendingTransformState && rotationDirtySinceInput) {{
+                pushStateHistory('Rotate layout', pendingTransformState);
+                pendingTransformState = null;
+            }}
+            rotationDirtySinceInput = false;
+            // Normalize the field display once editing ends (e.g. 750 → 30).
+            syncTransformInputs();
+        }}
+
+        // Counter-clockwise 90° per click: the angle wraps mod 360, so the
+        // Rotate field reads 270 → 180 → 90 → 0 as clicks accumulate; the
+        // Rotate field accepts any typed angle as well.
+        function rotateCounterClockwise() {{
+            pushHistory('Rotate layout');
+            applyRotationDelta(lastRotationDeg - 90);
+        }}
+
+        // Restore the inter-node gaps captured at the last layout run.
+        function resetSpacing() {{
+            if (!baselineGapX && !baselineGapY) return;
+            pushHistory('Reset spacing');
+            if (baselineGapX) applyNodeGap('x', baselineGapX);
+            if (baselineGapY) applyNodeGap('y', baselineGapY);
+            syncTransformInputs();
+        }}
+
+        // Called after a layout (re)run: the algorithm regenerated every
+        // position, so the rotation tracker restarts at 0 and the current
+        // gaps become the new Reset-Spacing baseline. Only trackers and
+        // spinners are touched — NO transform is applied.
+        function resetLayoutTransformTrackers() {{
+            lastRotationDeg = 0;
+            pendingTransformState = null;
+            // A fresh layout invalidates any in-flight transform drag:
+            // the next change commits only ITS OWN geometry delta.
+            spacingDirtySinceInput = false;
+            rotationDirtySinceInput = false;
+            const rs = document.getElementById('rotateSlider');
+            if (rs) rs.value = 0;
+            baselineGapX = measureAxisGap('x') || baselineGapX;
+            baselineGapY = measureAxisGap('y') || baselineGapY;
+            lastGapX = baselineGapX;
+            lastGapY = baselineGapY;
+            syncTransformInputs();
+        }}
+
+        // ===== PANEL COLLAPSE (top tools + right palette) =====
+        const PANEL_STATE_KEY = 'vispath_network_panels';
+
+        function applyTopControlsCollapsed(collapsed) {{
+            const controls = document.querySelector('.controls');
+            const btn = document.getElementById('toggleControlsBtn');
+            if (controls) controls.classList.toggle('collapsed', collapsed);
+            document.body.classList.toggle('controls-collapsed', collapsed);
+            if (btn) btn.textContent = collapsed ? '⚙️ Show Ribbon' : '⚙️ Hide Ribbon';
+        }}
+
+        function toggleTopControls() {{
+            const controls = document.querySelector('.controls');
+            const collapsed = controls ? !controls.classList.contains('collapsed') : false;
+            applyTopControlsCollapsed(collapsed);
+            persistPanelState();
+            updateHoverInfo(collapsed ? '⚙️ Top panel hidden' : '⚙️ Top panel shown');
+            // Cytoscape must re-measure the container or clicks drift after
+            // the canvas size changes.
+            if (typeof cy !== 'undefined') cy.resize();
+        }}
+
+        function applyPaletteHidden(hidden) {{
+            const palette = document.getElementById('colorPalette');
+            const main = document.querySelector('.main');
+            const btn = document.getElementById('togglePanelBtn');
+            if (palette) palette.style.display = hidden ? 'none' : '';
+            if (main) main.classList.toggle('palette-hidden', hidden);
+            // Frees the panel bar's palette clearance so search/help slide right
+            document.body.classList.toggle('palette-hidden', hidden);
+            if (btn) btn.textContent = hidden ? '🎨 Show Panel' : '🎨 Hide Panel';
+        }}
+
+        function toggleRightPanel() {{
+            const palette = document.getElementById('colorPalette');
+            const hidden = palette ? palette.style.display !== 'none' : false;
+            applyPaletteHidden(hidden);
+            persistPanelState();
+            updateHoverInfo(hidden ? '🎨 Right panel hidden' : '🎨 Right panel shown');
+            if (typeof cy !== 'undefined') cy.resize();
+        }}
+
+        // Panel collapse is a user preference shared by every network file
+        // (unlike layouts, which are per-file), so a global key is used.
+        function persistPanelState() {{
+            const controls = document.querySelector('.controls');
+            const palette = document.getElementById('colorPalette');
+            saveObjectToStorage(PANEL_STATE_KEY, {{
+                controlsCollapsed: controls ? controls.classList.contains('collapsed') : false,
+                paletteHidden: palette ? palette.style.display === 'none' : false,
+                activeTab: activeTabName,
+                ribbonCollapsed: controls ? controls.classList.contains('collapsed') : false,
+                accordions: {{
+                    edit: document.getElementById('accEdit').classList.contains('open'),
+                    history: document.getElementById('accHistory').classList.contains('open'),
+                    selection: document.getElementById('accSelection').classList.contains('open')
+                }}
+            }});
+        }}
+
+        // ===== RIBBON TABS (PPT-style): one horizontal tool row per tab =====
+        const RIBBON_PAGES = {{ layout: 'pageLayout', filter: 'pageFilter', style: 'pageStyle', share: 'pageShare' }};
+        let activeTabName = 'layout';
+
+        function switchTab(name) {{
+            const page = document.getElementById(RIBBON_PAGES[name]);
+            const ribbon = document.getElementById('ribbon');
+            if (!page || !ribbon) return;
+            if (page.classList.contains('open')) {{
+                // Unified toggle (PPT behavior): the first click on the ACTIVE
+                // tab collapses the ribbon, the next click on it expands it
+                // again. Routing through the same helper as the ⚙️ button
+                // keeps canvas height, toggle label and persistence in sync.
+                applyTopControlsCollapsed(!ribbon.classList.contains('collapsed'));
+                persistPanelState();
+                if (typeof cy !== 'undefined') cy.resize();
+                return;
+            }}
+            Object.keys(RIBBON_PAGES).forEach(key => {{
+                const p = document.getElementById(RIBBON_PAGES[key]);
+                if (p) p.classList.toggle('open', key === name);
+                const tab = document.getElementById('tab' + key.charAt(0).toUpperCase() + key.slice(1));
+                if (tab) tab.classList.toggle('active', key === name);
+            }});
+            activeTabName = name;
+            // Expanding via a different tab must also re-sync the ⚙️ toggle
+            // label and the canvas height class (same helper, one path).
+            applyTopControlsCollapsed(false);
+            persistPanelState();
+            if (typeof cy !== 'undefined') cy.resize();
+        }}
+
+        // Restore the last panel collapse state AFTER cy exists so the
+        // follow-up resize() is meaningful.
+        function initPanelBar() {{
+            const saved = loadObjectFromStorage(PANEL_STATE_KEY);
+            if (!saved) return;
+            if (saved.controlsCollapsed) applyTopControlsCollapsed(true);
+            if (saved.paletteHidden) applyPaletteHidden(true);
+            if (saved.activeTab && RIBBON_PAGES[saved.activeTab]) {{
+                // Restore directly (NOT via switchTab: for the default
+                // 'layout' tab the static markup is already open, and
+                // switchTab would read that as 'collapse the ribbon').
+                activeTabName = saved.activeTab;
+                Object.keys(RIBBON_PAGES).forEach(key => {{
+                    const p = document.getElementById(RIBBON_PAGES[key]);
+                    if (p) p.classList.toggle('open', key === saved.activeTab);
+                    const tab = document.getElementById('tab' + key.charAt(0).toUpperCase() + key.slice(1));
+                    if (tab) tab.classList.toggle('active', key === saved.activeTab);
+                }});
+            }}
+            if (saved.ribbonCollapsed) document.getElementById('ribbon').classList.add('collapsed');
+            if (saved.accordions) {{
+                ['edit', 'history', 'selection'].forEach(function(name) {{
+                    const section = document.getElementById('acc' + name.charAt(0).toUpperCase() + name.slice(1));
+                    if (section) section.classList.toggle('open', !!saved.accordions[name]);
+                }});
+            }}
+            if (saved.controlsCollapsed || saved.paletteHidden) cy.resize();
+        }}
+
+        // Accordion sections (right panel). Open flags persist with the
+        // other panel preferences.
+        function toggleAccordion(name) {{
+            const section = document.getElementById('acc' + name.charAt(0).toUpperCase() + name.slice(1));
+            if (section) section.classList.toggle('open');
+            persistPanelState();
+        }}
+
+        // ===== FEEDBACK: toast stack (operation feedback) =====
+        // Pure queue logic (testable headless): keeps at most `maxVisible`
+        // toasts, entries expire after ttl ms (errors live longer). The DOM
+        // layer in showToast/renderToasts renders whatever is active.
+        function createToastQueue(options) {{
+            const opts = options || {{}};
+            const maxVisible = opts.maxVisible || 4;
+            const ttl = opts.ttl || 3000;
+            const errorTtl = opts.errorTtl || 6000;
+            let items = [];  // {{ id, message, type, action, born, ttl }}
+            let nextId = 1;
+            return {{
+                push(message, type, action, now) {{
+                    const t = (typeof now === 'number') ? now : Date.now();
+                    const isError = type === 'error';
+                    items.push({{
+                        id: nextId++,
+                        message: String(message),
+                        type: type || 'info',
+                        action: action || null,
+                        born: t,
+                        ttl: isError ? errorTtl : ttl
+                    }});
+                    while (items.length > maxVisible) items.shift();
+                    return items.slice();
+                }},
+                expire(now) {{
+                    const t = (typeof now === 'number') ? now : Date.now();
+                    items = items.filter(item => t - item.born < item.ttl);
+                    return items.slice();
+                }},
+                remove(id) {{
+                    items = items.filter(item => item.id !== id);
+                    return items.slice();
+                }},
+                active() {{ return items.slice(); }},
+            }};
+        }}
+
+        const toastQueue = createToastQueue();
+
+        // Expire + render the active toasts into #toastStack.
+        function renderToasts() {{
+            toastQueue.expire();
+            const stack = document.getElementById('toastStack');
+            if (!stack) return;
+            stack.innerHTML = '';
+            toastQueue.active().forEach(item => {{
+                const el = document.createElement('div');
+                el.className = 'vp-toast vp-toast-' + item.type;
+                el.dataset.toastId = item.id;
+                el.textContent = item.message;
+                if (item.action) {{
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'vp-toast-action';
+                    btn.textContent = item.action.label;
+                    btn.addEventListener('click', function() {{
+                        item.action.onClick();
+                        toastQueue.remove(item.id);
+                        renderToasts();
+                    }});
+                    el.appendChild(btn);
+                }}
+                stack.appendChild(el);
+            }});
+        }}
+
+        // Single entry point for operation feedback. Optional action:
+        // {{ label, onClick }} renders an inline button on the toast.
+        function showToast(message, type, action) {{
+            toastQueue.push(message, type, action);
+            renderToasts();
+            setTimeout(renderToasts, type === 'error' ? 6000 : 3000);
+        }}
+
+        // ===== IN-PAGE DIALOGS (replace native prompt/confirm) =====
+        // Pure promise state machine (testable headless): one dialog at a
+        // time; field values arrive via set(); confirm() resolves with the
+        // values, cancel() rejects with 'cancelled'.
+        function createDialogController() {{
+            let active = null;  // {{ spec, values, resolve, reject }}
+            return {{
+                isActive() {{ return active !== null; }},
+                open(spec) {{
+                    if (active) return null;
+                    const initial = {{}};
+                    (spec.fields || []).forEach(f => {{ initial[f.key] = f.value; }});
+                    active = {{ spec: spec, values: initial, resolve: null, reject: null }};
+                    return new Promise((resolve, reject) => {{
+                        active.resolve = resolve;
+                        active.reject = reject;
+                    }});
+                }},
+                set(key, value) {{
+                    if (active) active.values[key] = value;
+                }},
+                confirm() {{
+                    if (!active) return null;
+                    const done = active;
+                    active = null;
+                    done.resolve(done.values);
+                    return done.values;
+                }},
+                cancel() {{
+                    if (!active) return null;
+                    const done = active;
+                    active = null;
+                    done.reject('cancelled');
+                    return null;
+                }},
+            }};
+        }}
+
+        const dialogCtl = createDialogController();
+        let lastDialogFocus = null;
+
+        // Build the dialog DOM for one open() call and wire the buttons.
+        // spec: {{ title, message?, fields?: [{{key,label,type,value,options?,placeholder?}}],
+        //         confirmText?, danger? }}
+        function showDialog(spec) {{
+            const promise = dialogCtl.open(spec);
+            if (promise === null) return Promise.reject('busy');
+            lastDialogFocus = document.activeElement;
+            const title = document.getElementById('vpDialogTitle');
+            const msg = document.getElementById('vpDialogMessage');
+            const body = document.getElementById('vpDialogBody');
+            const confirmBtn = document.getElementById('vpDialogConfirm');
+            title.textContent = spec.title || '';
+            if (spec.message) {{
+                msg.textContent = spec.message;
+                msg.style.display = 'block';
+            }} else {{
+                msg.style.display = 'none';
+            }}
+            body.innerHTML = '';
+            (spec.fields || []).forEach(field => {{
+                const wrap = document.createElement('div');
+                wrap.className = 'vp-dialog-field';
+                const label = document.createElement('label');
+                label.textContent = field.label || field.key;
+                wrap.appendChild(label);
+                let input;
+                if (field.type === 'select') {{
+                    input = document.createElement('select');
+                    (field.options || []).forEach(opt => {{
+                        const option = document.createElement('option');
+                        option.value = opt;
+                        option.textContent = opt;
+                        input.appendChild(option);
+                    }});
+                    input.value = field.value;
+                }} else {{
+                    input = document.createElement('input');
+                    input.type = field.type || 'text';
+                    if (field.value !== undefined && field.value !== null) input.value = field.value;
+                    if (field.placeholder) input.placeholder = field.placeholder;
+                }}
+                input.dataset.key = field.key;
+                input.id = 'vpField_' + field.key;
+                input.setAttribute('aria-label', field.label || field.key);
+                input.addEventListener('input', function() {{ dialogCtl.set(field.key, input.value); }});
+                input.addEventListener('keydown', function(e) {{
+                    if (e.key === 'Enter') {{ e.preventDefault(); confirmDialog(); }}
+                    if (e.key === 'Escape') {{ e.preventDefault(); cancelDialog(); }}
+                }});
+                wrap.appendChild(input);
+                body.appendChild(wrap);
+            }});
+            confirmBtn.textContent = spec.confirmText || 'OK';
+            confirmBtn.className = 'vp-dialog-btn ' + (spec.danger ? 'vp-danger' : 'vp-primary');
+            document.getElementById('vpDialogOverlay').classList.add('open');
+            const first = body.querySelector('input, select');
+            if (first) first.focus();
+            return promise;
+        }}
+
+        function closeDialogOverlay() {{
+            document.getElementById('vpDialogOverlay').classList.remove('open');
+            if (lastDialogFocus && lastDialogFocus.focus) lastDialogFocus.focus();
+            lastDialogFocus = null;
+        }}
+
+        function confirmDialog() {{
+            if (!dialogCtl.isActive()) return;
+            // Harvest the final field values from the DOM before resolving.
+            document.querySelectorAll('#vpDialogBody input, #vpDialogBody select').forEach(input => {{
+                dialogCtl.set(input.dataset.key, input.value);
+            }});
+            dialogCtl.confirm();
+            closeDialogOverlay();
+        }}
+
+        function cancelDialog() {{
+            if (!dialogCtl.isActive()) return;
+            dialogCtl.cancel();
+            closeDialogOverlay();
+        }}
+
+        // ===== COMMAND STRIP: node search =====
+        let searchMatches = [];
+        let searchIndex = -1;
+
+        // Pure matcher: nodes whose id or label contains the query
+        // (case-insensitive, minimum 2 characters).
+        function matchNodes(query) {{
+            const q = String(query || '').trim().toLowerCase();
+            if (q.length < 2) return [];
+            const hits = [];
+            cy.nodes().forEach(n => {{
+                const id = n.id();
+                const label = String(n.data('label') || id);
+                if (id.toLowerCase().includes(q) || label.toLowerCase().includes(q)) hits.push(n);
+            }});
+            return hits;
+        }}
+
+        function onSearchInput(value) {{
+            searchMatches = matchNodes(value);
+            searchIndex = searchMatches.length > 0 ? 0 : -1;
+            updateSearchCount();
+        }}
+
+        function updateSearchCount() {{
+            const el = document.getElementById('nodeSearchCount');
+            if (!el) return;
+            el.textContent = searchMatches.length === 0 ? '' : (searchIndex + 1) + '/' + searchMatches.length;
+        }}
+
+        function applySearchMatch() {{
+            if (searchIndex < 0 || searchIndex >= searchMatches.length) return;
+            const node = searchMatches[searchIndex];
+            cy.elements().unselect();
+            node.select();
+            cy.animate({{ center: {{ eles: node }} }}, {{ duration: 250 }});
+            if (!isVisibleElement(node)) showToast('Matched node is hidden — use 👁️ Show All to reveal it', 'warn');
+        }}
+
+        function onSearchKeydown(event) {{
+            if (event.key === 'Enter') {{
+                event.preventDefault();
+                applySearchMatch();
+            }} else if (event.key === 'ArrowDown') {{
+                event.preventDefault();
+                if (searchMatches.length) {{ searchIndex = (searchIndex + 1) % searchMatches.length; updateSearchCount(); }}
+            }} else if (event.key === 'ArrowUp') {{
+                event.preventDefault();
+                if (searchMatches.length) {{ searchIndex = (searchIndex - 1 + searchMatches.length) % searchMatches.length; updateSearchCount(); }}
+            }} else if (event.key === 'Escape') {{
+                event.preventDefault();
+                event.target.value = '';
+                searchMatches = [];
+                searchIndex = -1;
+                updateSearchCount();
+                event.target.blur();
+            }}
+        }}
+
+        // ===== HELP OVERLAY (? key / ❓ button) =====
+        function openHelp(section) {{
+            document.getElementById('helpOverlay').classList.add('open');
+            if (section) {{
+                const target = document.getElementById('help' + section.charAt(0).toUpperCase() + section.slice(1));
+                if (target && target.scrollIntoView) target.scrollIntoView({{ block: 'start' }});
+            }}
+        }}
+
+        function closeHelp() {{
+            document.getElementById('helpOverlay').classList.remove('open');
+        }}
+
+        function toggleHelp() {{
+            const overlay = document.getElementById('helpOverlay');
+            if (overlay.classList.contains('open')) closeHelp(); else openHelp();
+        }}
+
+        // Global Esc/? handling for dialogs and help; runs in capture phase
+        // before the single-letter shortcuts (which also guard on them).
+        document.addEventListener('keydown', function(e) {{
+            if (dialogCtl.isActive()) {{
+                if (e.key === 'Escape') {{ e.preventDefault(); cancelDialog(); }}
+                return;
+            }}
+            const helpOpen = document.getElementById('helpOverlay').classList.contains('open');
+            if (helpOpen) {{
+                if (e.key === 'Escape') {{ e.preventDefault(); closeHelp(); }}
+                return;
+            }}
+            const tag = e.target && e.target.tagName;
+            const typing = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable);
+            if (!typing && (e.key === '?' || (e.shiftKey && e.key === '/'))) {{
+                e.preventDefault();
+                toggleHelp();
+            }}
+        }}, true);
+
+        // Export functions (shared backend). Large export scales are
+        // confirmed with an in-page dialog (async), not window.confirm.
+        function resolveExportScale() {{
+            const el = document.getElementById('exportScale');
+            let scale = el ? parseFloat(el.value) : NaN;
+            if (isNaN(scale) || scale < 1) scale = 2;
+            if (scale <= 4) return Promise.resolve(scale);
+            return showDialog({{
+                title: 'Large export',
+                message: 'Exporting at ' + scale + 'x may fail in your browser (very large image). Export at the requested scale or fall back to a safer 4x?',
+                fields: [],
+                confirmText: 'Export at ' + scale + 'x',
+                danger: true
+            }}).then(() => scale).catch(() => 4);
+        }}
+
+        async function exportPNG() {{
+            const scale = await resolveExportScale();
             exportCytoscapeToImage(cy, 'png', 'network_selected_paths_' + scale + 'x.png', scale, bgCtrl.getColor());
         }}
         
@@ -6312,10 +7753,10 @@ class VisualizePath:
                 }};
                 
                 localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(state));
-                showLayoutStatus('Layout saved!');
+                showToast('Layout saved', 'success');
                 console.log('Layout saved successfully');
             }} catch (error) {{
-                showLayoutStatus('Save failed!');
+                showToast('Save failed', 'error');
                 console.error('Error saving layout:', error);
             }}
         }}
@@ -6324,7 +7765,7 @@ class VisualizePath:
             try {{
                 const saved = localStorage.getItem(LAYOUT_STORAGE_KEY);
                 if (!saved) {{
-                    showLayoutStatus('No saved layout found', 'warning');
+                    showToast('No saved layout found', 'warn');
                     return;
                 }}
                 
@@ -6413,16 +7854,12 @@ class VisualizePath:
                     restoringHistoryState = false;
                 }}
                 
-                showLayoutStatus('Layout loaded!');
+                showToast('Layout loaded', 'success');
                 console.log('Layout loaded successfully:', state);
             }} catch (error) {{
-                showLayoutStatus('Load failed!');
+                showToast('Load failed', 'error');
                 console.error('Error loading layout:', error);
             }}
-        }}
-        
-        function showLayoutStatus(message, type) {{
-            showStatusInContainer('layoutStatus', message, type || 'info');
         }}
 
         function showAllNodes() {{
@@ -6511,7 +7948,12 @@ class VisualizePath:
                     arrowSize: globalArrowSize,
                     edgeWidthScale: globalEdgeWidthScale,
                     metric: currentMetric,
-                    reciprocalOffset: reciprocalOffset
+                    reciprocalOffset: reciprocalOffset,
+                    // Layout transform trackers so undo/redo also restores
+                    // the absolute gaps / rotation base exactly.
+                    spacingX: lastGapX,
+                    spacingY: lastGapY,
+                    rotation: lastRotationDeg
                 }}
             }};
         }}
@@ -6594,6 +8036,13 @@ class VisualizePath:
                     const rLabel = document.getElementById('reciprocalOffsetValue');
                     if (rLabel) rLabel.textContent = Math.round(gs.reciprocalOffset) + 'px';
                 }}
+                // Restore the layout transform trackers (absolute gaps and
+                // rotation base) and re-sync their spinners so the next
+                // adjustment applies from the restored reference.
+                if (gs.spacingX !== undefined) lastGapX = gs.spacingX;
+                if (gs.spacingY !== undefined) lastGapY = gs.spacingY;
+                if (gs.rotation !== undefined) lastRotationDeg = gs.rotation;
+                syncTransformInputs();
                 // Re-apply through the update functions (they read the DOM
                 // controls); the flag above stops them from pushing new
                 // history entries. updateMetric() re-derives currentMetric
@@ -6672,6 +8121,7 @@ class VisualizePath:
                 // Keep the numeric geometry inputs in sync with manual drags
                 // (dragged node only when it is still selected).
                 if (evt.target.selected()) syncSelectedGeometryInputs(evt.target);
+                updateSelectionChip();
             }});
         }}
         registerDragHistory();
@@ -6686,6 +8136,7 @@ class VisualizePath:
             const selected = cy.$(':selected');
             if (selected.length === 0) {{
                 syncSelectedGeometryInputs(null);
+                updateSelectionChip();
                 return;
             }}
 
@@ -6697,6 +8148,7 @@ class VisualizePath:
                 primary = (evt.target && evt.target.selected()) ? evt.target : selected[0];
             }}
             syncSelectedGeometryInputs(primary);
+            updateSelectionChip();
         }});
 
         function undo() {{
@@ -6716,6 +8168,37 @@ class VisualizePath:
             updateHoverInfo('↪️ Redo: ' + entry.label);
         }}
 
+        // Live selection summary chip in the Selection & Color section.
+        function updateSelectionChip() {{
+            const chip = document.getElementById('selectionSummary');
+            if (!chip) return;
+            const nodes = cy.$('node:selected').length;
+            const edges = cy.$('edge:selected').length;
+            if (nodes === 0 && edges === 0) {{
+                chip.textContent = 'Nothing selected';
+                return;
+            }}
+            const parts = [];
+            if (nodes > 0) parts.push(nodes + (nodes === 1 ? ' node' : ' nodes'));
+            if (edges > 0) parts.push(edges + (edges === 1 ? ' edge' : ' edges'));
+            chip.textContent = parts.join(' · ') + ' selected';
+        }}
+
+        // Category icon for a history entry (display only — the recorded
+        // labels are unchanged).
+        function historyIcon(label) {{
+            const l = String(label || '').toLowerCase();
+            if (l.includes('delete')) return '🗑️';
+            if (l.includes('hide') || l.includes('show')) return '👁️';
+            if (l.includes('import')) return '📥';
+            if (l.includes('export')) return '📤';
+            if (l.includes('edit') || l.includes('resize') || l.includes('align') || l.includes('add ')) return '✏️';
+            if (l.includes('layout') || l.includes('rotate') || l.includes('spacing') || l.includes('refresh') || l.includes('reset')) return '⤢';
+            if (l.includes('color') || l.includes('group')) return '🎨';
+            if (l.includes('toggle')) return '🔁';
+            return '↩';
+        }}
+
         function updateUndoRedoButtons() {{
             const u = document.getElementById('undoBtn');
             const r = document.getElementById('redoBtn');
@@ -6732,7 +8215,7 @@ class VisualizePath:
             sel.innerHTML = '';
             undoStack.forEach((item, i) => {{
                 const opt = document.createElement('option');
-                opt.textContent = (i + 1) + '. ↩ ' + item.label;
+                opt.textContent = (i + 1) + '. ' + historyIcon(item.label) + ' ' + item.label;
                 sel.appendChild(opt);
             }});
             const cur = document.createElement('option');
@@ -6763,6 +8246,7 @@ class VisualizePath:
         // (skipped while typing in inputs/textareas)
         document.addEventListener('keydown', function(e) {{
             if (!(e.metaKey || e.ctrlKey)) return;
+            if (dialogCtl.isActive()) return;
             const tag = (e.target.tagName || '').toLowerCase();
             if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
             const k = e.key.toLowerCase();
@@ -6932,14 +8416,28 @@ class VisualizePath:
             const slider = document.getElementById('reciprocalOffsetSlider');
             const valueLabel = document.getElementById('reciprocalOffsetValue');
 
-            if (!container || !slider || !valueLabel) {{
+            if (!container || !slider) {{
                 return;
             }}
 
-            container.style.display = 'flex';
+            // The offset controls only matter when reciprocal pairs exist
+            // on the canvas — keep the group hidden otherwise.  One pass
+            // over the directed pairs: a per-edge selector scan is O(E²)
+            // on large graphs and breaks on ids containing quotes.
+            const directedPairs = new Set();
+            let hasReciprocalPairs = false;
+            cy.edges().forEach(e => {{
+                const source = e.source().id();
+                const target = e.target().id();
+                if (directedPairs.has(target + '\u0000' + source)) {{
+                    hasReciprocalPairs = true;
+                }}
+                directedPairs.add(source + '\u0000' + target);
+            }});
+            container.style.display = hasReciprocalPairs ? 'flex' : 'none';
             slider.value = defaultReciprocalOffset;
             reciprocalOffset = defaultReciprocalOffset;
-            valueLabel.textContent = `${{defaultReciprocalOffset}}px`;
+            if (valueLabel) valueLabel.textContent = `${{defaultReciprocalOffset}}px`;
             
             // Update slider enabled state based on current mode
             updateReciprocalSliderState();
@@ -6949,7 +8447,7 @@ class VisualizePath:
                     const newOffset = parseFloat(event.target.value) || 0;
                     if (!restoringHistoryState && newOffset !== reciprocalOffset) pushHistory('Adjust reciprocal offset');
                     reciprocalOffset = newOffset;
-                    valueLabel.textContent = `${{Math.round(reciprocalOffset)}}px`;
+                    if (valueLabel) valueLabel.textContent = `${{Math.round(reciprocalOffset)}}px`;
                     refreshEdgeStyles(false);
                 }});
                 slider.dataset.bound = 'true';
@@ -6987,6 +8485,33 @@ class VisualizePath:
             refreshEdgeStyles(true);
         }}
 
+        // Edge labels follow the ACTIVE connection metric: weight keeps the
+        // preformatted label (value + unit, e.g. "1,234 synapses");
+        // ratio/probability show the plain value.
+        function updateEdgeMetricLabels() {{
+            cy.edges().forEach(edge => {{
+                const fmt = v => (v === undefined || v === null || v === '' || isNaN(Number(v)))
+                    ? '' : String(Math.round(Number(v) * 1000) / 1000);
+                let label;
+                if (currentMetric === 'ratio') label = fmt(edge.data('ratio'));
+                else if (currentMetric === 'probability') label = fmt(edge.data('probability'));
+                else {{
+                    // The preformatted weight_label carries the metric's
+                    // unit (edge_weight_label); fall back to a bare number
+                    // for edges that lack it (e.g. newly added ones).
+                    const pre = edge.data('weight_label');
+                    if (pre) label = String(pre);
+                    else {{
+                        // Integers stay integers (no '.0').
+                        const raw = (edge.data('original_weight') !== undefined && edge.data('original_weight') !== null)
+                            ? Number(edge.data('original_weight')) : Number(edge.data('weight'));
+                        label = isFinite(raw) ? raw.toLocaleString('en-US') : '';
+                    }}
+                }}
+                edge.data('display_label', label);
+            }});
+        }}
+
         function toggleLabels() {{
             const btn = document.getElementById('toggleLabelsBtn');
             
@@ -7002,6 +8527,24 @@ class VisualizePath:
                 labelsVisible = true;
             }}
         }}
+
+        // Paint the preformatted weight on every edge (Filter tab →
+        // Labels → Edge Weights). Class-based, so per-edge inline color
+        // and width styling is untouched.
+        function toggleEdgeWeightLabels() {{
+            const btn = document.getElementById('toggleEdgeWeightsBtn');
+            const showing = btn.dataset.showing === '1';
+            if (showing) {{
+                cy.edges().removeClass('wlabel');
+                btn.textContent = '🏋️ Edge Weights';
+                btn.dataset.showing = '0';
+            }} else {{
+                updateEdgeMetricLabels();
+                cy.edges().addClass('wlabel');
+                btn.textContent = '🏋️ Hide Weights';
+                btn.dataset.showing = '1';
+            }}
+        }}
         
         // Background color toggle (shared controller)
         const bgCtrl = createBackgroundController(['#ffffff', '#000000', 'custom'], ['White', 'Dark', 'Custom'], applyBackground);
@@ -7014,22 +8557,31 @@ class VisualizePath:
             document.body.style.background = color;
             document.getElementById('cy').style.background = color;
             
-            // Adjust text colors based on background luminance
+            // Flip every UI surface at once via the theme custom properties
+            // (cards, inputs, panels, hover box, toasts, dialogs).
             const isDark = isColorDark(color);
+            document.body.classList.toggle('vp-dark', isDark);
             
-            // Update info text, legend, and label colors
-            document.querySelectorAll('.info, .legend span, .controls label').forEach(el => {{
-                el.style.color = isDark ? '#e0e0e0' : '#333';
-            }});
-            
-            // Update node label text background for readability
-            cy.style()
-                .selector('node')
-                .style({{
-                    'text-background-color': isDark ? '#333' : '#fff',
-                    'text-background-opacity': 0.8
-                }})
-                .update();
+            // Node labels NEVER get a background; instead their text color
+            // adapts to the theme unless the user picked one explicitly
+            // (replaces the old per-label background readability mechanism).
+            if (!customLabelColor) {{
+                cy.nodes().style('color', isDark ? '#e5e7eb' : '#000000');
+                const picker = document.getElementById('labelFontColor');
+                if (picker) picker.value = isDark ? '#e5e7eb' : '#000000';
+            }}
+        }}
+        
+        // Node label font color (Style tab → Background & Font). The user's
+        // choice wins over the automatic theme adaptation.
+        let customLabelColor = null;
+        function applyLabelFontColor(color) {{
+            const hex = extractColorHex(color) || '#000000';
+            customLabelColor = hex;
+            const picker = document.getElementById('labelFontColor');
+            if (picker && picker.value.toLowerCase() !== hex.toLowerCase()) picker.value = hex;
+            if (!restoringHistoryState) pushHistory('Change label font color');
+            cy.nodes().style('color', hex);
         }}
         
         function applyCustomBackground() {{
@@ -7040,7 +8592,8 @@ class VisualizePath:
 
         function updateFontSize(size) {{
             const value = parseFloat(size);
-            document.getElementById('fontSizeValue').textContent = value + 'px';
+            const echo = document.getElementById('fontSizeValue');
+            if (echo) echo.textContent = value + 'px';
             if (!restoringHistoryState && value !== globalFontSize) pushHistory('Adjust font size');
             globalFontSize = value;
             cy.style()
@@ -7051,7 +8604,8 @@ class VisualizePath:
 
         function updateNodeSize(size) {{
             const value = parseFloat(size);
-            document.getElementById('nodeSizeValue').textContent = value + 'px';
+            const echo = document.getElementById('nodeSizeValue');
+            if (echo) echo.textContent = value + 'px';
             if (!restoringHistoryState && value !== globalNodeSize) pushHistory('Adjust node size');
             globalNodeSize = value;
             cy.style()
@@ -7067,7 +8621,8 @@ class VisualizePath:
         }}
 
         function updateEdgeWidth(width) {{
-            document.getElementById('edgeWidthValue').textContent = width + 'px';
+            const echo = document.getElementById('edgeWidthValue');
+            if (echo) echo.textContent = width + 'px';
             const value = parseFloat(width);
             if (!restoringHistoryState && value !== globalEdgeWidth) pushHistory('Adjust edge width');
             globalEdgeWidth = value;
@@ -7131,7 +8686,8 @@ class VisualizePath:
 
         function updateArrowSize(size) {{
             const value = parseFloat(size);
-            document.getElementById('arrowSizeValue').textContent = value + 'px';
+            const echo = document.getElementById('arrowSizeValue');
+            if (echo) echo.textContent = value + 'px';
             if (!restoringHistoryState && value !== globalArrowSize) pushHistory('Adjust arrow size');
             globalArrowSize = value;
             cy.style()
@@ -7149,7 +8705,8 @@ class VisualizePath:
 
         // Update opacity display
         function updateOpacityDisplay(type, value) {{
-            document.getElementById(type + 'OpacityValue').textContent = value + '%';
+            const echo = document.getElementById(type + 'OpacityValue');
+            if (echo) echo.textContent = value + '%';
         }}
         
         // Recalculate and update all edge widths based on scaling method
@@ -7174,18 +8731,39 @@ class VisualizePath:
             const metric = document.getElementById('metricSelect').value;
             if (!restoringHistoryState && metric !== currentMetric) pushHistory('Change metric');
             currentMetric = metric;
-            
-            console.log(`\\n========== UPDATE METRIC ==========`);
+
+            // Edge labels (when shown) re-format to the active metric
+            updateEdgeMetricLabels();
+            console.log(`\n========== UPDATE METRIC ==========`);
             console.log(`Metric selected: ${{metric}}`);
-            
+
             // Update edge widths with new metric
             updateEdgeWidths();
-            
+
+            // The weight filter evaluates against the ACTIVE metric —
+            // re-apply it so hidden edges follow the new unit, and adapt
+            // the input placeholder so typed numbers match the unit.
+            applyEdgeFilter();
+            updateIgnoredEdgesPlaceholder();
+
             // Update hover info if currently hovering over an edge
             const hoverInfo = document.getElementById('hoverInfo');
             if (hoverInfo && hoverInfo.innerHTML.includes('Connection:')) {{
                 // Just leave it as is - next hover will show updated info
             }}
+        }}
+                
+        // Placeholder reflects the active metric so the numbers the user
+        // types are in the filtered unit.
+        function updateIgnoredEdgesPlaceholder() {{
+            const input = document.getElementById('ignoreEdgesInput');
+            if (!input) return;
+            const examples = {{
+                weight: 'OR: <5, >100 | AND: (>=5, <=10)',
+                ratio: 'OR: <0.2, >0.8 | AND: (>=0.1, <=0.5)',
+                probability: 'OR: <0.05, >0.9 | AND: (>=0.1, <=0.6)'
+            }};
+            input.placeholder = examples[currentMetric] || examples.weight;
         }}
         
         function updateEdgeWidths() {{
@@ -7422,6 +9000,9 @@ class VisualizePath:
         }}
 
         // Store default colors for groups (includes original defaults for reset)
+        // Declared dataset groups replace the structural roles as the base
+        // node groups (legend, quick actions, dropdown).
+        const declaredGroupsActive = {'true' if self.node_groups else 'false'};
         const originalGroupDefaults = {{
             source: {{ color: '{self.node_color[0]}', opacity: {int(self.source_opacity * 100)} }},
             intermediate: {{ color: '{self.node_color[1]}', opacity: {int(self.intermediate_opacity * 100)} }},
@@ -7432,10 +9013,182 @@ class VisualizePath:
             positive_edges: {{ color: '{self.edge_color}', opacity: {int(self.edge_opacity * 100)} }},
             negative_edges: {{ color: '#4A90E2', opacity: 100 }}
         }};
+        {extra_group_defaults_js}
         const groupDefaults = JSON.parse(JSON.stringify(originalGroupDefaults));
         
-        // Custom groups storage
+        // Custom group DEFINITIONS only — each entry is {{label, color,
+        // opacity, defaultColor, defaultOpacity}} — membership lives on each
+        // node's assigned_group data field ('' = Unassigned), so counts and
+        // the legend are always live.
         const customGroups = {{}};
+
+        // ===== NODE GROUP MEMBERSHIP =====
+        function groupMembers(name) {{
+            return cy.nodes('[assigned_group = "' + name + '"]');
+        }}
+
+        // Backfill nodes imported from older exports that lack the field.
+        function normalizeAssignedGroups() {{
+            cy.nodes().forEach(node => {{
+                const g = node.data('assigned_group');
+                if (g === undefined || g === null) {{
+                    node.data('assigned_group', node.data('node_type') || '');
+                }}
+            }});
+        }}
+        normalizeAssignedGroups();
+
+        function groupDefaultFor(name) {{
+            if (name === '') return groupDefaults.unassigned || {{ color: '#9ca3af', opacity: 100 }};
+            if (customGroups[name]) return {{ color: customGroups[name].color, opacity: customGroups[name].opacity }};
+            return groupDefaults[name] || originalGroupDefaults[name] || {{ color: '#888888', opacity: 100 }};
+        }}
+
+        function applyGroupLook(node, def) {{
+            node.style({{ 'background-color': def.color, 'opacity': ((def.opacity === undefined ? 100 : def.opacity) / 100) }});
+        }}
+
+        function groupLabel(name) {{
+            if (customGroups[name]) return customGroups[name].label || name;
+            const extra = extraNodeGroups.find(g => g.name === name);
+            if (extra) return extra.label;
+            return name ? name.charAt(0).toUpperCase() + name.slice(1) : 'Unassigned';
+        }}
+
+        // Assign nodes to a group (single membership). colorize applies the
+        // group's current look; Unassigned instead reverts each node to its
+        // structural default.
+        function assignNodesToGroup(nodes, name, colorize) {{
+            if (name === '') {{
+                nodes.forEach(node => {{
+                    node.data('assigned_group', '');
+                    applyGroupLook(node, groupDefaultFor(String(node.data('node_type') || '')));
+                }});
+            }} else {{
+                const def = groupDefaultFor(name);
+                nodes.forEach(node => {{
+                    node.data('assigned_group', name);
+                    if (colorize) applyGroupLook(node, def);
+                }});
+            }}
+            rebuildAssignSelect();
+            rebuildCustomGroupUI();
+            refreshLegend();
+        }}
+
+        // ===== DYNAMIC LEGEND =====
+        // Rebuilds the group chips from live state (structural/declared
+        // groups, custom groups, Unassigned when non-empty) with live colors
+        // and member counts. Dataset-code chips live in #datasetLegend and
+        // are never touched here.
+        function legendChip(group, label, def) {{
+            const count = groupMembers(group).length;
+            return '<div class="legend-item" data-group="' + group + '" title="' + escapeHtml(label) + ': ' + count + ' node(s)">'
+                + '<div class="legend-color" style="background: ' + def.color + '; opacity: ' + ((def.opacity === undefined ? 100 : def.opacity) / 100) + ';"></div>'
+                + '<span>' + escapeHtml(label) + ' (' + count + ')</span></div>';
+        }}
+
+        function refreshLegend() {{
+            const holder = document.getElementById('groupLegend');
+            if (!holder) return;
+            let html = '';
+            if (!declaredGroupsActive) {{
+                ['source', 'intermediate', 'target'].forEach(name => {{
+                    html += legendChip(name, name.charAt(0).toUpperCase() + name.slice(1), groupDefaultFor(name));
+                }});
+            }}
+            extraNodeGroups.forEach(g => {{
+                html += legendChip(g.name, g.label, groupDefaultFor(g.name));
+            }});
+            Object.keys(customGroups).forEach(name => {{
+                html += legendChip(name, customGroups[name].label || name, groupDefaultFor(name));
+            }});
+            if (groupMembers('').length > 0) {{
+                html += legendChip('', 'Unassigned', groupDefaultFor(''));
+            }}
+            holder.innerHTML = html;
+        }}
+        refreshLegend();
+
+        // ===== GROUP ASSIGNMENT UI =====
+        function rebuildAssignSelect() {{
+            const sel = document.getElementById('assignGroupSelect');
+            if (!sel) return;
+            const opts = [];
+            if (!declaredGroupsActive) {{
+                ['source', 'intermediate', 'target'].forEach(n => {{
+                    opts.push({{ value: n, label: n.charAt(0).toUpperCase() + n.slice(1) }});
+                }});
+            }}
+            extraNodeGroups.forEach(g => opts.push({{ value: g.name, label: g.label }}));
+            Object.keys(customGroups).forEach(n => opts.push({{ value: 'custom_' + n, label: customGroups[n].label || n }}));
+            opts.push({{ value: 'unassigned', label: 'Unassigned' }});
+            const current = sel.value;
+            sel.innerHTML = opts.map(o => '<option value="' + o.value + '">' + escapeHtml(o.label) + '</option>').join('');
+            if (opts.some(o => o.value === current)) sel.value = current;
+        }}
+        rebuildAssignSelect();
+
+        // Preselect the group shared by the current node selection (if any).
+        function syncAssignSelectToSelection() {{
+            const sel = document.getElementById('assignGroupSelect');
+            if (!sel) return;
+            const nodes = cy.$(':selected').nodes();
+            if (nodes.length === 0) return;
+            const first = nodes[0].data('assigned_group') || '';
+            const mixed = nodes.toArray().some(n => (n.data('assigned_group') || '') !== first);
+            const val = (mixed || first === '') ? 'unassigned' : (customGroups[first] ? 'custom_' + first : first);
+            if (Array.from(sel.options).some(o => o.value === val)) sel.value = val;
+        }}
+
+        function onAssignSelectChange() {{}}
+
+        function assignSelectedToGroup() {{
+            const sel = document.getElementById('assignGroupSelect');
+            if (!sel) return;
+            const value = sel.value;
+            const name = value === 'unassigned' ? '' : (value.startsWith('custom_') ? value.slice(7) : value);
+            const nodes = cy.$(':selected').nodes();
+            if (nodes.length === 0) {{
+                showToast('Select nodes to assign (groups are node memberships)', 'warn');
+                return;
+            }}
+            pushHistory('Assign to group');
+            assignNodesToGroup(nodes, name, true);
+            showToast('Assigned ' + nodes.length + ' node(s) ' + (name ? 'to ' + groupLabel(name) : 'to Unassigned'), 'success');
+        }}
+
+        // Rebuild the custom-group optgroup in the Groups dropdown (live
+        // counts) and inject the Unassigned entry when it has members.
+        function rebuildCustomGroupUI() {{
+            const selector = document.getElementById('groupSelector');
+            const old = document.getElementById('customGroupOptgroup');
+            if (old) old.remove();
+            const names = Object.keys(customGroups);
+            if (names.length > 0 && selector) {{
+                const og = document.createElement('optgroup');
+                og.id = 'customGroupOptgroup';
+                og.label = 'Custom Groups';
+                selector.appendChild(og);
+                names.forEach(name => {{
+                    const option = document.createElement('option');
+                    option.value = 'custom_' + name;
+                    option.textContent = name + ' (' + groupMembers(name).length + ')';
+                    og.appendChild(option);
+                }});
+            }}
+            const oldUn = document.getElementById('unassignedOption');
+            if (oldUn) oldUn.remove();
+            const unCount = groupMembers('').length;
+            if (unCount > 0 && selector) {{
+                const opt = document.createElement('option');
+                opt.id = 'unassignedOption';
+                opt.value = 'unassigned';
+                opt.textContent = 'Unassigned (' + unCount + ')';
+                selector.appendChild(opt);
+            }}
+            updateCustomGroupList();
+        }}
         
         // NT color mapping for JavaScript
         const ntColors = {nt_colors_js};
@@ -7469,6 +9222,11 @@ class VisualizePath:
                 defaults = groupDefaults[keyMap[group]] || {{ color: '#888888', opacity: 100 }};
             }}
             
+            // Unassigned pseudo-group
+            if (group === 'unassigned') {{
+                defaults = groupDefaults.unassigned || {{ color: '#9ca3af', opacity: 100 }};
+            }}
+
             // Handle custom groups (prefixed with 'custom_')
             if (group.startsWith('custom_')) {{
                 const groupName = group.replace('custom_', '');
@@ -7503,29 +9261,53 @@ class VisualizePath:
             
             console.log('Applying color to group:', group, color, opacity);
             
-            if (group === 'source' || group === 'all_nodes') {{
-                cy.nodes().filter('[node_type = "source"]').forEach(node => {{
+            const applyNodeGroupColor = (name) => {{
+                groupMembers(name).forEach(node => {{
                     if (!node.selected()) {{
                         node.style({{ 'background-color': color, 'opacity': opacity }});
                     }}
                 }});
-                groupDefaults.source = {{ color: color, opacity: opacity * 100 }};
+                groupDefaults[name] = {{ color: color, opacity: opacity * 100 }};
+            }};
+            if (group === 'source') applyNodeGroupColor('source');
+            if (group === 'intermediate') applyNodeGroupColor('intermediate');
+            if (group === 'target') applyNodeGroupColor('target');
+            // All Nodes recolors EVERY node — structural roles, declared
+            // dataset groups (which REPLACE the roles in the membership
+            // field) and custom groups alike — and records each member
+            // group's look so the legend and later group ops stay
+            // consistent with Reset All Colors.
+            if (group === 'all_nodes') {{
+                const memberGroups = [];
+                cy.nodes().forEach(node => {{
+                    const name = String(node.data('assigned_group') || '');
+                    if (!memberGroups.includes(name)) memberGroups.push(name);
+                }});
+                memberGroups.forEach(name => {{
+                    groupMembers(name).forEach(node => {{
+                        if (!node.selected()) {{
+                            node.style({{ 'background-color': color, 'opacity': opacity }});
+                        }}
+                    }});
+                    if (customGroups[name]) {{
+                        customGroups[name].color = color;
+                        customGroups[name].opacity = opacity * 100;
+                    }} else if (name === '') {{
+                        groupDefaults.unassigned = {{ color: color, opacity: opacity * 100 }};
+                    }} else {{
+                        groupDefaults[name] = {{ color: color, opacity: opacity * 100 }};
+                    }}
+                }});
             }}
-            if (group === 'intermediate' || group === 'all_nodes') {{
-                cy.nodes().filter('[node_type = "intermediate"]').forEach(node => {{
+            const extraGroup = extraNodeGroups.find(g => g.name === group);
+            if (extraGroup) applyNodeGroupColor(group);
+            if (group === 'unassigned') {{
+                groupMembers('').forEach(node => {{
                     if (!node.selected()) {{
                         node.style({{ 'background-color': color, 'opacity': opacity }});
                     }}
                 }});
-                groupDefaults.intermediate = {{ color: color, opacity: opacity * 100 }};
-            }}
-            if (group === 'target' || group === 'all_nodes') {{
-                cy.nodes().filter('[node_type = "target"]').forEach(node => {{
-                    if (!node.selected()) {{
-                        node.style({{ 'background-color': color, 'opacity': opacity }});
-                    }}
-                }});
-                groupDefaults.target = {{ color: color, opacity: opacity * 100 }};
+                groupDefaults.unassigned = {{ color: color, opacity: opacity * 100 }};
             }}
             if (group === 'hemi_left') {{
                 cy.nodes().filter('[hemisphere = "L"]').forEach(node => {{
@@ -7580,19 +9362,14 @@ class VisualizePath:
                 groupDefaults[group] = {{ color: color, opacity: opacity * 100 }};
             }}
             
-            // Handle custom groups (prefixed with 'custom_')
+            // Handle custom groups (prefixed with 'custom_'): color the
+            // CURRENT live members
             if (group.startsWith('custom_')) {{
                 const groupName = group.replace('custom_', '');
                 if (customGroups[groupName]) {{
-                    const ids = customGroups[groupName].ids;
-                    ids.forEach(id => {{
-                        const el = cy.getElementById(id);
-                        if (el.length > 0) {{
-                            if (el.isNode()) {{
-                                el.style({{ 'background-color': color, 'opacity': opacity }});
-                            }} else {{
-                                setEdgeBaseAppearance(el, color, opacity, true);
-                            }}
+                    groupMembers(groupName).forEach(node => {{
+                        if (!node.selected()) {{
+                            node.style({{ 'background-color': color, 'opacity': opacity }});
                         }}
                     }});
                     customGroups[groupName].color = color;
@@ -7600,26 +9377,8 @@ class VisualizePath:
                 }}
             }}
             
-            // Update legend for nodes
-            const legendColors = document.querySelectorAll('.legend-color');
-            if (group === 'source' || group === 'all_nodes') {{
-                if (legendColors[0]) {{
-                    legendColors[0].style.background = color;
-                    legendColors[0].style.opacity = opacity;
-                }}
-            }}
-            if (group === 'intermediate' || group === 'all_nodes') {{
-                if (legendColors[1]) {{
-                    legendColors[1].style.background = color;
-                    legendColors[1].style.opacity = opacity;
-                }}
-            }}
-            if (group === 'target' || group === 'all_nodes') {{
-                if (legendColors[2]) {{
-                    legendColors[2].style.background = color;
-                    legendColors[2].style.opacity = opacity;
-                }}
-            }}
+            // The legend chips mirror the live group colors/counts
+            refreshLegend();
             
             console.log('✓ Color applied to group:', group);
         }}
@@ -7630,11 +9389,15 @@ class VisualizePath:
             cy.elements().unselect();
             
             if (group === 'source') {{
-                cy.nodes().filter('[node_type = "source"]').select();
+                groupMembers('source').select();
             }} else if (group === 'intermediate') {{
-                cy.nodes().filter('[node_type = "intermediate"]').select();
+                groupMembers('intermediate').select();
             }} else if (group === 'target') {{
-                cy.nodes().filter('[node_type = "target"]').select();
+                groupMembers('target').select();
+            }} else if (group === 'unassigned') {{
+                groupMembers('').select();
+            }} else if (extraNodeGroups.some(g => g.name === group)) {{
+                groupMembers(group).select();
             }} else if (group === 'hemi_left') {{
                 cy.nodes().filter('[hemisphere = "L"]').select();
             }} else if (group === 'hemi_right') {{
@@ -7654,20 +9417,14 @@ class VisualizePath:
                 const ntType = group.replace('nt_', '');
                 cy.edges().filter(`[nt_type = "${{ntType}}"]`).select();
             }} else if (group.startsWith('custom_')) {{
-                // Handle custom groups
-                const groupName = group.replace('custom_', '');
-                if (customGroups[groupName]) {{
-                    const ids = customGroups[groupName].ids;
-                    ids.forEach(id => {{
-                        const el = cy.getElementById(id);
-                        if (el.length > 0) el.select();
-                    }});
-                }}
+                // Live membership: select the current members
+                groupMembers(group.replace('custom_', '')).select();
             }}
             
             // Update dropdown to match
             document.getElementById('groupSelector').value = group;
             updateGroupControls();
+            syncAssignSelectToSelection();
             
             // Update selection info
             const selectionCount = getSelectionCount();
@@ -7677,7 +9434,10 @@ class VisualizePath:
             document.getElementById('individualControls').style.display = 'block';
         }}
 
-        // Create custom group from current selection
+        // Create a node group from the current selection: membership is LIVE
+        // (each node carries assigned_group), so later assignments update
+        // counts, legend and dropdown automatically. Edges cannot join —
+        // groups are a node concept.
         function createCustomGroup() {{
             const nameInput = document.getElementById('customGroupName');
             let groupName = nameInput.value.trim();
@@ -7689,57 +9449,38 @@ class VisualizePath:
             // Sanitize name (remove special characters)
             groupName = groupName.replace(/[^a-zA-Z0-9_-]/g, '_');
             
-            const selected = cy.$(':selected');
-            if (selected.length === 0) {{
-                alert('Please select some nodes or edges first');
+            const selectedNodes = cy.$(':selected').nodes();
+            if (selectedNodes.length === 0) {{
+                showToast('Please select some nodes first (groups are node memberships)', 'warn');
                 return;
             }}
-            
-            // Store selected element IDs
-            const ids = [];
-            selected.forEach(el => ids.push(el.id()));
-            
-            // Get current color from first selected element
-            const firstEl = selected[0];
-            let color = '#888888';
-            if (firstEl.isNode()) {{
-                color = firstEl.style('background-color');
-            }} else {{
-                color = firstEl.style('line-color');
+            if (cy.$(':selected').edges().length > 0) {{
+                showToast('Edges in the selection were ignored — groups are node memberships', 'info');
             }}
             
-            // Store custom group
+            // Seed the group look from the first selected node; the computed
+            // style reports rgb(), so normalize to hex for input[type=color].
+            // defaultColor is what Reset All Colors restores.
+            const color = extractColorHex(selectedNodes[0].style('background-color')) || '#888888';
+            
+            pushHistory('Assign to group');
             customGroups[groupName] = {{
-                ids: ids,
+                label: groupName,
                 color: color,
                 opacity: 100,
-                type: selected.nodes().length > 0 ? 'mixed' : 'edges'
+                defaultColor: color,
+                defaultOpacity: 100
             }};
-            
-            // Add to dropdown
-            const selector = document.getElementById('groupSelector');
-            let customOptgroup = document.getElementById('customGroupOptgroup');
-            if (!customOptgroup) {{
-                customOptgroup = document.createElement('optgroup');
-                customOptgroup.id = 'customGroupOptgroup';
-                customOptgroup.label = 'Custom Groups';
-                selector.appendChild(customOptgroup);
-            }}
-            
-            const option = document.createElement('option');
-            option.value = 'custom_' + groupName;
-            option.textContent = groupName + ' (' + ids.length + ')';
-            customOptgroup.appendChild(option);
-            
-            // Update custom group list
-            updateCustomGroupList();
+            assignNodesToGroup(selectedNodes, groupName, true);
+
+            rebuildCustomGroupUI();
             
             // Select the new group in dropdown
-            selector.value = 'custom_' + groupName;
+            document.getElementById('groupSelector').value = 'custom_' + groupName;
             updateGroupControls();
             
             nameInput.value = '';
-            console.log('✓ Created custom group: ' + groupName + ' with ' + ids.length + ' elements');
+            showToast('Created group: ' + groupName + ' (' + selectedNodes.length + ' nodes)', 'success');
         }}
         
         // Delete selected custom group
@@ -7748,39 +9489,44 @@ class VisualizePath:
             const currentValue = selector.value;
             
             if (!currentValue.startsWith('custom_')) {{
-                alert('Please select a custom group to delete');
+                showToast('Please select a custom group to delete', 'warn');
                 return;
             }}
             
             const groupName = currentValue.replace('custom_', '');
             
-            if (!confirm('Delete custom group "' + groupName + '"?')) {{
-                return;
-            }}
-            
-            // Remove from storage
-            delete customGroups[groupName];
-            
-            // Remove from dropdown
-            const optgroup = document.getElementById('customGroupOptgroup');
-            if (optgroup) {{
-                const option = optgroup.querySelector(`option[value="${{currentValue}}"]`);
-                if (option) option.remove();
-                
-                // Remove optgroup if empty
-                if (optgroup.children.length === 0) {{
-                    optgroup.remove();
+            // Groups are NOT history-recorded, so a real (danger) dialog
+            // guards the irreversible delete.
+            showDialog({{
+                title: 'Delete custom group',
+                message: 'Delete custom group "' + groupName + '"? Its ' + groupMembers(groupName).length + ' node(s) become Unassigned. This cannot be undone.',
+                fields: [],
+                confirmText: 'Delete',
+                danger: true
+            }}).then(() => {{
+                // Members fall back to Unassigned and revert to their
+                // structural look (node_type never changes, so the target
+                // look is stable).
+                groupMembers(groupName).forEach(node => {{
+                    node.data('assigned_group', '');
+                    applyGroupLook(node, groupDefaultFor(String(node.data('node_type') || '')));
+                }});
+                delete customGroups[groupName];
+                rebuildCustomGroupUI();
+                rebuildAssignSelect();
+                refreshLegend();
+                // Reset the picker to a group that actually exists —
+                // declared dataset groups replace the structural roles in
+                // the dropdown, so 'source' is not always an option.
+                if (selector.querySelector('option[value="source"]')) {{
+                    selector.value = 'source';
+                }} else {{
+                    const firstNodeGroup = selector.querySelector('option[value="all_nodes"]');
+                    if (firstNodeGroup) selector.value = firstNodeGroup.value;
                 }}
-            }}
-            
-            // Update custom group list
-            updateCustomGroupList();
-            
-            // Reset selection
-            selector.value = 'source';
-            updateGroupControls();
-            
-            console.log('✓ Deleted custom group: ' + groupName);
+                updateGroupControls();
+                showToast('Deleted custom group: ' + groupName, 'success');
+            }}).catch(() => {{}});
         }}
         
         // Update custom group list display
@@ -7794,7 +9540,7 @@ class VisualizePath:
                 groupNames.forEach(name => {{
                     const opt = document.createElement('option');
                     opt.value = 'custom_' + name;
-                    opt.textContent = name + ' (' + customGroups[name].ids.length + ')';
+                    opt.textContent = name + ' (' + groupMembers(name).length + ')';
                     list.appendChild(opt);
                 }});
             }} else {{
@@ -7802,22 +9548,27 @@ class VisualizePath:
             }}
         }}
 
-        // Reset all colors to defaults
+        // Reset all colors to defaults (groups and memberships are KEPT —
+        // only the look resets; custom groups restore their creation color)
         function applyGlobalColors() {{
             pushHistory('Reset colors');
-            // Reset all node colors to original defaults
-            cy.nodes().filter('[node_type = "source"]').forEach(node => {{
-                node.style({{ 'background-color': originalGroupDefaults.source.color, 'opacity': originalGroupDefaults.source.opacity / 100 }});
-                node.data('customColor', false);
+            const resetNodeGroup = (name, def) => {{
+                groupMembers(name).forEach(node => {{
+                    applyGroupLook(node, def);
+                    node.data('customColor', false);
+                }});
+            }};
+            ['source', 'intermediate', 'target'].forEach(name => {{
+                resetNodeGroup(name, originalGroupDefaults[name]);
+                groupDefaults[name] = JSON.parse(JSON.stringify(originalGroupDefaults[name]));
             }});
-            cy.nodes().filter('[node_type = "intermediate"]').forEach(node => {{
-                node.style({{ 'background-color': originalGroupDefaults.intermediate.color, 'opacity': originalGroupDefaults.intermediate.opacity / 100 }});
-                node.data('customColor', false);
+            extraNodeGroups.forEach(g => {{
+                resetNodeGroup(g.name, originalGroupDefaults[g.name]);
+                groupDefaults[g.name] = JSON.parse(JSON.stringify(originalGroupDefaults[g.name]));
             }});
-            cy.nodes().filter('[node_type = "target"]').forEach(node => {{
-                node.style({{ 'background-color': originalGroupDefaults.target.color, 'opacity': originalGroupDefaults.target.opacity / 100 }});
-                node.data('customColor', false);
-            }});
+            // Unassigned nodes revert to the unassigned gray
+            const unassignedDef = groupDefaults.unassigned || {{ color: '#9ca3af', opacity: 100 }};
+            resetNodeGroup('', unassignedDef);
             
             // Reset positive edges to original default
             cy.edges().filter('[is_negative = 0]').forEach(edge => {{
@@ -7830,9 +9581,12 @@ class VisualizePath:
                 edge.data('customColor', false);
             }});
             
-            // Reset group defaults to original values
-            Object.keys(originalGroupDefaults).forEach(key => {{
-                groupDefaults[key] = JSON.parse(JSON.stringify(originalGroupDefaults[key]));
+            // Reset custom-group looks to their creation color; definitions
+            // and memberships survive a reset by design.
+            Object.keys(customGroups).forEach(name => {{
+                customGroups[name].color = customGroups[name].defaultColor || customGroups[name].color;
+                customGroups[name].opacity = customGroups[name].defaultOpacity === undefined ? 100 : customGroups[name].defaultOpacity;
+                resetNodeGroup(name, customGroups[name]);
             }});
             
             // Clear any NT group custom colors (reset to NT defaults)
@@ -7842,14 +9596,8 @@ class VisualizePath:
                 }}
             }});
             
-            // Clear custom groups
-            Object.keys(customGroups).forEach(key => delete customGroups[key]);
-            
-            // Update legend
-            const legendColors = document.querySelectorAll('.legend-color');
-            if (legendColors[0]) {{ legendColors[0].style.background = originalGroupDefaults.source.color; legendColors[0].style.opacity = originalGroupDefaults.source.opacity / 100; }}
-            if (legendColors[1]) {{ legendColors[1].style.background = originalGroupDefaults.intermediate.color; legendColors[1].style.opacity = originalGroupDefaults.intermediate.opacity / 100; }}
-            if (legendColors[2]) {{ legendColors[2].style.background = originalGroupDefaults.target.color; legendColors[2].style.opacity = originalGroupDefaults.target.opacity / 100; }}
+            // The legend mirrors the reset colors
+            refreshLegend();
             
             // Update group controls to current selection
             updateGroupControls();
@@ -7910,6 +9658,7 @@ class VisualizePath:
             document.getElementById('individualOpacity').value = currentOpacity;
             document.getElementById('individualOpacityValue').textContent = currentOpacity + '%';
             document.getElementById('individualControls').style.display = 'block';
+            syncAssignSelectToSelection();
             // Populate the size/position inputs for the tapped element
             syncSelectedGeometryInputs(element);
         }});
@@ -7933,9 +9682,9 @@ class VisualizePath:
         // Apply color and opacity to ALL selected elements (supports multi-selection!)
         function applyIndividualColor() {{
             const selectedElements = getSelectedElements();
-            
+
             if (selectedElements.length === 0) {{
-                alert('Please select one or more nodes/edges first');
+                showToast('Please select one or more nodes/edges first', 'warn');
                 return;
             }}
             
@@ -8044,7 +9793,7 @@ class VisualizePath:
         function applySelectedGeometry() {{
             const selected = getSelectedElements();
             if (selected.length === 0) {{
-                alert('Please select one or more nodes/edges first');
+                showToast('Please select one or more nodes/edges first', 'warn');
                 return;
             }}
             let primary = selectedElement;
@@ -8110,7 +9859,7 @@ class VisualizePath:
         function alignSelectedNodes(axis) {{
             const nodes = cy.$('node:selected');
             if (nodes.length < 2) {{
-                alert('Select at least two nodes to align');
+                showToast('Select at least two nodes to align', 'warn');
                 return;
             }}
             pushHistory('Align nodes');
@@ -8209,6 +9958,9 @@ class VisualizePath:
                 btn.textContent = '🔒 Disable Edit Mode';
                 btn.style.background = '#f44336';
                 controls.style.display = 'block';
+                // Canvas affordance: dashed accent border + mode badge
+                document.getElementById('cy').classList.add('vp-editmode');
+                document.getElementById('editBadge').style.display = 'block';
                 
                 // Enable node dragging in edit mode
                 cy.autoungrabify(false);
@@ -8240,6 +9992,8 @@ class VisualizePath:
                 btn.textContent = '✏️ Enable Edit Mode';
                 btn.style.background = '#ff9800';
                 controls.style.display = 'none';
+                document.getElementById('cy').classList.remove('vp-editmode');
+                document.getElementById('editBadge').style.display = 'none';
                 
                 // Disable special edit handlers only (use namespace to preserve main handlers)
                 cy.off('tap.editmode');
@@ -8252,120 +10006,121 @@ class VisualizePath:
             }}
         }}
         
-        // Edit node properties (double-click)
+        // Edit node properties (double-click): in-page dialog with label,
+        // type and an explicit color (defaults to the type color).
         function editNodeProperties(node) {{
+            if (!node || node.length === 0) return;  // nothing to edit
             const currentId = node.id();
             const currentType = node.data('node_type');
-            const currentLabel = node.data('label');
-            
-            const newLabel = prompt('Edit node label:', currentLabel);
-            if (newLabel === null) return;  // Cancelled
-            
-            const newType = prompt('Edit node type (source/intermediate/target):', currentType);
-            if (newType === null) return;  // Cancelled
-            
-            // Update node data
-            pushHistory('Edit node');
-            node.data('label', newLabel);
-            node.data('node_type', newType);
-            
-            // Update color based on new type
-            let newColor = '{self.node_color[1]}';  // intermediate default
-            if (newType === 'source') {{
-                newColor = '{self.node_color[0]}';
-            }} else if (newType === 'target') {{
-                newColor = '{self.target_color}';
-            }}
-            node.data('color', newColor);
-            node.style('background-color', newColor);
-            
-            updateHoverInfo('✓ Updated node: ' + currentId + ' → label="' + newLabel + '", type=' + newType);
+            const typeColor = currentType === 'source' ? '{self.node_color[0]}'
+                : (currentType === 'target' ? '{self.target_color}' : '{self.node_color[1]}');
+            const currentColor = extractColorHex(node.style('background-color')) || node.data('color') || typeColor;
+
+            showDialog({{
+                title: 'Edit node: ' + currentId,
+                fields: [
+                    {{ key: 'label', label: 'Label', type: 'text', value: node.data('label') }},
+                    {{ key: 'type', label: 'Type', type: 'select', value: currentType,
+                       options: ['source', 'intermediate', 'target'] }},
+                    {{ key: 'color', label: 'Color', type: 'color', value: currentColor }},
+                ],
+                confirmText: 'Apply',
+            }}).then(values => {{
+                const newLabel = String(values.label);
+                const newType = String(values.type);
+                const newColor = String(values.color || typeColor);
+
+                // Update node data
+                pushHistory('Edit node');
+                node.data('label', newLabel);
+                node.data('node_type', newType);
+                node.data('color', newColor);
+                node.style('background-color', newColor);
+
+                showToast('✓ Updated node: ' + currentId + ' → label="' + newLabel + '", type=' + newType, 'success');
+            }}).catch(() => {{}});
         }}
         
-        // Edit edge properties (double-click)
+        // Edit edge properties (double-click): one in-page dialog for
+        // weight, ratio and probability (negative weight preserved).
         function editEdgeProperties(edge) {{
             const source = edge.source().id();
             const target = edge.target().id();
-            const currentWeight = edge.data('weight') || edge.data('original_weight') || 1;
-            
-            // Get current optional properties
+            const currentWeight = edge.data('original_weight') || edge.data('weight') || 1;
             const currentRatio = edge.data('ratio') || '';
             const currentProb = edge.data('probability') || '';
-            
-            // Prompt for new values
-            const newWeight = prompt('Edit edge weight:', currentWeight);
-            if (newWeight === null) return;  // Cancelled
-            
-            const weightNum = parseFloat(newWeight);
-            if (isNaN(weightNum)) {{
-                alert('Invalid weight value. Must be a number.');
-                return;
-            }}
-            
-            // Optional: edit ratio and probability
-            const editMore = confirm('Edit additional properties (ratio, probability)?');
-            let newRatio = currentRatio;
-            let newProb = currentProb;
-            
-            if (editMore) {{
-                const ratioInput = prompt('Edit connection ratio (leave empty to skip):', currentRatio);
-                if (ratioInput !== null && ratioInput !== '') {{
-                    newRatio = parseFloat(ratioInput);
-                    if (isNaN(newRatio)) newRatio = currentRatio;
+        
+            showDialog({{
+                title: 'Edit edge: ' + source + ' → ' + target,
+                fields: [
+                    {{ key: 'weight', label: 'Weight', type: 'number', value: currentWeight }},
+                    {{ key: 'ratio', label: 'Connection ratio (optional)', type: 'text', value: currentRatio }},
+                    {{ key: 'probability', label: 'Traversal probability (optional)', type: 'text', value: currentProb }},
+                ],
+                confirmText: 'Apply',
+            }}).then(values => {{
+                const weightNum = parseFloat(values.weight);
+                if (isNaN(weightNum)) {{
+                    showToast('Invalid weight value. Must be a number.', 'error');
+                    return;
                 }}
-                
-                const probInput = prompt('Edit traversal probability (leave empty to skip):', currentProb);
-                if (probInput !== null && probInput !== '') {{
-                    newProb = parseFloat(probInput);
-                    if (isNaN(newProb)) newProb = currentProb;
+                let newRatio = String(values.ratio === undefined || values.ratio === null ? '' : values.ratio).trim();
+                let newProb = String(values.probability === undefined || values.probability === null ? '' : values.probability).trim();
+                if (newRatio !== '') {{
+                    const r = parseFloat(newRatio);
+                    if (isNaN(r)) newRatio = currentRatio; else newRatio = r;
                 }}
-            }}
-            
-            // Update edge data
-            pushHistory('Edit edge');
-            edge.data('weight', Math.abs(weightNum));
-            edge.data('original_weight', weightNum);
-            edge.data('is_negative', weightNum < 0 ? 1 : 0);
-            
-            if (newRatio !== '') {{
-                edge.data('ratio', newRatio);
-            }}
-            if (newProb !== '') {{
-                edge.data('probability', newProb);
-            }}
-            
-            // Update tooltip
-            const tooltipParts = [`Weight: ${{weightNum}}`];
-            if (newRatio !== '' && !isNaN(newRatio)) {{
-                tooltipParts.push(`Ratio: ${{newRatio.toFixed(3)}}`);
-            }}
-            if (newProb !== '' && !isNaN(newProb)) {{
-                tooltipParts.push(`Probability: ${{newProb.toFixed(3)}}`);
-            }}
-            edge.data('tooltip', tooltipParts.join('\\n'));
-            
-            // Update visual properties (edge width and color)
-            // Recalculate scaled width based on current scaling method
-            const scaledWidth = calculateEdgeWidth(Math.abs(weightNum));
-            edge.data('scaled_width', scaledWidth);
-            
-            // The edge-color pickers (edgeColor/negativeEdgeColor) only exist
-            // in the Sankey template; keep the edge's current color instead,
-            // preferring its NT color when one is available.
-            const edgeNT = edge.data('nt_type') || '';
-            const currentColor = extractColorHex(edge.style('line-color'));
-            const updatedColor = edgeNT ? getNTColor(edgeNT) : currentColor;
-            const currentOpacity = edge.data(EDGE_BASE_OPACITY_KEY) !== undefined ? edge.data(EDGE_BASE_OPACITY_KEY) : (parseFloat(edge.style('opacity')) || 1);
-            const canApplyNow = !edge.selected() && !edge.hasClass('highlighted');
-            setEdgeBaseAppearance(edge, updatedColor, currentOpacity, canApplyNow);
-            if (!canApplyNow) {{
-                applyEdgeHighlightOverride(edge);
-            }}
-            
-            // Apply the width update
-            updateEdgeWidths();
-            
-            updateHoverInfo('✓ Updated edge: ' + source + ' → ' + target + ' (weight=' + weightNum + ')');
+                if (newProb !== '') {{
+                    const p = parseFloat(newProb);
+                    if (isNaN(p)) newProb = currentProb; else newProb = p;
+                }}
+        
+                // Update edge data
+                pushHistory('Edit edge');
+                edge.data('weight', Math.abs(weightNum));
+                edge.data('original_weight', weightNum);
+                edge.data('is_negative', weightNum < 0 ? 1 : 0);
+        
+                if (newRatio !== '') {{
+                    edge.data('ratio', newRatio);
+                }}
+                if (newProb !== '') {{
+                    edge.data('probability', newProb);
+                }}
+        
+                // Update tooltip
+                const tooltipParts = [`Weight: ${{weightNum}}`];
+                if (newRatio !== '' && !isNaN(newRatio)) {{
+                    tooltipParts.push(`Ratio: ${{newRatio.toFixed(3)}}`);
+                }}
+                if (newProb !== '' && !isNaN(newProb)) {{
+                    tooltipParts.push(`Probability: ${{newProb.toFixed(3)}}`);
+                }}
+                edge.data('tooltip', tooltipParts.join('\\n'));
+        
+                // Update visual properties (edge width and color)
+                // Recalculate scaled width based on current scaling method
+                const scaledWidth = calculateEdgeWidth(Math.abs(weightNum));
+                edge.data('scaled_width', scaledWidth);
+        
+                // The edge-color pickers (edgeColor/negativeEdgeColor) only exist
+                // in the Sankey template; keep the edge's current color instead,
+                // preferring its NT color when one is available.
+                const edgeNT = edge.data('nt_type') || '';
+                const currentColor = extractColorHex(edge.style('line-color'));
+                const updatedColor = edgeNT ? getNTColor(edgeNT) : currentColor;
+                const currentOpacity = edge.data(EDGE_BASE_OPACITY_KEY) !== undefined ? edge.data(EDGE_BASE_OPACITY_KEY) : (parseFloat(edge.style('opacity')) || 1);
+                const canApplyNow = !edge.selected() && !edge.hasClass('highlighted');
+                setEdgeBaseAppearance(edge, updatedColor, currentOpacity, canApplyNow);
+                if (!canApplyNow) {{
+                    applyEdgeHighlightOverride(edge);
+                }}
+        
+                // Apply the width update
+                updateEdgeWidths();
+        
+                showToast('✓ Updated edge: ' + source + ' → ' + target + ' (weight=' + weightNum + ')', 'success');
+            }}).catch(() => {{}});
         }}
         
         // Calculate edge width based on weight and current scaling method
@@ -8458,91 +10213,115 @@ class VisualizePath:
             }}
         }}
         
-        // Add new node
+        // Add new node: in-page dialog for id + type
+        // Group options for the Add-node dialog: declared dataset groups
+        // REPLACE the structural roles in the membership field, so the
+        // dropdown mirrors rebuildAssignSelect's value set instead of
+        // hardcoding the structural roles (an assigned group with no
+        // dropdown entry or legend chip would be unreachable in the UI).
+        function groupFieldOptions() {{
+            const opts = [''];
+            if (!declaredGroupsActive) opts.push('source', 'intermediate', 'target');
+            extraNodeGroups.forEach(g => opts.push(g.name));
+            return opts;
+        }}
+
         function addNode() {{
             if (!editMode) {{
-                alert('Please enable Edit Mode first');
+                showToast('Please enable Edit Mode first', 'warn');
                 return;
             }}
-            
-            const nodeId = prompt('Enter node ID (e.g., Neuron_X):');
-            if (!nodeId) return;
-            
-            // Check if node already exists
-            if (cy.getElementById(nodeId).length > 0) {{
-                alert('Node with ID "' + nodeId + '" already exists');
-                return;
-            }}
-            
-            // Get node type
-            const nodeType = prompt('Enter node type (source/intermediate/target):', 'intermediate');
-            if (!nodeType) return;
-            
-            // Determine color based on type
-            let color = '{self.node_color[1]}';  // intermediate default
-            if (nodeType === 'source') {{
-                color = '{self.node_color[0]}';
-            }} else if (nodeType === 'target') {{
-                color = '{self.target_color}';
-            }}
-            
-            // Add node at center of viewport
-            const extent = cy.extent();
-            const centerX = (extent.x1 + extent.x2) / 2;
-            const centerY = (extent.y1 + extent.y2) / 2;
-            
-            pushHistory('Add node');
-            cy.add({{
-                group: 'nodes',
-                data: {{
-                    id: nodeId,
-                    label: nodeId,
-                    node_type: nodeType,
-                    color: color
-                }},
-                position: {{ x: centerX, y: centerY }}
-            }});
-            
-            updateHoverInfo('Node added: ' + nodeId + ' (' + nodeType + ')');
+
+            showDialog({{
+                title: 'Add node',
+                fields: [
+                    {{ key: 'id', label: 'Node ID', type: 'text', value: '', placeholder: 'e.g. Neuron_X' }},
+                    {{ key: 'type', label: 'Type', type: 'select', value: 'intermediate',
+                       options: ['source', 'intermediate', 'target'] }},
+                    {{ key: 'group', label: 'Group', type: 'select', value: '',
+                       options: groupFieldOptions() }},
+                ],
+                confirmText: 'Add',
+            }}).then(values => {{
+                const nodeId = String(values.id || '').trim();
+                if (!nodeId) return;
+
+                // Check if node already exists
+                if (cy.getElementById(nodeId).length > 0) {{
+                    showToast('Node with ID "' + nodeId + '" already exists', 'error');
+                    return;
+                }}
+
+                const nodeType = String(values.type || 'intermediate');
+
+                // Determine color based on type
+                let color = '{self.node_color[1]}';  // intermediate default
+                if (nodeType === 'source') {{
+                    color = '{self.node_color[0]}';
+                }} else if (nodeType === 'target') {{
+                    color = '{self.target_color}';
+                }}
+
+                // Add node at center of viewport
+                const extent = cy.extent();
+                const centerX = (extent.x1 + extent.x2) / 2;
+                const centerY = (extent.y1 + extent.y2) / 2;
+
+                pushHistory('Add node');
+                const assignedGroup = (values.group === undefined || values.group === null || values.group === '')
+                    ? nodeType : String(values.group);
+                cy.add({{
+                    group: 'nodes',
+                    data: {{
+                        id: nodeId,
+                        label: nodeId,
+                        node_type: nodeType,
+                        assigned_group: assignedGroup,
+                        color: color
+                    }},
+                    position: {{ x: centerX, y: centerY }}
+                }});
+                rebuildAssignSelect();
+                rebuildCustomGroupUI();
+                refreshLegend();
+
+                showToast('Node added: ' + nodeId + ' (' + nodeType + ')', 'success');
+            }}).catch(() => {{}});
         }}
         
-        // Delete selected element(s)
+        // Delete selected element(s): history-recorded, so no confirmation —
+        // a toast with the undo hint is enough.
         function deleteSelected() {{
             if (!editMode) {{
-                alert('Please enable Edit Mode first');
+                showToast('Please enable Edit Mode first', 'warn');
                 return;
             }}
             
             const selected = cy.$(':selected');
             if (selected.length === 0) {{
-                alert('No elements selected. Click to select nodes or edges.');
+                showToast('No elements selected. Click to select nodes or edges.', 'info');
                 return;
             }}
             
-            if (confirm('Delete ' + selected.length + ' selected element(s)?')) {{
-                pushHistory('Delete selection');
-                cy.remove(selected);
-                updateHoverInfo('Deleted ' + selected.length + ' element(s)');
-            }}
+            pushHistory('Delete selection');
+            cy.remove(selected);
+            showToast('Deleted ' + selected.length + ' element(s) — ⌘Z/⌃Z to undo', 'success');
         }}
         
-        // Delete single element (right-click)
+        // Delete single element (right-click in edit mode); undoable.
         function deleteElement(element) {{
             const type = element.isNode() ? 'node' : 'edge';
             const id = element.id();
-            
-            if (confirm('Delete ' + type + ': ' + id + '?')) {{
-                pushHistory('Delete ' + type);
-                cy.remove(element);
-                updateHoverInfo('Deleted ' + type + ': ' + id);
-            }}
+            pushHistory('Delete ' + type);
+            cy.remove(element);
+            showToast('Deleted ' + type + ': ' + id + ' — ⌘Z/⌃Z to undo', 'success');
         }}
         
-        // Update hover info display
+        // Update hover info display — LEGACY status entry point. Every
+        // operation message is a toast now; the hover box itself shows
+        // element tooltips only (the mouseover handlers write it directly).
         function updateHoverInfo(text) {{
-            // textContent: the hover box only ever shows plain text (labels,
-            // counts, instructions), so no HTML parsing is needed or wanted.
-            document.getElementById('hoverInfo').textContent = text;
+            showToast(text);
         }}
         
         // ===== EDGE FILTERING =====
@@ -8688,18 +10467,24 @@ class VisualizePath:
             return false;
         }}
         
+        // Value of the ACTIVE connection metric for one edge — the filter
+        // expressions evaluate against this (weight keeps its sign via
+        // original_weight; ratio/probability default to 0 when absent).
+        function metricEdgeValue(edge) {{
+            if (currentMetric === 'ratio') return Number(edge.data('ratio')) || 0;
+            if (currentMetric === 'probability') return Number(edge.data('probability')) || 0;
+            return edge.data('original_weight') !== undefined
+                ? edge.data('original_weight')
+                : edge.data('weight') || 0;
+        }}
+
         // Apply edge filter to show/hide edges
         function applyEdgeFilter() {{
             let hiddenCount = 0;
             let shownCount = 0;
             
             cy.edges().forEach(edge => {{
-                // Get the edge weight (use original_weight to handle negative weights)
-                const weight = edge.data('original_weight') !== undefined 
-                    ? edge.data('original_weight') 
-                    : edge.data('weight') || 0;
-                
-                if (shouldIgnoreEdge(weight)) {{
+                if (shouldIgnoreEdge(metricEdgeValue(edge))) {{
                     // Use 'filtered' class instead of display:none
                     edge.addClass('filtered');
                     hiddenCount++;
@@ -8942,6 +10727,7 @@ class VisualizePath:
             
             // Apply layout only to visible elements
             visibleElements.layout(layoutConfig).run();
+            resetLayoutTransformTrackers();
             
             setTimeout(() => {{
                 cacheHemispherePositions();
@@ -9000,7 +10786,8 @@ class VisualizePath:
                 fontSize: parseFloat(document.getElementById('fontSizeSlider')?.value || 12),
                 nodeSize: parseFloat(document.getElementById('nodeSizeSlider')?.value || 40),
                 groupDefaults: JSON.parse(JSON.stringify(groupDefaults)),
-                customGroups: JSON.parse(JSON.stringify(customGroups))
+                customGroups: JSON.parse(JSON.stringify(customGroups)),
+                labelFontColor: customLabelColor || ''
             }};
             
             // Create export object
@@ -9082,10 +10869,12 @@ class VisualizePath:
                 if (!entries.length) return '';
                 return '{{' + entries.map(([k, v]) => k + ':' + v).join('; ') + '}}';
             }};
-            // element id -> names of the custom groups containing it
+            // node id -> names of the custom groups currently containing it
+            // (live membership via each node's assigned_group field)
             const membership = {{}};
             Object.keys(customGroups).forEach(name => {{
-                (customGroups[name].ids || []).forEach(id => {{
+                groupMembers(name).forEach(node => {{
+                    const id = node.id();
                     if (!membership[id]) membership[id] = [];
                     membership[id].push(name);
                 }});
@@ -9124,9 +10913,12 @@ class VisualizePath:
                     color,
                     nt,
                     nt ? getNtGroupCSV(nt) : '',
-                    sourceNode.data('node_type') || 'intermediate',
-                    targetNode.data('node_type') || 'intermediate',
-                    (membership[edge.id()] || []).join(';'),
+                    (sourceNode.data('assigned_group') ?? sourceNode.data('node_type') ?? 'intermediate'),
+                    (targetNode.data('assigned_group') ?? targetNode.data('node_type') ?? 'intermediate'),
+                    Array.from(new Set([
+                        ...(membership[sourceNode.id()] || []),
+                        ...(membership[targetNode.id()] || [])
+                    ])).join(';'),
                     ratio ? ratio : '',
                     prob ? prob : '',
                     edgeInfo,
@@ -9167,26 +10959,35 @@ class VisualizePath:
             const file = event.target.files[0];
             if (!file) return;
             pushHistory('Import graph');
-            
+
             const reader = new FileReader();
-            reader.onload = function(e) {{
+            reader.onload = async function(e) {{
                 try {{
                     const importData = JSON.parse(e.target.result);
-                    
+
                     if (!importData.nodes || !importData.edges) {{
-                        alert('Invalid graph file format');
+                        showToast('Invalid graph file format — expected a graph export with "nodes" and "edges"', 'error');
                         return;
                     }}
-                    
-                    // Ask user if they want to replace or merge
-                    const action = confirm(
-                        'Import ' + importData.nodes.length + ' nodes and ' + 
-                        importData.edges.length + ' edges.\\n\\n' +
-                        'Click OK to REPLACE current graph\\n' +
-                        'Click Cancel to MERGE with current graph'
-                    );
-                    
-                    if (action) {{
+
+                    // Replace or merge — decided in the in-page dialog
+                    // (Confirm = REPLACE, Cancel = MERGE), consistent with
+                    // the no-native-modal contract.
+                    let replace = false;
+                    try {{
+                        await showDialog({{
+                            title: 'Import graph',
+                            message: 'Import ' + importData.nodes.length + ' nodes and ' +
+                                importData.edges.length + ' edges — OK to REPLACE the current graph, Cancel to MERGE into it.',
+                            fields: [],
+                            confirmText: 'Replace',
+                        }});
+                        replace = true;
+                    }} catch (dialogError) {{
+                        if (dialogError === 'busy') return;  // another dialog owns the page
+                    }}
+
+                    if (replace) {{
                         // Replace: clear current graph
                         cy.elements().remove();
                     }}
@@ -9200,7 +11001,7 @@ class VisualizePath:
                         // Check if node already exists
                         if (cy.getElementById(nodeId).length > 0) {{
                             // Update existing node position if in merge mode
-                            if (!action && nodeData.position) {{
+                            if (!replace && nodeData.position) {{
                                 cy.getElementById(nodeId).position(nodeData.position);
                             }}
                         }} else {{
@@ -9276,6 +11077,13 @@ class VisualizePath:
                     // Fit to view
                     cy.fit(null, 50);
                     
+                    // Memberships: backfill nodes from older exports, then
+                    // rebuild every group-driven UI from live state
+                    normalizeAssignedGroups();
+                    rebuildAssignSelect();
+                    rebuildCustomGroupUI();
+                    refreshLegend();
+                    
                     // Re-detect orphans/dead ends on the imported graph if
                     // their hiding toggles are active
                     reapplyDeadEndHiding();
@@ -9339,6 +11147,11 @@ class VisualizePath:
                                     updateNodeSize(settings.nodeSize);
                                 }}
                             }}
+                            
+                            // Restore the label font color choice
+                            if (settings.labelFontColor) {{
+                                applyLabelFontColor(settings.labelFontColor);
+                            }}
                         }} finally {{
                             restoringHistoryState = false;
                         }}
@@ -9350,32 +11163,32 @@ class VisualizePath:
                             }});
                         }}
                         
-                        // Restore custom groups
+                        // Restore custom group DEFINITIONS (membership lives
+                        // in each node's assigned_group data field; legacy
+                        // exports with static id lists are normalized).
                         if (settings.customGroups) {{
                             Object.keys(settings.customGroups).forEach(groupName => {{
-                                customGroups[groupName] = settings.customGroups[groupName];
-                            }});
-                            
-                            // Rebuild custom groups in dropdown
-                            if (Object.keys(settings.customGroups).length > 0) {{
-                                const selector = document.getElementById('groupSelector');
-                                let customOptgroup = document.getElementById('customGroupOptgroup');
-                                if (!customOptgroup) {{
-                                    customOptgroup = document.createElement('optgroup');
-                                    customOptgroup.id = 'customGroupOptgroup';
-                                    customOptgroup.label = 'Custom Groups';
-                                    selector.appendChild(customOptgroup);
-                                }}
-                                
-                                Object.keys(settings.customGroups).forEach(groupName => {{
-                                    const option = document.createElement('option');
-                                    option.value = 'custom_' + groupName;
-                                    option.textContent = groupName + ' (' + settings.customGroups[groupName].ids.length + ')';
-                                    customOptgroup.appendChild(option);
+                                const def = settings.customGroups[groupName] || {{}};
+                                customGroups[groupName] = {{
+                                    label: def.label || groupName,
+                                    color: def.color || '#888888',
+                                    opacity: def.opacity === undefined ? 100 : def.opacity,
+                                    defaultColor: def.defaultColor || def.color || '#888888',
+                                    defaultOpacity: def.defaultOpacity === undefined ? 100 : def.defaultOpacity
+                                }};
+                                // Legacy exports carried static id lists —
+                                // re-materialize their memberships AND look
+                                // (legacy payloads may lack per-node styles).
+                                (def.ids || []).forEach(id => {{
+                                    const n = cy.getElementById(id);
+                                    if (n.length > 0 && n.isNode()) {{
+                                        n.data('assigned_group', groupName);
+                                        applyGroupLook(n, customGroups[groupName]);
+                                    }}
                                 }});
-                                
-                                updateCustomGroupList();
-                            }}
+                            }});
+                            rebuildCustomGroupUI();
+                            refreshLegend();
                         }}
                         
                         const customGroupCount = settings.customGroups ? Object.keys(settings.customGroups).length : 0;
@@ -9391,7 +11204,7 @@ class VisualizePath:
                     }}
                     
                 }} catch (error) {{
-                    alert('Error loading graph file: ' + error.message);
+                    showToast('Error loading graph file: ' + error.message, 'error');
                     console.error('Import error:', error);
                 }}
             }};
@@ -9459,7 +11272,7 @@ class VisualizePath:
                     
                     // Check if it's a layout file
                     if (!importData.layout) {{
-                        alert('Invalid layout file format. Expected a layout export file.');
+                        showToast('Invalid layout file format. Expected a layout export file.', 'error');
                         return;
                     }}
                     
@@ -9502,15 +11315,10 @@ class VisualizePath:
                         message += `\\n💡 ${{unmappedCount}} current nodes kept their positions`;
                     }}
                     
-                    updateHoverInfo(message);
-                    
-                    // Optionally fit to view
-                    if (confirm('Fit graph to view?')) {{
-                        cy.fit(null, 50);
-                    }}
+                    showToast(message, 'success', {{ label: 'Fit', onClick: function() {{ cy.fit(null, 50); }} }});
                     
                 }} catch (error) {{
-                    alert('Error loading layout file: ' + error.message);
+                    showToast('Error loading layout file: ' + error.message, 'error');
                     console.error('Import error:', error);
                 }}
             }};
@@ -9532,6 +11340,7 @@ class VisualizePath:
         applyInitialOpacity();
         initializeEdgeBaseStyles();
         initializeLogBaseVisibility();
+        initPanelBar();
     </script>
 </body>
 </html>"""

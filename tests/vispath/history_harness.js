@@ -36,6 +36,10 @@ const FUNCTIONS = [
     'restoreGlobalStyles', 'updateNodeSize', 'updateEdgeWidth',
     'updateFontSize', 'updateArrowSize', 'updateMetric', 'updateEdgeWidths',
     'syncSelectedGeometryInputs', 'updateAlignButtons', 'alignSelectedNodes',
+    'syncTransformInputs', 'measureAxisGap', 'isVisibleElement', 'metricEdgeValue',
+    'updateEdgeMetricLabels',
+    'updateSelectionChip', 'historyIcon',
+    'updateIgnoredEdgesPlaceholder',
     'parseEdgeFilterInput', 'updateIgnoredEdges',
     'parseEdgeFilterExpressions', 'parseEdgeSingleExpression',
     'evaluateEdgeCondition', 'shouldIgnoreEdge', 'applyEdgeFilter',
@@ -71,6 +75,15 @@ function buildScope(cy) {
         let globalEdgeWidthScale = 'log_e';
         let reciprocalOffset = 5;
         let restoringHistoryState = false;
+        // Layout transform trackers mirrored by captureState's globalStyles
+        // (absolute inter-node gaps in px + rotation base).
+        let lastGapX = null;
+        let lastGapY = null;
+        let baselineGapX = null;
+        let baselineGapY = null;
+        let lastRotationDeg = 0;
+        // Operation feedback is a toast now; updateHoverInfo delegates to it.
+        function showToast(message, type, action) {}
         let ignoredEdges = new Set();
         let ignoredEdgeExpressions = [];
         let edgeFilterGroups = [];
