@@ -534,6 +534,9 @@ class VisualizePath:
         # Unit label shown with the edge weight (e.g. 'synapses' for
         # connectome graphs, 'neurons' for type-mapping graphs).
         self.edge_weight_label = str(edge_weight_label or 'synapses')
+        # Dagre flow direction: connectome hierarchies read top-to-bottom,
+        # mapping artifacts pass 'LR' so source→target reads left-to-right.
+        self.dagre_rank_dir = 'TB'
 
         # Hemisphere visualization options
         self.separate_hemispheres = separate_hemispheres
@@ -4557,8 +4560,12 @@ class VisualizePath:
                 has_nt_coloring_network = True
                 unique_nts_network.add(nt_type)
             
-            # Format tooltip - use actual newline character, not escaped
-            tooltip_parts = [f"Weight: {weight:,} {self.edge_weight_label}"]
+            # Format tooltip - use actual newline character, not escaped.
+            # Integer-valued counts drop the float '.0' (edge lists often
+            # parse synapse counts as floats).
+            weight_disp = (f"{int(weight):,}"
+                           if float(weight).is_integer() else f"{weight:,}")
+            tooltip_parts = [f"Weight: {weight_disp} {self.edge_weight_label}"]
             if not np.isnan(ratio):
                 tooltip_parts.append(f"Ratio: {ratio:.3f}")
             if not np.isnan(prob):
@@ -4596,9 +4603,6 @@ class VisualizePath:
                     'target': target,
                     'weight': abs_weight,  # Store positive for Cytoscape
                     'original_weight': weight,  # Store original for hover modification
-                    # Preformatted on-edge label (shown when the edge has
-                    # the 'wlabel' class — the Edge Weights toggle)
-                    'weight_label': f"{weight:,} {self.edge_weight_label}",
                     'is_negative': 1 if is_negative else 0,  # Use 1/0 instead of True/False for JavaScript
                     'nt_type': nt_type if nt_type else '',  # Store NT type for CSS styling
                     'color': edge_color,  # Per-edge color (file color or link_color fallback)
@@ -6353,7 +6357,7 @@ class VisualizePath:
                 }},
                 'dagre': {{
                     name: 'dagre',
-                    rankDir: 'TB',              // Top to bottom
+                    rankDir: '{self.dagre_rank_dir}',  // Document flow direction (TB hierarchy, LR mapping)
                     nodeSep: 50,                // Horizontal spacing between nodes
                     edgeSep: 20,                // Spacing for edges
                     rankSep: 100,               // Vertical spacing between ranks
@@ -8485,9 +8489,9 @@ class VisualizePath:
             refreshEdgeStyles(true);
         }}
 
-        // Edge labels follow the ACTIVE connection metric: weight keeps the
-        // preformatted label (value + unit, e.g. "1,234 synapses");
-        // ratio/probability show the plain value.
+        // Edge labels follow the ACTIVE connection metric: weight shows a
+        // BARE number — no unit suffix; ratio/probability show the plain
+        // value.
         function updateEdgeMetricLabels() {{
             cy.edges().forEach(edge => {{
                 const fmt = v => (v === undefined || v === null || v === '' || isNaN(Number(v)))
@@ -8496,17 +8500,14 @@ class VisualizePath:
                 if (currentMetric === 'ratio') label = fmt(edge.data('ratio'));
                 else if (currentMetric === 'probability') label = fmt(edge.data('probability'));
                 else {{
-                    // The preformatted weight_label carries the metric's
-                    // unit (edge_weight_label); fall back to a bare number
-                    // for edges that lack it (e.g. newly added ones).
-                    const pre = edge.data('weight_label');
-                    if (pre) label = String(pre);
-                    else {{
-                        // Integers stay integers (no '.0').
-                        const raw = (edge.data('original_weight') !== undefined && edge.data('original_weight') !== null)
-                            ? Number(edge.data('original_weight')) : Number(edge.data('weight'));
-                        label = isFinite(raw) ? raw.toLocaleString('en-US') : '';
-                    }}
+                    // Integer-valued weights must not render with a
+                    // trailing '.0' — edge lists often parse synapse
+                    // counts as floats.
+                    const raw = (edge.data('original_weight') !== undefined && edge.data('original_weight') !== null)
+                        ? Number(edge.data('original_weight')) : Number(edge.data('weight'));
+                    if (!isFinite(raw)) label = '';
+                    else if (Number.isInteger(raw)) label = raw.toLocaleString('en-US');
+                    else label = String(Math.round(raw * 1000) / 1000);
                 }}
                 edge.data('display_label', label);
             }});
@@ -8541,6 +8542,9 @@ class VisualizePath:
             }} else {{
                 updateEdgeMetricLabels();
                 cy.edges().addClass('wlabel');
+                // The stylesheet default (#333) is only a fallback — the
+                // labels follow the theme / the user's label font color.
+                cy.edges('.wlabel').style('color', effectiveEdgeLabelColor());
                 btn.textContent = '🏋️ Hide Weights';
                 btn.dataset.showing = '1';
             }}
@@ -8565,15 +8569,20 @@ class VisualizePath:
             // Node labels NEVER get a background; instead their text color
             // adapts to the theme unless the user picked one explicitly
             // (replaces the old per-label background readability mechanism).
+            // Edge-weight labels adapt with them.
             if (!customLabelColor) {{
-                cy.nodes().style('color', isDark ? '#e5e7eb' : '#000000');
+                const labelColor = isDark ? '#e5e7eb' : '#000000';
+                cy.nodes().style('color', labelColor);
+                cy.edges('.wlabel').style('color', labelColor);
                 const picker = document.getElementById('labelFontColor');
-                if (picker) picker.value = isDark ? '#e5e7eb' : '#000000';
+                if (picker) picker.value = labelColor;
             }}
         }}
         
         // Node label font color (Style tab → Background & Font). The user's
-        // choice wins over the automatic theme adaptation.
+        // choice wins over the automatic theme adaptation. On-edge weight
+        // labels (.wlabel) are text too — they follow the same color so
+        // both label kinds stay readable when the background changes.
         let customLabelColor = null;
         function applyLabelFontColor(color) {{
             const hex = extractColorHex(color) || '#000000';
@@ -8582,6 +8591,14 @@ class VisualizePath:
             if (picker && picker.value.toLowerCase() !== hex.toLowerCase()) picker.value = hex;
             if (!restoringHistoryState) pushHistory('Change label font color');
             cy.nodes().style('color', hex);
+            cy.edges('.wlabel').style('color', hex);
+        }}
+
+        // The color edge-weight labels currently render with (theme
+        // adaptation unless the user picked an explicit label color).
+        function effectiveEdgeLabelColor() {{
+            const dark = document.body.classList.contains('vp-dark');
+            return customLabelColor || (dark ? '#e5e7eb' : '#000000');
         }}
         
         function applyCustomBackground() {{

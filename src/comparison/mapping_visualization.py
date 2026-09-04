@@ -665,6 +665,7 @@ def _render_mapping_graph(graph, output_path: str, *, open_browser: bool = False
             "hemisphere_desaturate_side": None,
             "hemisphere_desaturate_factor": 0.4,
             "edge_weight_label": "synapses",
+            "dagre_rank_dir": "TB",
             "node_groups": [],
         }
 
@@ -686,6 +687,11 @@ def _render_mapping_graph(graph, output_path: str, *, open_browser: bool = False
     visualizer.output_folder = os.path.dirname(os.path.abspath(output_path))
     visualizer.verbose = False
     visualizer.network_layout = layout
+    # Mapping artifacts read source → target LEFT-TO-RIGHT (types left,
+    # foreign types middle/right); the connectome hierarchy default TB
+    # turned every mapping view into a top-down fan (the broken-layout
+    # report).
+    visualizer.dagre_rank_dir = "LR" if layout == "dagre" else "TB"
     visualizer.source_color = "#5b8cff"
     visualizer.intermediate_color = "#94a3b8"
     visualizer.target_color = "#22c55e"

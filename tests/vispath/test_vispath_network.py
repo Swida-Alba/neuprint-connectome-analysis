@@ -543,7 +543,12 @@ class TestPanelCollapseAndRegrouping:
         assert "applyLabelFontColor(this.value)" in html
         assert "let customLabelColor = null;" in js
         assert "if (!customLabelColor) {" in js
-        assert "cy.nodes().style('color', isDark ? '#e5e7eb' : '#000000')" in js
+        assert ("const labelColor = isDark ? '#e5e7eb' : '#000000';" in js)
+        assert "cy.nodes().style('color', labelColor)" in js
+        # on-edge weight labels follow the same theme adaptation
+        assert "cy.edges('.wlabel').style('color', labelColor)" in js
+        # …and the explicit user choice recolors them together
+        assert "cy.edges('.wlabel').style('color', hex)" in js
         # the old readability background is gone from applyBackground
         assert "text-background-color': isDark" not in js
         # persisted with the graph export and restored on import
