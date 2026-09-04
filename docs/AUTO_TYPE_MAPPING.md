@@ -67,6 +67,53 @@ Resolution rules:
 - Missing dataset tables only disable the rename resolution; the mapper
   still works from the male-cns crosswalk alone.
 
+#### Valid bridge source map (BRIDGE_SOURCE_MAP)
+
+Every derivation bridge the mapper offers is licensed by the declarative
+`BRIDGE_SOURCE_MAP` constant in
+`src/comparison/cross_dataset_type_mapper.py` — valid bridges are derived
+from the source map, never guessed from the data layout. The map licenses
+one edge per `(home dataset, name column) -> {landing datasets}`:
+
+| home dataset | column | lands in |
+|---|---|---|
+| any | `type` | any namespace (same-name identity) |
+| male-cns | `flywireType` | FAFB **and** BANC (both flywire datasets; 96%/97% of cell values hit either namespace) |
+| male-cns | `hemibrainType` | hemibrain only |
+| male-cns | `mancType` | manc only (the crosswalk was built against MANC v1.0) |
+| FAFB | `additional_type(s)` | FAFB only |
+| BANC | `Alternative Cell Type(s)` | BANC only |
+
+On top of the map, one endpoint rule applies: **a crosswalk hop is valid
+only when the bridge's endpoints include a namespace the column routes
+to**. A `hemibrainType` hop on a male-cns↔BANC bridge describes a third
+dataset's naming and is rejected (e.g.
+`DN1pA[MCNS·type] → DN1pA[MCNS·hemibrainType] → DN1pA[BANC·type]` is
+invalid), while the sanctioned hemibrain↔flywire route through male-cns
+(`hemibrain type → hemibrainType → male-cns type → flywireType → flywire
+type`) is licensed on both legs. Chains whose standardized linkers contain
+consecutive identical `(column, value)` pairs (zero-information ping-pong,
+the additional_type(s)→additional_type(s) self-loop class) are also
+rejected, and every chain must end at a real primary `type` of the target
+dataset.
+
+The map is verified against the data at load time and by
+`tests/core/test_type_mapper_source_map.py`, which grounds the declared
+columns in the actual dataset tables, sweeps every directed namespace pair
+for licensing violations, and pins the known-pair regressions.  At load
+time, a declared column missing from a table that IS present aborts the
+load (data drift must not silently change what is bridgeable — the run
+logs `BRIDGE_SOURCE_MAP: …` and the mapper stays unloaded); an absent
+optional table (e.g. no FlyWire side table) only disables its bridges.
+
+An interactive network visualization of the map (datasets, their name
+columns, and the licensed edges) is regenerated with:
+
+```bash
+python scripts/render_source_map_network.py
+# → outputs/type_mapping/source_map_network.html
+```
+
 ### 3. User Warnings and Double-Check Recommendation
 
 Auto type mapping is applied automatically, so runs surface what it changed

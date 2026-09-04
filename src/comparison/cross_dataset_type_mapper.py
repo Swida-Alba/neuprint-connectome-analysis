@@ -139,6 +139,77 @@ LINKER_COLORS = {
 CROSSWALK_COLUMNS = ("flywireType", "hemibrainType", "mancType")
 ANNOTATION_COLUMNS = ("additional_type(s)", "Alternative Cell Type(s)")
 
+# ---------------------------------------------------------------------------
+# The declarative source map of the valid derivation bridges (§9I).
+#
+# Every non-``type`` edge the derivation walk may use MUST be licensed by an
+# entry here: ``(home registry key, column) -> {registry keys the column's
+# values land in}``.  Valid bridges are derived from this map — never by
+# guessing from the data layout:
+#
+#   - ``type`` is the universal same-name identity between namespaces;
+#   - the male-cns crosswalk columns route from the male-cns metadata into
+#     their target families: flywireType reaches BOTH flywire datasets (FAFB
+#     and BANC — 96%/97% of its values hit either namespace), hemibrainType
+#     only hemibrain (100%), mancType only manc (the crosswalk was built
+#     against MANC v1.0);
+#   - the annotation columns are intra-namespace: ``additional_type(s)``
+#     maps to flywire datasets only (it lives on the FAFB rows) and
+#     ``Alternative Cell Type(s)`` only works for the BANC.
+#
+# ``bridge_is_valid`` (below) plus the walk enforce one more rule on top of
+# the map: a crosswalk hop is only evidence when the bridge's ENDPOINT
+# namespaces include a namespace the column routes to — a hemibrainType hop
+# on a male-cns↔BANC bridge describes a third dataset's naming and is
+# invalid, while the hemibrain↔flywire route through male-cns (hemibrain
+# type → hemibrainType → male-cns type → flywireType → flywire type) is
+# licensed on both legs.
+# ---------------------------------------------------------------------------
+
+BRIDGE_IDENTITY = "*"
+
+# The crosswalk host: the namespace whose metadata table physically
+# carries the crosswalk columns (the map's crosswalk home).
+CROSSWALK_HOME = "male-cns:v1.0"
+
+BRIDGE_SOURCE_MAP: Dict[tuple, Set[str]] = {
+    (BRIDGE_IDENTITY, "type"): set(),  # same-name identity, any namespace
+    (CROSSWALK_HOME, "flywireType"): {
+        "flywire_FAFB_v783", "flywire_BANC_v626"},
+    (CROSSWALK_HOME, "hemibrainType"): {"hemibrain:v1.2.1"},
+    (CROSSWALK_HOME, "mancType"): {"manc:v1.0"},
+    ("flywire_FAFB_v783", "additional_type(s)"): {"flywire_FAFB_v783"},
+    ("flywire_BANC_v626", "Alternative Cell Type(s)"): {
+        "flywire_BANC_v626"},
+}
+
+
+def source_map_targets(home_key: str, column: str) -> Optional[Set[str]]:
+    """Landing namespaces licensed for one ``(home, column)`` edge.
+
+    ``None`` means the universal same-name ``type`` identity; an empty
+    set means the column is not licensed at all.
+    """
+    if column == "type":
+        return None
+    return set(BRIDGE_SOURCE_MAP.get((home_key, column), ()))
+
+
+def crosswalk_route_licensed(column: str, source_key: str,
+                             target_key: str) -> bool:
+    """Endpoint-family licensing for one crosswalk hop (§9I).
+
+    ``column`` may appear in a bridge between ``source_key`` and
+    ``target_key`` only when one of the endpoints is a namespace the
+    column routes to.
+    """
+    for (home, col), targets in BRIDGE_SOURCE_MAP.items():
+        if col != column or home == BRIDGE_IDENTITY:
+            continue
+        if targets & {source_key, target_key}:
+            return True
+    return False
+
 
 def hop_home(hop: Dict[str, str], source_dataset: str) -> str:
     """The dataset whose metadata physically holds a chain hop's column.
@@ -297,6 +368,52 @@ def standardize_bridge(chain, source_dataset: str,
             'indirect': last['column'] not in registry_columns,
         })
     return linkers
+
+
+def bridge_is_valid(chain, source_dataset: str, target_dataset: str,
+                    key_of=None) -> bool:
+    """Map-derived validity check for one derivation chain (§9I).
+
+    Every non-``type`` hop must be licensed by ``BRIDGE_SOURCE_MAP``:
+    its landing namespace is among the entry's targets AND the entry's
+    home agrees with the hop's physical home (``hop_home``) — a
+    crosswalk hop is the exception, because its columns only exist on
+    the male-cns rows (the map's crosswalk home) while the hop records
+    the namespace it REACHES.  A crosswalk hop additionally requires
+    endpoint-family licensing; and consecutive standardized linkers
+    must never be identical — the ping-pong self-loop class (e.g.
+    additional_type(s) 'X' → additional_type(s) 'X').  ``key_of`` maps
+    dataset names to registry keys.
+    """
+    if not chain:
+        return False
+    resolve = key_of or (lambda name: name)
+    endpoints = {resolve(source_dataset), resolve(target_dataset)}
+    for hop in chain[1:]:
+        column = hop.get("column", "")
+        if column == "type":
+            continue
+        landing = resolve(hop.get("dataset", ""))
+        physical_home = None if column in CROSSWALK_COLUMNS \
+            else resolve(hop_home(hop, source_dataset))
+        licensed = [
+            targets
+            for (home, col), targets in BRIDGE_SOURCE_MAP.items()
+            if col == column and home != BRIDGE_IDENTITY
+            and landing in targets
+            and (physical_home is None or home == physical_home)
+        ]
+        if not licensed:
+            return False
+        if (column in CROSSWALK_COLUMNS
+                and not any(targets & endpoints for targets in licensed)):
+            return False
+    linkers = [l for l in standardize_bridge(
+        chain, source_dataset, target_dataset) if l.get("kind") == "linker"]
+    for a, b in zip(linkers, linkers[1:]):
+        if (a["column"], a["value"]) == (b["column"], b["value"]):
+            return False
+    return True
 
 
 class TypeMappingWarning(UserWarning):
@@ -533,8 +650,11 @@ class CrossDatasetTypeMapper:
                 if not primary:
                     continue
                 for name in names:
-                    # The unfiltered annotation view keeps EVERY value —
-                    # including values that are themselves primaries.
+                    # The unfiltered annotation view keeps every value that
+                    # is a DIFFERENT type — a primary's own name in its own
+                    # cell is a self-alias and adds only self-loop noise.
+                    if name == primary:
+                        continue
                     annotation_primaries.setdefault(name, set()).add(primary)
                     if name in primaries:
                         # A primary type keeps its own identity; the
@@ -630,15 +750,87 @@ class CrossDatasetTypeMapper:
 
             # Build mappings
             self._build_type_mappings()
+            # Map grounding runs LAST: the overlap stats need every
+            # namespace index built (§9I).
+            self._verify_source_map()
             self._loaded = True
             
             self._log(f"Loaded {len(self._neuron_df):,} neurons with type mappings")
             return True
             
         except Exception as e:
-            self._log(f"Error loading neuron_df: {e}", level='warn')
+            # Source-map grounding failures (BRIDGE_SOURCE_MAP: …) are
+            # attributed as such — a drifted table must not read like a
+            # generic read error.
+            prefix = ("Type mapper not loaded"
+                      if str(e).startswith("BRIDGE_SOURCE_MAP:")
+                      else "Error loading neuron_df")
+            self._log(f"{prefix}: {e}", level='warn')
             return False
     
+    def _verify_source_map(self) -> None:
+        """Verify BRIDGE_SOURCE_MAP against the loaded tables (§9I).
+
+        Every declared (home, column) must exist in the home dataset's
+        neuron table — a missing column on a LOADED table is data drift
+        and raises (valid bridges derive from the map, so a drifted
+        table must not silently change what is bridgeable).  Absent
+        optional tables (e.g. no FlyWire side table) only disable their
+        bridges.  Loaded crosswalk tables also log their overlap stats,
+        grounding the map's licensing numbers.
+        """
+
+        def _namespace_names(key: str) -> Set[str]:
+            names = set(self._dataset_types.get(key, {}))
+            names.update(self._flywire_primaries.get(key, ()))
+            return names
+
+        for (home, column), targets in BRIDGE_SOURCE_MAP.items():
+            if home == BRIDGE_IDENTITY or column == "type":
+                continue
+            if home == CROSSWALK_HOME:
+                if (self._neuron_df is None
+                        or column not in self._neuron_df.columns):
+                    raise ValueError(
+                        f"BRIDGE_SOURCE_MAP: the male-cns table lacks the "
+                        f"declared '{column}' column (data drift)")
+                values: set = set()
+                for cell in self._neuron_df[column].dropna().astype(str):
+                    values.update(self._split_type_cell(cell))
+                for target in sorted(targets):
+                    hit = len(values & _namespace_names(target))
+                    self._log(
+                        f"BRIDGE_SOURCE_MAP: {column} → {target}: "
+                        f"{hit:,}/{len(values):,} cell values hit "
+                        f"({100 * hit / max(1, len(values)):.0f}%)")
+            elif home in FLYWIRE_TYPE_SOURCES:
+                path = self._flywire_neuron_df_paths.get(home)
+                if not path or not os.path.exists(path):
+                    # optional namespace: an absent table only disables
+                    # its rename resolution (existing behavior)
+                    self._log(
+                        f"BRIDGE_SOURCE_MAP: {home} table unavailable; "
+                        f"'{column}' bridges are disabled for it.",
+                        level='warn')
+                    continue
+                try:
+                    present = column in pd.read_csv(path, nrows=0).columns
+                except Exception:
+                    present = False
+                if not present:
+                    raise ValueError(
+                        f"BRIDGE_SOURCE_MAP: column '{column}' of {home} "
+                        "is missing from its dataset table (data drift)")
+                values = set(self._flywire_annotation_primaries.get(home, {}))
+                hit = len(values & _namespace_names(home))
+                self._log(
+                    f"BRIDGE_SOURCE_MAP: {column} → {home}: "
+                    f"{len(values):,} distinct cell values, "
+                    f"{hit:,} of them also primary names")
+            else:
+                raise ValueError(
+                    f"BRIDGE_SOURCE_MAP: unknown home namespace {home!r}")
+
     def _build_type_mappings(self):
         """Build internal type mapping dictionaries."""
         if self._neuron_df is None:
@@ -2131,46 +2323,50 @@ class CrossDatasetTypeMapper:
             if name in self._dataset_types.get(other_key, ()) or name in self._flywire_primaries.get(other_key, ()):
                 neighbors.append((other_key, name, "type", name))
 
-        # Male-CNS crosswalk cells: one column per target namespace.
-        if key == "male-cns:v1.0":
-            for column, target_key in (
-                ("flywireType", "flywire_FAFB_v783"),
-                ("hemibrainType", "hemibrain:v1.2.1"),
-                ("mancType", "manc:v1.0"),
-            ):
+        # Male-CNS crosswalk cells: every crosswalk edge is licensed by a
+        # BRIDGE_SOURCE_MAP entry (§9I) — no hardcoded column/target
+        # tuples; the map is the single source of truth for valid bridges.
+        for (home, column), targets in BRIDGE_SOURCE_MAP.items():
+            if (home != key or column == "type"
+                    or column in ANNOTATION_COLUMNS):
+                continue
+            for target_key in sorted(targets):
                 for part in self._crosswalk_parts(name, column):
                     neighbors.append((target_key, part, column, part))
 
-        # FlyWire additional-type columns: an alternative (old) name on rows
-        # typed with the primary name.
-        for fw_key, alt_table in self._flywire_alt_to_primary.items():
-            if key == fw_key:
-                for primary in sorted(
-                    alt_table.get(name, ())
-                ):
-                    neighbors.append((fw_key, primary,
-                                      self._flywire_alt_column(fw_key), name))
+        # FlyWire additional-type columns: an alternative (old) name on
+        # rows typed with the primary name.  The edges exist only when
+        # the source map licenses this namespace's annotation column.
+        alt_column = self._flywire_alt_column(key)
+        if source_map_targets(key, alt_column):
+            for primary in sorted(
+                    self._flywire_alt_to_primary.get(key, {}).get(name, ())
+            ):
+                neighbors.append((key, primary, alt_column, name))
         # FlyWire reverse annotation edges: a primary type whose rows list
         # additional Type(S) values — the linker bridge walks these BOTH
         # ways (alt -> primary resolves a rename; primary -> alt pools the
         # bodyIds annotated with the linked crosswalk value, which is how
         # BANC/FlyWire type names route into the male-cns crosswalk).
-        for fw_key, alt_table in self._flywire_primary_to_alts.items():
-            if key == fw_key:
-                for alt in sorted(
-                    alt_table.get(name, ())
-                ):
-                    neighbors.append((fw_key, alt,
-                                      self._flywire_alt_column(fw_key), name))
+        if source_map_targets(key, alt_column):
+            for alt in sorted(
+                    self._flywire_primary_to_alts.get(key, {}).get(name, ())
+            ):
+                neighbors.append((key, alt, alt_column, name))
         # Annotation-reverse edges from NON-FlyWire namespaces: when a
         # FlyWire dataset's annotation cells name THIS type (e.g. FAFB
         # rows typed APDN3 carry additional Type(S) 'CL125'), that is
         # registry evidence for the pair and must be walkable from this
         # side too — otherwise the MCNS→FAFB direction loses every
-        # mapping that only the FAFB→MCNS direction could see.
+        # mapping that only the FAFB→MCNS direction could see.  Only
+        # namespaces whose annotation column the source map licenses
+        # are consulted (§9I).
         if key not in self._flywire_alt_to_primary:
             for fw_key, alt_table in (
                     self._flywire_annotation_primaries.items()):
+                if not source_map_targets(
+                        fw_key, self._flywire_alt_column(fw_key)):
+                    continue
                 for primary in sorted(alt_table.get(name, ())):
                     neighbors.append(
                         (fw_key, primary,
@@ -2283,6 +2479,15 @@ class CrossDatasetTypeMapper:
                     # ARRIVES in the target namespace (e.g. the BANC LTe71
                     # hub route), which is real routing evidence.
                     continue
+                if (column in CROSSWALK_COLUMNS
+                        and not crosswalk_route_licensed(
+                            column, source_key, target_key)):
+                    # Endpoint-family licensing (§9I): a crosswalk hop is
+                    # evidence only when the bridge actually connects a
+                    # namespace the column routes to — hemibrainType
+                    # needs a hemibrain endpoint, mancType a manc
+                    # endpoint, flywireType a flywire-family endpoint.
+                    continue
                 hop = {"dataset": nns, "column": column, "value": nname}
                 if via != nname:
                     hop["via"] = via
@@ -2321,6 +2526,17 @@ class CrossDatasetTypeMapper:
                 if direct <= 2:
                     within.append(chain)
             bridges = within
+
+        # Source-map validity (§9I): every hop licensed by
+        # BRIDGE_SOURCE_MAP, the crosswalk endpoint rule, and the
+        # ping-pong suppression (consecutive identical standardized
+        # linkers) in one map-derived check — valid bridges are derived
+        # from the source map, not by guessing.
+        bridges = [
+            chain for chain in bridges
+            if bridge_is_valid(chain, source_dataset, target_dataset,
+                               key_of=self._get_type_mapping_key)
+        ]
 
         # Evidence subsumption: a bare same-name chain is IMPLIED by any
         # linker-bearing chain to the same target type (the verification
