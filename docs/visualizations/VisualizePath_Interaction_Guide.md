@@ -227,8 +227,8 @@ The Sankey diagram shows flow-based pathway visualization.
 | Control                   | Default          | Description                     |
 | ------------------------- | ---------------- | ------------------------------- |
 | ☐ Color by NT             | Off              | Enable NT-based edge coloring   |
-| Excitatory (ACh, Glut)    | Orange (#F39C12) | Acetylcholine, Glutamate        |
-| Inhibitory (GABA)         | Green (#27AE60)  | GABAergic connections           |
+| Excitatory (ACh)          | Orange (#F39C12) | Cholinergic connections         |
+| Inhibitory (GABA, Glut)   | Green (#27AE60)  | GABAergic and glutamatergic connections (GLUT treated as inhibitory) |
 | Modulatory (DA, 5-HT, OA) | Purple (#9B59B6) | Dopamine, Serotonin, Octopamine |
 | Unknown NT                | Gray (#95A5A6)   | Unknown neurotransmitter        |
 

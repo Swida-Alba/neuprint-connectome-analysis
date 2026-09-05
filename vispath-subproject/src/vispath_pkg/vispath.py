@@ -164,10 +164,12 @@ NT_COLORS = {
     '': '#95A5A6',
 }
 
-# NT type groupings for interactive color adjustment
+# NT type groupings for interactive color adjustment.
+# GLUT (glutamate) is treated as inhibitory: in the adult fly CNS
+# glutamatergic transmission acts largely through inhibitory receptors.
 NT_GROUPS = {
-    'excitatory': ['acetylcholine', 'ACH', 'ach', 'glutamate', 'GLUT', 'glut'],
-    'inhibitory': ['gaba', 'GABA'],
+    'excitatory': ['acetylcholine', 'ACH', 'ach'],
+    'inhibitory': ['gaba', 'GABA', 'glutamate', 'GLUT', 'glut'],
     'modulatory': ['dopamine', 'DA', 'da', 'serotonin', 'SER', 'ser', '5-HT', '5-ht', 'octopamine', 'OCT', 'oct'],
     'unknown': ['unknown', 'none', ''],
 }
@@ -3313,7 +3315,7 @@ class VisualizePath:
                 </div>
                 
                 <div class="control-group">
-                    <label class="control-label">Excitatory (ACh, Glut)</label>
+                    <label class="control-label">Excitatory (ACh)</label>
                     <div class="color-input-group">
                         <input type="color" id="excitatoryColor" value="{NT_GROUP_COLORS['excitatory']}" onchange="updateNtGroupColorText('excitatory')">
                         <input type="text" id="excitatoryColorText" value="{NT_GROUP_COLORS['excitatory']}" readonly>
@@ -3321,7 +3323,7 @@ class VisualizePath:
                 </div>
                 
                 <div class="control-group">
-                    <label class="control-label">Inhibitory (GABA)</label>
+                    <label class="control-label">Inhibitory (GABA, Glut)</label>
                     <div class="color-input-group">
                         <input type="color" id="inhibitoryColor" value="{NT_GROUP_COLORS['inhibitory']}" onchange="updateNtGroupColorText('inhibitory')">
                         <input type="text" id="inhibitoryColorText" value="{NT_GROUP_COLORS['inhibitory']}" readonly>
@@ -10853,9 +10855,11 @@ class VisualizePath:
         function getNtGroupCSV(ntType) {{
             if (ntType === null || ntType === undefined) return 'unknown';
             const ntStr = String(ntType).trim();
+            // Mirrors the Python get_nt_group mapping (GLUT counts as
+            // inhibitory there too).
             const groups = {{
-                'excitatory': ['acetylcholine', 'ACH', 'ach', 'glutamate', 'GLUT', 'glut'],
-                'inhibitory': ['gaba', 'GABA'],
+                'excitatory': ['acetylcholine', 'ACH', 'ach'],
+                'inhibitory': ['gaba', 'GABA', 'glutamate', 'GLUT', 'glut'],
                 'modulatory': ['dopamine', 'DA', 'da', 'serotonin', 'SER', 'ser', '5-HT', '5-ht', 'octopamine', 'OCT', 'oct'],
                 'unknown': ['unknown', 'none', '']
             }};

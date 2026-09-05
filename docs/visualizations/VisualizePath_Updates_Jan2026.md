@@ -228,10 +228,11 @@ vp.visualize()
 # 1. Select "GABA Edges" (inhibitory)
 # 2. Set color to green, opacity to 100%
 # 3. Apply to group
-# 4. Select "GLUT Edges" (excitatory)  
+# 4. Select "ACH Edges" (excitatory)  
 # 5. Set color to red, opacity to 100%
 # 6. Apply to group
 # Now you have clear visual separation of inhibitory vs excitatory pathways!
+# (GLUT is treated as inhibitory in the NT group coloring, alongside GABA.)
 ```
 
 ---

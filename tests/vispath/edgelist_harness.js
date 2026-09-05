@@ -232,7 +232,8 @@ check('every exported row matches the embedded input', rowsMatchInput, rowDetail
     const cy = buildGraph();
     const exporter = makeExporter(cy, {});
     const cases = [
-        ['acetylcholine', 'excitatory'], ['ACH', 'excitatory'], ['glutamate', 'excitatory'],
+        ['acetylcholine', 'excitatory'], ['ACH', 'excitatory'],
+        ['glutamate', 'inhibitory'], ['GLUT', 'inhibitory'], ['glut', 'inhibitory'],
         ['gaba', 'inhibitory'], ['GABA', 'inhibitory'],
         ['dopamine', 'modulatory'], ['serotonin', 'modulatory'], ['5-HT', 'modulatory'],
         ['octopamine', 'modulatory'], ['DA', 'modulatory'],
