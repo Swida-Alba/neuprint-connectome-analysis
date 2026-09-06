@@ -502,7 +502,7 @@ class TestPanelCollapseAndRegrouping:
             html.index('id="hideOrphansBtn"'),
             html.index('id="hideSelfLoopsBtn"'),
             html.index('id="hideDeadEndsBtn"'),
-            html.index('id="pageStyle"'),
+            html.index('id="pageShare"'),
         ]
         assert order == sorted(order), "metric + hide toggles not grouped in the Filter card"
 
@@ -529,7 +529,7 @@ class TestPanelCollapseAndRegrouping:
         # Reset button removed from the Canvas group
         assert 'onclick="resetLayout()"' not in html
         # the Filter page no longer hosts the Labels group
-        filter_seg = html[html.index('id="pageFilter"'): html.index('id="pageStyle"')]
+        filter_seg = html[html.index('id="pageFilter"'): html.index('id="pageShare"')]
         assert 'toggleLabelsBtn' not in filter_seg
         # metric-following edge labels
         assert "function updateEdgeMetricLabels" in js
@@ -588,11 +588,12 @@ class TestPanelCollapseAndRegrouping:
 
     def test_appearance_card_groups_style_controls(self, network_html):
         """Edge-width scale, size spinners, reciprocal offset and the
-        background/font color controls live in ONE Style ribbon page (the
-        metric moved to the Filter page; the refresh-edges card is gone)."""
+        background/font color controls live on the merged Layout & Style
+        ribbon page as a SECOND card row (after the vp-ribbon-break); the
+        metric moved to the Filter page; the refresh-edges card is gone."""
         html = network_html.read_text(encoding="utf-8")
         order = [
-            html.index('id="pageStyle"'),
+            html.index('id="pageLayout"'),
             html.index('id="edgeWidthScale"'),
             html.index('id="fontSizeSlider"'),
             html.index('id="nodeSizeSlider"'),
@@ -600,9 +601,13 @@ class TestPanelCollapseAndRegrouping:
             html.index('id="arrowSizeSlider"'),
             html.index('id="reciprocalOffsetControls"'),
             html.index('id="bgToggleBtn"'),
-            html.index('id="pageShare"'),
+            html.index('id="pageFilter"'),
         ]
         assert order == sorted(order), "style controls not grouped in the Style card"
+        # the style cards open a deterministic second row inside the page
+        assert 'class="vp-ribbon-break"' in html
+        assert html.index('id="pageLayout"') < html.index('class="vp-ribbon-break"') \
+            < html.index('id="edgeWidthScale"')
 
     def test_layout_persistence_grouped_with_exports(self, network_html):
         """Layout persistence (Save/Load browser storage, Export/Import
@@ -705,6 +710,48 @@ class TestPanelCollapseAndRegrouping:
         assert "function applyNodeGap" in js
         assert "function applyRotationDelta" in js
 
+    def test_rotation_swaps_axis_gap_trackers(self, network_html):
+        """A ±90°/270° rotation swaps the Horizontal/Vertical gap trackers
+        AND refreshes the spinners — reachable from the typed Rotate field
+        AND from the ↺ button (applyRotationDelta is the single path).
+        Reset Spacing swaps the layout-run baseline targets to compensate
+        for the current rotation."""
+        js = _script_text(network_html)
+        assert "function swapGapAxesIfQuarterTurn" in js
+        assert "function syncGapDisplays" in js
+        # the rotation applier performs the swap on its success path
+        rot_seg = js[js.index("function applyRotationDelta"):js.index("function syncTransformInputs")]
+        assert "swapGapAxesIfQuarterTurn(deltaDeg)" in rot_seg
+        # the ↺ button reaches the swap through the same applier
+        ccw_seg = js[js.index("function rotateCounterClockwise"):js.index("function resetSpacing")]
+        assert "applyRotationDelta(lastRotationDeg - 90)" in ccw_seg
+        # Reset Spacing maps the layout-frame baselines through the parity
+        r_seg = js[js.index("function resetSpacing"):js.index("function resetLayoutTransformTrackers")]
+        assert "gapAxesSwapped()" in r_seg
+
+    def test_gaps_measured_in_layout_frame(self, network_html):
+        """Gap measurement and scaling happen in the LAYOUT frame (visible
+        coordinates unrotated by the accumulated rotation): a small tilt no
+        longer makes the H/V spinners jump, spacing edits at a tilt scale the
+        layout's own columns/rows (never shear), and the screen-axis mapping
+        follows the same 45° parity as the quarter-turn tracker swap."""
+        js = _script_text(network_html)
+        assert "function gapAxesSwapped" in js
+        # measurement unrotates the coordinates by the current rotation
+        m_seg = js[js.index("function measureAxisGap"):js.index("function applyNodeGap")]
+        assert "lastRotationDeg" in m_seg
+        assert "visibleNodeCentroid()" in m_seg
+        # scaling maps the screen axis onto the layout axis via the parity
+        a_seg = js[js.index("function applyNodeGap"):js.index("function syncRotateDisplay")]
+        assert "gapAxesSwapped()" in a_seg
+        assert "layoutAxis" in a_seg
+        # spinner sync maps the measured layout gaps through the parity
+        s_seg = js[js.index("function syncTransformInputs"):js.index("function onSpacingInput")]
+        assert "gapAxesSwapped()" in s_seg
+        # Reset Spacing maps the layout-frame baselines through the parity
+        r_seg = js[js.index("function resetSpacing"):js.index("function resetLayoutTransformTrackers")]
+        assert "gapAxesSwapped()" in r_seg
+
 
 class TestUiRedesign:
     """Full UI redesign: theme tokens, toast feedback, in-page dialogs,
@@ -726,15 +773,17 @@ class TestUiRedesign:
     def test_ribbon_tabs(self, network_html):
         html = network_html.read_text(encoding="utf-8")
         js = _script_text(network_html)
-        # four tabs on the command strip
-        for tab in ("tabLayout", "tabFilter", "tabStyle", "tabShare"):
+        # three tabs on the command strip (Style merged into Layout & Style)
+        for tab in ("tabLayout", "tabFilter", "tabShare"):
             assert f'id="{tab}"' in html
-        assert html.count('onclick="switchTab(') == 4
+        assert 'id="tabStyle"' not in html and 'id="pageStyle"' not in html
+        assert ">🔧 Layout &amp; Style</button>" in html
+        assert html.count('onclick="switchTab(') == 3
         assert "function switchTab" in js
-        # exactly one page open by default (Layout), the others hidden
+        # exactly one page open by default (Layout & Style), the others hidden
         assert 'id="pageLayout" class="vp-ribbon-page open"' in html or \
             'class="vp-ribbon-page open" id="pageLayout"' in html
-        for pid in ("pageFilter", "pageStyle", "pageShare"):
+        for pid in ("pageFilter", "pageShare"):
             seg_start = html.index(f'id="{pid}"')
             assert 'open' not in html[seg_start - 40:seg_start + 40].split('id=')[0], \
                 f"{pid} should not be open by default"
@@ -803,6 +852,9 @@ class TestUiRedesign:
         assert "'Fit', onClick" in js or 'label: \'Fit\'' in js
 
     def test_command_strip_search(self, network_html):
+        """The search box has visible ▲/▼ steppers; every navigation route
+        (buttons, ↑/↓ keys) steps through the 1/N matches AND select+centers
+        each one via the shared cycleSearchMatch helper."""
         html = network_html.read_text(encoding="utf-8")
         js = _script_text(network_html)
         assert 'id="nodeSearchInput"' in html
@@ -811,6 +863,17 @@ class TestUiRedesign:
         assert "function onSearchInput" in js
         assert "function onSearchKeydown" in js
         assert "function applySearchMatch" in js
+        # visible steppers wired to the shared cycling helper
+        assert 'id="searchPrevBtn"' in html and 'id="searchNextBtn"' in html
+        assert 'onclick="cycleSearchMatch(-1)"' in html
+        assert 'onclick="cycleSearchMatch(1)"' in html
+        assert "function cycleSearchMatch" in js
+        cycle_seg = js[js.index("function cycleSearchMatch"):js.index("function onSearchKeydown")]
+        assert "applySearchMatch()" in cycle_seg
+        # the arrow keys route through the same helper (which applies)
+        key_seg = js[js.index("function onSearchKeydown"):js.index("function onSearchKeydown") + 900]
+        assert "cycleSearchMatch(1)" in key_seg
+        assert "cycleSearchMatch(-1)" in key_seg
 
     def test_metric_drives_edge_filter(self, network_html):
         """The Connection Metric lives in the Filter card and the edge

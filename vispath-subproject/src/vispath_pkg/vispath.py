@@ -4957,7 +4957,8 @@ class VisualizePath:
         body.palette-hidden .controls {{
             padding-right: 10px;
         }}
-        /* Ribbon: one horizontal tool row per active tab (PPT-style). */
+        /* Ribbon pages: tool cards wrap left-to-right; the Layout & Style
+           page forces its style cards onto a second row via the break. */
         .vp-ribbon-page {{
             display: none;
             flex: 1 1 100%;
@@ -4970,6 +4971,11 @@ class VisualizePath:
             justify-content: flex-start;
         }}
         .vp-ribbon-page.open {{ display: flex; }}
+        /* Zero-height full-width item: forces the next cards onto a new row. */
+        .vp-ribbon-break {{
+            flex-basis: 100%;
+            height: 0;
+        }}
         .vp-ribbon-group {{
             display: flex;
             flex-direction: column;
@@ -5098,8 +5104,8 @@ class VisualizePath:
             text-align: right;
         }}
         /* Inline variant: label left of the spinner (Sizes group) keeps the
-           control row a single 26px line so the Style tab fits the shared
-           ribbon height. */
+           control row a single 26px line so the merged Layout & Style page
+           stays close to the shared ribbon height. */
         .vp-spinner-inline {{ max-width: none; }}
         .vp-spinner-inline label {{ flex: 0 0 auto; }}
         .vp-spinner-row {{
@@ -5425,6 +5431,21 @@ class VisualizePath:
             min-width: 34px;
             text-align: right;
         }}
+        /* Compact ▲/▼ steppers beside the search box for cycling matches. */
+        .vp-search-step {{
+            padding: 2px 7px;
+            font-size: 10px;
+            line-height: 1.2;
+            background: var(--vp-card-bg);
+            color: var(--vp-text-2);
+            border: 1px solid var(--vp-border);
+            border-radius: 4px;
+            cursor: pointer;
+        }}
+        .vp-search-step:hover {{
+            color: var(--vp-text-1);
+            background: var(--vp-hover-bg);
+        }}
         /* Toast stack: operation feedback (success/info/warn/error),
            bottom-left above the hover info box. aria-live=polite. */
         #toastStack {{
@@ -5637,22 +5658,23 @@ class VisualizePath:
     <!-- Panel bar / command strip: panel toggles + ribbon tabs + search + help -->
     <div id="panelBar">
         <div class="vp-tabs" role="tablist" aria-label="Tool tabs">
-            <button type="button" id="tabLayout" class="vp-tab active" style="--vp-tab-accent: var(--vp-accent-arrange);" onclick="switchTab('layout')" title="Layout tools: algorithm, node gaps, rotation (click again to collapse the ribbon)">🔧 Layout</button>
+            <button type="button" id="tabLayout" class="vp-tab active" style="--vp-tab-accent: var(--vp-accent-arrange);" onclick="switchTab('layout')" title="Layout & style tools: algorithm, node gaps, rotation, sizes, width scale, background (click again to collapse the ribbon)">🔧 Layout &amp; Style</button>
             <button type="button" id="tabFilter" class="vp-tab" style="--vp-tab-accent: var(--vp-accent-filter);" onclick="switchTab('filter')" title="Filter tools: connection metric, hide edges/labels/orphans (click again to collapse the ribbon)">👁️ Filter</button>
-            <button type="button" id="tabStyle" class="vp-tab" style="--vp-tab-accent: var(--vp-accent-style);" onclick="switchTab('style')" title="Style tools: sizes, width scale, reciprocal offset, background (click again to collapse the ribbon)">🎨 Style</button>
             <button type="button" id="tabShare" class="vp-tab" style="--vp-tab-accent: var(--vp-accent-share);" onclick="switchTab('share')" title="Import & export: images, graph, layouts, edge list (click again to collapse the ribbon)">💾 Import & Export</button>
         </div>
         <span class="vp-flex-spacer"></span>
         <button id="refreshLayoutTopBtn" class="panelbar-btn" onclick="refreshLayout()" title="Re-run the current layout algorithm — available from every tool tab">🔄 Refresh Layout</button>
         <div class="vp-search">
-            <input type="text" id="nodeSearchInput" placeholder="🔍 Find node…" autocomplete="off" oninput="onSearchInput(this.value)" onkeydown="onSearchKeydown(event)" title="Search nodes by id or label — Enter selects and centers, ↑/↓ cycle matches, Esc clears" aria-label="Find node">
+            <input type="text" id="nodeSearchInput" placeholder="🔍 Find node…" autocomplete="off" oninput="onSearchInput(this.value)" onkeydown="onSearchKeydown(event)" title="Search nodes by id or label — Enter selects and centers, ↑/↓ or the ▲/▼ buttons step through matches, Esc clears" aria-label="Find node">
+            <button type="button" id="searchPrevBtn" class="vp-search-step" onclick="cycleSearchMatch(-1)" title="Previous match (↑)">▲</button>
+            <button type="button" id="searchNextBtn" class="vp-search-step" onclick="cycleSearchMatch(1)" title="Next match (↓)">▼</button>
             <span id="nodeSearchCount" aria-live="polite"></span>
         </div>
         <button id="toggleControlsBtn" class="panelbar-btn" onclick="toggleTopControls()" title="Collapse or show the ribbon (all tool tabs)">⚙️ Hide Ribbon</button>
         <button id="togglePanelBtn" class="panelbar-btn" onclick="toggleRightPanel()" title="Collapse or show the right side panel">🎨 Hide Panel</button>
         <button id="helpBtn" class="panelbar-btn" onclick="toggleHelp()" title="Help: mouse gestures, keyboard shortcuts, recipes (?)">❓</button>
     </div>
-    <!-- Ribbon: one horizontal tool row per active tab -->
+    <!-- Ribbon: tool card rows per active tab (Layout & Style packs two rows) -->
     <div class="controls" id="ribbon">
         <div class="vp-ribbon-page open" id="pageLayout">
             <div class="vp-ribbon-group" style="min-width: 250px;">
@@ -5722,40 +5744,7 @@ class VisualizePath:
             </div>
             </div>
             {hemisphere_group_html}
-        </div>
-
-        <div class="vp-ribbon-page" id="pageFilter">
-            <div class="vp-ribbon-group" style="min-width: 150px;">
-            <label class="vp-group-title">Connection Metric</label>
-            <select id="metricSelect" onchange="updateMetric()" title="Value used by the edge filter below AND by the edge widths: synapse count, connection ratio, or traversal probability" style="width: 100%; padding: 5px;">
-                <option value="weight">Synapse Count</option>
-                <option value="ratio">Connection Ratio</option>
-                <option value="probability">Traversal Probability</option>
-            </select>
-            </div>
-            <div class="vp-ribbon-group" style="min-width: 215px;">
-            <label class="vp-group-title" for="ignoreEdgesInput">Hide Edges (by metric)</label>
-            <input type="text" id="ignoreEdgesInput" placeholder="OR: <5, >100 | AND: (>=5, <=10)" style="width: 100%; padding: 5px; font-size: 11px; border-radius: 3px; box-sizing: border-box;" oninput="updateIgnoredEdges()" title="Hide edges whose ACTIVE metric value matches. Comma = OR, parentheses = AND, e.g. under 5, over 100, (at least 10 and at most 20)">
-            <div style="font-size: 9px; color: var(--vp-text-2); line-height: 1.2;">
-                Comma = OR, Parentheses = AND · <a href="#" onclick="openHelp('recipes'); return false;" title="Open the filter-syntax recipes in the help overlay" style="color: var(--vp-accent-filter);">…more</a>
-            </div>
-            </div>
-            <div class="vp-ribbon-group" style="min-width: 230px;">
-            <label class="vp-group-title">Auto-hide</label>
-            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px;">
-                <button class="btn" id="hideOrphansBtn" onclick="toggleOrphanNodes()" style="font-size: 10px; padding: 6px; background: #9c27b0;" title="Show or hide nodes with no connections">👻 Hide Orphans</button>
-                <button class="btn" id="hideSelfLoopsBtn" onclick="toggleSelfLoops()" style="font-size: 10px; padding: 6px; background: #ff5722;" title="Show or hide edges from a node to itself">🔁 Hide Self-Loops</button>
-                <button class="btn" id="hideDeadEndsBtn" onclick="toggleDeadEnds()" style="font-size: 10px; padding: 6px; background: #607d8b;" title="Show or hide out-only non-source / in-only non-target nodes">💀 Hide Dead Ends</button>
-            </div>
-            <div style="font-size: 10px; color: var(--vp-text-2); line-height: 1.3;">
-                • Orphans: nodes with no connections<br>
-                • Self-Loops: edges from a node to itself<br>
-                • Dead Ends: out-only non-source / in-only non-target nodes
-            </div>
-            </div>
-        </div>
-
-        <div class="vp-ribbon-page" id="pageStyle">
+            <div class="vp-ribbon-break" aria-hidden="true"></div>
             <div class="vp-ribbon-group" style="min-width: 170px;">
             <label class="vp-group-title" for="edgeWidthScale">Edge Width Scale</label>
             <select id="edgeWidthScale" onchange="updateEdgeWidths()" title="How edge weights map to widths (linear, logarithmic, square root, or constant)" style="width: 100%; padding: 5px;">
@@ -5808,6 +5797,37 @@ class VisualizePath:
                 <input type="color" id="customBgColor" value="#f5f5f5" style="width: 35px; height: 28px; border: 1px solid var(--vp-border); border-radius: 3px; cursor: pointer;" title="Custom background color — applies immediately (exports match the visible background)" onchange="applyCustomBackground()">
                 <span class="vp-mini-label" style="margin-left: 2px;">Font</span>
                 <input type="color" id="labelFontColor" value="#000000" style="width: 35px; height: 28px; border: 1px solid var(--vp-border); border-radius: 3px; cursor: pointer;" title="Node label text color (node labels never have a background)" onchange="applyLabelFontColor(this.value)">
+            </div>
+            </div>
+        </div>
+
+        <div class="vp-ribbon-page" id="pageFilter">
+            <div class="vp-ribbon-group" style="min-width: 150px;">
+            <label class="vp-group-title">Connection Metric</label>
+            <select id="metricSelect" onchange="updateMetric()" title="Value used by the edge filter below AND by the edge widths: synapse count, connection ratio, or traversal probability" style="width: 100%; padding: 5px;">
+                <option value="weight">Synapse Count</option>
+                <option value="ratio">Connection Ratio</option>
+                <option value="probability">Traversal Probability</option>
+            </select>
+            </div>
+            <div class="vp-ribbon-group" style="min-width: 215px;">
+            <label class="vp-group-title" for="ignoreEdgesInput">Hide Edges (by metric)</label>
+            <input type="text" id="ignoreEdgesInput" placeholder="OR: <5, >100 | AND: (>=5, <=10)" style="width: 100%; padding: 5px; font-size: 11px; border-radius: 3px; box-sizing: border-box;" oninput="updateIgnoredEdges()" title="Hide edges whose ACTIVE metric value matches. Comma = OR, parentheses = AND, e.g. under 5, over 100, (at least 10 and at most 20)">
+            <div style="font-size: 9px; color: var(--vp-text-2); line-height: 1.2;">
+                Comma = OR, Parentheses = AND · <a href="#" onclick="openHelp('recipes'); return false;" title="Open the filter-syntax recipes in the help overlay" style="color: var(--vp-accent-filter);">…more</a>
+            </div>
+            </div>
+            <div class="vp-ribbon-group" style="min-width: 230px;">
+            <label class="vp-group-title">Auto-hide</label>
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px;">
+                <button class="btn" id="hideOrphansBtn" onclick="toggleOrphanNodes()" style="font-size: 10px; padding: 6px; background: #9c27b0;" title="Show or hide nodes with no connections">👻 Hide Orphans</button>
+                <button class="btn" id="hideSelfLoopsBtn" onclick="toggleSelfLoops()" style="font-size: 10px; padding: 6px; background: #ff5722;" title="Show or hide edges from a node to itself">🔁 Hide Self-Loops</button>
+                <button class="btn" id="hideDeadEndsBtn" onclick="toggleDeadEnds()" style="font-size: 10px; padding: 6px; background: #607d8b;" title="Show or hide out-only non-source / in-only non-target nodes">💀 Hide Dead Ends</button>
+            </div>
+            <div style="font-size: 10px; color: var(--vp-text-2); line-height: 1.3;">
+                • Orphans: nodes with no connections<br>
+                • Self-Loops: edges from a node to itself<br>
+                • Dead Ends: out-only non-source / in-only non-target nodes
             </div>
             </div>
         </div>
@@ -6110,6 +6130,7 @@ class VisualizePath:
                         <tr><td class="vp-key">⌘Z / ⌃Z</td><td>Undo</td></tr>
                         <tr><td class="vp-key">⌘⇧Z / ⌃Y</td><td>Redo</td></tr>
                         <tr><td class="vp-key">Enter / Esc</td><td>Confirm / cancel dialogs, clear search</td></tr>
+                        <tr><td class="vp-key">↑ / ↓</td><td>Find node: previous / next match (same as the ▲/▼ buttons)</td></tr>
                     </table>
                 </div>
                 <div id="helpRecipes">
@@ -6118,7 +6139,7 @@ class VisualizePath:
                     <code>&lt;5, &gt;100</code> hides weak and very strong edges;<br>
                     <code>(&gt;=10, &lt;=20)</code> keeps only a weight band.</p>
                     <p><strong>Save vs Export Layout</strong> — Save keeps positions in this browser for this file; Export Layout downloads them as JSON to share or re-import elsewhere.</p>
-                    <p><strong>Horizontal/Vertical Gap &amp; Rotate</strong> — set the center-to-center distance between neighboring nodes in px (node size unchanged); rotation turns the whole arrangement around its center; both reset when the layout re-runs and are undoable.</p>
+                    <p><strong>Horizontal/Vertical Gap &amp; Rotate</strong> — set the center-to-center distance between neighboring nodes in px (node size unchanged); rotation turns the whole arrangement around its center — the gaps are measured along the layout's own columns/rows, so small tilts keep the values stable, while at ±90°/270° the Horizontal and Vertical values swap accordingly (↺ Reset Spacing restores the layout-run gaps for the current rotation); both reset when the layout re-runs and are undoable.</p>
                     <p><strong>Panels</strong> — ⚙️ hides the top tool panel, 🎨 the right panel; both states are remembered.</p>
                 </div>
             </div>
@@ -7095,12 +7116,32 @@ class VisualizePath:
             return {{ x: sx / visNodes.length, y: sy / visNodes.length }};
         }}
 
+        // Which pair of LAYOUT axes currently reads as screen H/V: beyond
+        // 45° of accumulated rotation the layout's vertical axis is the more
+        // horizontal one on screen. Same parity as the tracker swap on exact
+        // quarter turns (swapGapAxesIfQuarterTurn).
+        function gapAxesSwapped() {{
+            return Math.round(lastRotationDeg / 90) % 2 !== 0;
+        }}
+
         // Median successive difference of the visible coordinates on one
-        // axis — the center-to-center gap between neighboring rows/columns.
+        // axis of the LAYOUT FRAME — the coordinates unrotated by the
+        // accumulated rotation, i.e. the center-to-center gap between the
+        // layout's own neighboring columns/rows. Measuring there (instead
+        // of raw screen coordinates) keeps the gap meaningful at ANY angle:
+        // a 5° tilt no longer collapses the median diff (the misaligned
+        // columns produce tiny row-offset diffs), so the spinners only
+        // change when the geometry really does.
         function measureAxisGap(axis) {{
+            const center = visibleNodeCentroid();
+            const a = lastRotationDeg * Math.PI / 180;
+            const c = Math.cos(a), s = Math.sin(a);
             const coords = [];
             cy.nodes().filter(isVisibleElement).forEach(n => {{
-                coords.push(axis === 'x' ? n.position().x : n.position().y);
+                const p = n.position();
+                const dx = p.x - center.x, dy = p.y - center.y;
+                // offset → layout frame: rotate by -lastRotationDeg
+                coords.push(axis === 'x' ? dx * c + dy * s : -dx * s + dy * c);
             }});
             if (coords.length < 2) return 0;
             coords.sort((a, b) => a - b);
@@ -7114,39 +7155,70 @@ class VisualizePath:
             return diffs[Math.floor(diffs.length / 2)];
         }}
 
-        // Set the inter-node gap on one axis to an ABSOLUTE center-to-center
-        // distance (px): scales the offsets from the visible centroid so the
-        // median neighbor distance along that axis equals targetPx. Node
-        // sizes are irrelevant — only positions participate.
-        function applyNodeGap(axis, targetPx) {{
+        // Set the inter-node gap on one SCREEN axis to an ABSOLUTE
+        // center-to-center distance (px). The scale is applied in the
+        // LAYOUT frame (unrotate → scale the mapped axis → rotate back), so
+        // a tilted arrangement is stretched along its own columns/rows and
+        // never sheared — rotating back to 0° restores the axis-aligned
+        // layout exactly. Node sizes are irrelevant — only positions
+        // participate.
+        function applyNodeGap(screenAxis, targetPx) {{
             const target = Number(targetPx);
             if (!isFinite(target) || target <= 0) return false;
-            const current = measureAxisGap(axis);
+            const swapped = gapAxesSwapped();
+            const layoutAxis = ((screenAxis === 'x') !== swapped) ? 'x' : 'y';
+            const current = measureAxisGap(layoutAxis);
             if (current <= 0.01) return false;  // single row/column
             const factor = target / current;
             const anchor = visibleNodeCentroid();
+            const c = Math.cos(lastRotationDeg * Math.PI / 180);
+            const s = Math.sin(lastRotationDeg * Math.PI / 180);
             cy.batch(() => {{
                 cy.nodes().filter(isVisibleElement).forEach(n => {{
                     const p = n.position();
+                    const dx = p.x - anchor.x, dy = p.y - anchor.y;
+                    // offset → layout frame (rotate by -lastRotationDeg)
+                    const lx = dx * c + dy * s;
+                    const ly = -dx * s + dy * c;
+                    // scale the mapped axis, then back to the screen frame
+                    const rx = layoutAxis === 'x' ? lx * factor : lx;
+                    const ry = layoutAxis === 'y' ? ly * factor : ly;
                     n.position({{
-                        x: axis === 'x' ? anchor.x + (p.x - anchor.x) * factor : p.x,
-                        y: axis === 'y' ? anchor.y + (p.y - anchor.y) * factor : p.y
+                        x: anchor.x + rx * c - ry * s,
+                        y: anchor.y + rx * s + ry * c
                     }});
                 }});
             }});
-            if (axis === 'x') lastGapX = target; else lastGapY = target;
+            if (screenAxis === 'x') lastGapX = target; else lastGapY = target;
             return true;
         }}
 
-        // Rotate visible node positions around the visible centroid by the
-        // delta between the target angle and the last applied angle. The
-        // centroid and every pairwise distance are conserved, so the node
-        // gaps survive rotation (the H and V axes swap at 90 degrees).
         // Write the normalized tracker into the Rotate field unless the user
         // is editing it right now.
         function syncRotateDisplay() {{
             const rs = document.getElementById('rotateSlider');
             if (rs && document.activeElement !== rs) rs.value = Math.round(lastRotationDeg);
+        }}
+
+        // Write the gap trackers into the H/V spinners (no re-measurement).
+        function syncGapDisplays() {{
+            const gh = document.getElementById('nodeGapHSlider');
+            const gv = document.getElementById('nodeGapVSlider');
+            if (gh && lastGapX) gh.value = Math.round(lastGapX * 10) / 10;
+            if (gv && lastGapY) gv.value = Math.round(lastGapY * 10) / 10;
+        }}
+
+        // An exact ±90° (or ±270°) rotation maps horizontal neighbor columns
+        // onto vertical rows and vice versa, so the H/V gap trackers must
+        // swap to keep describing the same node pairs (the swap is exact:
+        // the rotated x-coordinates ARE the unrotated y-coordinates).
+        // Arbitrary angles re-measure on commit instead
+        // (onRotationChange → syncTransformInputs).
+        function swapGapAxesIfQuarterTurn(deltaDeg) {{
+            const norm = ((deltaDeg % 180) + 180) % 180;
+            if (Math.abs(norm - 90) > 1e-6) return;
+            const tmp = lastGapX; lastGapX = lastGapY; lastGapY = tmp;
+            syncGapDisplays();
         }}
 
         function applyRotationDelta(targetDeg) {{
@@ -7156,7 +7228,8 @@ class VisualizePath:
             // turns are geometrically identical), while the tracker and the
             // Rotate field are kept in [0, 360) so repeated ↺ clicks read
             // 270 → 180 → 90 → 0 instead of drifting to -1440.
-            const delta = (raw - lastRotationDeg) * Math.PI / 180;
+            const deltaDeg = raw - lastRotationDeg;
+            const delta = deltaDeg * Math.PI / 180;
             if (Math.abs(delta % (2 * Math.PI)) < 1e-9) {{
                 lastRotationDeg = ((raw % 360) + 360) % 360;
                 syncRotateDisplay();
@@ -7176,23 +7249,27 @@ class VisualizePath:
                 }});
             }});
             lastRotationDeg = ((raw % 360) + 360) % 360;
+            // Keep the H/V gap trackers describing the same neighbors: they
+            // swap under every quarter turn (including via the ↺ button).
+            swapGapAxesIfQuarterTurn(deltaDeg);
             syncRotateDisplay();
             return true;
         }}
 
-        // Sync the gap/rotation spinners with the MEASURED geometry (the
-        // gap axes swap under a 90-degree rotation; layouts regenerate the
-        // gaps entirely).
+        // Sync the gap/rotation spinners: the gaps are measured in the
+        // LAYOUT frame (rotation-invariant) and mapped onto the SCREEN H/V
+        // axes — swapped beyond 45° of rotation, consistent with the
+        // quarter-turn tracker swap.
         function syncTransformInputs() {{
-            const gx = measureAxisGap('x');
-            const gy = measureAxisGap('y');
-            if (gx > 0) lastGapX = gx;
-            if (gy > 0) lastGapY = gy;
-            const gh = document.getElementById('nodeGapHSlider');
-            const gv = document.getElementById('nodeGapVSlider');
+            const lx = measureAxisGap('x');
+            const ly = measureAxisGap('y');
+            const swapped = gapAxesSwapped();
+            const sx = swapped ? ly : lx;
+            const sy = swapped ? lx : ly;
+            if (sx > 0) lastGapX = sx;
+            if (sy > 0) lastGapY = sy;
+            syncGapDisplays();
             const rs = document.getElementById('rotateSlider');
-            if (gh && lastGapX) gh.value = Math.round(lastGapX * 10) / 10;
-            if (gv && lastGapY) gv.value = Math.round(lastGapY * 10) / 10;
             if (rs) rs.value = Math.round(lastRotationDeg);
         }}
 
@@ -7244,8 +7321,14 @@ class VisualizePath:
         function resetSpacing() {{
             if (!baselineGapX && !baselineGapY) return;
             pushHistory('Reset spacing');
-            if (baselineGapX) applyNodeGap('x', baselineGapX);
-            if (baselineGapY) applyNodeGap('y', baselineGapY);
+            // The baselines are layout-frame values captured right after a
+            // layout run (rotation 0): map them through the CURRENT screen
+            // axis orientation so the layout's own gaps come back exactly.
+            const swapped = gapAxesSwapped();
+            const targetX = swapped ? baselineGapY : baselineGapX;
+            const targetY = swapped ? baselineGapX : baselineGapY;
+            if (targetX) applyNodeGap('x', targetX);
+            if (targetY) applyNodeGap('y', targetY);
             syncTransformInputs();
         }}
 
@@ -7329,8 +7412,8 @@ class VisualizePath:
             }});
         }}
 
-        // ===== RIBBON TABS (PPT-style): one horizontal tool row per tab =====
-        const RIBBON_PAGES = {{ layout: 'pageLayout', filter: 'pageFilter', style: 'pageStyle', share: 'pageShare' }};
+        // ===== RIBBON TABS (PPT-style): tool card rows per tab =====
+        const RIBBON_PAGES = {{ layout: 'pageLayout', filter: 'pageFilter', share: 'pageShare' }};
         let activeTabName = 'layout';
 
         function switchTab(name) {{
@@ -7636,16 +7719,26 @@ class VisualizePath:
             if (!isVisibleElement(node)) showToast('Matched node is hidden — use 👁️ Show All to reveal it', 'warn');
         }}
 
+        // Step to the previous/next match (dir = -1/+1) and select+center it
+        // — shared by the ▲/▼ buttons and the ↑/↓ keys, so every navigation
+        // route moves the view, not just the 1/N counter.
+        function cycleSearchMatch(dir) {{
+            if (!searchMatches.length) return;
+            searchIndex = (searchIndex + dir + searchMatches.length) % searchMatches.length;
+            updateSearchCount();
+            applySearchMatch();
+        }}
+
         function onSearchKeydown(event) {{
             if (event.key === 'Enter') {{
                 event.preventDefault();
                 applySearchMatch();
             }} else if (event.key === 'ArrowDown') {{
                 event.preventDefault();
-                if (searchMatches.length) {{ searchIndex = (searchIndex + 1) % searchMatches.length; updateSearchCount(); }}
+                cycleSearchMatch(1);
             }} else if (event.key === 'ArrowUp') {{
                 event.preventDefault();
-                if (searchMatches.length) {{ searchIndex = (searchIndex - 1 + searchMatches.length) % searchMatches.length; updateSearchCount(); }}
+                cycleSearchMatch(-1);
             }} else if (event.key === 'Escape') {{
                 event.preventDefault();
                 event.target.value = '';
@@ -8603,7 +8696,7 @@ class VisualizePath:
             }}
         }}
         
-        // Node label font color (Style tab → Background & Font). The user's
+        // Node label font color (Layout & Style tab → Background & Font). The user's
         // choice wins over the automatic theme adaptation. On-edge weight
         // labels (.wlabel) are text too — they follow the same color so
         // both label kinds stay readable when the background changes.

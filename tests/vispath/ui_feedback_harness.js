@@ -28,7 +28,7 @@ function extractFunction(name, source) {
 
 const FUNCTIONS = [
     'createToastQueue', 'createDialogController', 'matchNodes',
-    'isVisibleElement',
+    'isVisibleElement', 'cycleSearchMatch',
 ];
 
 // NOTE: sources come from the project's own generated HTML (trusted,
@@ -40,6 +40,31 @@ function buildScope(cy) {
         return { createToastQueue, createDialogController, matchNodes };
     `;
     return new Function('cy', src)(cy);
+}
+
+// Scope for the search stepper: cycleSearchMatch runs against stubbed
+// state so the test records WHICH match index gets applied.
+function buildSearchScope() {
+    const fnSource = extractFunction('cycleSearchMatch', html);
+    const src = `
+        let searchMatches = [];
+        let searchIndex = -1;
+        const applied = [];
+        const counts = [];
+        function updateSearchCount() {
+            counts.push(searchMatches.length === 0 ? '' : (searchIndex + 1) + '/' + searchMatches.length);
+        }
+        function applySearchMatch() { applied.push(searchIndex); }
+        ${fnSource}
+        return {
+            setMatches: (m) => { searchMatches = m; searchIndex = m.length > 0 ? 0 : -1; },
+            cycle: (d) => cycleSearchMatch(d),
+            getIndex: () => searchIndex,
+            getApplied: () => applied,
+            getCounts: () => counts,
+        };
+    `;
+    return new Function('cy', src)();
 }
 
 // A(0,0), B(100,0), C(0,50) with labels; B additionally matches "bee".
@@ -140,6 +165,29 @@ function check(name, got, expected) {
     check('label match works', api.matchNodes('cherry').length, 1);
     check('no match returns empty', api.matchNodes('zebra').length, 0);
     check('two-char prefix matches label', api.matchNodes('ap').length, 1);
+}
+
+// ===== Test D: search stepping APPLIES each match (select + center) =====
+// (the reported bug: navigation only bumped the 1/N counter — the shared
+// cycleSearchMatch helper now drives the ▲/▼ buttons AND the ↑/↓ keys and
+// applies every step)
+{
+    const api = buildSearchScope();
+    api.setMatches(['n1', 'n2', 'n3']);
+    api.cycle(1);   // 1/3 -> 2/3
+    check('next applies match 2', api.getApplied(), [1]);
+    api.cycle(1);   // -> 3/3
+    api.cycle(1);   // wraps -> 1/3
+    check('wrap-around cycle order', api.getApplied(), [1, 2, 0]);
+    api.cycle(-1);  // wraps back -> 3/3
+    check('previous wraps to the last match', api.getApplied(), [1, 2, 0, 2]);
+    check('counter tracked every step', api.getCounts(), ['2/3', '3/3', '1/3', '3/3']);
+    // no matches: a no-op, never applies
+    const before = api.getApplied().slice();
+    api.setMatches([]);
+    api.cycle(1);
+    api.cycle(-1);
+    check('empty matches never apply', api.getApplied(), before);
 }
 
 console.log(failures === 0 ? 'ALL UI-FEEDBACK TESTS PASSED' : failures + ' UI-FEEDBACK TEST(S) FAILED');

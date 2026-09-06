@@ -31,7 +31,8 @@ function extractFunction(name, source) {
 const FUNCTIONS = [
     'isVisibleElement', 'visibleNodeCentroid', 'measureAxisGap',
     'applyNodeGap', 'applyRotationDelta', 'syncRotateDisplay',
-    'syncTransformInputs',
+    'syncGapDisplays', 'swapGapAxesIfQuarterTurn', 'gapAxesSwapped',
+    'syncTransformInputs', 'rotateCounterClockwise', 'resetSpacing',
 ];
 
 // NOTE: sources come from the project's own generated HTML (trusted,
@@ -66,10 +67,13 @@ function buildScope(cy) {
     const src = prelude + fnSources + `
         return {
             applyNodeGap, applyRotationDelta, measureAxisGap, visibleNodeCentroid,
-            syncTransformInputs,
+            syncTransformInputs, rotateCounterClockwise, resetSpacing,
+            setBaselines: (x, y) => { baselineGapX = x; baselineGapY = y; },
             getLastGapX: () => lastGapX,
             getLastGapY: () => lastGapY,
             getLastRotationDeg: () => lastRotationDeg,
+            getElValue: (id) => els[id] ? String(els[id].value) : null,
+            isSwapped: () => gapAxesSwapped(),
         };
     `;
 
@@ -176,34 +180,40 @@ function checkClose(name, got, expected) {
         [api.visibleNodeCentroid().x, api.visibleNodeCentroid().y]);
 }
 
-// ===== Test D: gap survives rotation (axes swap at 90 degrees) =====
+// ===== Test D: rotation conserves the LAYOUT-frame gaps; screen maps swap =====
 {
     const cy = buildGraph();
     const api = buildScope(cy);
     api.applyNodeGap('x', 300);
     api.applyRotationDelta(90);
-    // The former x gaps are now y gaps: measured y gap = 300
-    checkClose('x gap conserved as y gap after 90deg', [api.measureAxisGap('y')], [300]);
+    // layout-frame gaps are invariant under pure rotation — the screen
+    // H/V mapping swaps instead (trackers + spinners)
+    checkClose('layout x gap conserved at 90deg', [api.measureAxisGap('x')], [300]);
+    checkClose('layout y gap conserved at 90deg', [api.measureAxisGap('y')], [50]);
     check('rotation tracker at 90', api.getLastRotationDeg(), 90);
-    // And the spinner sync reflects the measured swap
+    // And the spinner sync maps the layout gaps onto the swapped screen axes
+    // (tolerant compare: the 90° rotation leaves ~1e-13 FP noise)
     api.syncTransformInputs();
-    checkClose('synced tracker y = 300', [api.getLastGapY()], [300]);
+    checkClose('screen H/V trackers swapped by the 90deg sync',
+        [api.getLastGapX(), api.getLastGapY()], [50, 300]);
 }
 
-// ===== Test E: gap change AFTER rotation works around the centroid =====
+// ===== Test E: gap change AFTER rotation scales the layout frame =====
 {
     const cy = buildGraph();
     const api = buildScope(cy);
     api.applyNodeGap('x', 200);
-    api.applyRotationDelta(90);
-    // After a 90deg rotation the former x gaps live on the y axis; setting
-    // the y gap must scale them without touching the (now vertical) chain
-    const yBefore = api.measureAxisGap('y');
+    api.applyNodeGap('y', 50);  // real pages hold BOTH trackers after a layout run
+    api.applyRotationDelta(90);  // trackers swap to [50, 200]
+    // At 90° the screen-V spinner reads the layout's x axis: setting it
+    // retargets the layout columns without touching the rows
     api.applyNodeGap('y', 100);
-    checkClose('y gap retargeted after rotation', [api.measureAxisGap('y')], [100]);
+    checkClose('screen-V edit retargets the layout columns',
+        [api.measureAxisGap('x')], [100]);
+    checkClose('layout rows untouched by the screen-V edit',
+        [api.measureAxisGap('y')], [50]);
     check('y tracker updated', api.getLastGapY(), 100);
-    check('x measurement unchanged by y edit', api.getLastGapX() !== null, true);
-    void yBefore;
+    check('x tracker untouched by the y edit', api.getLastGapX(), 50);
 }
 
 // ===== Test F: hidden nodes excluded from measure and transform =====
@@ -236,6 +246,115 @@ function checkClose(name, got, expected) {
     check('tracker unchanged by no-op', api.getLastGapX(), null);
     api.applyRotationDelta(0);
     checkClose('identity rotation is a no-op', pos(cy, 'B'), [0, 0]);
+}
+
+// ===== Test H: a quarter turn SWAPS the H/V gap trackers + spinners =====
+// (the rotated x-coordinates ARE the unrotated y-coordinates, so the swap
+// is exact for any layout; the swap keys on the DELTA, so two quarter
+// turns (180° total) swap twice = identity)
+{
+    const cy = buildGraph();
+    const api = buildScope(cy);
+    api.applyNodeGap('x', 300);
+    api.applyNodeGap('y', 50);
+    check('pre-rotation trackers', [api.getLastGapX(), api.getLastGapY()], [300, 50]);
+    api.applyRotationDelta(90);  // +90: one quarter turn
+    check('trackers swapped after +90', [api.getLastGapX(), api.getLastGapY()], [50, 300]);
+    check('H spinner shows the swapped value', api.getElValue('nodeGapHSlider'), '50');
+    check('V spinner shows the swapped value', api.getElValue('nodeGapVSlider'), '300');
+    checkClose('layout x gap conserved through the swap', [api.measureAxisGap('x')], [300]);
+    checkClose('layout y gap conserved through the swap', [api.measureAxisGap('y')], [50]);
+    api.applyRotationDelta(180);  // another quarter turn (90 → 180): swap back
+    check('trackers swapped back at 180 total', [api.getLastGapX(), api.getLastGapY()], [300, 50]);
+    check('rotation tracker at 180', api.getLastRotationDeg(), 180);
+    api.applyRotationDelta(360);  // full turn: no swap
+    check('full turn keeps the trackers', [api.getLastGapX(), api.getLastGapY()], [300, 50]);
+    check('rotation tracker wrapped to 0', api.getLastRotationDeg(), 0);
+    api.applyRotationDelta(37);  // arbitrary angle: no swap
+    check('arbitrary angle keeps the trackers',
+        [api.getLastGapX(), api.getLastGapY()], [300, 50]);
+}
+
+// ===== Test I: the ↺ button (rotateCounterClockwise) swaps the gaps =====
+// (this was the reported bug: the button used to leave the spinners stale)
+{
+    const cy = buildGraph();
+    const api = buildScope(cy);
+    api.applyNodeGap('x', 300);
+    api.applyNodeGap('y', 50);
+    api.rotateCounterClockwise();  // 0 -> 270 (a quarter turn)
+    check('rotation tracker at 270', api.getLastRotationDeg(), 270);
+    check('trackers swapped by the button',
+        [api.getLastGapX(), api.getLastGapY()], [50, 300]);
+    check('H spinner swapped by the button', api.getElValue('nodeGapHSlider'), '50');
+    check('V spinner swapped by the button', api.getElValue('nodeGapVSlider'), '300');
+}
+
+// ===== Test J: Reset Spacing compensates for the current rotation =====
+// (the baselines are layout-frame values captured at rotation 0; the
+// screen-axis mapping follows the 45° parity so the layout's own gaps
+// come back exactly at any rotation)
+{
+    const cy = buildGraph();
+    const api = buildScope(cy);
+    api.applyNodeGap('x', 300);
+    api.applyNodeGap('y', 50);
+    api.setBaselines(300, 50);
+    api.applyRotationDelta(90);
+    api.applyNodeGap('y', 150);  // squeeze the layout columns away from baseline
+    api.resetSpacing();
+    checkClose('reset restores the layout-run x gap',
+        [api.measureAxisGap('x')], [300]);
+    checkClose('reset restores the layout-run y gap',
+        [api.measureAxisGap('y')], [50]);
+    check('reset at 0deg uses the baselines unswapped', (() => {
+        const cy2 = buildGraph();
+        const api2 = buildScope(cy2);
+        api2.applyNodeGap('x', 300);
+        api2.applyNodeGap('y', 50);
+        api2.setBaselines(300, 50);
+        api2.applyNodeGap('x', 120);  // drift away from baseline
+        api2.resetSpacing();
+        return api2.measureAxisGap('x');
+    })(), 300);
+}
+
+// ===== Test K: small tilts keep the gap values stable (the jump bug) =====
+// (measureAxisGap used to diff raw screen coordinates: a 5° tilt collapsed
+// the median column distance to the row offset and the spinners jumped)
+{
+    const cy = buildGraph();
+    const api = buildScope(cy);
+    api.applyNodeGap('x', 300);
+    api.applyNodeGap('y', 50);
+    api.applyRotationDelta(5);
+    checkClose('x gap stable at 5deg', [api.measureAxisGap('x')], [300]);
+    checkClose('y gap stable at 5deg', [api.measureAxisGap('y')], [50]);
+    api.syncTransformInputs();
+    checkClose('trackers stable through the 5deg commit',
+        [api.getLastGapX(), api.getLastGapY()], [300, 50]);
+    check('parity unswapped at 5deg', api.isSwapped(), false);
+    api.applyRotationDelta(50);
+    check('parity swapped at 50deg', api.isSwapped(), true);
+    api.applyRotationDelta(0);
+    check('parity unswapped again at 0deg', api.isSwapped(), false);
+}
+
+// ===== Test L: spacing edit at a tilt, rotate back — layout recovers =====
+// (the reported bug: scaling SCREEN-axis offsets at a tilt sheared the
+// layout, so rotating 5° → 0° no longer restored the arrangement)
+{
+    const cy = buildGraph();
+    const api = buildScope(cy);
+    api.applyNodeGap('x', 200);
+    api.applyRotationDelta(5);
+    api.applyNodeGap('x', 300);   // widen while tilted
+    api.applyRotationDelta(0);    // rotate back to 0
+    const a = pos(cy, 'A'), b = pos(cy, 'B'), c = pos(cy, 'C');
+    checkClose('A and B back on one row', [a[1], b[1]], [0, 0]);
+    checkClose('C back under A', [c[0]], [a[0]]);
+    checkClose('column distance is the edited 300', [b[0] - a[0]], [300]);
+    checkClose('row distance still 50', [c[1] - a[1]], [50]);
 }
 
 console.log(failures === 0 ? 'ALL LAYOUT-TRANSFORM TESTS PASSED' : failures + ' LAYOUT-TRANSFORM TEST(S) FAILED');
