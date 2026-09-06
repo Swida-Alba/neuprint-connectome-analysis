@@ -79,13 +79,14 @@ symptoms.
 
 - `datasets/` and `cache/` are created automatically; the first query downloads
   the full neuron table (needs token + network, can take minutes).
-- FlyWire FAFB/BANC require manually downloaded local files (Settings tab guide).
+- FlyWire FAFB requires manually downloaded local files (Settings tab guide);
+  BANC auto-prepares from its public bucket (network only, no token).
 - UI port 8080 busy: set `DROCAT_UI_PORT` (for example
   `DROCAT_UI_PORT=8081 ./mac_DROCAT.command`) or stop the other process.
 - 3D PNG/video exports use Chrome + WebDriver (Kaleido fallback). Install Chrome
   if exports fail.
 - Neuron indexes are persistent "system files" under `neuron_indexes/` (not
-  `cache/`): `male-cns:v1.0`, `flywire_FAFB_v783`, and `flywire_BANC_v888` ship
+  `cache/`): `male-cns:v1.0`, `flywire_FAFB_v783`, and `banc_v888` ship
   committed seed indexes; other datasets get their index on first pull. Clearing
   `cache/` never removes them. Refresh the bundled seeds with
   `python src/build_seed_indexes.py`.

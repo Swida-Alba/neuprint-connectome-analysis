@@ -117,8 +117,10 @@ itself always ships with the repository.
 
 - NeuPrint token: <https://neuprint.janelia.org/account>
 - CAVE token: <https://codex.flywire.ai/auth_token>
-- FlyWire FAFB/BANC also need their local data files in
-  `datasets/<dataset>/downloads/` — see the Settings tab guide.
+- FlyWire FAFB also needs its local data files in
+  `datasets/flywire_FAFB_v783/downloads/` — see the Settings tab guide.
+  BANC (`banc_v626`/`banc_v888`) needs no manual downloads: it auto-prepares
+  from its public release bucket on first use (network only, no token).
 - Strict verification for a configured workstation:
   `python skills/drocat-install/scripts/verify_install.py --project . --require-token`
 

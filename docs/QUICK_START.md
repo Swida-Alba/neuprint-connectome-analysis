@@ -208,7 +208,7 @@ from comparison.profile_comparator import HomologFinder
 finder = HomologFinder(
     token='YOUR_NEUPRINT_TOKEN',
     source='aMe12',
-    source_dataset='flywire_BANC_v626',
+    source_dataset='banc_v626',
     target_dataset='flywire_FAFB_v783',
     output_dir='./homolog_results',
     similarity_metric='jaccard', # or 'cosine', 'rank'

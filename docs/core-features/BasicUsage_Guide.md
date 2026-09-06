@@ -176,7 +176,7 @@ fc = FindNeuronConnection(
     # Pathfinding options
     max_interlayer=4,                # Maximum intermediate layers
     keyword_in_path_to_remove=['None'],  # Exclude these types from paths
-    pathfinding='MemoizedDFS',      # Algorithm choice (fastest measured; see PATHFINDING_ALGORITHM_EVALUATION.md)
+    pathfinding='StrongestFirst',  # Built-in 'all'-mode algorithm (bounded by Max Paths with a reported tau)
     
     # Performance options
     skip_bodyId=True,                # Skip bodyId-level for speed
@@ -191,10 +191,15 @@ fc.FindAllPath(forward_only=True)   # forward_only=True for faster search
 
 ### Pathfinding Algorithms
 
+StrongestFirst is the built-in pipeline algorithm (default since
+2026-09-05; bounded by Max Paths with a reported tau). The complete
+enumerators below are API-only alternatives (set
+`max_paths_bodyid=0` for unbounded runs):
+
 | Algorithm         | When to Use                | Speed   | Memory |
 | ----------------- | -------------------------- | ------- | ------ |
-| `'MemoizedDFS'`   | **All depths** (default)    | Fastest | Moderate |
-| `'MemoizedDFS'`   | **Deep paths (L≥5)**       | Medium  | Low    |
+| `'StrongestFirst'`| **All depths** (default)    | Bounded | Bounded |
+| `'MemoizedDFS'`   | Complete runs (API)         | Fastest | Moderate |
 | `'DP'`            | **Sparse graphs**          | Medium  | Lowest |
 | `'DFS'`           | Standard traversal         | Medium  | Medium |
 | `'Backtracking'`  | Extreme memory constraints | Slowest | Lowest |
@@ -221,7 +226,7 @@ output_format = 'csv'           # CSV is faster than Excel
 **Deep circuit tracing:**
 ```python
 max_interlayer = 4              # 4 intermediate layers
-pathfinding = 'MemoizedDFS'     # Best for deep paths
+pathfinding = 'StrongestFirst'  # Built-in; strongest paths first with a reported tau
 min_synapse_num = 3             # Filter weak connections
 ```
 
@@ -432,7 +437,7 @@ local_data/flylight/SS01015_{timestamp}/
 | `optic-lobe:v1.1`   | NeuPrint | Optic lobe detailed         |
 | `manc:v1.2.3`       | NeuPrint | Male ventral nerve cord     |
 | `flywire_FAFB_v783` | Local    | FlyWire female adult brain  |
-| `flywire_BANC_v626` | Local    | FlyWire male VNC            |
+| `banc_v626` | Local    | FlyWire male VNC            |
 
 ### Neuron Selection (Regex Support)
 
@@ -506,7 +511,7 @@ min_ratio = min_traversal_probability * 0.3
 | Parameter                   | Description                    | Default         | Values            |
 | --------------------------- | ------------------------------ | --------------- | ----------------- |
 | `max_interlayer`            | Maximum intermediate layers    | 1               | 1-6               |
-| `pathfinding`               | Algorithm choice               | `'MemoizedDFS'` | See table below   |
+| `pathfinding`               | Algorithm choice               | `'StrongestFirst'` | See table below   |
 | `show_top_n_paths`          | Limit output paths (-1 = all)  | -1              | 100-1000          |
 | `keyword_in_path_to_remove` | Exclude paths with these types | `[]`            | `['None', 'APL']` |
 | `skip_bodyId`               | Skip bodyId-level analysis     | `False`         | `True` for speed  |
@@ -515,8 +520,8 @@ min_ratio = min_traversal_probability * 0.3
 
 | Algorithm          | Best For         | Parameter Value   |
 | ------------------ | ---------------- | ----------------- |
-| All depths (default) | Memoized DFS   | `'MemoizedDFS'` |
-| Deep paths (L≥5)   | Meet-in-middle   | `'MemoizedDFS'`   |
+| All depths (default) | StrongestFirst  | `'StrongestFirst'` |
+| Deep paths (L≥5)   | StrongestFirst (bounded)   | `'StrongestFirst'`   |
 | Sparse graphs      | Backward pruning | `'DP'`            |
 | Memory constrained | Backtracking     | `'Backtracking'`  |
 
@@ -726,7 +731,7 @@ sourceNeurons=['MBON01', 'MBON03', 'KC.*']
 | Parameter                   | Description                                                 | Default         |
 | --------------------------- | ----------------------------------------------------------- | --------------- |
 | `max_interlayer`            | Maximum intermediate layers                                 | 1               |
-| `pathfinding`               | Algorithm: `'MemoizedDFS'`, `'Bidirectional'`, `'DP'`, etc. | `'MemoizedDFS'` |
+| `pathfinding`               | Algorithm: `'StrongestFirst'` (built-in), `'MemoizedDFS'`, `'Bidirectional'`, `'DP'`, etc. | `'StrongestFirst'` |
 | `show_top_n_paths`          | Limit output paths (-1 = all)                               | -1              |
 | `keyword_in_path_to_remove` | Exclude paths containing these types                        | `[]`            |
 

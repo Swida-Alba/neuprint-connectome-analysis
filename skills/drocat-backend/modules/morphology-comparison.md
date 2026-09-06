@@ -13,7 +13,7 @@ Module `src/morphology_comparison.py`. One class:
 from morphology_comparison import MorphologyProfileComparer
 
 comparer = MorphologyProfileComparer(
-    dataset="male-cns:v1.0",             # one dataset; BANC rejected
+    dataset="male-cns:v1.0",             # one dataset; BANC deferred (similarity validation pending)
     query=["aMe12", "aMe10", "aMe.*"],   # types, bodyIds, or regex patterns
     method="vector_v2",                  # "vector_v2" | "nblast"
     max_members_per_type=25,

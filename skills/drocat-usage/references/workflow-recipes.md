@@ -103,5 +103,7 @@ script and add a regression test for the corrected call.
   the query; record the chosen trade-off.
 - Misaligned 3D mesh: verify dataset/template coordinates and use the
   dataset-specific guidance before changing transforms.
-- FlyWire/BANC failure: verify local files and CAVE token; API-only NeuPrint
-  assumptions do not apply.
+- FlyWire failure: verify local files and CAVE token. BANC failure: verify
+  network reachability of the public bucket (no token, no local files
+  needed; the pathfinding connection cache rebuilds automatically from the
+  per-version merged table). API-only NeuPrint assumptions do not apply.

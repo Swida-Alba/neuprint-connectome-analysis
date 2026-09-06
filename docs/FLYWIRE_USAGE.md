@@ -15,9 +15,12 @@ You need to download the required CSV files from the Codex Download Page (or equ
 **For FAFB (flywire_FAFB_v783):**
 - See [FAFB Integration Guide](FAFB_INTEGRATION.md) for the full file list.
 
-**For BANC (`flywire_BANC_v626` or `flywire_BANC_v888`):**
-- See [BANC Integration Guide](BANC_INTEGRATION.md) for the full file list.
-- **Note:** Skeleton visualization is NOT available for BANC.
+**For BANC (`banc_v626` or `banc_v888`):**
+- See [BANC Integration Guide](BANC_INTEGRATION.md).
+- **Preparation is automatic:** metadata + connections download from the
+  public BANC release bucket (no login, no token), and 3D skeleton
+  visualization works in native BANC space with skeletons fetched from the
+  same bucket.
 
 ### Step 2: Place Files in Directory
 Create the directory structure in your project folder and place the downloaded files there.
@@ -41,7 +44,7 @@ datasets/
 **For BANC:**
 ```
 datasets/
-  └── flywire_BANC_v626/
+  └── banc_v626/
       └── downloads/
             ├── neurons.csv.gz
             ├── connections_princeton.csv.gz
@@ -63,7 +66,7 @@ python src/BANC_file_converter.py
 For v888, pass the selected dataset name to the converter function:
 
 ```bash
-python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter import ensure_banc_data; d='flywire_BANC_v888'; ensure_banc_data(d, 'datasets/' + d)"
+python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter import ensure_banc_data; d='banc_v888'; ensure_banc_data(d, 'datasets/' + d)"
 ```
 
 This script will:
@@ -84,7 +87,7 @@ from coana import FindNeuronConnection
 # Initialize connection finder
 fc = FindNeuronConnection(
     token='dummy_token',  # Token is ignored for local files
-    dataset='flywire_BANC_v626', # or 'flywire_FAFB_v783'
+    dataset='banc_v626', # or 'flywire_FAFB_v783'
     sourceNeurons=['720575940621039145'],  # Use Root IDs
     targetNeurons=['720575940619419758'],
     min_synapse_num=5

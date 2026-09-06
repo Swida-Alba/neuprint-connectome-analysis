@@ -124,7 +124,7 @@ expected outputs, and a runnable launcher command.
 
 - Validate dataset spelling against the configured dataset list before an API
   call. NeuPrint names include versions (`hemibrain:v1.2.1`, `male-cns:v0.9`);
-  FlyWire names include `flywire_FAFB_v783` and `flywire_BANC_v888`.
+  FlyWire names include `flywire_FAFB_v783` and `banc_v888`.
 - Keep `use_cache=True` for repeat work. Use `cache_only=True` only after checking
   cache coverage.
 - Prefer CSV for large intermediate tables; use Excel only when the user needs

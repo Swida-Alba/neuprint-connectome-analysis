@@ -2,9 +2,10 @@
 
 Reproduce the **Morphology tab → Find Similar sub-tab** as a direct backend
 call: a query-vs-all morphological similarity search **within one dataset**
-(intra-dataset only — BANC is excluded because FlyWire provides no BANC
-skeletons). For connectivity-based similar search (including cross-dataset
-homolog search), see [find-homologs.md](find-homologs.md).
+(intra-dataset only — BANC is excluded because morphological similarity on
+its public L2/full skeletons is deferred pending vector-quality validation;
+BANC 3D visualization works). For connectivity-based similar search
+(including cross-dataset homolog search), see [find-homologs.md](find-homologs.md).
 
 ## Backend contract
 

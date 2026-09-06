@@ -14,12 +14,39 @@
   </header>
   <h1>Pathfinding Algorithms</h1>
   <p class="lede">
-    How DROCAT finds multi-hop pathways and which algorithm to pick.
-    Linked from the <b>Algorithm</b> selector in <a href="find_path.html">Find All Paths</a>
-    and the <b>Pathfinding Algorithm</b> selector in <a href="cross_dataset.html">Cross-Dataset Comparison</a>.
+    How DROCAT finds multi-hop pathways and how runs are bounded.
+    <b>StrongestFirst is the built-in 'all'-mode algorithm</b> — the
+    Algorithm selector was removed on 2026-09-05. The other enumerators
+    below remain available to scripts via the <code>pathfinding</code>
+    parameter and are kept here for the benchmark record.
   </p>
 
-  <h2>What "pathfinding" means here</h2>
+  <h2>StrongestFirst (budgeted) — the pipeline algorithm</h2>
+<p><code>pathfinding='StrongestFirst'</code> &middot;
+<code>FastGraph.find_paths_strongest_first</code></p>
+<p>Best-first search ordered by each path's <strong>bottleneck</strong>
+(its weakest edge), with a widest-path backward DP as the admissible
+bound. Emits complete intact paths <strong>strongest-first</strong> under
+a path budget (<b>Max Paths (BodyId)</b>, <code>max_paths_bodyid</code>;
+0 = auto → internal 1,000,000 budget): when the budget is reached the
+search <strong>drains every tie at the cutoff strength
+<strong>tau</strong></strong> and stops, so the output contains exactly
+"all intact paths with bottleneck &ge; tau" (the drain may overshoot the
+budget — both numbers are reported). Without a budget bite the emitted
+set is identical to the complete enumerators, and the run reports its
+<strong>natural tau</strong> — the weakest emitted path's bottleneck
+("every threshold up to this value yields this identical set").</p>
+<p>Two lossless prunes (hop-budget edge pruning + dead-end node pruning)
+shrink the cone before enumeration. A lossy <strong>Edge
+Budget</strong> (<code>graph_edge_limit_bodyid</code>, default 1M, 0 =
+off) caps the cone itself: when the lossless-pruned cone still exceeds
+the budget, every edge below <code>w0 = (N-th strongest edge weight) +
+1</code> is dropped — exactly equivalent to raising the threshold, kept
+edges stay strictly below the budget, and the applied floor is reported
+as <code>edge_weight_floor</code> (effective cutoff = max(tau, w0)).
+Shortest mode is never floored.</p>
+<hr/>
+<h2>What "pathfinding" means here</h2>
   <p>
     Given a set of <b>source neurons</b> and a set of <b>target neurons</b>,
     DROCAT enumerates every acyclic connection chain (path) from any source
@@ -35,7 +62,13 @@
     <b>dense</b> connectomes.
   </p>
 
-  <h2>The algorithms</h2>
+  <h2>The complete enumerators (API / benchmark reference)</h2>
+  <p class="small">All of these return <b>exactly the same path set</b> as
+  an unbudgeted StrongestFirst run — they differ only in speed and
+  memory. They are no longer selectable in the UI; scripts can still set
+  <code>pathfinding='MemoizedDFS'</code> (etc.) with
+  <code>max_paths_bodyid=0</code> for unbounded complete enumeration,
+  which is also exactly what a τ-clamped run equals at its reported tau.</p>
   <div class="grid">
     <div class="card">
       <h3>DP (Backward Reachability)</h3>
@@ -151,33 +184,31 @@
     from DP to <b>MemoizedDFS</b>.
   </div>
 
-  <h2>Which one should I pick?</h2>
+  <h2>What bounds a run today?</h2>
   <table>
-    <tr><th>Your query</th><th>Recommended algorithm</th></tr>
-    <tr><td>The common case (2–4 intermediate layers)</td><td><b>MemoizedDFS</b>
-      — fastest at 4 layers and within noise elsewhere; the default</td></tr>
-    <tr><td>Shallow queries (2–3 intermediate layers)</td><td><b>MeetInMiddle</b>
-      — fastest measured (0.00–0.01 s)</td></tr>
-    <tr><td>Few targets, many sources</td><td><b>DFS</b> — the same memoized
-      search started from the smaller (target) side</td></tr>
-    <tr><td>Deep queries (5+ intermediate layers)</td><td><b>Bidirectional</b>
-      is marginally fastest (4.54 s) but at 892 MB vs ~610 MB for the
-      pruners; <b>DFS</b>/<b>MemoizedDFS</b> are the balanced choice</td></tr>
-    <tr><td>Shortest paths first, memory to spare</td><td><b>Bidirectional</b>
-      — but it is the only algorithm with a large footprint (18.9 MB →
-      892 MB with depth)</td></tr>
+    <tr><th>Knob</th><th>Bounds</th><th>Reported as</th></tr>
+    <tr><td><b>Min Synapse Count</b> (asked threshold)</td><td>the discovery cone, a priori</td><td>the folder <code>minsyn_{t}</code></td></tr>
+    <tr><td><b>Edge Budget</b> (<code>graph_edge_limit_bodyid</code>, default 1M)</td><td>the lossless-pruned cone, lossy: floor at w0 = (N-th strongest edge) + 1</td><td><code>edge_weight_floor</code> / <code>edge_budget_landing</code> in the run attributes + a lossy-floor note</td></tr>
+    <tr><td><b>Max Paths (BodyId)</b> (<code>max_paths_bodyid</code>, 0 = auto → 1M)</td><td>the output path list: keeps all intact paths with bottleneck ≥ tau</td><td><code>tau</code> + <code>paths_complete</code> in the run notes and exports</td></tr>
   </table>
+  <p class="small">They compose exactly: effective cutoff =
+  <b>max(tau_budget, w0)</b>, and the run equals a complete run at that
+  threshold. A complete run reports its natural tau (weakest emitted
+  bottleneck) — every threshold up to that value yields the identical
+  set.</p>
 
   <h2>Practical tips</h2>
   <ul>
     <li><b>Prefilter the graph</b>: raising <b>Min Synapse Count</b> and
-      lowering <b>Edge Limit – BodyIds</b> shrinks the search space far more than any
-      algorithm choice.</li>
+      lowering the <b>Edge Budget</b> shrinks the search space far more
+      than any other control.</li>
     <li><b>Deep + dense = expensive</b>: the number of paths grows
       exponentially with <b>Max Intermediate Layers</b>; the output itself
-      dominates runtime and memory once path counts reach millions.</li>
-    <li><b>All algorithms are equivalent</b>: results never depend on the
-      selection — switch algorithms freely to tune speed or memory.</li>
+      dominates runtime and memory once path counts reach millions — that
+      is what Max Paths bounds, with a reported tau.</li>
+    <li><b>Clamping is honest</b>: a τ-clamped run equals a complete run
+      at its reported tau (complete enumerators — API only — reproduce the
+      identical set when run at that threshold).</li>
   </ul>
 </main>
 </body>

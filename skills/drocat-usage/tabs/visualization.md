@@ -118,7 +118,12 @@ python skills/drocat-usage/scripts/run_direct.py \
 
 ## Notes
 
-- BANC skeleton visualization is unavailable — use a non-BANC dataset.
+- BANC (`banc_v626`/`banc_v888`) is supported (native BANC space, public
+  bucket — no token). Skeleton chain is unified (888 L2 -> 888 full ->
+  v626 pcg; no source selector). Defaults: Synapse Mode `skip` (opt-in
+  downloads a ~3.9 GB table once; markers sit on pre-sites only),
+  normalized tube radii (120 nm median). Saved HTML/PNGs open on the
+  calibrated BANC frontal view.
 - `mesh_roi`/brain/VNC meshes are dataset-specific; verify ROI availability
   (`vs.list_available_rois()`). Mesh transforms also depend on the dataset.
 - Keep `show_fig=False` and `export_views=False` for unattended runs; enable

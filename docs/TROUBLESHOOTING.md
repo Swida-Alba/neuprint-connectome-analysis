@@ -366,7 +366,7 @@ CRITICAL ERROR: FlyWire/BANC data preparation failed.
 
 1. **Download required files** from: https://codex.flywire.ai/api/download?dataset=banc
 
-2. **Save files to:** `datasets/flywire_BANC_v626/downloads/`
+2. **Save files to:** `datasets/banc_v626/downloads/`
 
 3. **Required files:**
    | File                           | Description       | Required |

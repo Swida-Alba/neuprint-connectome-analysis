@@ -45,7 +45,7 @@ renames between releases:
 - FAFB v783: `additional_type(s)` in
   `datasets/flywire_FAFB_v783/flywire_FAFB_v783_allneurons_neuron_df.csv`
 - BANC v626: `Alternative Cell Type(s)` in
-  `datasets/flywire_BANC_v626/flywire_BANC_v626_allneurons_neuron_df.csv`
+  `datasets/banc_v626/banc_v626_allneurons_neuron_df.csv`
 
 When a male-cns `flywireType` value is **no longer a primary `type`** in the
 target dataset but appears in that column, the mapping resolves to the
@@ -66,6 +66,48 @@ Resolution rules:
   each keeps its own mapping namespace.
 - Missing dataset tables only disable the rename resolution; the mapper
   still works from the male-cns crosswalk alone.
+
+#### The FAFB ↔ BANC annotation bridge (additional Type(S) ⇄ Alternative Cell Type(s))
+
+The two FlyWire annotation columns also work as a **direct bridge between
+the FAFB and BANC namespaces**, without routing through the male-cns
+crosswalk. A FAFB `additional_type(s)` token that also appears in a BANC
+`Alternative Cell Type(s)` cell connects the types on both sides:
+
+```
+FAFB type --(additional_type(s))--> shared token --(Alternative Cell Type(s))--> BANC type
+```
+
+Example: FAFB `s-CPDN3A` rows annotate `CB1770`/`CB1791`/`SMP229`, which
+are BANC primary types — the bridge derives all three candidates even
+though no crosswalk row connects them. The derivation walk lands the
+shared token in the other namespace (a dedicated hop) and continues over
+that namespace's own annotation edges, so every chain carries the full
+evidence (both annotation columns appear as linkers).
+
+Production resolution applies the bridge as an overlay with this
+precedence:
+
+1. **Crosswalk route** (male-cns anchored) — wins when present.
+2. **Same-name identity** — a type that is a primary in both namespaces
+   maps to itself (e.g. FAFB `APDN3` → BANC `APDN3`). Without this, a
+   same-name type absent from the crosswalk would resolve to nothing and
+   vanish from cross-dataset queries.
+3. **Annotation bridge** — exactly one candidate becomes the mapping;
+   several candidates become a `1-to-N` conflict (never guessed),
+   deduplicated against crosswalk conflicts.
+
+Untyped sentinels (`Unknown`, empty, bare numbers) never become bridge
+targets or candidates — consistent with the cross-dataset run's default
+untyped-neuron drop.
+
+The exports state how each pair was derived: `auto_type_mapping.csv`
+carries a `mapping_origin` column (`crosswalk`, `same name`, or
+`annotation bridge via <token>`); `auto_type_mapping_conflicts.csv`
+carries an `origin` column with the same distinction. Bridge pairs whose
+endpoints have no male-cns anchor get their own rows. Ambiguity
+resolution by neuron counts is deliberately NOT applied — the conflicts
+export is the place to adjudicate those by hand.
 
 #### Valid bridge source map (BRIDGE_SOURCE_MAP)
 
@@ -352,7 +394,7 @@ Now the Jaccard and cosine similarities correctly identify these as highly simil
 Type mappings are available for:
 - `male-cns:v0.9` (canonical reference)
 - `flywire_FAFB_v783`
-- `flywire_BANC_v626`
+- `banc_v626`
 - `hemibrain:v1.2.1`
 - `manc:v1.0` / `manc:v1.2.1`
 
@@ -362,7 +404,7 @@ When running `ComparisonAnalyzer.export_results()` with `auto_type_mapping=True`
 
 1. **auto_type_mapping.csv**: Type mappings for neurons in results only
    ```csv
-   male-cns:v0.9,flywire_FAFB_v783,flywire_BANC_v626,hemibrain:v1.2.1,manc:v1.0,manc:v1.2.1
+   male-cns:v0.9,flywire_FAFB_v783,banc_v626,hemibrain:v1.2.1,manc:v1.0,manc:v1.2.1
    ALIN4,ALIN4,ALIN4,lLN7,,
    DNp01,DNp01,DNp01,DNp01,,
    MeVPLo2,MTe07,MTe07,,,
@@ -414,3 +456,90 @@ If cross-dataset similarity seems too low:
 
 - [Cross-Dataset Comparison](./core-features/CrossDatasetComparison_Guide.md) - Overview of cross-dataset analysis
 - [Connectivity Profiling](./CONNECTIVITY_PROFILING.md) - Connectivity profile computation
+
+---
+
+## Threshold equivalence across datasets
+
+The analysis compares all datasets at the SAME threshold (horizontal
+comparison). Synapse-count conventions differ strongly between datasets —
+the median number of synapses per neuron spans ~6x (BANC v626 ≈ 52 post,
+FAFB v783 ≈ 308 post, male-cns v1.0 ≈ 340 post / 490 pre+post) — so "BANC
+≥ 3" and "FAFB ≥ 3" do NOT cut the connectomes at comparable sparsities.
+This section gives a rough, whole-dataset alignment; per-query alignment
+is computed automatically in every run (see below).
+
+### Criterion
+
+**bodyId-level per-neuron connection-pair density**: the number of distinct
+(presynaptic, postsynaptic) body pairs with weight ≥ t, divided by the
+dataset's total neuron count. Unweighted — edge presence only, synapse
+counts (weights) ignored.
+
+Caveats:
+
+- BANC local downloads are pre-truncated at weight ≥ 3 (thresholds 1–2 are
+  no-ops on the pair counts).
+- male-cns numbers come from the ~98% coverage connection cache.
+- Whole-dataset values are a rough hint only. Real matching is
+  query-specific — a given query's best-aligned thresholds can differ from
+  the global rule by several units (this is exactly why every run exports
+  its own alignment).
+
+### Reference values (whole dataset, pairs per neuron)
+
+| t | BANC v626 | BANC v888 | FAFB v783 | male-cns v1.0 |
+|---|---|---|---|---|
+| 3 | 23.2 | 19.2 | 47.3 | 60.5 |
+| 5 | 12.2 | 9.7 | 26.8 | 35.9 |
+| 8 | 6.5 | 5.0 | 15.0 | 20.9 |
+| 10 | 4.8 | 3.6 | 11.2 | 15.9 |
+
+Best threshold matches under the pairs-per-neuron criterion:
+
+| anchor | → FAFB | → male-cns |
+|---|---|---|
+| BANC v888 @3 (19.2) | **7** (17.8) | **8–9** (20.9 / 18.1) |
+| BANC v626 @3 (23.2) | 6 | 7–8 |
+| BANC v888 @5 (9.7) | 11 | 15 |
+| BANC v626 @5 (12.2) | 9–10 | 12 |
+
+Rule of thumb: **FAFB threshold ≈ 2.2–2.3x BANC, male-cns ≈ 2.8–3x BANC.**
+BANC has the lowest edge density at every threshold; FAFB and male-cns sit
+at an analogous scale (within ~1.5x of each other).
+
+### Where the per-query alignment comes from
+
+Every cross-dataset run exports threshold-alignment files (spec Feature C):
+
+- `comparison_results/threshold_alignment_best_matches.csv` — a bisection
+  prober over each dataset's lowest-threshold extract finds the
+  best-matching threshold in every other dataset for the CURRENT query
+  (extended range, not limited to the typed thresholds). Primary metric:
+  edge-count distance `|n_a − n_b| / max(n_a, n_b, 1)`; tolerance ≤ 0.10.
+- `comparison_results/threshold_alignment_matrix.csv` (+ heatmap) —
+  pairwise metrics over the typed thresholds only.
+- `comparison_results/edge_density_per_threshold.csv` and
+  `comparison_visualizations/edge_density_threshold_curves.png` — the
+  density curves behind the matching (absolute + per-neuron).
+
+### Per-dataset thresholds (vertical comparison)
+
+The Cross-Dataset tab ▸ Advanced Settings ▸ **Per-dataset thresholds**
+assigns each dataset its OWN ascending threshold list (e.g.
+BANC@{3,5}, FAFB@{7,11}, male-cns@{8,15}) so each runs at its
+density-equivalent sparsity. `thresholds` in the parameters remains the
+sorted union; horizontal tables simply have no cross-dataset content at
+thresholds not shared by ≥ 2 datasets — in vertical mode the alignment
+files above ARE the cross-dataset comparison.
+
+### Related run features
+
+- **Duplicate-threshold skipping (Feature G)**: with a path budget, a run
+  whose weakest emitted path has bottleneck τ produces the identical set
+  for every threshold up to τ; later input thresholds ≤ τ are skipped and
+  marked `skipped/duplicate_of` in `threshold_sensitivity.csv` (τ collapse).
+- **Replay paths (Feature F)**: in path mode 'all' the path set is
+  enumerated once at the lowest threshold; every higher threshold is
+  materialized from the bottleneck-annotated path set (identical outputs,
+  no re-enumeration). Disable via Advanced Settings ▸ Replay Paths.

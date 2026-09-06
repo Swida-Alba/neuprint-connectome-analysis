@@ -94,8 +94,10 @@ configured workstation. The verifier needs no network.
   `DROCAT`.
 - Override the host/port with `DROCAT_UI_HOST`, `DROCAT_UI_PORT`, or
   `DROCAT_UI_SHOW=0` for a headless launch. First run: datasets auto-download on
-  first query (requires token + network). FlyWire FAFB/BANC additionally require
-  manually downloaded data files (the Settings tab has the guide).
+  first query (requires token + network). FlyWire FAFB additionally requires
+  manually downloaded data files (the Settings tab has the guide); BANC
+  (`banc_v626`/`banc_v888`) auto-prepares from its public bucket — no token,
+  no manual downloads.
 
 ## After installation: analysis skills are already local
 

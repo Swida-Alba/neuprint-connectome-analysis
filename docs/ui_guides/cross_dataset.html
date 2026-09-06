@@ -35,6 +35,7 @@
     <tr><th>Example</th><th>Behavior</th></tr>
     <tr><td>Datasets: male-cns:v0.9, hemibrain:v1.2.1</td><td>Two datasets compared using their automatic display names</td></tr>
     <tr><td>Thresholds: <code>3, 5, 10</code></td><td>Separate analyses per threshold</td></tr>
+    <tr><td style="white-space:nowrap">Rough equivalence</td><td>Whole-dataset hint (connection-pair density per neuron): BANC ≥ 3 ≈ FAFB ≥ ~6–7 ≈ male-cns ≥ ~7–9; BANC ≥ 5 ≈ FAFB ≥ ~9–11 ≈ male-cns ≥ ~12–15. Query-specific alignment is exported per run in <code>threshold_alignment_*.csv</code></td></tr>
     <tr><td>Mode: <code>edge</code></td><td>Edges compared by weight only</td></tr>
     <tr><td>Mode: <code>path</code> (default)</td><td>Edges discovered through paths</td></tr>
     <tr><td>Path Enumeration: <code>shortest</code></td><td>Per-dataset runs keep only per-pair minimum-hop paths (all ties)</td></tr>
@@ -46,12 +47,15 @@
     <tr><td>Path Enumeration</td><td>all</td><td><code>all</code>: every path within the layer limit (FindAllPath). <code>shortest</code>: only the per-(source bodyId, target bodyId) minimum-hop paths (FindShortestPath), using target-rooted incoming discovery.</td></tr>
     <tr><td>Max Intermediate Layers</td><td>2</td><td>Path depth for path mode. In shortest mode, 0 = direct connections only; a positive value caps paths at layers + 1 hops. A capped result is shortest only within the explored graph.</td></tr>
     <tr><td>Top Edges in Analysis Reports</td><td>500</td><td>Limits top-edge comparison/overlap results, edge/path presence-matrix rows, and path-presence data used by comparison summary plots; it does not trim pathfinding or set the per-visualization drawn-edge cap</td></tr>
-    <tr><td>Edge Limit – BodyIds</td><td>1,000,000</td><td>Trims the bodyId discovery graph before pathfinding for deep searches (Layers &ge; 3); 0 = no graph trimming, while a positive cap can change path results</td></tr>
+    <tr><td>Edge Budget</td><td>1,000,000</td><td>Fix D: after the lossless prunes, discovery cones exceeding this many bodyId edges are floored just above the N-th strongest edge's weight (w0 = w1 + 1) — exactly equivalent to raising the threshold; the applied floor is reported as <code>edge_weight_floor</code>. 0 = off; shortest mode never floors</td></tr>
     <tr><td>Visualization Edge Limit</td><td>500</td><td>Caps edges drawn in each network/Sankey/heatmap visualization; it does not alter fetched connections or pathfinding</td></tr>
-    <tr><td>Pathfinding Algorithm</td><td>MemoizedDFS</td><td>Algorithm used per dataset (not used by shortest enumeration). See the <a href="pathfinding_algorithms.html">pathfinding algorithms guide</a>: MemoizedDFS is fastest at all depths; DFS for few targets; MeetInMiddle for shallow queries.</td></tr>
+    <tr><td>Max Paths (BodyId)</td><td>0 = auto (1M)</td><td>StrongestFirst path budget: when the search exceeds it, ALL paths above the achieved strength cutoff (tau) are kept and tau is reported. StrongestFirst is the built-in 'all'-mode algorithm (the selector was removed); see the <a href="pathfinding_algorithms.html">pathfinding algorithms guide</a>.</td></tr>
+    <tr><td>Per-dataset thresholds</td><td>off</td><td>Advanced: assign each dataset its OWN ascending threshold list (vertical comparison, e.g. BANC@{3,5} + FAFB@{7,11}); empty rows fall back to the global list. The threshold_alignment files carry the cross-dataset comparison at unmatched thresholds</td></tr>
+    <tr><td>Replay Paths</td><td>on</td><td>Path mode 'all': enumerate once at the lowest threshold and materialize higher thresholds from the bottleneck-annotated path set (identical outputs, no re-enumeration). With a tau collapse, folders exist only for real thresholds — the tau folder is materialized fresh (tau denominators) and collapsed thresholds alias it. Shortest mode is never replayed</td></tr>
+    <tr><td>Auto-extend Collapsed Thresholds</td><td>off</td><td>F7: when a run's effective tau collapses asked thresholds, extend each dataset with k × τ_ref points (τ_ref = max per-dataset tau) while ≤ 2× the max asked threshold — the schedule is global, so the expanded points stay shared across datasets</td></tr>
     <tr><td>Search Columns</td><td>auto</td><td>Columns searched when resolving source/target names in every dataset: <code>auto</code> = all columns (bodyId → type → instance → flywireType/hemibrainType/…), or restrict to <code>type</code> / <code>instance</code> / <code>bodyId</code>. Use <code>auto</code> when names come from a cross-dataset type column (e.g. <code>MTe07</code> in <code>flywireType</code> on male-cns v1.0).</td></tr>
-    <tr><td>Min Connection Ratio</td><td>0.0</td><td>Weight/post ratio filter</td></tr>
-    <tr><td>Min Traversal Prob.</td><td>0.0</td><td>Traversal probability filter</td></tr>
+    <tr><td>Min Connection Ratio</td><td>hidden</td><td>F9: readout column only (weight / ALL-POST incoming weight — threshold-free); no longer filters</td></tr>
+    <tr><td>Min Traversal Prob.</td><td>hidden</td><td>F9: readout column only (ratio/0.3, capped at 1.0); no longer filters</td></tr>
     <tr><td>Output Format</td><td>csv</td><td>csv or xlsx</td></tr>
   </table>
 
@@ -108,7 +112,14 @@
     top_edges_comparison.csv, top_edges_overlap.csv
     degree_in.csv, degree_out.csv, degree_statistics.csv
     neuron_counts_by_type.csv, neuron_counts_summary.csv
-    motif_analysis.csv, threshold_sensitivity.csv
+    motif_analysis.csv
+    threshold_sensitivity.csv   # per threshold: edge_count, retention,
+                                # asked vs applied_threshold, tau,
+                                # paths_complete, skipped, duplicate_of,
+                                # pruned, edge_weight_floor
+    effective_thresholds.json (run root)  # written on a tau collapse:
+                                # the asked → applied mapping behind the
+                                # in-app banner
     dataset_metadata_comparison.csv
   comparison_visualizations/              # edge/path heatmap PNGs + data
     edge_heatmap_{N}.png, path_heatmap_{N}.png, path_counts.png
@@ -134,5 +145,21 @@
     disabled) is set in Settings → Default Settings → Run Guide Format.
   </div>
 </main>
+<div style="border:1px solid #ccc; padding:12px; margin:12px; font-family:sans-serif;">
+<h3>Thresholds are nested — and the run states its real cutoffs</h3>
+<p>Each threshold run discovers its own cone (edges &ge; threshold), so
+result sets are nested: paths kept at t=10 also exist at t=5 and t=3.
+Runs are bounded by StrongestFirst's <strong>Max Paths</strong> budget
+and the lossy <strong>Edge Budget</strong> floor; a clamped run at
+threshold t is exactly a complete run at its reported
+<strong>tau</strong> (or <code>edge_weight_floor</code> when the floor
+fired — effective cutoff = max(tau, w0)). Compare runs at equal tau.
+When a tau collapses asked thresholds, the run shows a persistent
+banner with the asked → applied mapping per dataset
+(<code>effective_thresholds.json</code>), materializes folders only for
+real thresholds, and marks collapsed rows
+<code>skipped</code>/<code>duplicate_of</code> in
+<code>threshold_sensitivity.csv</code>.</p>
+</div>
 </body>
 </html>

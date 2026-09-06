@@ -1,6 +1,13 @@
 # Pathfinding Methods in FindAllPath
 
-The `FindAllPath` function in `coana.py` leverages the optimized `FastGraph` core to support multiple advanced pathfinding algorithms. You can select the algorithm using the `pathfinding` parameter in `FindNeuronConnection` (and from the **Algorithm** selector in the Find All Paths and Cross-Dataset tabs).
+The `FindAllPath` function in `coana.py` runs on the optimized `FastGraph`
+core. Since 2026-09-05, **StrongestFirst is the built-in 'all'-mode
+algorithm** — the Algorithm selector was removed from the Find All Paths
+and Cross-Dataset tabs. The `pathfinding` parameter survives for
+scripts/API callers (legacy complete enumerators are documented below
+and remain verified), and `max_paths_bodyid` bounds the output with a
+reported τ while `graph_edge_limit_bodyid` is the **Edge Budget** that
+floors the discovery cone.
 
 The four algorithms are also evaluated theoretically and by measured time/memory in [PATHFINDING_ALGORITHM_EVALUATION.md](../technical/PATHFINDING_ALGORITHM_EVALUATION.md), with the benchmark harness at `examples/performance/benchmark_pathfinding.py`.
 
@@ -14,6 +21,76 @@ real neuron chain behind them. See
 for the rationale and the comparative measurements.
 
 ## Available Algorithms
+
+### 0. StrongestFirst (budgeted) — the default since 2026-09-04
+**Parameter:** `pathfinding='StrongestFirst'`
+**Method:** `FastGraph.find_paths_strongest_first`
+
+Best-first search ordered by each path's **bottleneck** (its weakest
+edge), with a widest-path backward DP as the admissible suffix bound.
+Emits complete intact paths **strongest-first** under a path budget
+(`max_paths_bodyid`, default 1,000,000):
+
+*   **Mechanism**:
+    *   Precomputes `W[d][v]` — the best achievable bottleneck from node
+        `v` to any target within `d` edges.
+    *   Expands path prefixes best-first on `min(running bottleneck,
+        W[remaining][node])`, so complete paths are emitted in
+        non-increasing bottleneck order.
+    *   When the budget is reached, the search drains all ties at the
+        cutoff strength **tau** and stops: the output contains exactly
+        "all intact paths with bottleneck >= tau". Tau is reported in the
+        run log and `user_warning_notes.txt`.
+*   **Guarantee**: without a budget bite the emitted SET is identical to
+    the complete enumerators below (only the order differs). When the
+    budget bites, the cutoff is a well-defined strength threshold — not
+    an arbitrary truncation.
+*   **Best Use Case**: connectome queries where full enumeration
+    explodes (millions of paths); you keep the strongest structure
+    within a bounded memory/time envelope.
+*   **Deterministic**: same graph, same emission sequence.
+*   **Sole UI algorithm (2026-09-05)**: the Algorithm selector was
+    removed; every UI run uses StrongestFirst. `0 = auto` → internal 1M
+    budget. Complete runs report their **natural tau** (the weakest
+    emitted path's bottleneck — "every threshold up to this value yields
+    this identical set") alongside `paths_complete=true`; budget-bitten
+    runs report both the budget and the emitted count (the tie-drain may
+    overshoot the budget).
+*   **Unification (Fix C, 2026-09-04)**: a positive `max_paths_bodyid`
+    routes to StrongestFirst regardless of the Algorithm selector; the
+    lossy bodyId edge trim no longer runs in
+    FindAllPath/FindShortestPath. The single bounding mechanism is the path
+    budget with its τ report — a budgeted run at threshold t is
+    *equivalent to a complete run at min_synapse_num = τ*.
+*   **Edge Budget (Fix D, 2026-09-05)**: `graph_edge_limit_bodyid`
+    (default 1M, 0 = off) caps the cone itself: after the lossless
+    prunes, a cone exceeding the budget is floored at
+    `w0 = (N-th strongest edge weight) + 1` — the +1 excludes the
+    boundary-tie mass, so the kept-edge count is *strictly* below the
+    budget. The floor is a pure threshold raise (effective cutoff =
+    max(τ_budget, w0)), reported as `edge_weight_floor` /
+    `edge_budget_landing` in the run attributes and an honest lossy
+    note. Shortest mode is never floored.
+*   Before enumeration, a **lossless hop-budget pruning pass**
+    (`prune_layers_hop_budget`) removes every discovery edge that cannot
+    lie on any source→target path within the layer bound — at every
+    depth, in both 'all' and 'shortest' modes. No admissible path is
+    lost (each kept-path set is unchanged); the removed-row count is
+    logged and noted as lossless in `user_warning_notes.txt`.
+*   **Ratio/probability filters retired (F9, 2026-09-05)**:
+    `connection_ratio` (weight / ALL-POST incoming weight — the
+    denominator is now threshold-free) and `traversal_probability`
+    (ratio/0.3, capped) are readout columns only; they no longer filter
+    the graph. This restores cone nesting under any future ratio
+    predicate and makes ratios comparable across thresholds.
+
+## Complete enumerators (API / benchmark reference)
+
+The enumerators below are **no longer selectable in the UI**
+(StrongestFirst is the pipeline); scripts can still request them via
+`pathfinding=...` with `max_paths_bodyid=0` for unbounded complete
+enumeration. They all return the identical path set — which is exactly
+what a τ-clamped StrongestFirst run equals at its reported tau.
 
 ### 1. Bidirectional Search (Layer Intersection)
 **Parameter:** `pathfinding='Bidirectional'`
@@ -130,8 +207,10 @@ Key findings:
   graph.
 - **DP** degenerates on deep queries (20.2 s at 5 layers).
 
-**Recommendation (2026-08)**: `MemoizedDFS` is the default (fastest
-measured at every depth, no graph copy). Use `DFS` for deep paths with few
+**Recommendation (2026-08, superseded 2026-09-05)**: `MemoizedDFS` was
+the fastest complete enumerator; StrongestFirst is now the pipeline
+algorithm (bounded output with a reported τ), with MemoizedDFS kept for
+unbounded complete runs via the API. Use `DFS` for deep paths with few
 targets, `MeetInMiddle` for shallow queries, `Bidirectional` only for
 shortest-first output with memory to spare.
 

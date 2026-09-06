@@ -138,10 +138,10 @@ All NeuPrint server datasets are supported (verified against `api.neuprint.janel
 | Dataset | Description |
 | --- | --- |
 | `flywire_FAFB_v783` | Female Adult Fly Brain (FAFB v783, 139,255 neurons) |
-| `flywire_BANC_v888` | Brain and Nerve Cord (BANC v888, 158,262 neurons) |
-| `flywire_BANC_v626` | Brain and Nerve Cord, older (BANC v626, 115,151 neurons) |
+| `banc_v888` | Brain and Nerve Cord (BANC v888; public-bucket tables + skeletons) |
+| `banc_v626` | Brain and Nerve Cord, older (BANC v626; public-bucket tables + skeletons) |
 
-> BANC (Brain And Nerve Cord) is served via FlyWire/Codex as `flywire_BANC_v888` (local data files). The NeuPrint server metadata also lists a hidden `banc:v888` entry, but it is not queryable through the NeuPrint API and is therefore not supported.
+> BANC (Brain And Nerve Cord) is analyzed from its own public release bucket as `banc_v888`/`banc_v626` — datasets, connections and skeletons all prepare automatically, no login required. The NeuPrint server metadata also lists a hidden `banc:v888` entry, but it is not queryable through the NeuPrint API and is therefore not supported.
 
 📖 **[FlyWire Setup Guide](docs/FLYWIRE_USAGE.md)** · **[Available ROI Meshes](docs/AVAILABLE_ROIS.md)**
 

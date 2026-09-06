@@ -3,7 +3,9 @@
 Morphological similarity search (module `src/morphology.py`). The main class is
 `MorphologyComparer` (query-vs-all similarity); `SkeletonVectorCache` manages the
 skeleton vector cache used by morphological and `candidate_source` paths. BANC
-datasets are not supported for morphology.
+is deferred for similarity (the public L2/full skeletons still need
+vector-quality validation — BANC 3D visualization works) and raises a clear
+error instead of silently reusing the FAFB pipeline.
 
 ## MorphologyComparer — key params
 

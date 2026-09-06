@@ -7,9 +7,9 @@ outputs, visualization) with shortest-only enumeration.
 
 ## Semantics
 
-- For every reachable (source, target) pair, the minimum-hop paths under the
-  search criteria (Min Synapse Count / Min Connection Ratio / Min Traversal
-  Prob.) are returned. **All tied shortest paths are kept**, each once.
+- For every reachable (source, target) pair, the minimum-hop paths under
+  the search criteria (Min Synapse Count — ratio/probability are readout
+  columns since F9) are returned. **All tied shortest paths are kept**, each once.
 - Discovery is target-rooted by default: the search starts at each target,
   follows incoming edges, and reconstructs only reverse branches that reach
   an enrolled source bodyId. This avoids building the full fan-out of source
@@ -59,20 +59,20 @@ the shortest-path DAG — polynomial in the graph size. The combinatorial
 path explosion that makes Find All Paths expensive does not exist here, so
 the algorithm choice and the deep-search warning do not apply.
 
-## Edge Limit – BodyIds: off by default
+## Edge Budget: off in shortest mode
 
-Unlike Find All Paths, the bodyId graph edge limit is **disabled by
-default**:
+Unlike Find All Paths (where the Edge Budget floors an oversized
+discovery cone), shortest mode **never floors** — for any Edge Budget
+value, including 1M defaults:
 
 - Its purpose (bounding the exponential path count) is unnecessary for
-  shortest enumeration.
-- Trimming keeps the strongest edges: it preserves pair *reachability* but
+  polynomial shortest enumeration.
+- Flooring is a threshold raise: it preserves pair *reachability* but
   not *shortest distance* — a dropped weak edge can silently inflate a
   reported distance.
 
-Set it only to cap memory on extremely large graphs; the run then reports
-shortest paths **within the trimmed graph** (noted in
-`user_warning_notes.txt`).
+The tab disables the Edge Budget input in shortest mode; API callers
+passing `graph_edge_limit_bodyid` get the full un-floored graph here.
 
 ## Visualization Edge Limit
 
@@ -103,8 +103,7 @@ network/Sankey/heatmap visualizations.
 
 Typing the special chip `all_neurons` as the **source or target** loads the
 full (typed) neuron set on that side, so the run fetches every adjacent
-neuron at the given thresholds (Min Synapse Count / Min Connection Ratio /
-Min Traversal Prob.):
+neuron at the given thresholds (Min Synapse Count):
 
 - `all_neurons` replaces every other chip in the same input.
 - Both source and target = `all_neurons` is not allowed.

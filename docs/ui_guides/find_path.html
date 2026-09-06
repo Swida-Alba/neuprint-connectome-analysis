@@ -45,7 +45,7 @@
   <p>Typing the special chip <code>all_neurons</code> as the <b>source or
     target</b> loads the full (typed) neuron set on that side, so the run
     fetches <b>every adjacent neuron at the given thresholds</b> (Min
-    Synapse Count / Min Connection Ratio / Min Traversal Prob.):</p>
+    Synapse Count):</p>
   <ul>
     <li><code>all_neurons</code> <b>replaces every other chip</b> in the
       same input.</li>
@@ -69,10 +69,10 @@
     <tr><td>Max Intermediate Layers</td><td>2</td><td>Path length: 0 = direct, 2 = two intermediates</td><td>3 finds longer circuits but is slower</td></tr>
     <tr><td>Min Synapse Count</td><td>3</td><td>Connections below this weight are removed</td><td>10 keeps only strong edges</td></tr>
     <tr><td>Visualization Edge Limit</td><td>500</td><td>Maximum edges drawn per visualization (network / Sankey / heatmap, incl. the network_early preview); does not alter pathfinding</td><td>50 for very dense regions</td></tr>
-    <tr><td>Edge Limit – BodyIds</td><td>1,000,000</td><td>Trims the bodyId discovery graph before deep pathfinding (Layers &ge; 3); 0 = complete graph</td><td>0 for no graph trimming</td></tr>
-    <tr><td>Min Connection Ratio</td><td>0.0</td><td>Minimum weight/post ratio</td><td>0.1 keeps only dominant outputs</td></tr>
-    <tr><td>Min Traversal Prob.</td><td>0.0</td><td>ratio/0.3, capped at 1.0</td><td>0.5 = confident paths only</td></tr>
-    <tr><td>Algorithm</td><td>MemoizedDFS</td><td>MemoizedDFS (fastest measured at all depths, no graph copy; the default), DFS (backward memoized, few targets), MeetInMiddle (shallow queries), DP (robust), Bidirectional (shortest-first, high memory). See the <a href="pathfinding_algorithms.html">pathfinding algorithms guide</a>.</td><td>MemoizedDFS</td></tr>
+    <tr><td>Edge Budget</td><td>1,000,000</td><td>Fix D: after the lossless prunes, a discovery cone exceeding this many bodyId edges is floored just above the N-th strongest edge's weight (w0 = w1 + 1) — equivalent to raising the threshold; reported as <code>edge_weight_floor</code>. 0 = off</td><td>0 to keep the full lossless-pruned cone</td></tr>
+    <tr><td>Min Connection Ratio</td><td>hidden</td><td>F9: readout column only (weight / ALL-POST incoming weight, threshold-free); no longer filters</td><td>—</td></tr>
+    <tr><td>Min Traversal Prob.</td><td>hidden</td><td>F9: readout column only (ratio/0.3, capped at 1.0); no longer filters</td><td>—</td></tr>
+    <tr><td>Max Paths (BodyId)</td><td>0 = auto (1M)</td><td>StrongestFirst path budget: when the search exceeds it, ALL paths above the achieved strength cutoff (tau) are kept and tau is reported in the run notes. StrongestFirst is the built-in algorithm (the Algorithm selector was removed). See the <a href="pathfinding_algorithms.html">pathfinding algorithms guide</a>.</td><td>Lower for bounded runs on dense queries</td></tr>
     <tr><td>Search Columns</td><td>auto</td><td>Columns searched when resolving source/target names: <code>auto</code> = all columns (bodyId → type → instance → flywireType/hemibrainType/…), or restrict to <code>type</code> / <code>instance</code> / <code>bodyId</code>. Needed when a name lives in a cross-dataset column (e.g. <code>MTe07</code> only exists in <code>flywireType</code> on male-cns v1.0).</td><td><code>auto</code></td></tr>
     <tr><td>Filter By</td><td>bodyId</td><td>bodyId (per neuron) or type (aggregated)</td><td>type for cleaner summaries</td></tr>
     <tr><td>Output Format</td><td>csv</td><td>csv (fast) or xlsx</td><td>xlsx for Excel formatting</td></tr>

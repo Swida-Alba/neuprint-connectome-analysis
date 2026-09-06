@@ -42,7 +42,7 @@
   <p>Typing the special chip <code>all_neurons</code> as the <b>source or
     target</b> loads the full (typed) neuron set on that side, so the run
     fetches <b>every adjacent neuron at the given thresholds</b> (Min
-    Synapse Count / Min Connection Ratio / Min Traversal Prob.):</p>
+    Synapse Count):</p>
   <ul>
     <li><code>all_neurons</code> <b>replaces every other chip</b> in the
       same input.</li>
@@ -80,9 +80,9 @@
     <tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr>
     <tr><td>Max Intermediate Layers (optional)</td><td>5</td><td>0 = direct only; &gt;0 caps path length at <i>layers + 1</i> edges</td></tr>
     <tr><td>Min Synapse Count</td><td>3</td><td>Minimum edge weight</td></tr>
-    <tr><td>Min Connection Ratio</td><td>0.0</td><td>Minimum weight/post ratio</td></tr>
-    <tr><td>Min Traversal Prob.</td><td>0.0</td><td>Traversal probability threshold</td></tr>
-    <tr><td>Edge Limit – BodyIds</td><td>0 (off)</td><td>See note below — trimming can inflate shortest distances</td></tr>
+    <tr><td>Min Connection Ratio</td><td>hidden</td><td>F9: readout column only (weight / ALL-POST incoming weight); no longer filters</td></tr>
+    <tr><td>Min Traversal Prob.</td><td>hidden</td><td>F9: readout column only (ratio/0.3, capped at 1.0); no longer filters</td></tr>
+    <tr><td>Edge Budget</td><td>off in shortest mode</td><td>Shortest mode is never floored (the tab disables the input) — flooring would raise the threshold and can inflate shortest distances</td></tr>
     <tr><td>Visualization Edge Limit</td><td>500</td><td>Maximum edges drawn in each network/Sankey/heatmap visualization; does not alter shortest-path discovery</td></tr>
     <tr><td>Filter By</td><td>bodyId</td><td>bodyId or type aggregation</td></tr>
     <tr><td>Output Format</td><td>csv</td><td>csv or xlsx</td></tr>
@@ -117,13 +117,13 @@
   </div>
 
   <div class="callout warn">
-    <b>Edge Limit – BodyIds is off by default.</b> Its purpose (bounding the
+    <b>The Edge Budget is off in shortest mode.</b> Its purpose (bounding the
     exponential path count) does not apply to shortest enumeration, and
-    trimming by strength preserves pair <i>reachability</i> but not
+    flooring (a threshold raise) preserves pair <i>reachability</i> but not
     <i>shortest distance</i> — a dropped weak edge can silently inflate a
-    reported distance. Enable it only to cap memory on extremely large
-    graphs; results then become shortest-within-trimmed-graph (noted in
-    <code>user_warning_notes.txt</code>).
+    reported distance. The tab disables the Edge Budget input in shortest
+    mode; API callers passing <code>graph_edge_limit_bodyid</code> get the
+    full un-floored graph here.
   </div>
 
   <h2>BodyId enrollment</h2>
