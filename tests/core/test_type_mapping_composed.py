@@ -130,16 +130,17 @@ def test_bridges_csv_contract():
              _flow(MCNS, 'T2, X', FAFB, 'T3', 2, 3, linkers=False)]
     text = build_bridges_csv(flows, pools={
         ('T2, X', 'T3'): {'source_body_ids': [1, 2],
-                          'target_body_ids': [3, 4, 5]}})
+                          'target_body_ids': [3, 4, 5],
+                          'coverage': 'covered 2 of 3'}})
     lines = text.strip().splitlines()
     assert lines[0] == ('dataset,entry_kind,matched_column,name,foreign_type,'
                         'neuron_count,mapped_kind,mapped_to,map_used,'
-                        'bridge-flywireType,granularity,coverage')
+                        'bridge-flywireType,pool_coverage')
     # linker-bearing row: bridge cell filled, quoting handles the comma
     assert 'male-cns:v1.0,type,type,T1,T1,4,mapped,T1,' in lines[1]
-    # bare same-name row: empty bridge cell, no granularity (no pools)
+    # bare same-name row: empty bridge cell, pool coverage filled
     assert '"T2, X"' in lines[2] and 'same name' in lines[2]
-    assert lines[2].endswith('2 to 3,covered 2 of 3')
+    assert lines[2].endswith('covered 2 of 3')
     assert build_bridges_csv([]) is None
 
 
@@ -183,9 +184,9 @@ def test_combined_bridges_csv_uniform_width():
     for text in (build_bridges_csv(pair_a, bridge_columns=union),
                  build_bridges_csv(pair_b, bridge_columns=union)):
         rows = list(csv.reader(io.StringIO(text)))
-        assert {len(r) for r in rows} == {12}
-        assert rows[0][-3:] == ['bridge-flywireType', 'granularity',
-                                'coverage']
+        assert {len(r) for r in rows} == {11}
+        assert rows[0][-2:] == ['bridge-flywireType',
+                                'pool_coverage']
         widths.add(len(rows[0]))
     assert len(widths) == 1
     # the bare pair pads the missing bridge column with an empty cell

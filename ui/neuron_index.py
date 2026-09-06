@@ -3203,16 +3203,89 @@ def collect_native_type_matches(
     return matches
 
 
+def mapped_type_targets(mapper, foreign_type: str, foreign_ds: str,
+                        selected_ds: str,
+                        alias_cache: Optional[Dict[str,
+                                                   Optional[Dict[str, Any]]]] = None,
+                        ) -> Optional[Dict[str, Any]]:
+    """Canonical mapped-target resolution — THE shared backend (§backend
+    unification, user 2026-09-07).
+
+    Both the 'See available neurons' auto-initiated type mapping (the
+    viewer's mapped view via ``enrich_native_type_matches``) and the
+    cross-dataset tab's Type Mapping panel (its summary via
+    ``_compute``) resolve every foreign type through THIS function: the
+    union of the stored-mapping/alias resolution
+    (``get_alias_candidates``) and the derivation-bridge ends
+    (``get_type_bridges``).  Bridge-only pairs (FAFB LPN ->
+    LPN_a/LPN_b) and overlay 1-to-N splits (5th-LNv -> 5thsLNv_LNd6 +
+    s-LNv) therefore resolve identically on every surface.
+
+    Returns ``{'kind', 'targets'}`` or None; ``alias_cache`` optionally
+    memoizes the alias half across calls.
+    """
+    if alias_cache is not None and foreign_type in alias_cache:
+        ann = alias_cache[foreign_type]
+    else:
+        try:
+            res = mapper.get_alias_candidates(foreign_type, [selected_ds])
+            info = res.get(selected_ds) or {}
+            candidates = info.get("candidates", [])
+            if info.get("outcome") != "matched" or not candidates:
+                ann = None
+            elif any(c["kind"] == "one of N" for c in candidates):
+                # The reverse aggregation is refused: show every local
+                # type that corresponds to the foreign name.
+                ann = {
+                    "kind": "one of N",
+                    "targets": sorted(
+                        c["name"] for c in candidates
+                        if c["kind"] == "one of N"
+                    ),
+                }
+            else:
+                cand = candidates[0]
+                ann = {
+                    "kind": cand["kind"],
+                    "targets": [cand["name"]],
+                }
+        except Exception:
+            ann = None
+        if alias_cache is not None:
+            alias_cache[foreign_type] = ann
+    try:
+        chains = mapper.get_type_bridges(
+            foreign_type, foreign_ds, selected_ds)
+    except Exception:
+        chains = []
+    ends = {
+        str(c[-1]['value']) for c in (chains or [])
+        if c and c[-1].get('value')
+    }
+    if not ends:
+        return ann
+    targets = set(ends)
+    if ann:
+        targets.update(ann.get('targets') or [])
+    if len(targets) == 1 and ann:
+        return {'kind': ann['kind'], 'targets': sorted(targets)}
+    return {
+        'kind': 'one of N' if len(targets) > 1 else 'bridged',
+        'targets': sorted(targets),
+    }
+
+
 def enrich_native_type_matches(
     native_matches: List[Dict[str, Any]],
     selected_dataset: str,
 ) -> None:
     """Annotate native type matches with their mapped names, in place.
 
-    For every matched foreign type, the cross-dataset type mapper resolves
-    what that type corresponds to in the *selected* dataset (unique rename,
-    same name, or the members of a refused N-to-1 aggregation).  Types with
-    no counterpart keep ``annotation=None`` and stay visible unmapped, so
+    For every matched foreign type, the shared backend
+    (``mapped_type_targets``) resolves what that type corresponds to in
+    the *selected* dataset (unique rename, same name, the members of a
+    refused N-to-1 aggregation, or the bridge ends).  Types with no
+    counterpart keep ``annotation=None`` and stay visible unmapped, so
     the user is still led to inspect them in the other dataset.  Mapper
     failures simply leave everything unannotated.
     """
@@ -3227,69 +3300,11 @@ def enrich_native_type_matches(
 
     cache: Dict[str, Optional[Dict[str, Any]]] = {}
 
-    def _annotation(foreign_type: str) -> Optional[Dict[str, Any]]:
-        if foreign_type in cache:
-            return cache[foreign_type]
-        try:
-            res = mapper.get_alias_candidates(foreign_type, [selected_dataset])
-            info = res.get(selected_dataset) or {}
-            candidates = info.get("candidates", [])
-            if info.get("outcome") != "matched" or not candidates:
-                annotation = None
-            elif any(c["kind"] == "one of N" for c in candidates):
-                # The reverse aggregation is refused: show every local type
-                # that corresponds to the foreign name.
-                annotation = {
-                    "kind": "one of N",
-                    "targets": sorted(
-                        c["name"] for c in candidates
-                        if c["kind"] == "one of N"
-                    ),
-                }
-            else:
-                cand = candidates[0]
-                annotation = {
-                    "kind": cand["kind"],
-                    "targets": [cand["name"]],
-                }
-        except Exception:
-            annotation = None
-        cache[foreign_type] = annotation
-        return annotation
-
     def _annotation_for(foreign_type: str, foreign_ds: str) \
             -> Optional[Dict[str, Any]]:
-        """Alias annotation UNION the derivation-bridge targets.
-
-        The type-mapping panel resolves through ``get_type_bridges``
-        (crosswalk + overlay + annotation bridges); the alias path above
-        knows only the stored crosswalk entries and conflicts.  Union the
-        two so every surface reports the SAME mapped target set — the
-        bridge-only pairs (e.g. FAFB LPN -> LPN_a/LPN_b) and the overlay
-        1-to-N splits (5th-LNv -> 5thsLNv_LNd6 + s-LNv) can no longer
-        vanish from the viewer's mapped view.
-        """
-        ann = _annotation(foreign_type)
-        try:
-            chains = mapper.get_type_bridges(
-                foreign_type, foreign_ds, selected_dataset)
-        except Exception:
-            chains = []
-        ends = {
-            str(c[-1]['value']) for c in (chains or [])
-            if c and c[-1].get('value')
-        }
-        if not ends:
-            return ann
-        targets = set(ends)
-        if ann:
-            targets.update(ann.get('targets') or [])
-        if len(targets) == 1 and ann:
-            return {'kind': ann['kind'], 'targets': sorted(targets)}
-        return {
-            'kind': 'one of N' if len(targets) > 1 else 'bridged',
-            'targets': sorted(targets),
-        }
+        return mapped_type_targets(
+            mapper, foreign_type, foreign_ds, selected_dataset,
+            alias_cache=cache)
 
     for entry in native_matches:
         foreign_ds = entry.get("dataset", "")

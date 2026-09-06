@@ -959,3 +959,102 @@ def test_dataset_abbreviations_and_version_suffixes():
     # BOTH colliding labels get versions — a bare MCNS would stay ambiguous
     assert labels == ['MCNS_v1_0', 'MCNS_v0_9', 'BANC_v888', 'BANC_v626',
                       'FAFB']
+
+
+def test_linker_network_one_column_per_linker_and_legend(mapper):
+    """§layout (user 2026-09-06): the linker network lays out ONE column
+    per bridge linker COLUMN (MCNS type -> flywireType ->
+    additional_type(s) -> FAFB type = four columns), never per-chain hop
+    order, and both the linker network and the linker Sankey carry a
+    color-keyed bridge-linker legend."""
+    from comparison.mapping_visualization import (
+        build_bridge_linker_graph,
+        render_bridge_linker_html,
+        render_mapping_sankey_html,
+    )
+    from comparison.mapping_visualization import origin_seeded_flows
+
+    flows = []
+    for type_name in ('CL125', 'PLP080', 'MDN', 'aMe12'):
+        flows += origin_seeded_flows(
+            'male-cns:v1.0', [type_name], FW)
+    graph = build_bridge_linker_graph(
+        flows, source_dataset=MCNS, target_dataset=FW)
+    # canonical column order: the crosswalk linker first, the FAFB
+    # annotation second — the four-column shape
+    assert graph.graph['linker_columns'] == ['flywireType',
+                                             'additional_type(s)']
+    # every linker COLUMN occupies exactly one x layer (no mixing)
+    xs = {}
+    for node, data in graph.nodes(data=True):
+        if data.get('node_type') == 'linker':
+            column = str(node).split('|')[1]
+            xs.setdefault(column, set()).add(data['position']['x'])
+    assert set(xs) == {'flywireType', 'additional_type(s)'}
+    assert all(len(v) == 1 for v in xs.values())
+    assert xs['additional_type(s)'] != xs['flywireType']
+
+    html = render_bridge_linker_html(
+        flows, source_dataset=MCNS, target_dataset=FW)
+    # §layout unification: the linker columns are header chips in the
+    # unified CODE: full (count) format alongside the dataset chips —
+    # no separate bottom legend box, no duplicated group chip.
+    assert html and 'data-dataset="flywireType"' in html
+    assert 'data-dataset="additional_type(s)"' in html
+    assert 'data-dataset="FAFB"' in html and 'data-dataset="MCNS"' in html
+    assert '(2)' in html and 'flywire_FAFB_v783' in html
+    assert 'Bridge linkers' not in html
+
+    sankey = render_mapping_sankey_html(flows, variant='linker')
+    assert sankey and 'Bridge linkers' in sankey
+    assert 'additional_type(s):' in sankey
+
+
+def test_panel_and_viewer_share_mapped_type_backend(mapper):
+    """§backend unification (user 2026-09-07): the cross-dataset panel's
+    summary and the viewer's mapped view resolve through the SAME
+    ``mapped_type_targets`` backend, and the panel counts each target's
+    neurons ONCE (no per-flow multiplicity: the old Σ foreign_count
+    turned 219 unique male-cns neurons into 243 via the shared
+    s-LNv / 5thsLNv_LNd6 / SMP227 targets)."""
+    from ui.neuron_index import (
+        collect_native_type_matches,
+        count_types_in_index,
+        enrich_native_type_matches,
+        mapped_type_targets,
+        resolve_type_matches,
+    )
+    from ui.neuron_index import load_cached_neuron_index
+
+    res = resolve_type_matches(['circadian_clock'], 'exact',
+                               [MCNS, FW])
+    origins = res['origins']
+    assert set(origins) == {FW}
+
+    # shared-engine panel side
+    idx = {MCNS: load_cached_neuron_index(MCNS), FW: load_cached_neuron_index(FW)}
+    panel_targets = set()
+    for target in (MCNS, FW):
+        if target == FW:
+            continue
+        for otype in origins[FW]:
+            ann = mapped_type_targets(mapper, otype, FW, target)
+            if ann:
+                panel_targets.update(ann['targets'])
+    # viewer mapped-view side
+    entries = collect_native_type_matches(
+        MCNS, 'circadian_clock', datasets=[MCNS, FW], uncapped=True)
+    enrich_native_type_matches(entries, MCNS)
+    viewer_targets = set()
+    for entry in entries:
+        for label in (entry.get('labels_all') or []):
+            for covered in (label.get('covered_all') or []):
+                if covered.get('mapped'):
+                    viewer_targets.update(
+                        covered['mapped']['targets'])
+    assert panel_targets == viewer_targets
+    unique_neurons = sum(
+        count_types_in_index(idx[MCNS], sorted(panel_targets)).values())
+    # unique count, not the 243 per-flow multiplicity sum
+    assert unique_neurons == 219, unique_neurons
+    assert len(panel_targets) == 40

@@ -292,6 +292,7 @@ class VisualizePath:
         edge_labels=None,       # NEW: Custom edge labels dict {(source, target): {'label_name': value, ...}}
         color_edges_by_nt=False, # NEW: Color edges by neurotransmitter type
         dataset_legend=None,    # NEW: Dataset short code legend {code: full_name} for display names
+        dataset_legend_meta=None,  # NEW: per-code {'count': int, 'color': str} — chip count + swatch override
         node_dataset_info=None, # NEW: Node-level dataset info {node_label: {code: name_in_dataset}}
         node_groups=None,       # NEW: Declared node groups [{name,label,color}] (dataset groups in the mapping views)
         separate_hemispheres=False,  # NEW: Enable hemisphere-aware coloring/layout
@@ -521,6 +522,11 @@ class VisualizePath:
         # Dataset legend for cross-dataset type name display
         # Format: {short_code: full_dataset_name} e.g., {'M': 'male-cns v0.9', 'F': 'FlyWire FAFB v783'}
         self.dataset_legend = dataset_legend or {}
+        # Per-code legend extras (§layout unification): {'count': node
+        # count, 'color': swatch override} — the chip renders
+        # ``CODE: full (count)`` and linker-column entries carry their
+        # LINKER_COLORS swatch through 'color'.
+        self.dataset_legend_meta = dataset_legend_meta or {}
         
         # Node-level dataset info for hover labels
         # Format: {node_label: {code: name_in_that_dataset}} e.g., {'MeVP(MTe07)': {'M': 'MeVP', 'F': 'MTe07'}}
@@ -4534,6 +4540,8 @@ class VisualizePath:
                 'gap: 6px; margin-bottom: 8px;">' + extra_group_buttons + '</div>')
         extra_group_defaults_js = (
             'const extraNodeGroups = ' + json.dumps(extra_node_groups) + ';\n'
+            '        const datasetLegendCodes = new Set('
+            + json.dumps(sorted((self.dataset_legend or {}).keys())) + ');\n'
             '        extraNodeGroups.forEach(g => {\n'
             '            originalGroupDefaults[g.name] = { color: g.color, opacity: 100 };\n'
             '        });')
@@ -4739,23 +4747,34 @@ class VisualizePath:
         # Generate dataset legend HTML for cross-dataset type name display
         # Shows one-character codes and their corresponding dataset names;
         # each chip carries its group's color dot when the code is a
-        # declared group (§13).
+        # declared group (§13).  §layout unification (user 2026-09-07):
+        # every chip renders ``CODE: full (count)`` — dataset chips carry
+        # their node count (the dynamic group chip for the same code is
+        # skipped below, killing the duplicated header row), and
+        # linker-column entries carry their LINKER_COLORS swatch + node
+        # count through dataset_legend_meta.
         group_color_map = {g['name']: g['color'] for g in extra_node_groups}
+        legend_meta = getattr(self, 'dataset_legend_meta', None) or {}
         dataset_legend_html = ""
         if self.dataset_legend:
             legend_items = []
             for code, full_name in sorted(self.dataset_legend.items()):
+                meta = legend_meta.get(code) or {}
+                dot_color = meta.get('color') or group_color_map.get(code)
                 dot = ""
-                dot_color = group_color_map.get(code)
                 if dot_color:
                     dot = (
                         '<span style="display:inline-block;width:9px;'
                         'height:9px;border-radius:50%;background:'
                         f'{dot_color};margin-right:4px;"></span>')
+                count = meta.get('count')
+                count_html = (
+                    f' <span style="font-size: 10px; color: var(--vp-text-2);">'
+                    f'({count})</span>' if count is not None else '')
                 legend_items.append(
                     f'<div class="legend-item" data-dataset="{code}" title="{full_name}">{dot}'
                     f'<span style="font-weight: bold; color: #666;">{code}:</span> '
-                    f'<span style="font-size: 11px;">{full_name}</span>'
+                    f'<span style="font-size: 11px;">{full_name}</span>{count_html}'
                     f'</div>'
                 )
             if legend_items:
@@ -9120,6 +9139,11 @@ class VisualizePath:
                 }});
             }}
             extraNodeGroups.forEach(g => {{
+                if (datasetLegendCodes.has(g.name)) {{
+                    // the static dataset chip already carries this code's
+                    // count — no duplicated group chip in the header
+                    return;
+                }}
                 html += legendChip(g.name, g.label, groupDefaultFor(g.name));
             }});
             Object.keys(customGroups).forEach(name => {{

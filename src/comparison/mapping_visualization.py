@@ -575,6 +575,7 @@ def render_mapping_network_html(flows, *,
     # pair edges.
     node_dataset_info: Dict[str, Dict[str, str]] = {}
     dataset_legend: Dict[str, str] = {}
+    ds_counts: Dict[str, int] = {}
     for node, data in graph.nodes(data=True):
         hop_dataset = str(node).split("|")[1] if "|" in str(node) else ""
         # 4-char abbreviation (MCNS/FAFB/...; version suffix on family
@@ -584,6 +585,10 @@ def render_mapping_network_html(flows, *,
             code: str(data.get("title") or data.get("label", ""))
         }
         dataset_legend[code] = hop_dataset
+        ds_counts[code] = ds_counts.get(code, 0) + 1
+    # §layout unification: header chips render CODE: full (count)
+    legend_meta = {code: {"count": count}
+                   for code, count in ds_counts.items()}
 
     # Pair-edge hover labels: one maps-via label per bridge chain plus the
     # per-side neuron counts. Keys stay {key:val}-safe (no ';' inside
@@ -610,6 +615,7 @@ def render_mapping_network_html(flows, *,
         graph, edge_labels=edge_labels,
         node_dataset_info=node_dataset_info,
         dataset_legend=dataset_legend,
+        dataset_legend_meta=legend_meta,
         node_groups=_dataset_groups(graph), layout="dagre")
 
 
@@ -654,6 +660,8 @@ def _render_mapping_graph(graph, output_path: str, *, open_browser: bool = False
                           edge_labels: Optional[Dict[tuple, Dict[str, str]]] = None,
                           node_dataset_info: Optional[Dict[str, Dict[str, str]]] = None,
                           dataset_legend: Optional[Dict[str, str]] = None,
+                          dataset_legend_meta: Optional[Dict[str,
+                                                             Dict[str, Any]]] = None,
                           edge_weight_label: str = "neurons",
                           linker_colors: Optional[Dict[str, str]] = None,
                           node_groups: Optional[List[Dict[str, str]]] = None,
@@ -705,6 +713,7 @@ def _render_mapping_graph(graph, output_path: str, *, open_browser: bool = False
             "edge_weight_label": "synapses",
             "dagre_rank_dir": "TB",
             "node_groups": [],
+            "dataset_legend_meta": {},
         }
 
         def __getattr__(self, name):
@@ -737,6 +746,11 @@ def _render_mapping_graph(graph, output_path: str, *, open_browser: bool = False
     visualizer.edge_color = "#64748b"
     visualizer.node_dataset_info = node_dataset_info
     visualizer.dataset_legend = dataset_legend
+    # §layout unification: per-code {'count', 'color'} — dataset chips
+    # render ``CODE: full (count)`` and linker-column chips carry their
+    # LINKER_COLORS swatch; the duplicated dynamic group chip for a code
+    # present here is skipped by the vispath legend.
+    visualizer.dataset_legend_meta = dataset_legend_meta or {}
     visualizer.edge_labels = edge_labels
     # the mapping weights are neuron counts, not synapses
     visualizer.edge_weight_label = "neurons"
@@ -751,7 +765,8 @@ def _render_mapping_graph(graph, output_path: str, *, open_browser: bool = False
 
 
 def _vispath_html(graph, *, edge_labels=None, node_dataset_info=None,
-                  dataset_legend=None, node_groups=None,
+                  dataset_legend=None, dataset_legend_meta=None,
+                  node_groups=None,
                   layout: str = "dagre") -> Optional[str]:
     """Render a mapping graph to an HTML string.
 
@@ -774,6 +789,7 @@ def _vispath_html(graph, *, edge_labels=None, node_dataset_info=None,
                 edge_labels=edge_labels,
                 node_dataset_info=node_dataset_info,
                 dataset_legend=dataset_legend,
+                dataset_legend_meta=dataset_legend_meta,
                 node_groups=node_groups,
                 edge_weight_label="neurons", layout=layout)
         except _VispathUnavailable:
@@ -857,7 +873,31 @@ def build_bridge_linker_graph(flows, *, source_dataset: str,
     graph = nx.DiGraph()
     pools = pools or {}
     src_pool_ids, tgt_pool_ids = _endpoint_pool_counts(pools)
-    max_linkers = 0
+
+    ordered = sorted(
+        flows,
+        key=lambda f: -(f.get("foreign_count") or f.get("source_count") or 0),
+    )
+
+    # §layout (user 2026-09-06): ONE COLUMN PER BRIDGE LINKER COLUMN —
+    # never per-chain hop order.  The canonical column order is the first
+    # appearance walking the chains source→target (chains are canonical,
+    # so MCNS↔FAFB lays out flywireType then additional_type(s): the
+    # four-column MCNS type → flywireType → additional_type(s) → FAFB
+    # type shape).  Layering by per-chain hop order instead let a
+    # 1-linker chain place its additional_type(s) node in the SAME
+    # column as another chain's flywireType nodes, and a shared linker
+    # node's position was overwritten by whichever chain processed last.
+    column_order: List[str] = []
+    for flow in ordered:
+        for chain in (flow.get("bridges") or [])[:2]:
+            for linker in (l for l in standardize_bridge(
+                    chain, source_dataset, target_dataset)
+                    if l.get("kind") == "linker"):
+                if linker["column"] not in column_order:
+                    column_order.append(linker["column"])
+    column_layer = {column: index + 1
+                    for index, column in enumerate(column_order)}
 
     def _endpoint(side: int, dataset: str, type_name: str, count) -> str:
         node_id = f"{side}|{dataset}|{type_name}"
@@ -873,10 +913,6 @@ def build_bridge_linker_graph(flows, *, source_dataset: str,
             position={"x": 0, "y": 0})
         return node_id
 
-    ordered = sorted(
-        flows,
-        key=lambda f: -(f.get("foreign_count") or f.get("source_count") or 0),
-    )
     for flow in ordered:
         source_type = flow.get("source_type", "")
         foreign_type = flow.get("foreign_type", "")
@@ -899,10 +935,9 @@ def build_bridge_linker_graph(flows, *, source_dataset: str,
             linkers = [l for l in standardize_bridge(
                 chain, source_dataset, target_dataset)
                 if l.get("kind") == "linker"]
-            max_linkers = max(max_linkers, len(linkers))
             chain_text = format_bridge(chain)
             previous = src_id
-            for order_index, linker in enumerate(linkers, start=1):
+            for linker in linkers:
                 node_id = f"L|{linker['column']}|{linker['value']}"
                 title = (f"{linker['column']} · {linker['value']} "
                          f"[{dataset_abbrev(linker['home'])}]{pool_note}")
@@ -911,7 +946,7 @@ def build_bridge_linker_graph(flows, *, source_dataset: str,
                     home_dataset=linker.get("home", ""),
                     label=linker["value"], title=title,
                     color=LINKER_COLORS.get(linker["column"], "#94a3b8"),
-                    position={"x": order_index, "y": 0})
+                    position={"x": column_layer[linker["column"]], "y": 0})
                 if node_id == previous:
                     continue  # self-alias hops fold onto the same node
                 if not graph.has_edge(previous, node_id):
@@ -926,12 +961,18 @@ def build_bridge_linker_graph(flows, *, source_dataset: str,
     if not graph.nodes:
         return graph
 
-    # Layer 0 = source types, layers 1..k = linkers, last layer = targets.
-    target_layer = max(1, max_linkers) + 1
+    # Layer 0 = source types, layers 1..k = the linker COLUMNS in canonical
+    # order, last layer = target types — one column per linker column, no
+    # mixing.
+    target_layer = len(column_layer) + 1
     node_layer: Dict[str, int] = {}
+    linker_homes: Dict[str, str] = {}
     for node, data in graph.nodes(data=True):
         if data.get("node_type") == "linker":
-            node_layer[node] = int(data["position"]["x"])
+            node_layer[node] = column_layer[
+                str(node).split("|")[1]]
+            linker_homes.setdefault(str(node).split("|")[1],
+                                    data.get("home_dataset", ""))
         elif data.get("node_type") == "source":
             node_layer[node] = 0
         else:
@@ -940,7 +981,83 @@ def build_bridge_linker_graph(flows, *, source_dataset: str,
     for node, layer in node_layer.items():
         graph.nodes[node]["position"] = {
             "x": layer * layer_gap, "y": ys[node]}
+    graph.graph["linker_columns"] = column_order
+    graph.graph["linker_homes"] = linker_homes
     return graph
+
+
+_LINKER_LEGEND_DESC = {
+    "flywireType": "male-cns crosswalk column (fT)",
+    "hemibrainType": "male-cns crosswalk column (hT)",
+    "mancType": "male-cns crosswalk column (mT)",
+    "additional_type(s)": "FAFB additional-name cells (aT)",
+    "Alternative Cell Type(s)":
+        "BANC Alternative Cell Type(s) cells (ACT)",
+}
+
+
+def _collect_linker_columns(flows) -> List[tuple]:
+    """(column, home-dataset, distinct-value count) in chain order."""
+    from comparison.cross_dataset_type_mapper import standardize_bridge
+
+    columns: List[str] = []
+    homes: Dict[str, str] = {}
+    values: Dict[str, set] = {}
+    for flow in flows or []:
+        s = flow.get("source_dataset", "")
+        t = flow.get("target_dataset", "")
+        for chain in (flow.get("bridges") or [])[:2]:
+            for linker in (l for l in standardize_bridge(chain, s, t)
+                           if l.get("kind") == "linker"):
+                if linker["column"] not in columns:
+                    columns.append(linker["column"])
+                    homes[linker["column"]] = linker.get("home", "")
+                    values[linker["column"]] = set()
+                values[linker["column"]].add(linker["value"])
+    return [(column, homes[column], len(values[column]))
+            for column in columns]
+
+
+def _linker_legend_html(columns_with_homes: List[tuple]) -> str:
+    """Bridge-linker legend in the unified ``NAME: full (count)`` format.
+
+    The Sankey backend has no dataset-legend header, so the linker
+    entries render as an injected note — same chip shape as the
+    vispath header legend: LINKER_COLORS swatch, bold column name, the
+    home dataset's full name, and the distinct linker-value count.
+    """
+    from comparison.cross_dataset_type_mapper import LINKER_COLORS
+
+    items = []
+    for column, home, count in columns_with_homes:
+        color = LINKER_COLORS.get(column, "#94a3b8")
+        desc = _LINKER_LEGEND_DESC.get(column, f"{column} cells")
+        items.append(
+            '<span style="display:inline-flex;align-items:center;gap:6px;'
+            'margin-right:14px;white-space:nowrap" '
+            f'title="{desc}">'
+            '<span style="display:inline-block;width:9px;height:9px;'
+            'border-radius:50%;background:' + color + ';"></span>'
+            f'<span style="font-weight:bold;color:#666">{column}:</span> '
+            f'<span style="font-size:11px">{home or "?"}</span>'
+            f'<span style="font-size:10px;color:#64748b">({count})</span>'
+            '</span>')
+    if not items:
+        return ""
+    return (
+        '<div style="position:fixed;bottom:8px;left:8px;z-index:9999;'
+        'background:rgba(255,255,255,0.94);border:1px solid #cbd5e1;'
+        'border-radius:8px;padding:8px 12px;max-width:96vw;'
+        'font:12px/1.6 -apple-system,Segoe UI,sans-serif;color:#0f172a">'
+        '<b>Bridge linkers</b> (one column per linker): ' + " ".join(items)
+        + "</div>")
+
+
+def _inject_body_note(html: str, note: str) -> str:
+    """Insert a fixed-position note right after the artifact's <body>."""
+    import re
+
+    return re.sub(r"<body[^>]*>", lambda m: m.group(0) + note, html, count=1)
 
 
 def render_bridge_linker_html(flows, *, source_dataset: str,
@@ -963,10 +1080,13 @@ def render_bridge_linker_html(flows, *, source_dataset: str,
 
     node_dataset_info: Dict[str, Dict[str, str]] = {}
     dataset_legend: Dict[str, str] = {}
+    ds_counts: Dict[str, int] = {}
+    linker_counts: Dict[str, int] = {}
     for node, data in graph.nodes(data=True):
         # linker nodes carry their home dataset explicitly (their node id's
         # second segment is the COLUMN — abbreviating that produced the
         # confusing FLYW/ADDI codes); dataset nodes keep the id segment.
+        is_linker = data.get("node_type") == "linker"
         hop_dataset = (data.get("home_dataset")
                        or (str(node).split("|")[1]
                            if "|" in str(node) else ""))
@@ -977,6 +1097,33 @@ def render_bridge_linker_html(flows, *, source_dataset: str,
             code: str(data.get("title") or data.get("label", ""))
         }
         dataset_legend[code] = hop_dataset
+        if is_linker:
+            # §layout: linker columns are legend entries of their own —
+            # counted separately so they never inflate a dataset count
+            linker_column = str(node).split("|")[1]
+            linker_counts[linker_column] = \
+                linker_counts.get(linker_column, 0) + 1
+        else:
+            ds_counts[code] = ds_counts.get(code, 0) + 1
+
+    # §layout unification (user 2026-09-07): the linker columns join the
+    # existing MCNS/FAFB header chips in the same CODE: full (count)
+    # format, with their LINKER_COLORS swatch; the dynamic group chip for
+    # a code present here is skipped by the vispath legend (no duplicate
+    # header row).
+    from comparison.cross_dataset_type_mapper import LINKER_COLORS
+
+    linker_homes = graph.graph.get("linker_homes", {})
+    for column, count in linker_counts.items():
+        dataset_legend[column] = linker_homes.get(column, "")
+    legend_meta: Dict[str, Dict[str, Any]] = {
+        code: {"count": count} for code, count in ds_counts.items()}
+    for column, count in linker_counts.items():
+        entry = {"count": count}
+        color = LINKER_COLORS.get(column)
+        if color:
+            entry["color"] = color
+        legend_meta[column] = entry
 
     edge_labels: Dict[tuple, Dict[str, str]] = {}
     for src, tgt, data in graph.edges(data=True):
@@ -987,12 +1134,14 @@ def render_bridge_linker_html(flows, *, source_dataset: str,
         if labels:
             edge_labels[(src, tgt)] = labels
 
-    return _vispath_html(
+    html = _vispath_html(
         graph, edge_labels=edge_labels,
         node_dataset_info=node_dataset_info,
         dataset_legend=dataset_legend,
+        dataset_legend_meta=legend_meta,
         node_groups=_dataset_groups(graph),
         layout="mapping")
+    return html
 
 
 def write_bridge_linker_html(flows, output_path: str, *,
@@ -1143,7 +1292,6 @@ def render_mapping_sankey_html(flows, *, pools: Optional[Dict[tuple,
         return None
 
     import os
-    import re
     import tempfile
 
     import pandas as pd
@@ -1172,16 +1320,21 @@ def render_mapping_sankey_html(flows, *, pools: Optional[Dict[tuple,
             return None
         with open(path, "r", encoding="utf-8") as handle:
             html = handle.read()
+    notes = []
     if overflow:
-        note = (
+        notes.append(
             '<div style="position:fixed;top:8px;left:8px;z-index:9999;'
             'background:rgba(255,255,255,0.94);border:1px solid #cbd5e1;'
             'border-radius:8px;padding:8px 12px;'
             'font:12px/1.45 -apple-system,Segoe UI,sans-serif;color:#0f172a">'
             f'<b>+{overflow} more flows not drawn</b> (cap {max_flows}) — '
             'the full mapping is in the CSV export.</div>')
-        html = re.sub(r"<body[^>]*>", lambda m: m.group(0) + note, html,
-                      count=1)
+    if variant == "linker":
+        legend = _linker_legend_html(_collect_linker_columns(flows))
+        if legend:
+            notes.append(legend)
+    if notes:
+        html = _inject_body_note(html, "".join(notes))
     return html
 
 
@@ -1648,7 +1801,7 @@ def build_bridges_csv(flows, *, pools=None,
         prepared.append((flow, linkers, info))
 
     header = base + [f"bridge-{column}" for column in linker_columns] + [
-        "granularity", "coverage"]
+        "pool_coverage"]
     buffer = io.StringIO()
     writer = _csv.writer(buffer, quoting=_csv.QUOTE_MINIMAL)
     writer.writerow(header)
@@ -1663,13 +1816,11 @@ def build_bridges_csv(flows, *, pools=None,
         src_type = flow.get("source_type", "")
         foreign = flow.get("foreign_type", "")
         pool = pools.get((src_type, foreign)) or {}
-        s_ids = pool.get("source_body_ids") or []
-        t_ids = pool.get("target_body_ids") or []
-        granularity = f"{len(s_ids)} to {len(t_ids)}" if s_ids and t_ids \
-            else ""
-        coverage = (f"covered {min(len(s_ids), len(t_ids))} of "
-                    f"{max(len(s_ids), len(t_ids))}" if s_ids and t_ids
-                    else "")
+        # §dedupe (user 2026-09-07): one pool_coverage column — the pool's
+        # own ``covered <target pool> of <target type total>`` (fills even
+        # when one side's pool is empty; the old granularity/coverage pair
+        # carried the same two numbers and blanked together).
+        pool_coverage = pool.get("coverage") or ""
         row = [src_ds, entry_kind, matched_column, src_type, foreign,
                flow.get("source_count") or flow.get("foreign_count") or 0,
                "same name" if not linkers else "mapped", foreign,
@@ -1681,7 +1832,7 @@ def build_bridges_csv(flows, *, pools=None,
             by_column.setdefault(linker["column"], []).append(cell)
         row.extend("; ".join(by_column.get(column, []))
                    for column in linker_columns)
-        row.extend([granularity, coverage])
+        row.extend([pool_coverage])
         writer.writerow(row)
     return buffer.getvalue()
 

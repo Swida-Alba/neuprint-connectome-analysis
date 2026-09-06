@@ -146,17 +146,19 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                                       flow.get("foreign_type", ""))
             pool = pools.get((flow.get("source_type"),
                               flow.get("foreign_type"))) or {}
-            s_ids = pool.get("source_body_ids") or []
-            t_ids = pool.get("target_body_ids") or []
-            gran = f"{len(s_ids)} to {len(t_ids)}" if s_ids and t_ids else ""
-            cov = (f"covered {min(len(s_ids), len(t_ids))} of "
-                   f"{max(len(s_ids), len(t_ids))}" if s_ids and t_ids else "")
+            # §dedupe (user 2026-09-07): granularity ("n to m") and
+            # coverage ("covered n of m") carried the SAME two numbers —
+            # one Coverage column now uses the pool's own
+            # ``covered <target pool> of <target type total>`` (which
+            # also stays filled when one side's pool is empty, the old
+            # blank-when-either-side-empty case).
+            cov = pool.get("coverage") or "—"
             rows.append([
                 flow.get("source_type", ""),
                 flow.get("foreign_type", ""),
                 f"{flow.get('source_count') or 0} → "
                 f"{flow.get('foreign_count') or 0}",
-                info["text"], gran, cov,
+                info["text"], cov,
             ])
         ui.table(
             columns=[
@@ -168,13 +170,11 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                  "align": "left"},
                 {"name": "map_used", "label": "Map used", "field": "map_used",
                  "align": "left"},
-                {"name": "gran", "label": "Granularity", "field": "gran",
-                 "align": "left"},
-                {"name": "cov", "label": "Coverage", "field": "cov",
+                {"name": "cov", "label": "Pool coverage", "field": "cov",
                  "align": "left"},
             ],
             rows=[dict(zip(("name", "foreign", "counts", "map_used",
-                             "gran", "cov"), r)) for r in rows],
+                             "cov"), r)) for r in rows],
         ).classes("w-full")
         with ui.row().classes("flex-wrap"):
             ui.button("Sankey (type-level)",
@@ -392,14 +392,21 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
             collect_native_type_matches,
             count_types_in_index,
             enrich_native_type_matches,
+            mapped_type_targets,
             resolve_type_matches,
         )
+        from comparison.cross_dataset_type_mapper import get_type_mapper
         from comparison.mapping_visualization import (
             build_mapping_flows,
             dedupe_mirrored_pairs,
             origin_seeded_flows,
             render_composed_mapping_html,
         )
+
+        try:
+            mapper = get_type_mapper()
+        except Exception:
+            mapper = None
 
         indexes = {ds: load_cached_neuron_index(ds) for ds in datasets}
         # §12: resolve every chip under the ACTIVE FILTER MODE (exact /
@@ -489,8 +496,32 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                     for t in missing]
 
         # Per-dataset summary strip (fig 2): matched types, neurons,
-        # mapped pairs, mapped types, mapped neurons, unmapped — all
-        # derived from the SAME resolution (H2-4).
+        # mapped pairs, mapped types, mapped neurons, unmapped.
+        # §backend unification (user 2026-09-07): the received types come
+        # from the SAME shared resolution as the 'See available neurons'
+        # auto-initiated type mapping (``mapped_type_targets``), and
+        # mapped_neurons counts each target's neurons ONCE — the old
+        # per-flow Σ foreign_count double-counted shared targets
+        # (s-LNv / 5thsLNv_LNd6 ×2, SMP227 ×3), which turned 219 unique
+        # male-cns neurons into 243.
+        recv_types_by_ds: Dict[str, set] = {ds: set() for ds in datasets}
+        if mapper is not None and getattr(mapper, '_loaded', False):
+            for origin in sorted(origins):
+                for target in datasets:
+                    if target == origin:
+                        continue
+                    for otype in origins[origin]:
+                        ann = mapped_type_targets(
+                            mapper, otype, origin, target)
+                        if ann:
+                            recv_types_by_ds[target].update(
+                                ann.get('targets') or [])
+        # the flow ends are the bridge half of the same resolution
+        for (s, t), fl in pair_flows.items():
+            recv_types_by_ds.setdefault(t, set()).update(
+                f.get('foreign_type') or '' for f in fl
+                if f.get('foreign_type'))
+
         summary = []
         for ds in datasets:
             matched = origins.get(ds, [])
@@ -498,12 +529,10 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                 indexes[ds], matched).values()) if matched else 0)
             pairs = sum(len(fl) for (s, t), fl in pair_flows.items()
                         if s == ds or t == ds)
-            recv_types = {f.get("foreign_type") or ""
-                          for (s, t), fl in pair_flows.items()
-                          if t == ds for f in fl}
-            recv_neurons = sum(int(f.get("foreign_count") or 0)
-                               for (s, t), fl in pair_flows.items()
-                               if t == ds for f in fl)
+            recv_types = recv_types_by_ds.get(ds, set())
+            recv_neurons = (sum(count_types_in_index(
+                indexes[ds], sorted(recv_types)).values())
+                if recv_types else 0)
             issued_types = {f.get("foreign_type") or ""
                             for (s, t), fl in pair_flows.items()
                             if s == ds for f in fl}

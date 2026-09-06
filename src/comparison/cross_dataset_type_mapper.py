@@ -392,8 +392,15 @@ def standardize_bridge(chain, source_dataset: str,
         # crosswalk-arrival chain (e.g. [type, flywireType]): the terminal
         # metadata hop IS the verification linker — a same-name pair is
         # corroborated by the source's crosswalk cell naming the target.
+        # §pooling fix (user 2026-09-07): the linker value is the CELL
+        # content (``via``) — the forward direction has via == value, but
+        # the REVERSE leg's hop value is the arrival (male-cns) type name
+        # while the cell carries the foreign token (e.g. MCNS rows typed
+        # 5thsLNv_LNd6 whose flywireType cell is 's-LNv_a,LNd_a'): using
+        # the arrival name emptied the target-side bodyId pool.
         linkers.append({
-            'column': last['column'], 'value': last['value'],
+            'column': last['column'],
+            'value': last.get("via") or last["value"],
             'home': hop_home(last, source_dataset), 'kind': 'linker',
             'indirect': last['column'] not in registry_columns,
         })
