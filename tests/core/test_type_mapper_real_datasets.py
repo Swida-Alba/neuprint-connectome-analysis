@@ -564,11 +564,16 @@ def test_banc_type_names_route_through_annotations(mapper):
     """
     chains = mapper.get_type_bridges('DNp50', BANC, MCNS)
     assert chains, 'DNp50 (BANC) must route into male-cns'
-    # every chain ends at a male-cns type identity
+    # every chain ends at a male-cns type identity — the arrival is either
+    # the type hop or (PREFERRED, §preference) the crosswalk-arrival hop
+    # whose cell names DNp50
     for chain in chains:
         assert chain[0]['dataset'] == BANC and chain[0]['column'] == 'type'
         assert chain[-1]['dataset'] == MCNS
-        assert chain[-1]['column'] == 'type'
+        assert chain[-1]['column'] in ('type', 'flywireType'), chain
+    # §preference: the crosswalk-verified route wins over the bare
+    # same-name/type arrival
+    assert any(chain[-1]['column'] == 'flywireType' for chain in chains)
     # the surviving chain routes through an annotation linker naming MDN
     assert any(
         any(hop['column'] in ('additional_type(s)', 'Alternative Cell Type(s)')

@@ -2686,16 +2686,6 @@ class CrossDatasetTypeMapper:
         key = self._get_type_mapping_key(namespace)
         neighbors = []
 
-        # Same-name membership in other namespaces (the type columns agree).
-        # Sorted so the derivation walk (and every downstream chain order)
-        # is deterministic across processes.
-        for other_key in sorted(set(self._dataset_types)
-                                | set(self._flywire_primaries)):
-            if other_key == key:
-                continue
-            if name in self._dataset_types.get(other_key, ()) or name in self._flywire_primaries.get(other_key, ()):
-                neighbors.append((other_key, name, "type", name))
-
         # Male-CNS crosswalk cells: every crosswalk edge is licensed by a
         # BRIDGE_SOURCE_MAP entry (§9I) — no hardcoded column/target
         # tuples; the map is the single source of truth for valid bridges.
@@ -2762,8 +2752,12 @@ class CrossDatasetTypeMapper:
                     continue
                 for mcns_type in sorted(
                         self._crosswalk_reverse(column).get(name, ())):
-                    if mcns_type == name:
-                        continue  # same-name identity covers it
+                    # §preference: the SAME-NAME arrival keeps its
+                    # crosswalk-verification edge too — the evidence chain
+                    # (the crosswalk cell naming this very type) must be
+                    # walkable, otherwise a same-name pair can never show
+                    # metadata verification.  The bare same-name hop is
+                    # emitted last (below) and loses the visited race.
                     neighbors.append(
                         (CROSSWALK_HOME, mcns_type, column, name))
         # Cross-namespace annotation-value landing: a token this namespace
@@ -2791,6 +2785,22 @@ class CrossDatasetTypeMapper:
                     or name in self._flywire_alt_to_primary.get(other_key, {}))
                 if in_other:
                     neighbors.append((other_key, name, other_alt, name))
+        # Same-name membership in other namespaces (the type columns agree)
+        # — EMITTED LAST (§preference, user 2026-09-07): a same-name pair
+        # tries to find its metadata bridge FIRST; every evidence edge
+        # above (crosswalk, annotation, reverse-crosswalk, landing) wins
+        # the walk's visited race, so a same-name pair whose crosswalk
+        # cell or annotation cells verify it derives through the EVIDENCE
+        # chain (e.g. FAFB DN1a -> MCNS flywireType 'DN1a'), and the bare
+        # same-name chain is the LAST choice — reached only when no
+        # evidence edge connects the pair.  Sorted so the derivation walk
+        # (and every downstream chain order) stays deterministic.
+        for other_key in sorted(set(self._dataset_types)
+                                | set(self._flywire_primaries)):
+            if other_key == key:
+                continue
+            if name in self._dataset_types.get(other_key, ()) or name in self._flywire_primaries.get(other_key, ()):
+                neighbors.append((other_key, name, "type", name))
         return neighbors
 
     def get_type_bridges(
