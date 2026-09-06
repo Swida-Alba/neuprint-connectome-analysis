@@ -74,15 +74,20 @@ except ImportError:
 
 from .connectivity_profiler import ConnectivityProfile, ConnectivityProfiler, ProfilerConfig, progress_bars_disabled
 from .cross_dataset_type_mapper import CrossDatasetTypeMapper, get_type_mapper
+
+try:
+    from ..utils.naming_utils import canonical_dataset_name
+except ImportError:  # pragma: no cover - direct package imports
+    from utils.naming_utils import canonical_dataset_name
 try:
     from ..visualization_options import default_analysis_skeleton_mesh_simplification
 except ImportError:
     from visualization_options import default_analysis_skeleton_mesh_simplification
 
 try:
-    from ..flywire_ids import is_flywire_dataset
+    from ..flywire_ids import is_flywire_dataset, is_banc_dataset
 except ImportError:
-    from flywire_ids import is_flywire_dataset
+    from flywire_ids import is_flywire_dataset, is_banc_dataset
 
 if TYPE_CHECKING:
     from .connectivity_profiler import ConnectivityStatus
@@ -3326,7 +3331,7 @@ class HomologFinder:
         except ImportError:
             use_polars = False
         
-        safe_name = dataset.replace(':', '_').replace('.', '_')
+        safe_name = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
         src_dir = Path(__file__).parent.parent
         project_root = src_dir.parent
         
@@ -3467,7 +3472,7 @@ class HomologFinder:
         # Clear profiler's connection cache
         try:
             from .connectivity_profiler import _PROFILER_CONN_CACHE
-            safe_name = dataset.replace(':', '_').replace('.', '_')
+            safe_name = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
             if safe_name in _PROFILER_CONN_CACHE:
                 _PROFILER_CONN_CACHE[safe_name] = {}
         except:
@@ -3476,7 +3481,7 @@ class HomologFinder:
         # Clear FNC's module-level cache
         try:
             from coana import _FNC_CACHE
-            safe_name = dataset.replace(':', '_').replace('.', '_')
+            safe_name = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
             if safe_name in _FNC_CACHE:
                 if 'conn_df' in _FNC_CACHE[safe_name]:
                     _FNC_CACHE[safe_name]['conn_df'] = None
@@ -3738,14 +3743,24 @@ class HomologFinder:
         try:
             from ..coana import FindNeuronConnection
             
-            # Determine if this is a FlyWire/local dataset
+            # Determine the dataset family: BANC is its own standalone
+            # source ('banc'), FlyWire/local is 'flywire', everything else
+            # is NeuPrint (§I of the integration plan — BANC must never
+            # present itself as a NeuPrint client).
             is_flywire = is_flywire_dataset(dataset)
+            is_banc = is_banc_dataset(dataset)
+            if is_banc:
+                client_type = 'banc'
+            elif is_flywire:
+                client_type = 'flywire'
+            else:
+                client_type = 'neuprint'
             
             # Create FNC instance with minimal settings
             # Pass token from HomologFinder; FNC handles env vars if empty
             fnc = FindNeuronConnection(
                 dataset=dataset,
-                client_type='flywire' if is_flywire else 'neuprint',
+                client_type=client_type,
                 max_interlayer=-1,  # No connection fetching, just neuron info
                 verbose_mode='silent',
                 token=getattr(self, 'token', '')
@@ -4384,7 +4399,7 @@ class HomologFinder:
     def _get_connection_cache_path(self, dataset: str) -> 'Path':
         """Get path to existing connection cache."""
         from pathlib import Path
-        safe_name = dataset.replace(':', '_').replace('.', '_')
+        safe_name = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
         src_dir = Path(__file__).parent.parent
         project_root = src_dir.parent
         return project_root / 'cache' / safe_name / 'connections.parquet'
@@ -4392,7 +4407,7 @@ class HomologFinder:
     def _get_neuron_index_path(self, dataset: str) -> 'Path':
         """Get path to the app-owned neuron index for type mapping."""
         from pathlib import Path
-        safe_name = dataset.replace(':', '_').replace('.', '_')
+        safe_name = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
         src_dir = Path(__file__).parent.parent
         project_root = src_dir.parent
         return project_root / 'neuron_indexes' / safe_name / 'neuron_index.parquet'
@@ -4426,7 +4441,7 @@ class HomologFinder:
             return self._conn_cache[dataset]
         
         from pathlib import Path
-        safe_name = dataset.replace(':', '_').replace('.', '_')
+        safe_name = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
         src_dir = Path(__file__).parent.parent
         project_root = src_dir.parent
         
@@ -4723,7 +4738,7 @@ class HomologFinder:
             
             # Also clear the module-level cache for this dataset
             # This prevents accumulating large DataFrames across datasets
-            safe_name = dataset.replace(':', '_').replace('.', '_')
+            safe_name = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
             
             # Try clearing from all possible module locations to handle import variations
             modules_to_check = ['coana', 'src.coana', 'src.comparison.coana']
@@ -5305,7 +5320,7 @@ class HomologFinder:
             return cached
 
         labels: set = set()
-        safe_name = key.replace(':', '_').replace('.', '_')
+        safe_name = canonical_dataset_name(key).replace(':', '_').replace('.', '_')
         root = Path(project_root) if project_root \
             else Path(__file__).parent.parent.parent
         candidates = [
@@ -5738,7 +5753,7 @@ class HomologFinder:
                     del source_conn
                     
                     # Also clear FNC's cache for source dataset to free memory
-                    source_safe_name = source_dataset.replace(':', '_').replace('.', '_')
+                    source_safe_name = canonical_dataset_name(source_dataset).replace(':', '_').replace('.', '_')
                     try:
                         from coana import _FNC_CACHE
                         if source_safe_name in _FNC_CACHE:
@@ -8790,7 +8805,7 @@ class HomologFinder:
         
         # Get all available types from the dataset for shuffling
         # We use the type pool from the dataset's connection cache
-        dataset_key = profile.dataset.replace(':', '_').replace('.', '_')
+        dataset_key = canonical_dataset_name(profile.dataset).replace(':', '_').replace('.', '_')
         type_pool = self._get_type_pool(profile.dataset)
         
         if not type_pool:
@@ -8868,7 +8883,7 @@ class HomologFinder:
             List of all unique type names in the dataset
         """
         # Try to get types from the profiler's connection cache
-        dataset_key = dataset.replace(':', '_').replace('.', '_')
+        dataset_key = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
         
         # Check profiler cache first
         from .connectivity_profiler import _PROFILER_CONN_CACHE
@@ -9786,7 +9801,7 @@ class ConnectivityProfileComparer:
             fnc._conn_index_post = {}
             
             # Also clear the module-level cache for this dataset
-            safe_name = self.dataset.replace(':', '_').replace('.', '_')
+            safe_name = canonical_dataset_name(self.dataset).replace(':', '_').replace('.', '_')
             
             modules_to_check = ['coana', 'src.coana', 'src.comparison.coana']
             for mod_name in modules_to_check:
@@ -9971,7 +9986,7 @@ class ConnectivityProfileComparer:
         
         # The profiling dataset may appear under its exact name or the
         # normalized variant (colons/dots replaced by underscores).
-        candidates = {dataset, dataset.replace(':', '_').replace('.', '_')}
+        candidates = {dataset, canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')}
         ds_key = next(
             (k for k in side
              if k not in ('custom_label', 'std_label') and k in candidates),
@@ -9991,7 +10006,7 @@ class ConnectivityProfileComparer:
                 if side_key in ('custom_label', 'std_label'):
                     continue
                 for known_ds in self.datasets:
-                    if side_key in (known_ds, known_ds.replace(':', '_').replace('.', '_')):
+                    if side_key in (known_ds, canonical_dataset_name(known_ds).replace(':', '_').replace('.', '_')):
                         processed_rows = []
                         for row in (rows or []):
                             if isinstance(row, str):
@@ -10059,7 +10074,7 @@ class ConnectivityProfileComparer:
                 first_item = first_item[0] if first_item else "group"
             first = str(first_item).replace('.*', '').replace('*', '')
         
-        first = first.replace(':', '_').replace('.', '_').replace('/', '_')
+        first = canonical_dataset_name(first).replace(':', '_').replace('.', '_').replace('/', '_')
         
         n_items = len(self._custom_group_names) if self._custom_group_names else len(self.query)
         

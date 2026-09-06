@@ -527,7 +527,7 @@ def test_banc_dataset_rejected(monkeypatch):
     monkeypatch.setattr(mc, "is_banc_dataset", lambda d: True)
     with pytest.raises(ValueError, match="BANC"):
         mc.MorphologyProfileComparer(
-            dataset="flywire_BANC_v626", query=["a", "b"])
+            dataset="banc_v626", query=["a", "b"])
 
 
 def test_invalid_method_rejected():

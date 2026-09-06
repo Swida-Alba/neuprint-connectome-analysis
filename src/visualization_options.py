@@ -19,6 +19,12 @@ def default_skeleton_tab_simplification(
     The fast/direct pipeline removes 90% of tube-mesh faces and fine/artistic
     pipelines remove 95%. The same method-specific defaults apply to
     NeuPrint and FlyWire/FAFB tube renders.
+
+    BANC needs no special default: the slider only ever drives the
+    full-resolution sources (FAFB-style 90%), while L2 tubes skip the
+    decimation stage structurally in the BANC render processor — a 0.0
+    default here would leave full-res-only neurons (they exist, e.g. one
+    l-LNv) undecimated.
     """
     pipeline = str(neuprint_skeleton_pipeline or "fast").strip().lower()
     return 0.90 if pipeline in {"fast", "direct"} else 0.95

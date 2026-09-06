@@ -1808,14 +1808,16 @@ class TestFlywireIsolation:
         assert not (cache_dir / "meshes").exists()
         assert not (cache_dir / "skeletons" / "raw_skeletons").exists()
 
-        # BANC is disabled the same way, with its own converter URL
-        with pytest.raises(morph.FlyWireSkeletonAccessError) as banc_exc:
-            morph.download_all_skeletons(
-                "flywire_BANC_v888", project_root=str(tmp_path),
-                max_workers=2, verbose=False)
-        banc_message = str(banc_exc.value)
-        assert "https://codex.flywire.ai/api/download?dataset=banc" in banc_message
-        assert "BANC_file_converter" in banc_message
+        # BANC pulls are allowed: skeletons fetch per-neuron from the
+        # public release bucket. Without local tables there is nothing to
+        # enumerate, so the pull completes with an empty summary (hermetic:
+        # no network access happens).
+        summary = morph.download_all_skeletons(
+            "banc_v888", project_root=str(tmp_path),
+            max_workers=2, verbose=False)
+        assert summary["total"] == 0
+        assert summary["fetched"] == 0
+        assert summary["representation"] == "skeleton"
 
 
 # ---------------------------------------------------------------------------

@@ -75,6 +75,31 @@ def test_banc_neurons_conversion_full(tmp_path):
     assert (df["post"] == 0).all()
 
 
+def test_banc_neurons_cable_length_unit_relabel(tmp_path):
+    """The Codex CSV mislabels micrometre cable lengths as 'Cable length
+    (nm)'; the conversion must emit the honest unit so the Codex fallback
+    path and the bucket-prepared path agree."""
+    read_path = tmp_path / "neurons.csv"
+    read_path.write_text(
+        "\n".join([
+            BANC_NEURON_HEADER + ",Cable length (nm)",
+            "720575940000000001,Unknown,visual,input,,dorsal,ACh,PN,medulla,"
+            "right,315.2",
+        ]),
+        encoding="utf-8",
+    )
+    save_path = tmp_path / "neuron_df.parquet"
+
+    assert banc.process_neurons_to_parquet(
+        str(read_path), str(save_path)) is True
+
+    df = pd.read_parquet(save_path)
+    assert "Cable length (µm)" in df.columns
+    assert "Cable length (nm)" not in df.columns
+    # Values pass through unchanged (they were always micrometres).
+    assert df["Cable length (µm)"].iloc[0] == 315.2
+
+
 def test_banc_neurons_gzip_input(tmp_path):
     read_path = tmp_path / "neurons.csv.gz"
     _write_gz(read_path, _banc_neuron_rows())
@@ -240,7 +265,7 @@ def test_banc_update_post_counts_error(tmp_path):
 
 
 def test_banc_ensure_data_full_pipeline(tmp_path, capsys):
-    dataset_dir = tmp_path / "datasets" / "flywire_BANC_v999"
+    dataset_dir = tmp_path / "datasets" / "banc_v999"
     downloads = dataset_dir / "downloads"
     downloads.mkdir(parents=True)
     _write_gz(downloads / "neurons.csv.gz", _banc_neuron_rows())
@@ -255,12 +280,12 @@ def test_banc_ensure_data_full_pipeline(tmp_path, capsys):
         "720575940000000001,720575940000000002,C,2,GABA",
     ]))
 
-    assert banc.ensure_banc_data("flywire_BANC_v999", str(dataset_dir)) is True
+    assert banc.ensure_banc_data("banc_v999", str(dataset_dir)) is True
 
-    neuron_pq = dataset_dir / "flywire_BANC_v999_allneurons_neuron_df.parquet"
-    conn_pq = dataset_dir / "flywire_BANC_v999_merged_connections.parquet"
+    neuron_pq = dataset_dir / "banc_v999_allneurons_neuron_df.parquet"
+    conn_pq = dataset_dir / "banc_v999_merged_connections.parquet"
     assert neuron_pq.exists() and conn_pq.exists()
-    assert (dataset_dir / "flywire_BANC_v999_allneurons_neuron_df.csv").exists()
+    assert (dataset_dir / "banc_v999_allneurons_neuron_df.csv").exists()
 
     # Post counts were back-filled from the connection weights.
     df = pd.read_parquet(neuron_pq)
@@ -271,17 +296,69 @@ def test_banc_ensure_data_full_pipeline(tmp_path, capsys):
 
     # Second run: everything already present, post counts already populated.
     capsys.readouterr()
-    assert banc.ensure_banc_data("flywire_BANC_v999", str(dataset_dir)) is True
+    assert banc.ensure_banc_data("banc_v999", str(dataset_dir)) is True
     output = capsys.readouterr().out
     assert "Found existing neurons" in output
     assert "Found existing connections" in output
     assert "Post counts already populated" in output
 
 
-def test_banc_ensure_data_missing_files(tmp_path):
-    dataset_dir = tmp_path / "datasets" / "flywire_BANC_v999"
-    assert banc.ensure_banc_data("flywire_BANC_v999", str(dataset_dir)) is False
+def test_banc_ensure_data_missing_files(tmp_path, monkeypatch):
+    # Bucket preparation unavailable (offline): falls back to the manual
+    # Codex instructions and reports failure.  Downloads are stubbed out so
+    # the test stays hermetic.
+    import banc_public_data
+
+    monkeypatch.setattr(banc_public_data, "download_meta_feather",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(banc_public_data, "download_connections_product",
+                        lambda *a, **k: None)
+    dataset_dir = tmp_path / "datasets" / "banc_v999"
+    assert banc.ensure_banc_data("banc_v999", str(dataset_dir)) is False
     assert (dataset_dir / "downloads").is_dir()
+
+
+def test_banc_ensure_data_bucket_path_fills_post_counts(tmp_path, monkeypatch,
+                                                        capsys):
+    """Bucket-prepared tables carry post = 0; the early-return bucket path
+    must still back-fill the column from the merged connections."""
+    import banc_public_data
+
+    dataset_dir = tmp_path / "datasets" / "banc_v999"
+    dataset_dir.mkdir(parents=True)
+
+    def fake_prepare(dataset_name, dir_, project_root=None):
+        dir_ = Path(dir_)
+        pd.DataFrame({
+            "bodyId": ["720575940000000001", "720575940000000002"],
+            "type": ["A", "B"],
+            "post": [0, 0],
+        }).to_parquet(
+            dir_ / f"{dataset_name}_allneurons_neuron_df.parquet",
+            index=False)
+        pd.DataFrame({
+            "bodyId_pre": ["720575940000000002",
+                           "720575940000000002",
+                           "720575940000000001"],
+            "bodyId_post": ["720575940000000001",
+                            "720575940000000001",
+                            "720575940000000002"],
+            "weight": [4, 3, 2],
+        }).to_parquet(
+            dir_ / f"{dataset_name}_merged_connections.parquet",
+            index=False)
+        return True
+
+    monkeypatch.setattr(banc_public_data, "prepare_dataset_tables",
+                        fake_prepare)
+
+    assert banc.ensure_banc_data("banc_v999", str(dataset_dir)) is True
+    df = pd.read_parquet(
+        dataset_dir / "banc_v999_allneurons_neuron_df.parquet")
+    assert df.set_index("bodyId")["post"].to_dict() == {
+        "720575940000000001": 7,
+        "720575940000000002": 2,
+    }
 
 
 # ===========================================================================

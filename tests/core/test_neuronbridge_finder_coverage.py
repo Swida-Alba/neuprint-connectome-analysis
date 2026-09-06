@@ -526,7 +526,7 @@ def test_load_neuron_df_for_dataset_paths(finder, monkeypatch):
     pulled = []
     monkeypatch.setattr(
         finder, "_pull_and_load_dataset", lambda ds: pulled.append(ds))
-    assert finder._load_neuron_df_for_dataset("flywire_BANC_v626") is None
+    assert finder._load_neuron_df_for_dataset("banc_v626") is None
     assert pulled == []
 
     # No datasets_path -> FNC fallback (mocked)

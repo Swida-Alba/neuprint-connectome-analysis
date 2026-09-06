@@ -1041,7 +1041,7 @@ def test_load_flywire_skeletons_batch_cave_fallback(tmp_path, monkeypatch):
                         lambda dataset, body_ids, project_root=None, log=None,
                         denoise_twigs=None: {5: tree})
     out = M.load_flywire_skeletons_batch(
-        "flywire_BANC_v626", [5], project_root=str(tmp_path))
+        "banc_v626", [5], project_root=str(tmp_path))
     assert set(out) == {5} and out[5] is tree
 
 
@@ -1414,6 +1414,7 @@ def test_fetch_skeleton_on_demand_paths(tmp_path, monkeypatch):
 
     monkeypatch.undo()
     monkeypatch.setattr(M, "is_flywire_dataset", lambda ds: False)
+    monkeypatch.setattr(M, "is_banc_dataset", lambda ds: False)
     monkeypatch.setattr(M, "_fetch_cave_skeleton", flaky_cave)
     monkeypatch.setattr(M, "cache_fetched_skeleton_vectors",
                         lambda *a, **k: None)
@@ -1697,9 +1698,14 @@ def test_download_all_fafb_guard_and_mode_aliases(tmp_path, monkeypatch):
     # guard + compatibility-mode aliases are.
     from utils.flywire_readiness import FlyWireSkeletonAccessError
     _downloader_guard(monkeypatch)
-    for dataset in ("FAFB_v783", "fafb", "banc:v1.0"):
+    for dataset in ("FAFB_v783", "fafb"):
         with pytest.raises(FlyWireSkeletonAccessError):
             M.download_all_skeletons(dataset, project_root=str(tmp_path))
+    # BANC pulls are allowed (public-bucket per-neuron fetches); without
+    # local tables there is nothing to enumerate, so it exits early.
+    summary = M.download_all_skeletons(
+        "banc:v1.0", project_root=str(tmp_path), verbose=False)
+    assert summary["total"] == 0
     # compatibility mode aliases are validated before the guard is the only
     # dataset-dependent step; invalid modes raise ValueError (already covered
     # above), valid aliases for a non-FlyWire dataset proceed to the fetch

@@ -178,8 +178,9 @@ class MorphologyProfileComparer:
                 f"Invalid method: {self.method} (vector_v2|nblast)")
         if is_banc_dataset(self.dataset):
             raise ValueError(
-                "BANC morphological comparison is unavailable: FlyWire does "
-                "not provide BANC skeletons.")
+                "BANC morphological comparison is deferred: the public "
+                "L2/full skeletons still need vector-quality validation. "
+                "3D skeleton visualization for BANC is available.")
 
     # ------------------------------------------------------------------ log
     def _log(self, msg: str) -> None:

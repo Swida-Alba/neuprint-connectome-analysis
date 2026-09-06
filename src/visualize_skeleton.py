@@ -8,7 +8,7 @@ of neuron skeletons, synapses, and brain region meshes across multiple connectom
 Supported Datasets
 ------------------
 - **NeuPrint datasets**: hemibrain:v1.2.1, optic-lobe:v1.1, manc:v1.0, male-cns:v0.9
-- **FlyWire/FAFB datasets**: flywire_FAFB_v783, flywire_BANC_v626
+- **FlyWire/FAFB datasets**: flywire_FAFB_v783, banc_v626
 
 Key Features
 ------------
@@ -118,6 +118,11 @@ logging.getLogger("navis").setLevel(logging.ERROR)
 
 import navis.interfaces.neuprint as neu
 from neuprint import Client, fetch_synapse_connections, SynapseCriteria, fetch_meta
+
+try:
+    from .utils.naming_utils import canonical_dataset_name
+except ImportError:  # pragma: no cover - src laid bare on sys.path
+    from utils.naming_utils import canonical_dataset_name
 import plotly.graph_objects as go
 import bokeh.palettes
 
@@ -139,6 +144,9 @@ from utils.flywire_readiness import (
 try:
     from .flywire_ids import (
         body_id_to_api_int,
+        dataset_folder,
+        is_banc_dataset,
+        is_fafb_dataset,
         is_flywire_dataset,
         normalize_flywire_body_id,
         normalize_flywire_body_ids,
@@ -147,6 +155,9 @@ try:
 except ImportError:
     from flywire_ids import (
         body_id_to_api_int,
+        dataset_folder,
+        is_banc_dataset,
+        is_fafb_dataset,
         is_flywire_dataset,
         normalize_flywire_body_id,
         normalize_flywire_body_ids,
@@ -176,6 +187,8 @@ except ImportError:
     )
 try:
     from skeleton_simplification import (
+        BANC_FULL_MIN_KEEP_FACES,
+        BANC_LINE_FULL_NODE_REDUCTION,
         FAFB_FAST_NODE_RETENTION,
         FAFB_LINE_NODE_REDUCTION,
         NEUPRINT_LINE_NODE_REDUCTION,
@@ -183,6 +196,8 @@ try:
     )
 except ImportError:
     from .skeleton_simplification import (
+        BANC_FULL_MIN_KEEP_FACES,
+        BANC_LINE_FULL_NODE_REDUCTION,
         FAFB_FAST_NODE_RETENTION,
         FAFB_LINE_NODE_REDUCTION,
         NEUPRINT_LINE_NODE_REDUCTION,
@@ -1492,7 +1507,9 @@ def dataset_render_space(dataset: str) -> str:
     if 'fafb' in d or ('flywire' in d and 'banc' not in d):
         return 'FLYWIRE'
     if 'banc' in d:
-        return 'FLYWIRE'  # BANC scenes render in the FLYWIRE template today
+        # BANC renders in its native space (public skeleton/ROI products
+        # share one nanometre coordinate frame).
+        return 'BANC'
     if ('male-cns' in d or 'malecns' in d or 'optic' in d):
         return 'JRCFIB2022M'
     if 'hemibrain' in d:
@@ -1503,6 +1520,73 @@ def dataset_render_space(dataset: str) -> str:
         f"No known render space for dataset '{dataset}'; "
         "pass explicit spaces to transform_neurons_to_space instead."
     )
+
+
+def dataset_view_cameras(dataset: str, brain_mesh=None, distance: float = 2.5,
+                         lowercase: bool = False) -> dict:
+    """Per-dataset preset view cameras shared by every export path.
+
+    Single source of truth for the interactive view dropdown, the static
+    PNG view export, the individual-neuron plots, and the video export —
+    previously four hand-copied tables that could (and did) drift.
+
+    Axes per family:
+    - Default: X left-right, Y dorsal-ventral, Z anterior-posterior.
+    - MANC: anterior at +Z (front/back flipped relative to the default).
+    - BANC: AP = Y with anterior at -Y, dorsal at +Z, +X = fly's left.
+    - hemibrain (brain_mesh='template'): rotated into its Y-front frame.
+
+    ``distance`` scales the eye position (the video export varies it);
+    ``lowercase`` yields the 'front'-style keys used by the PNG exports.
+    """
+    def _cam(eye, up):
+        return dict(
+            eye=dict(x=eye[0] * distance, y=eye[1] * distance,
+                     z=eye[2] * distance),
+            center=dict(x=0, y=0, z=0),
+            up=dict(x=up[0], y=up[1], z=up[2]),
+        )
+
+    d = str(dataset or '').lower()
+    if 'banc' in d:
+        table = {
+            'Front': _cam((0, -1, 0), (0, 0, 1)),
+            'Back': _cam((0, 1, 0), (0, 0, 1)),
+            'Top': _cam((0, 0, 1), (0, -1, 0)),
+            'Bottom': _cam((0, 0, -1), (0, -1, 0)),
+            'Left': _cam((1, 0, 0), (0, 0, 1)),
+            'Right': _cam((-1, 0, 0), (0, 0, 1)),
+        }
+    elif 'manc' in d:
+        table = {
+            'Front': _cam((0, 0, 1), (0, -1, 0)),
+            'Back': _cam((0, 0, -1), (0, -1, 0)),
+            'Top': _cam((0, -1, 0), (0, 0, 1)),
+            'Bottom': _cam((0, 1, 0), (0, 0, 1)),
+            'Left': _cam((-1, 0, 0), (0, -1, 0)),
+            'Right': _cam((1, 0, 0), (0, -1, 0)),
+        }
+    elif 'hemibrain' in d and brain_mesh == 'template':
+        table = {
+            'Front': _cam((0, 1, 0), (0, 0, -1)),
+            'Back': _cam((0, -1, 0), (0, 0, -1)),
+            'Top': _cam((0, 0, -1), (0, 1, 0)),
+            'Bottom': _cam((0, 0, 1), (0, 1, 0)),
+            'Left': _cam((-1, 0, 0), (0, 0, -1)),
+            'Right': _cam((1, 0, 0), (0, 0, -1)),
+        }
+    else:
+        table = {
+            'Front': _cam((0, 0, -1), (0, -1, 0)),
+            'Back': _cam((0, 0, 1), (0, -1, 0)),
+            'Top': _cam((0, -1, 0), (0, 0, 1)),
+            'Bottom': _cam((0, 1, 0), (0, 0, -1)),
+            'Left': _cam((-1, 0, 0), (0, -1, 0)),
+            'Right': _cam((1, 0, 0), (0, -1, 0)),
+        }
+    if lowercase:
+        table = {name.lower(): cam for name, cam in table.items()}
+    return table
 
 
 def transform_neurons_to_space(
@@ -1530,7 +1614,29 @@ def transform_neurons_to_space(
     if source_space == target_space:
         return list(navis.NeuronList(neurons))
 
-    path, seq = _registry.shortest_bridging_seq(source_space, target_space)
+    try:
+        path, seq = _registry.shortest_bridging_seq(source_space, target_space)
+    except Exception as exc:
+        # No bridging transform between the two spaces (falls back here
+        # whenever the flybrains registry has no path — e.g. custom or
+        # misspelled template spaces): drop with an explicit warning
+        # instead of raising.
+        dropped = list(neurons or [])
+
+        def _overlay_label(n):
+            identifier = getattr(n, 'id', None)
+            if identifier is None:
+                identifier = getattr(n, 'name', '?')
+            return str(identifier)
+
+        preview = ', '.join(_overlay_label(n) for n in dropped[:10])
+        more = ('' if len(dropped) <= 10
+                else f' … (+{len(dropped) - 10} more)')
+        _vprint_safe(
+            f'  ⚠️ No bridging transform {source_space} -> {target_space} '
+            f'is available ({exc}); {len(dropped)} overlay '
+            f'neuron(s) dropped: {preview}{more}')
+        return []
 
     # TPS target landmarks bound the template space the bridge maps into.
     bounds_lo = bounds_hi = None
@@ -1577,6 +1683,15 @@ def transform_neurons_to_space(
     return out
 
 
+def _banc_volume_from(mesh, name):
+    """navis.Volume from a CloudVolume mesh (vertices/faces arrays)."""
+    import trimesh
+    return navis.Volume(
+        trimesh.Trimesh(vertices=np.asarray(mesh.vertices),
+                        faces=np.asarray(mesh.faces)),
+        name=name)
+
+
 def _vprint_safe(msg: str) -> None:
     """Module-level printer for helper warnings (no VisualizeSkeleton bound)."""
     try:
@@ -1620,7 +1735,7 @@ class VisualizeSkeleton:
     dataset : str, default='hemibrain:v1.2.1'
         Dataset identifier. Supported values:
         - NeuPrint: 'hemibrain:v1.2.1', 'optic-lobe:v1.1', 'manc:v1.0', 'male-cns:v0.9'
-        - FlyWire: 'flywire_FAFB_v783', 'flywire_BANC_v626'
+        - FlyWire: 'flywire_FAFB_v783', 'banc_v626'
     
     neuron_layers : str | list
         Neuron layers to visualize. Can be:
@@ -2562,6 +2677,18 @@ class VisualizeSkeleton:
     For FlyWire/FAFB: Always uses datasets/{dataset}/flywire_FAFB_v783_synapse_table.parquet\n
     '''
     
+    banc_skeleton_resolution: str = 'l2'
+    '''
+    DEPRECATED and ignored: kept for constructor compatibility.
+
+    The BANC skeleton chain is unified — every neuron renders from the
+    888-namespace L2 when it exists, else the 888 full-resolution
+    skeleton, else the v626-era pcg-skel set (scaled to nm).  There is no
+    per-call source selection anymore.
+    '''
+    banc_normalize_radius: bool = True
+    banc_radius_target_nm: float = 120.0
+
     force_API_fetching: bool = False
     '''
     Force fetching skeletons from CAVE API instead of downloaded ZIP files (FAFB only).\n
@@ -2861,39 +2988,21 @@ class VisualizeSkeleton:
         and annotations showing current camera angles. The camera presets are adjusted based on
         the dataset coordinate system.
         """
-        # Define camera positions based on dataset
-        # Default: Standard fly brain - X: Left-Right, Y: Dorsal-Ventral, Z: Anterior-Posterior
-        view_cameras = {
-            'Front': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-            'Back': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-            'Top': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=1)),
-            'Bottom': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
-            'Left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-            'Right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-        }
+        # Per-dataset preset cameras from the shared table (default, MANC,
+        # hemibrain-template, and BANC axis conventions).
+        view_cameras = dataset_view_cameras(self.dataset, self.brain_mesh)
         
-        # Adjust for MANC (Male Adult Nerve Cord)
-        if 'manc' in self.dataset.lower():
-            view_cameras = {
-                'Front': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-                'Back': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-                'Top': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=1)),
-                'Bottom': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=1)),
-                'Left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-                'Right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-            }
-        
-        # Adjust for hemibrain template (JRCFIB2018F)
-        if 'hemibrain' in self.dataset.lower() and self.brain_mesh == 'template':
-            view_cameras = {
-                'Front': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
-                'Back': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
-                'Top': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=1, z=0)),
-                'Bottom': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=1, z=0)),
-                'Left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
-                'Right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
-            }
-        
+        # The exported HTML must OPEN on the Front view; without an initial
+        # scene camera plotly shows its diagonal default, which for BANC
+        # reads as a bottom view.
+        self.fig_3d.update_layout(
+            scene=dict(camera={
+                'eye': view_cameras['Front']['eye'],
+                'up': view_cameras['Front']['up'],
+                'center': view_cameras['Front'].get('center', dict(x=0, y=0, z=0)),
+            })
+        )
+
         # Create dropdown buttons for view selection
         view_buttons = []
         for view_name, camera in view_cameras.items():
@@ -3021,8 +3130,8 @@ class VisualizeSkeleton:
 
         dataset_name = str(dataset or '')
         normalized_dataset = dataset_name.lower()
-        is_fafb = 'fafb' in normalized_dataset
-        is_flywire = 'flywire' in normalized_dataset
+        is_fafb = is_fafb_dataset(dataset_name)
+        is_flywire = is_flywire_dataset(dataset_name)
 
         if is_fafb:
             family = 'FlyWire FAFB'
@@ -3435,8 +3544,7 @@ class VisualizeSkeleton:
             body = source_row.get('bodyId')
             if body is not None and pd.notna(body):
                 base = str(body)
-            is_fafb = ('flywire' in self.dataset.lower()
-                       or 'fafb' in self.dataset.lower())
+            is_fafb = is_flywire_dataset(self.dataset)
             if is_fafb:
                 ntype = None
                 for col in ('flywireType', 'type'):
@@ -5433,8 +5541,8 @@ class VisualizeSkeleton:
             
         if not isinstance(self.client_type, str):
             errors.append(f"client_type must be a string, got {type(self.client_type).__name__}")
-        elif self.client_type not in ('neuprint', 'flywire'):
-            errors.append(f"client_type must be 'neuprint' or 'flywire', got '{self.client_type}'")
+        elif self.client_type not in ('neuprint', 'flywire', 'banc'):
+            errors.append(f"client_type must be 'neuprint', 'flywire' or 'banc', got '{self.client_type}'")
 
         if not isinstance(self.output_format, str):
             errors.append(f"output_format must be a string, got {type(self.output_format).__name__}")
@@ -5919,7 +6027,7 @@ class VisualizeSkeleton:
 
         if not dataset or not bids:
             return None
-        safe_name = str(dataset).replace(':', '_').replace('.', '_')
+        safe_name = canonical_dataset_name(str(dataset)).replace(':', '_').replace('.', '_')
         root = Path(getattr(self, 'script_path', '') or '')
         candidates = [
             root / 'neuron_indexes' / safe_name / 'neuron_index.parquet',
@@ -6145,6 +6253,25 @@ class VisualizeSkeleton:
                 project_root=self.script_path,
                 log=self._vprint,
             )
+
+        # Deprecated BANC resolution knob: normalized for backward
+        # compatibility, but unused — the fetch chain is unified
+        # (888 L2 -> 888 full -> v626 pcg).
+        banc_resolution = str(
+            getattr(self, 'banc_skeleton_resolution', None) or 'l2').strip().lower()
+        if banc_resolution not in ('l2', 'full', 'full_auto'):
+            self._vprint(
+                f"  ⚠️ Invalid banc_skeleton_resolution "
+                f"'{banc_resolution}'; using 'l2'.", level='simple')
+            banc_resolution = 'l2'
+        self.banc_skeleton_resolution = banc_resolution
+        self.banc_normalize_radius = bool(
+            getattr(self, 'banc_normalize_radius', True))
+        try:
+            self.banc_radius_target_nm = max(
+                1.0, float(getattr(self, 'banc_radius_target_nm', 120.0)))
+        except (TypeError, ValueError):
+            self.banc_radius_target_nm = 120.0
         
         # Silence navis INFO messages (like "Use the `.show()` method to plot the figure.")
         # These are not useful for automated visualization and clutter output
@@ -6170,8 +6297,21 @@ class VisualizeSkeleton:
         # Initialize list to store meshes for export
         self.exportable_meshes = []
         
-        # Auto-detect client_type from dataset if not explicitly set to flywire
-        if self.client_type == 'neuprint' and ('flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()):
+        # BANC normalization first (integration plan §I): a standalone
+        # public-bucket source — never present as a NeuPrint or FlyWire
+        # client.  ``is_flywire_dataset`` deliberately includes BANC, so
+        # the BANC check must precede the flywire auto-detect below.
+        if is_banc_dataset(self.dataset):
+            if self.client_type not in ('neuprint', 'banc'):
+                raise ValueError(
+                    f"client_type='{self.client_type}' is not valid for "
+                    f"BANC dataset '{self.dataset}': use 'banc' (the "
+                    f"standalone bucket source) or the default 'neuprint', "
+                    f"which normalizes to it.")
+            if self.client_type != 'banc':
+                self.client_type = 'banc'
+                self._vprint(f"Auto-detected client_type='banc' from dataset '{self.dataset}'", level='full')
+        elif self.client_type == 'neuprint' and is_flywire_dataset(self.dataset):
             self.client_type = 'flywire'
             self._vprint(f"Auto-detected client_type='flywire' from dataset '{self.dataset}'", level='full')
 
@@ -6179,7 +6319,7 @@ class VisualizeSkeleton:
         # morphology.  Synapse caching remains enabled when requested: the
         # local master connection table is the dataset's canonical synapse
         # cache and is also the source for pre/post connector sites.
-        if self.client_type == 'flywire' or 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
+        if self.client_type == 'flywire' or is_flywire_dataset(self.dataset):
             # Raw skeleton pkl caching is disabled (files too large and need transformation anyway)
             if self.cache_neurons:
                 self._vprint("  ℹ️  FlyWire/FAFB: Using mesh cache (simplified) instead of raw skeletons", level='full')
@@ -6188,8 +6328,7 @@ class VisualizeSkeleton:
         # not specified. Fast/direct renders use 90% removal; fine/artistic
         # renders use 95%, for both NeuPrint and FlyWire/FAFB tube renders.
         if self.skeleton_mesh_simplification is None:
-            if ('flywire' in self.dataset.lower()
-                    or 'fafb' in self.dataset.lower()):
+            if is_flywire_dataset(self.dataset):
                 pipeline = self._resolved_fafb_pipeline()
             else:
                 pipeline = self._resolved_neuprint_skeleton_pipeline()
@@ -6204,7 +6343,7 @@ class VisualizeSkeleton:
             )
 
         # Auto-detect version from dataset if not provided
-        if self.client_type == 'flywire' and self.version is None:
+        if self.client_type in ('flywire', 'banc') and self.version is None:
             import re
             # Look for v783 or version 783
             match = re.search(r'v(\d+)', self.dataset)
@@ -6213,7 +6352,10 @@ class VisualizeSkeleton:
                 self._vprint(f"Auto-detected version={self.version} from dataset '{self.dataset}'", level='full')
 
         # Initialize client if needed
-        if self.client_type == 'neuprint':
+        # (belt and suspenders: the 'banc' normalization above already
+        # keeps BANC out — this guard also protects direct constructions
+        # that bypass __post_init__.)
+        if self.client_type == 'neuprint' and not is_banc_dataset(self.dataset):
             import neuprint
             
             # Use provided client if available
@@ -6295,12 +6437,13 @@ class VisualizeSkeleton:
             pass
 
         # Check FlyWire visualization files
-        if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
-            # Ensure data is prepared using the converter
-            dataset_dir = os.path.join(self.script_path, 'datasets', self.dataset)
-            
+        if is_flywire_dataset(self.dataset):
+            # Ensure data is prepared using the converter (canonical folder)
+            dataset_dir = os.path.join(self.script_path, 'datasets',
+                                       dataset_folder(self.dataset))
+
             # Use the converter module to ensure data is ready
-            if 'BANC' in self.dataset:
+            if is_banc_dataset(self.dataset):
                 success = BANC_file_converter.ensure_banc_data(self.dataset, dataset_dir)
             else:
                 success = FAFB_file_converter.ensure_flywire_data(self.dataset, dataset_dir)
@@ -7208,7 +7351,7 @@ class VisualizeSkeleton:
         - cache/hemibrain_v1_2_1/skeletons/raw_skeletons/{bodyId}.swc.zst
         - datasets/flywire_FAFB_v783/flywire_FAFB_v783_synapse_table.parquet
         """
-        dataset_normalized = self.dataset.replace(':', '_').replace('.', '_')
+        dataset_normalized = canonical_dataset_name(self.dataset).replace(':', '_').replace('.', '_')
         cache_dir = os.path.join(self.script_path, 'cache', dataset_normalized, cache_type)
         os.makedirs(cache_dir, exist_ok=True)
         return cache_dir
@@ -7220,7 +7363,7 @@ class VisualizeSkeleton:
         - hemibrain -> HEMI
         - male-cns -> MCNS
         - flywire_FAFB -> FAFB
-        - flywire_BANC -> BANC
+        - banc -> BANC
         - optic-lobe -> OL
         - manc -> MANC
         
@@ -7337,7 +7480,7 @@ class VisualizeSkeleton:
         Returns:
             str: Path to synapse table, or None if not found
         """
-        dataset_normalized = self.dataset.replace(':', '_').replace('.', '_')
+        dataset_normalized = canonical_dataset_name(self.dataset).replace(':', '_').replace('.', '_')
         if is_flywire_dataset(self.dataset):
             # FlyWire-family datasets are independent sources. In particular,
             # a BANC query must never read FAFB synapses merely because the
@@ -7511,7 +7654,7 @@ class VisualizeSkeleton:
         project_root = getattr(
             self, 'script_path', os.path.dirname(os.path.dirname(__file__))
         )
-        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+        dataset_safe = canonical_dataset_name(self.dataset).replace(':', '_').replace('.', '_')
         return fafb_utils.load_extrusion_check_cache(
             project_root, dataset_safe)
     
@@ -7528,7 +7671,7 @@ class VisualizeSkeleton:
         project_root = getattr(
             self, 'script_path', os.path.dirname(os.path.dirname(__file__))
         )
-        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+        dataset_safe = canonical_dataset_name(self.dataset).replace(':', '_').replace('.', '_')
         fafb_utils.save_extrusion_check_cache(
             project_root, dataset_safe, results_dict)
 
@@ -7548,7 +7691,7 @@ class VisualizeSkeleton:
         from fafb_utils import flag_extrusions
 
         project_root = os.path.dirname(os.path.dirname(__file__))
-        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+        dataset_safe = canonical_dataset_name(self.dataset).replace(':', '_').replace('.', '_')
 
         def _vprint_simple(msg):
             self._vprint(msg, level='simple')
@@ -8230,9 +8373,7 @@ class VisualizeSkeleton:
         fetch decision. Mesh-cache hits can still avoid a render fetch when
         that separate mesh cache is explicitly enabled.
         """
-        if ('flywire' in self.dataset.lower()
-                or 'fafb' in self.dataset.lower()
-                or self.client_type == 'flywire'):
+        if is_flywire_dataset(self.dataset) or self.client_type == 'flywire':
             return []
 
         all_fetch_ids = []
@@ -9018,7 +9159,7 @@ class VisualizeSkeleton:
 
             # Compatibility read for API_cache/{bodyId}.pkl produced by older
             # CAVE versions. New writes never target this path.
-            dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+            dataset_safe = canonical_dataset_name(self.dataset).replace(':', '_').replace('.', '_')
             legacy_file = os.path.join(
                 self.script_path, 'cache', dataset_safe, 'API_cache',
                 'skeletons', f'{bid}.pkl')
@@ -9286,7 +9427,7 @@ class VisualizeSkeleton:
                     try:
                         from fafb_utils import set_extrusion_repair_status
 
-                        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+                        dataset_safe = canonical_dataset_name(self.dataset).replace(':', '_').replace('.', '_')
                         set_extrusion_repair_status(
                             self.script_path,
                             dataset_safe,
@@ -9736,7 +9877,7 @@ class VisualizeSkeleton:
             print(f"✓ Fixed and cached {len(neurons)}/{len(body_ids)} FAFB meshes")
             print(
                 "  Cache location: "
-                f"cache/{dataset.replace(':', '_').replace('.', '_')}"
+                f"cache/{canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')}"
                 "/meshes/FLYWIRE_simp95_soma80_r20/"
             )
             print("  These meshes will automatically be preferred over ZIP data")
@@ -9809,7 +9950,7 @@ class VisualizeSkeleton:
         
         # The healed bundle reads .zst first; the ZIP is the fallback
         # with lazy per-skeleton conversion.
-        dataset_clean = dataset.replace(':', '_').replace('.', '_')
+        dataset_clean = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
         skeleton = None
         soma_pos = None
         try:
@@ -10014,6 +10155,298 @@ class VisualizeSkeleton:
                 result['recommendation'] += f' Auto-fix failed: {e}'
         
         return result
+
+    def _resolve_banc_sources(self, body_ids, use_cache=True,
+                              resolution=None):
+        """Resolve per-body BANC sources (public GCS SWCs) for rendering.
+
+        Isolated from the FAFB resolver: BANC has no healed-ZIP bundle, no
+        CAVE/CloudVolume mesh path, and no extrusion machinery — the bucket
+        SWCs are official products.  Sources are the shared raw skeleton
+        cache first (``.swc.zst``, level 0), then the public bucket via the
+        unified chain (888 L2 -> 888 full-resolution -> v626-era pcg-skel).
+        ``resolution`` is accepted for backward compatibility and ignored.
+
+        Returns the ``(sources, skeleton_cache, mesh_cache)`` triple shape
+        of ``_resolve_fafb_sources``; ``mesh_cache`` is always empty because
+        every BANC source is a TreeNeuron.
+        """
+        import banc_public_data
+
+        requested = normalize_flywire_body_ids(body_ids)
+        sources = {}
+        skeleton_cache = {}
+        mesh_cache = {}
+        remaining = list(requested)
+
+        if use_cache and self.cache_neurons:
+            raw_skeletons, missing = self._load_api_cached_skeletons(
+                remaining)
+            for key, neuron in (raw_skeletons or {}).items():
+                canonical = normalize_flywire_body_id(key)
+                sources[canonical] = 'raw_cache'
+                # Cache reloads lose the in-memory resolution attribute;
+                # restore it from the provenance header ('banc_gcs_full')
+                # so full-resolution neurons keep their pipeline stages
+                # (node reduction + decimation) instead of rendering at
+                # raw density as misread L2 sources.
+                if not hasattr(neuron, '_drocat_banc_resolution'):
+                    source = getattr(neuron, '_drocat_source', '') or ''
+                    neuron._drocat_banc_resolution = (
+                        'full' if source.endswith('_full') else 'l2')
+                skeleton_cache[canonical] = neuron
+            remaining = missing
+
+        total = len(remaining)
+        if total:
+            self._vprint(
+                f'  🌐 Fetching {total} BANC skeleton(s) from the public '
+                f'release bucket (L2 -> full -> pcg chain)...', level='simple')
+        for index, body_id in enumerate(remaining, start=1):
+            try:
+                neuron = banc_public_data.fetch_banc_swc(
+                    self.dataset, body_id,
+                    project_root=self.script_path, use_cache=use_cache)
+            except Exception as exc:
+                neuron = None
+                self._vprint(
+                    f'  ⚠️ BANC fetch failed for {body_id}: {exc}',
+                    level='simple')
+            if neuron is None:
+                # ~1.7% of the release (tiny fragments) has no skeleton.
+                self._vprint(
+                    f'  ⚠️ No public skeleton for BANC id {body_id}; skipped',
+                    level='simple')
+                continue
+            canonical = normalize_flywire_body_id(body_id)
+            neuron.id = int(canonical)
+            sources[canonical] = 'banc_gcs'
+            skeleton_cache[canonical] = neuron
+            if index % 25 == 0 or index == total:
+                self._vprint(
+                    f'    fetched {index}/{total} from the public bucket',
+                    level='simple')
+        return sources, skeleton_cache, mesh_cache
+
+    def _process_banc_layer(self, neuron_vols, banc_pipeline,
+                            progress_callback=None):
+        """BANC render processing for one layer (isolated from FAFB).
+
+        Every BANC source is a TreeNeuron from the public SWC bucket.
+        Tube mode: radius repair, navis tube meshing, decimation — the
+        extrusion detect/repair cycle never runs (FAFB thresholds misfire
+        on coarse L2 edge lengths, and CAVE repair does not apply).  Node
+        reduction applies only to full-resolution sources in the fast
+        pipeline; the coarse L2 skeletons already sit at cache density.
+        Line mode: full-resolution sources reduce 50%; L2 sources keep
+        every node.
+        """
+        report = progress_callback or (lambda *a, **k: None)
+
+        def stage_log(message):
+            if progress_callback is None:
+                self._vprint(message, level='full', use_tqdm=True)
+
+        def is_full_resolution(neuron):
+            return getattr(neuron, '_drocat_banc_resolution', 'l2') == 'full'
+
+        def normalize_radii(work):
+            """Rescale radii so the neuron's median maps onto the shared
+            BANC target.  The release products carry inconsistent calibers
+            per neuron (l-LNv L2 median 172 nm vs aMe12 skeleton 50 nm),
+            which rendered as visibly mismatched tube thicknesses inside
+            one scene.  Disable via banc_normalize_radius=False."""
+            if not self.banc_normalize_radius:
+                return
+            if not (hasattr(work, 'nodes')
+                    and 'radius' in work.nodes.columns):
+                return
+            radii = work.nodes['radius'].to_numpy(dtype=float)
+            positive = radii[radii > 0]
+            if not len(positive):
+                return
+            median_r = float(np.median(positive))
+            if median_r <= 0:
+                return
+            scale = float(self.banc_radius_target_nm) / median_r
+            if abs(scale - 1.0) > 0.05:  # skip near-identity rescales
+                work.nodes['radius'] = radii * scale
+
+        def repair_radii(work):
+            if hasattr(work, 'nodes') and 'radius' in work.nodes.columns:
+                invalid_mask = (
+                    (work.nodes['radius'] <= 0)
+                    | (work.nodes['radius'].isna()))
+                if invalid_mask.any():
+                    work.nodes.loc[invalid_mask, 'radius'] = 1
+            elif hasattr(work, 'nodes'):
+                work.nodes['radius'] = 1
+
+        if self.skeleton_mode == 'tube':
+            target_simp = self.skeleton_mesh_simplification
+            soma_simp = self.soma_mesh_simplification
+            use_soma_aware = (
+                soma_simp is not None and soma_simp != target_simp)
+            decimator = (
+                self._simplify_mesh_vertex_clustering
+                if banc_pipeline == 'artistic'
+                else self._simplify_mesh_fafb_fine)
+
+            all_mesh_neurons = []
+            neurons_list = []
+            if neuron_vols is not None and len(neuron_vols) > 0:
+                neurons_list = (
+                    list(neuron_vols)
+                    if isinstance(neuron_vols, navis.NeuronList)
+                    else [neuron_vols])
+            for n in neurons_list:
+                neuron_id = getattr(n, 'id', None)
+                report(neuron_id, 'prepare')
+                work = n
+                if (banc_pipeline == 'fast'
+                        and isinstance(n, navis.TreeNeuron)
+                        and is_full_resolution(n)):
+                    # Full-resolution SWCs get the FAFB-style node stage;
+                    # coarse L2 sources already are the cache-level product.
+                    try:
+                        report(neuron_id, 'reduce nodes')
+                        work, stats = simplify_skeleton_nodes(
+                            n, 1.0 - FAFB_FAST_NODE_RETENTION)
+                        stage_log(
+                            f'  🔽 reduce nodes {neuron_id} '
+                            f'{stats["raw_nodes"]}→{stats["achieved_nodes"]}')
+                    except Exception as exc:
+                        self._vprint(
+                            f'  ⚠️ node reduction failed for '
+                            f'{neuron_id}: {exc}', level='full',
+                            use_tqdm=True)
+                repair_radii(work)
+                normalize_radii(work)
+
+                if isinstance(work, navis.TreeNeuron):
+                    try:
+                        report(neuron_id, 'tube mesh')
+                        mesh_n = navis.conversion.tree2meshneuron(
+                            work, tube_points=self.SKELETON_TUBE_POINTS)
+                        stage_log(f'  🧪 tube mesh {neuron_id}')
+                    except Exception as exc:
+                        self._vprint(
+                            f'  ⚠️ tube mesh failed for {neuron_id}: {exc}',
+                            level='full', use_tqdm=True)
+                        all_mesh_neurons.append(n)
+                        report(neuron_id, 'ready', done=True)
+                        continue
+                else:
+                    mesh_n = work
+
+                if getattr(mesh_n, 'trimesh', None) is not None:
+                    n_faces = len(mesh_n.trimesh.faces)
+                    # L2 tubes are already the cache-level product: they
+                    # skip face decimation entirely (the default 90% pass
+                    # is what made L2 renders sketchy).  Only
+                    # full-resolution sources get the pipeline decimation.
+                    if not is_full_resolution(n):
+                        stage_log(f'  ℹ️ L2 tube kept as-is {neuron_id} '
+                                  f'({n_faces} faces)')
+                        # Keep the per-neuron identity: downstream color
+                        # and legend mapping key off the mesh id/name
+                        # (meshing may not carry it over).
+                        mesh_n.id = getattr(n, 'id', None)
+                        if hasattr(n, 'name'):
+                            mesh_n.name = n.name
+                        all_mesh_neurons.append(mesh_n)
+                        report(neuron_id, 'ready', done=True)
+                        continue
+                    soma_pos = getattr(work, 'soma_pos', None)
+                    target_faces = max(
+                        100, int(n_faces * (1 - target_simp)))
+                    # Plan §B safety floor: however aggressive the slider,
+                    # a full-resolution tube never keeps fewer than this
+                    # many faces (L2 sources skip decimation entirely).
+                    target_faces = max(
+                        target_faces,
+                        min(BANC_FULL_MIN_KEEP_FACES, n_faces))
+                    if target_faces >= n_faces:
+                        # The slider asks for no reduction (an explicit 0.0
+                        # override): the tube product is final.  Keep the
+                        # per-neuron identity like both sibling paths —
+                        # downstream color and legend mapping key off the
+                        # mesh id/name (meshing may not carry it over).
+                        mesh_n.id = getattr(n, 'id', None)
+                        if hasattr(n, 'name'):
+                            mesh_n.name = n.name
+                        all_mesh_neurons.append(mesh_n)
+                        report(neuron_id, 'ready', done=True)
+                        continue
+                    try:
+                        if (banc_pipeline in {'fine', 'artistic'}
+                                and use_soma_aware
+                                and soma_pos is not None):
+                            report(neuron_id, 'decimate')
+                            simplified = (
+                                self._simplify_mesh_with_soma_awareness(
+                                    mesh_n.trimesh,
+                                    skeleton_simp=target_simp,
+                                    soma_simp=soma_simp,
+                                    soma_pos=soma_pos,
+                                    soma_radius=self.soma_region_radius,
+                                    decimator=decimator,
+                                ))
+                        else:
+                            report(neuron_id, 'decimate')
+                            simplified = decimator(mesh_n.trimesh,
+                                                   target_faces)
+                        stage_log(f'  ⚡ decimate {neuron_id}')
+                    except Exception as exc:
+                        self._vprint(
+                            f'  ⚠️ decimation failed for {neuron_id}: {exc}',
+                            level='full', use_tqdm=True)
+                        simplified = mesh_n.trimesh
+                    mesh_n = navis.MeshNeuron(simplified)
+                    mesh_n.id = getattr(n, 'id', None)
+                    if hasattr(n, 'name'):
+                        mesh_n.name = n.name
+                all_mesh_neurons.append(mesh_n)
+                report(neuron_id, 'ready', done=True)
+
+            if all_mesh_neurons:
+                neuron_vols = navis.NeuronList(all_mesh_neurons)
+            # BANC tubes are built + decimated here; skip the generic block.
+            return neuron_vols, True
+
+        if self.skeleton_mode == 'line':
+            prepared_lines = []
+            neurons_list = []
+            if neuron_vols is not None and len(neuron_vols) > 0:
+                neurons_list = (
+                    list(neuron_vols)
+                    if isinstance(neuron_vols, navis.NeuronList)
+                    else [neuron_vols])
+            for n in neurons_list:
+                neuron_id = getattr(n, 'id', None)
+                if isinstance(n, navis.TreeNeuron) and is_full_resolution(n):
+                    try:
+                        report(neuron_id, 'reduce nodes')
+                        work, stats = simplify_skeleton_nodes(
+                            n, BANC_LINE_FULL_NODE_REDUCTION)
+                        stage_log(
+                            f'  🔽 reduce nodes {neuron_id} '
+                            f'{stats["raw_nodes"]}→{stats["achieved_nodes"]}')
+                        prepared_lines.append(work)
+                    except Exception as exc:
+                        self._vprint(
+                            f'  ⚠️ line node reduction failed for '
+                            f'{neuron_id}: {exc}', level='full',
+                            use_tqdm=True)
+                        prepared_lines.append(n)
+                else:
+                    prepared_lines.append(n)
+                report(neuron_id, 'ready', done=True)
+            if prepared_lines:
+                neuron_vols = navis.NeuronList(prepared_lines)
+            return neuron_vols, False
+
+        return neuron_vols, False
 
     def _process_fafb_layer(self, neuron_vols, cached_mesh_neurons,
                             fafb_pipeline, use_fafb_cache,
@@ -10344,6 +10777,7 @@ class VisualizeSkeleton:
         # - simplification=0.95 (keep 5%): load from cache (5%), no additional simplification needed
         # - simplification=0.5 (keep 50%): cannot use cache (only has 10%), load from ZIP and apply 0.5 simplification
         is_fafb = is_flywire_dataset(self.dataset)
+        is_banc = is_banc_dataset(self.dataset)
         neuprint_pipeline = self._resolved_neuprint_skeleton_pipeline()
         use_neuprint_fine_pipeline = (
             not is_fafb
@@ -10360,13 +10794,16 @@ class VisualizeSkeleton:
         # and the render target at/above the prepared cache level (0.95).
         # Line mode disables the prepared mesh cache entirely.
         use_fafb_cache = (
-            is_fafb and self.skeleton_mode == 'tube' and self.cache_neurons
+            is_fafb and not is_banc
+            and self.skeleton_mode == 'tube' and self.cache_neurons
             and self.skeleton_mesh_simplification
             >= self.FAFB_MESH_CACHE_SIMPLIFICATION
         )
 
-        # Check for force_API_fetching - bypasses ZIP loading for FAFB
-        use_api_fetching = is_fafb and self.force_API_fetching
+        # Check for force_API_fetching - bypasses ZIP loading for FAFB.
+        # BANC always fetches from the public bucket, so the CAVE override
+        # does not apply.
+        use_api_fetching = is_fafb and not is_banc and self.force_API_fetching
 
         # FAFB source resolution: SWC-first for every render mode.
         # skeleton_cache holds TreeNeuron sources (ZIP / raw SWC cache),
@@ -10397,13 +10834,24 @@ class VisualizeSkeleton:
             else:
                 self._vprint(f'  ℹ️  FAFB prepared mesh cache bypassed (SWC-first sources only)', level='full')
 
-            fafb_sources, fafb_skeleton_cache, fafb_mesh_cache = (
-                self._resolve_fafb_sources(
-                    all_fafb_body_ids,
-                    allow_mesh_cache=use_fafb_cache,
-                    api_only=use_api_fetching,
+            if is_banc:
+                # BANC resolves through its own public-bucket path; the
+                # FAFB resolver (healed ZIP / CAVE / extrusion repair) is
+                # never touched.
+                fafb_sources, fafb_skeleton_cache, fafb_mesh_cache = (
+                    self._resolve_banc_sources(
+                        all_fafb_body_ids,
+                        use_cache=bool(self.cache_neurons),
+                    )
                 )
-            )
+            else:
+                fafb_sources, fafb_skeleton_cache, fafb_mesh_cache = (
+                    self._resolve_fafb_sources(
+                        all_fafb_body_ids,
+                        allow_mesh_cache=use_fafb_cache,
+                        api_only=use_api_fetching,
+                    )
+                )
 
         
         # NeuPrint fine/artistic rendering never loads or writes a transformed
@@ -10419,7 +10867,7 @@ class VisualizeSkeleton:
         neuprint_prepared_skeletons = {}
         neuprint_prepared_mesh = False
         neuprint_preprocessing_active = (
-            not is_fafb and self.client_type != 'flywire')
+            self.client_type == 'neuprint' and not is_fafb)
         if neuprint_preprocessing_active:
             neuprint_prepared_skeletons, neuprint_prepared_mesh = (
                 self._prepare_neuprint_skeletons_for_render(
@@ -10748,7 +11196,15 @@ class VisualizeSkeleton:
             # FAFB processing is pipeline-driven from the resolved per-body
             # sources (see _process_fafb_layer for the per-pipeline rules).
             fafb_already_simplified = False
-            if is_fafb:
+            if is_banc:
+                neuron_vols, fafb_already_simplified = (
+                    self._process_banc_layer(
+                        neuron_vols,
+                        fafb_pipeline,
+                        progress_callback=report_fafb_progress,
+                    )
+                )
+            elif is_fafb:
                 neuron_vols, fafb_already_simplified = (
                     self._process_fafb_layer(
                         neuron_vols,
@@ -11666,7 +12122,7 @@ class VisualizeSkeleton:
         # FlyWire/FAFB have one dataset-native paired synapse table.  It is
         # the synapse cache source, not a skeleton/mesh cache, and the reader
         # applies the same column/coordinate normalization used everywhere.
-        if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
+        if is_flywire_dataset(self.dataset):
             frame = self._read_flywire_connection_frame(
                 source_ids=source_ids, target_ids=target_ids)
             return (
@@ -11707,7 +12163,7 @@ class VisualizeSkeleton:
         """
         if not self.cache_synapses:
             return
-        if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
+        if is_flywire_dataset(self.dataset):
             # The dataset-native master table is already the canonical
             # FlyWire synapse cache; do not duplicate it into pair files.
             return
@@ -11735,9 +12191,52 @@ class VisualizeSkeleton:
         # rather than the paired inter-layer synapses; it bypasses the adjacent
         # layer loop and returns its own export.
         if self.synapse_mode == 'pre_post':
+            if is_banc_dataset(self.dataset):
+                self._vprint(
+                    '⚠️  pre/post site mode needs post-site coordinates, '
+                    'which the BANC release does not publish. Use the '
+                    'scatter/sphere mode to draw pre-synaptic site markers '
+                    'instead.', level='always')
+                return
             return self._plot_pre_post_sites()
 
         synapse_frames = []
+
+        if is_banc_dataset(self.dataset):
+            # One-time preparation: download the release per-synapse table
+            # (resumable) and derive the per-pair table the reader consumes.
+            from banc_public_data import ensure_synapse_derived_table
+
+            banc_dataset_dir = os.path.join(
+                self.script_path, 'datasets',
+                canonical_dataset_name(self.dataset).replace(':', '_').replace('.', '_'))
+            self._vprint('  🌐 Checking the BANC per-synapse table '
+                         '(first use downloads ~3.9 GB from the public '
+                         'bucket)...', level='simple')
+            try:
+                banc_synapse_ok = ensure_synapse_derived_table(
+                    self.dataset, banc_dataset_dir,
+                    project_root=self.script_path)
+            except Exception as exc:
+                banc_synapse_ok = False
+                self._vprint(f'  ⚠️ BANC synapse table preparation failed: '
+                             f'{exc}', level='simple')
+            if not banc_synapse_ok:
+                self._vprint(
+                    '  ⚠️ BANC synapse table unavailable; skipping synapse '
+                    'plotting for this run.', level='simple')
+                return
+            # The release provides only pre-site coordinates, so markers are
+            # drawn at the pre-synaptic site (scatter) regardless of the
+            # requested shape.
+            if self.synapse_mode not in ('scatter',):
+                self._vprint(
+                    '  ℹ️  BANC release provides pre-synaptic site '
+                    'coordinates only: rendering pre-site markers '
+                    '(scatter) instead of '
+                    f"'{self.synapse_mode}'.", level='simple')
+                self.synapse_mode = 'scatter'
+
         for i in range(len(self.neuron_layers) - 1):
             source_criteria = self.layer_criteria[i]
             target_criteria = self.layer_criteria[i + 1]
@@ -11746,7 +12245,10 @@ class VisualizeSkeleton:
             conn_df = None
 
             # --- Begin FlyWire/NeuPrint synapse loading logic ---
-            if self.client_type == 'flywire':
+            # BANC shares the flywire-shaped local synapse-table reader
+            # (its synapse product follows the same fallback-name probe)
+            # even though its client_type is the standalone 'banc'.
+            if self.client_type in ('flywire', 'banc'):
                 source_ids = set(self.neuron_dfs[i]['bodyId'].astype(str))
                 target_ids = set(self.neuron_dfs[i + 1]['bodyId'].astype(str))
                 # All FlyWire/FAFB connector consumers use this one
@@ -11758,7 +12260,7 @@ class VisualizeSkeleton:
                 if conn_df is None:
                     dataset_dir = os.path.join(
                         self.script_path, 'datasets',
-                        self.dataset.replace(':', '_').replace('.', '_'))
+                        canonical_dataset_name(self.dataset).replace(':', '_').replace('.', '_'))
                     self._vprint(
                         f"  ⚠️ Synapse table not found or unreadable for "
                         f"dataset '{self.dataset}'.",
@@ -11877,7 +12379,7 @@ class VisualizeSkeleton:
                 
                 # Apply FAFB tilt correction if using template mode
                 # This corrects the left-right tilt in the FLYWIRE template mesh
-                is_fafb = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
+                is_fafb = is_flywire_dataset(self.dataset) and not is_banc_dataset(self.dataset)
                 if is_fafb and self.brain_mesh == 'template':
                     xyz_df = self._apply_fafb_tilt_correction(xyz_df)
                 
@@ -12013,7 +12515,7 @@ class VisualizeSkeleton:
                 
                 # Apply FAFB tilt correction if using template mode
                 # This corrects the left-right tilt in the FLYWIRE template mesh
-                is_fafb = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
+                is_fafb = is_flywire_dataset(self.dataset)
                 if is_fafb and self.brain_mesh == 'template':
                     pre_coords = self._apply_fafb_tilt_correction(pre_coords)
                     post_coords = self._apply_fafb_tilt_correction(post_coords)
@@ -12296,7 +12798,7 @@ class VisualizeSkeleton:
         )
         parquet_file = self._get_synapse_table_path()
         if parquet_file is None:
-            dataset_normalized = self.dataset.replace(':', '_').replace('.', '_')
+            dataset_normalized = canonical_dataset_name(self.dataset).replace(':', '_').replace('.', '_')
             dataset_dir = os.path.join(self.script_path, 'datasets', dataset_normalized)
             candidate = os.path.join(
                 dataset_dir, f"{dataset_normalized}_synapse_table.parquet")
@@ -12521,7 +13023,7 @@ class VisualizeSkeleton:
 
         frames = []
         layer_count = len(self.neuron_layers)
-        if self.client_type == 'flywire':
+        if self.client_type in ('flywire', 'banc'):
             if layer_count > 1:
                 for index in range(layer_count - 1):
                     source_ids = {
@@ -12659,7 +13161,7 @@ class VisualizeSkeleton:
             return None, None
         layer_ids = set(str(b) for b in ndf['bodyId'].tolist())
 
-        if self.client_type == 'flywire':
+        if self.client_type in ('flywire', 'banc'):
             site_df = self._read_flywire_site_frame(layer_ids)
         else:
             site_df = self._fetch_neuprint_site_frame(layer_idx, layer_ids)
@@ -12751,7 +13253,7 @@ class VisualizeSkeleton:
             template_info = self._get_template_info()
             with self._suppress_output():
                 coords = navis.xform_brain(coords, source=template_info['source'], target=template_info['target'])
-        is_fafb = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
+        is_fafb = is_flywire_dataset(self.dataset)
         if is_fafb and self.brain_mesh == 'template':
             coords = self._apply_fafb_tilt_correction(coords)
         return site_df.assign(x=coords['x'], y=coords['y'], z=coords['z'])
@@ -13155,7 +13657,7 @@ class VisualizeSkeleton:
         - navis mesh handling: https://navis.readthedocs.io/en/latest/source/api.html#navis.Volume
         - mesh compression: use navis.Volume.to_json() with compression for storage optimization
         """
-        dataset_normalized = self.dataset.replace(':', '_').replace('.', '_')
+        dataset_normalized = canonical_dataset_name(self.dataset).replace(':', '_').replace('.', '_')
         cache_mesh_dir = os.path.join(self.script_path, 'cache', dataset_normalized, 'meshes')
         os.makedirs(cache_mesh_dir, exist_ok=True)
         return cache_mesh_dir
@@ -14089,7 +14591,7 @@ class VisualizeSkeleton:
         
         # Get available ROIs if not provided
         if available_rois is None:
-            is_fafb = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
+            is_fafb = is_flywire_dataset(self.dataset) and not is_banc_dataset(self.dataset)
             if is_fafb:
                 malecns_cache = os.path.join(self.script_path, 'cache', 'male-cns_v0_9', 'available_rois.json')
                 if os.path.exists(malecns_cache):
@@ -14171,10 +14673,10 @@ class VisualizeSkeleton:
         keyword remains complete and deterministic in offline runs; FlyWire
         ROI meshes use the male-cns metadata as their backend does.
         """
-        dataset_normalized = self.dataset.replace(':', '_').replace('.', '_')
+        dataset_normalized = canonical_dataset_name(self.dataset).replace(':', '_').replace('.', '_')
         folders = [dataset_normalized]
         dataset_lower = str(self.dataset).lower()
-        if 'flywire' in dataset_lower or 'fafb' in dataset_lower:
+        if is_flywire_dataset(self.dataset) and not is_banc_dataset(self.dataset):
             folders = ['male-cns_v0_9', 'male-cns_v1_0', *folders]
 
         for folder in folders:
@@ -14391,7 +14893,7 @@ class VisualizeSkeleton:
         - neuprint-python API: https://github.com/connectome-neuprint/neuprint-python
         """
         # Cache file path in organized cache/ structure
-        dataset_normalized = self.dataset.replace(':', '_').replace('.', '_')
+        dataset_normalized = canonical_dataset_name(self.dataset).replace(':', '_').replace('.', '_')
         cache_dir = os.path.join(self.script_path, 'cache', dataset_normalized)
         cache_file = os.path.join(cache_dir, 'available_rois.json')
         
@@ -14408,8 +14910,24 @@ class VisualizeSkeleton:
         
         # Fetch from NeuPrint API
         if fetch_online:
+            # BANC: the public region_outlines layer lists every named
+            # region (plus the aggregate outlines) — no NeuPrint involved.
+            if is_banc_dataset(self.dataset):
+                import json as _json
+                region_map = self._get_banc_region_map()
+                roi_list = sorted(region_map)
+                if roi_list:
+                    try:
+                        os.makedirs(cache_dir, exist_ok=True)
+                        with open(cache_file, 'w') as f:
+                            _json.dump(roi_list, f, indent=2)
+                    except Exception as e:
+                        self._vprint(f'⚠️ Failed to cache ROI list: {e}',
+                                     level='full')
+                return roi_list
+
             # Special handling for FlyWire/FAFB: Do not use API, use local primary_rois or hemibrain cache
-            if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
+            if is_flywire_dataset(self.dataset):
                 self._vprint('ℹ️  FlyWire/FAFB dataset detected: Skipping online API fetch for ROIs.', level='full')
                 self._vprint('   Scanning local ROI meshes...', level='full')
                 
@@ -14560,7 +15078,7 @@ class VisualizeSkeleton:
         
         # Only hemibrain and FAFB with brain_mesh='whole' require H5 transforms
         is_hemibrain = 'hemibrain' in dataset_lower
-        is_fafb = 'flywire' in dataset_lower or 'fafb' in dataset_lower
+        is_fafb = is_flywire_dataset(dataset_lower)
         
         if not (is_hemibrain or is_fafb):
             return
@@ -14697,7 +15215,7 @@ class VisualizeSkeleton:
         
         # FlyWire/FAFB with brain_mesh='whole' requires H5 transforms
         # because it needs to go from FAFB to JRC2018F (involves H5transform)
-        if ('flywire' in dataset_lower or 'fafb' in dataset_lower) and self.brain_mesh == 'whole':
+        if (is_flywire_dataset(dataset_lower)) and self.brain_mesh == 'whole':
             return True
         
         # All other cases use only affine transforms or no transforms:
@@ -14729,7 +15247,7 @@ class VisualizeSkeleton:
         import numpy as np
         
         # Check if correction is needed
-        is_fafb = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
+        is_fafb = is_flywire_dataset(self.dataset) and not is_banc_dataset(self.dataset)
         if not is_fafb or self.brain_mesh != 'template':
             return np.eye(4)  # Return identity - no correction needed
         
@@ -14814,7 +15332,7 @@ class VisualizeSkeleton:
         import numpy as np
         
         # Check if correction is needed
-        is_fafb = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
+        is_fafb = is_flywire_dataset(self.dataset) and not is_banc_dataset(self.dataset)
         if not is_fafb or self.brain_mesh != 'template' or not self.FAFB_template_correction:
             return obj  # No correction needed
         
@@ -14881,6 +15399,272 @@ class VisualizeSkeleton:
             self._vprint(f'⚠️  Failed to apply FAFB tilt correction: {e}', level='full')
             return obj
     
+    # BANC mesh-cache products whose names are plain, unique, and never
+    # case-collide: they use clean filenames instead of the generic
+    # lowercase encoding that spelled 'BANC_outline' as
+    # 'BANC__o_u_t_l_i_n_e.json'.
+    _BANC_CLEAN_NAMED_MESHES = frozenset({
+        'BANC_outline', 'BANC_outline_full', 'BANC_neuropil',
+        'BANC_brain_neuropil', 'BANC_vnc_neuropil',
+    })
+
+    def _banc_mesh_file_path(self, mesh_dir: str, roi_name: str) -> str:
+        """Cache path for one BANC region mesh (with legacy migration).
+
+        The aggregate products use their plain names — unique and never
+        case-colliding — instead of the generic per-lowercase-letter
+        encoding meant for NeuPrint ROI names like 'aL(L)' vs 'AL(L)'.
+        Cache files written with the old encoding are renamed in place on
+        first touch.
+        """
+        if roi_name in self._BANC_CLEAN_NAMED_MESHES:
+            clean = os.path.join(mesh_dir, roi_name + '.json')
+            legacy = os.path.join(mesh_dir, self._roi_to_filename(roi_name))
+            if not os.path.exists(clean) and os.path.exists(legacy):
+                try:
+                    os.replace(legacy, clean)
+                except OSError:
+                    return legacy
+            return clean
+        return self._get_mesh_file_path(mesh_dir, roi_name)
+
+    def _load_banc_region_mesh_json(self, roi_name):
+        """Load a cached BANC region mesh json as navis.Volume, or None."""
+        import json as _json
+
+        mesh_dir = self._get_dataset_mesh_dir()
+        mesh_file = self._banc_mesh_file_path(mesh_dir, roi_name)
+        if not os.path.exists(mesh_file):
+            return None
+        try:
+            with open(mesh_file, 'r') as handle:
+                payload = _json.load(handle)
+            vertices = np.asarray(payload['vertices'], dtype=float)
+            faces = np.asarray(payload['faces'], dtype=np.int64)
+            import trimesh
+            return navis.Volume(
+                trimesh.Trimesh(vertices=vertices, faces=faces),
+                name=roi_name)
+        except Exception as exc:
+            self._vprint(f'  ⚠️ Could not load BANC region {roi_name}: {exc}',
+                         level='full')
+            return None
+
+    def _store_banc_region_mesh_json(self, roi_name, vertices, faces) -> bool:
+        """Cache a BANC region mesh as json for reuse."""
+        import json as _json
+
+        try:
+            mesh_dir = self._get_dataset_mesh_dir()
+            os.makedirs(mesh_dir, exist_ok=True)
+            mesh_file = self._banc_mesh_file_path(mesh_dir, roi_name)
+            payload = {
+                'vertices': np.asarray(vertices).tolist(),
+                'faces': np.asarray(faces).tolist(),
+            }
+            with open(mesh_file, 'w') as handle:
+                _json.dump(payload, handle)
+            return True
+        except Exception as exc:
+            self._vprint(f'  ⚠️ Could not cache BANC region {roi_name}: {exc}',
+                         level='full')
+            return False
+
+    def _banc_outline_face_count(self, volume) -> int:
+        try:
+            return len(volume.faces)
+        except (TypeError, AttributeError):
+            return 0
+
+    def _decimate_banc_outline_volume(self, volume):
+        """Return (render, full) outline products: render ≈100k faces (the
+        JRCFIB2022M template reference density), full untouched."""
+        max_faces = 100_000
+        if self._banc_outline_face_count(volume) <= max_faces:
+            return volume, volume
+        tm = getattr(volume, 'trimesh', None)
+        if tm is None:
+            tm = getattr(volume, 'mesh', None)
+        if tm is None:
+            import trimesh
+            tm = trimesh.Trimesh(vertices=np.asarray(volume.vertices),
+                                 faces=np.asarray(volume.faces))
+        simplified = self._simplify_mesh_open3d(tm, max_faces)
+        render = navis.Volume(simplified, name=volume.name)
+        self._vprint(
+            f'  ℹ️  BANC outline decimated for rendering '
+            f'({self._banc_outline_face_count(volume):,} -> '
+            f'{len(simplified.faces):,} faces); full resolution kept in '
+            'BANC_outline_full.json.', level='full')
+        return render, volume
+
+    def _get_banc_region_volume(self, roi_name, segid):
+        """Fetch (with cache) one region_outlines mesh as a navis.Volume.
+
+        The public region_outlines layer stores nanometre coordinates — the
+        same frame as the public SWCs — so no scaling or transform applies.
+        The whole-CNS outline ('BANC_outline') is cached as a pair,
+        mirroring how flybrains ships template meshes pre-decimated: the
+        render-sized product (~100k faces) under the standard name and the
+        untouched full-resolution mesh under ``BANC_outline_full``.
+        """
+        cached = self._load_banc_region_mesh_json(roi_name)
+        if cached is not None:
+            if (roi_name == 'BANC_outline'
+                    and self._banc_outline_face_count(cached) > 150_000):
+                # Self-heal caches written before the render/full split.
+                render, full = self._decimate_banc_outline_volume(cached)
+                self._store_banc_region_mesh_json(
+                    'BANC_outline_full', full.vertices, full.faces)
+                self._store_banc_region_mesh_json(
+                    'BANC_outline', render.vertices, render.faces)
+                return render
+            return cached
+        try:
+            from cloudvolume import CloudVolume
+            from banc_public_data import REGION_OUTLINES_URL
+
+            cv = CloudVolume(REGION_OUTLINES_URL, cache=False)
+            mesh = cv.mesh.get(segid)
+            if mesh is None or len(getattr(mesh, 'vertices', [])) == 0:
+                return None
+            if roi_name == 'BANC_outline':
+                render, full = self._decimate_banc_outline_volume(
+                    _banc_volume_from(mesh, roi_name))
+                self._store_banc_region_mesh_json(
+                    'BANC_outline_full', full.vertices, full.faces)
+                self._store_banc_region_mesh_json(
+                    roi_name, render.vertices, render.faces)
+                return render
+            self._store_banc_region_mesh_json(roi_name, mesh.vertices, mesh.faces)
+            import trimesh
+            return navis.Volume(
+                trimesh.Trimesh(vertices=np.asarray(mesh.vertices),
+                                faces=np.asarray(mesh.faces)),
+                name=roi_name)
+        except Exception as exc:
+            self._vprint(f'  ⚠️ BANC region {roi_name} unavailable: {exc}',
+                         level='simple')
+            return None
+
+    def _get_banc_region_map(self):
+        """segid -> region-name map of the public region_outlines layer.
+
+        Cached as ``cache/{dataset}/region_name_map.json``.  Includes the
+        four aggregate outlines (whole CNS, neuropil, brain/VNC neuropil).
+        """
+        import json as _json
+
+        cache_dir = self._get_cache_path('')
+        map_file = os.path.join(cache_dir, 'region_name_map.json')
+        if os.path.exists(map_file):
+            try:
+                with open(map_file, 'r') as handle:
+                    return {str(k): int(v)
+                            for k, v in _json.load(handle).items()}
+            except Exception:
+                pass
+        try:
+            from banc_public_data import (
+                BUCKET_HTTP_BASE, REGION_AGGREGATES, http_get)
+
+            url = (f"{BUCKET_HTTP_BASE}/region_outlines/"
+                   "segment_properties/info")
+            blob = http_get(url, timeout=120, note="segment_properties/info")
+            if blob is None:
+                return {}
+            payload = _json.loads(blob.decode("utf-8", "replace"))
+            inline = payload.get("inline", payload)
+            names_by_segid = {}
+            if isinstance(inline, dict) and "ids" in inline:
+                ids = [str(int(i)) for i in inline.get("ids", [])]
+                label_prop = None
+                for prop in inline.get("properties", []):
+                    if prop.get("id") in ("label", "name") or prop.get(
+                            "name") == "label":
+                        label_prop = prop
+                        break
+                values = (label_prop or {}).get("values", [])
+                for segid, name in zip(ids, values):
+                    if name:
+                        names_by_segid[segid] = str(name)
+            else:
+                for segid, entry in (inline or {}).items():
+                    name = (entry or {}).get("label") if isinstance(
+                        entry, dict) else entry
+                    if name:
+                        names_by_segid[str(int(segid))] = str(name)
+            for segid, name in REGION_AGGREGATES.items():
+                names_by_segid[str(segid)] = name
+            region_map = {}
+            for segid, name in names_by_segid.items():
+                region_map[name] = int(segid)
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(map_file, 'w') as handle:
+                _json.dump(region_map, handle, indent=2)
+            return region_map
+        except Exception as exc:
+            self._vprint(f'  ⚠️ Could not fetch the BANC region map: {exc}',
+                         level='simple')
+            return {}
+
+    def _get_banc_segid(self, roi_name):
+        """segid for one BANC region name, or None."""
+        region_map = self._get_banc_region_map()
+        return region_map.get(str(roi_name).strip())
+
+    def _get_banc_template_volume(self):
+        """Whole-CNS outline (region_outlines segid 1) as the BANC template.
+
+        The cached product is already render-sized (see
+        ``_get_banc_region_volume``); segmentation into brain/VNC portions
+        happens at render time via ``_split_banc_cns_volume``.
+        """
+        memo = getattr(self, '_banc_template_volume_memo', None)
+        if memo is not None:
+            return memo
+        volume = self._get_banc_region_volume('BANC_outline', segid=1)
+        self._banc_template_volume_memo = volume
+        return volume
+
+    def _split_banc_cns_volume(self, volume):
+        """Split the whole-CNS outline into (brain, VNC) at the neck.
+
+        Mirrors the male-cns coordinate-based extraction: BANC's posterior
+        axis is +Y and the brain/neck boundary sits at
+        ``BANC_BRAIN_VNC_Y_CUTOFF`` (y = 350,000 nm — brain somas end by
+        y ≈ 284k, VNC somas start ≈ 538k, so the cervical connective stays
+        with the VNC).  Boundary-crossing faces are assigned by centroid so
+        the brain and VNC portions meet seamlessly (the earlier
+        all-vertices filter dropped them and left a visible crack).
+        """
+        from banc_public_data import BANC_BRAIN_VNC_Y_CUTOFF
+
+        if volume is None:
+            return None, None
+        try:
+            import trimesh
+            verts = np.asarray(volume.vertices, dtype=float)
+            faces = np.asarray(volume.faces, dtype=np.int64)
+            # Assign boundary-crossing faces by centroid: dropping them (the
+            # all-vertices filter) punched a visible crack into both meshes
+            # at the cut plane.  Centroid assignment keeps the union
+            # watertight, so brain and VNC meet seamlessly.
+            centroids = verts[faces].mean(axis=1)
+            brain_mask = centroids[:, 1] < BANC_BRAIN_VNC_Y_CUTOFF
+            vnc_mask = ~brain_mask
+            brain_tm = trimesh.Trimesh(vertices=verts, faces=faces[brain_mask])
+            brain_tm.remove_unreferenced_vertices()
+            vnc_tm = trimesh.Trimesh(vertices=verts, faces=faces[vnc_mask])
+            vnc_tm.remove_unreferenced_vertices()
+            return (navis.Volume(brain_tm, name='BANC_brain'),
+                    navis.Volume(vnc_tm, name='BANC_vnc'))
+        except Exception as exc:
+            self._vprint(
+                f'  ⚠️ BANC brain/VNC segmentation failed: {exc}',
+                level='simple')
+            return None, None
+
     def _get_template_info(self):
         """Get template brain/VNC information for current dataset.
         
@@ -14958,10 +15742,32 @@ class VisualizeSkeleton:
                 'mesh_name': 'JRCFIB2022M (male CNS: brain + VNC)'
             }
         
+        # BANC datasets: native BANC space.  The template outline comes from
+        # the public region_outlines layer (cached like ROI meshes), which
+        # shares the nanometre coordinate frame of the public SWCs — no
+        # transform is ever applied.
+        elif 'banc' in dataset_lower:
+            if self.brain_mesh == 'whole':
+                self._vprint(
+                    '⚠️  brain_mesh="whole" (JRC2018F) is not available for '
+                    'BANC yet; using the native BANC outline instead.',
+                    level='simple')
+            # Template mode shows the brain-only portion (cut at render
+            # time); 'whole' keeps the full-CNS outline fallback.
+            return {
+                'source': 'BANC',
+                'target': 'BANC',
+                'template_obj': self._get_banc_template_volume(),
+                'mesh_name': ('BANC (brain)'
+                              if self.brain_mesh == 'template'
+                              else 'BANC (CNS outline)'),
+                'skip_transform': True,
+            }
+
         # FlyWire / FAFB datasets
         # For 'template': No transform needed - use native FLYWIRE coordinates
         # For 'whole': Transform to JRC2018F (standard female brain template)
-        elif 'flywire' in dataset_lower or 'fafb' in dataset_lower:
+        elif is_flywire_dataset(dataset_lower):
             if self.brain_mesh == 'whole':
                 # Transform to JRC2018F standard whole-brain template
                 # This requires H5 transforms (~580MB download)
@@ -15061,6 +15867,21 @@ class VisualizeSkeleton:
             return {
                 'mesh': flybrains.MANC.mesh,
                 'mesh_name': 'MANC (VNC)'
+            }
+
+        # BANC: the VNC portion of the whole-CNS outline, segmented by the
+        # neck coordinate (native BANC space, nanometres) — same approach
+        # as the male-cns geometric extraction.
+        elif 'banc' in dataset_lower:
+            whole = self._get_banc_template_volume()
+            if whole is None:
+                return None
+            _, vnc_volume = self._split_banc_cns_volume(whole)
+            if vnc_volume is None:
+                return None
+            return {
+                'mesh': vnc_volume,
+                'mesh_name': 'BANC (VNC)'
             }
         
         # VNC mesh not available for other datasets
@@ -15307,7 +16128,7 @@ class VisualizeSkeleton:
         
         # For FAFB with brain_mesh='whole' and mesh_roi specified
         # ROI transforms from male-cns (JRCFIB2022Mraw) to JRC2018F require elastix which is problematic
-        is_flywire = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
+        is_flywire = is_flywire_dataset(self.dataset) and not is_banc_dataset(self.dataset)
         if is_flywire and self.brain_mesh == 'whole' and has_roi_meshes:
             # Always skip ROI meshes in whole mode for FAFB/FlyWire to avoid elastix dependency
             self._vprint('')
@@ -15360,11 +16181,21 @@ class VisualizeSkeleton:
             roi_source_space = None # Track the coordinate space of the ROI
             roi_needs_transform = False  # Track if ROI needs transform after loading
             
-            # Determine if this is FlyWire/FAFB
-            is_flywire = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
+            # Determine if this is FlyWire/FAFB (BANC has its own ROI source)
+            is_flywire = is_flywire_dataset(self.dataset) and not is_banc_dataset(self.dataset)
 
             # Try dataset-specific directory first (with case-safe filename)
             mesh_file = self._get_mesh_file_path(mesh_dir, roi)
+
+            # BANC: fetch the region outline from the public layer when not
+            # cached (segid-keyed meshes sharing the SWCs' nanometre frame).
+            if is_banc_dataset(self.dataset) and not os.path.exists(mesh_file):
+                segid = self._get_banc_segid(roi)
+                if segid is not None:
+                    if self._get_banc_region_volume(roi, segid=segid) is not None:
+                        source_info = "BANC public region_outlines"
+                        roi_source_space = 'BANC'
+                        roi_needs_transform = False
             
             # For FAFB: Check for pre-transformed ROI mesh cache first
             # Transformed meshes are stored in cache/{dataset}/meshes_transformed/{TARGET}/
@@ -15694,7 +16525,13 @@ class VisualizeSkeleton:
             # so we don't need to extract a "brain" portion from it.
 
             use_brain_only = is_male_cns and self.brain_mesh == 'template'
-            
+
+            # BANC mirrors the male-cns brain-only extraction: the template
+            # outline covers brain + VNC; the neck coordinate splits them.
+            # The '(brain)' display name comes from _get_template_info.
+            use_banc_brain_only = (
+                is_banc_dataset(self.dataset) and self.brain_mesh == 'template')
+
             if use_brain_only:
                 mesh_display_name = 'JRCFIB2022M (brain)'
             
@@ -15739,10 +16576,15 @@ class VisualizeSkeleton:
                     brain_mesh = flybrains.JRCFIB2022M.mesh_brain
                 else:
                     brain_mesh = template_info['template_obj'].mesh if hasattr(template_info['template_obj'], 'mesh') else template_info['template_obj']
-                
+
+                # BANC: brain-only portion, segmented from the whole-CNS
+                # outline at the neck coordinate (mirrors male-cns).
+                if use_banc_brain_only:
+                    brain_mesh, _ = self._split_banc_cns_volume(brain_mesh)
+
                 # Apply FAFB tilt correction if using template mode
                 # This corrects the left-right tilt in the FLYWIRE template mesh
-                is_fafb = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
+                is_fafb = is_flywire_dataset(self.dataset)
                 if is_fafb and self.brain_mesh == 'template':
                     brain_mesh = self._apply_fafb_tilt_correction(brain_mesh)
                 
@@ -15828,7 +16670,13 @@ class VisualizeSkeleton:
                 self._vprint('ℹ️  VNC mesh already shown as template', level='full')
             
             # If using JRCFIB2022M and NOT splitting brain (e.g. brain_mesh='whole'), VNC is already included
-            elif (is_male_cns or is_manc) and self.brain_mesh in ['template', 'whole'] and not use_brain_only:
+            elif ((is_male_cns or is_manc)
+                  and self.brain_mesh in ['template', 'whole']
+                  and not use_brain_only):
+                self._vprint('ℹ️  VNC mesh already shown via brain_mesh', level='full')
+            elif (is_banc_dataset(self.dataset)
+                  and self.brain_mesh == 'whole'):
+                # BANC 'whole' plots the entire CNS outline, VNC included.
                 self._vprint('ℹ️  VNC mesh already shown via brain_mesh', level='full')
             else:
                 vnc_info = self._get_vnc_template_info()
@@ -15874,6 +16722,18 @@ class VisualizeSkeleton:
         self._vprint('Done', level='full')
         return 0
     
+    def _frontal_scene_camera(self):
+        """Frontal layout camera from the shared per-dataset table.
+
+        The interactive path re-applies the same per-dataset Front camera
+        when the view menu is added on top of the layout; non-interactive
+        exports only ever get this one, so it must follow the shared table
+        too (BANC's anterior is -Y — the default Z-frontal would show its
+        ventral side).
+        """
+        front = dataset_view_cameras(self.dataset, self.brain_mesh)['Front']
+        return dict(up=front['up'], eye=front['eye'])
+
     def save_figure(self):
         if self.backend == 'plotly':
             # Scatter synapse/pre-post-site modes expose a size slider in the
@@ -15881,33 +16741,11 @@ class VisualizeSkeleton:
             sliders = getattr(self, '_plotly_sliders', [])
             
             # set layout
-            # Always use frontal view camera regardless of brain_mesh setting
-            # This ensures consistent viewing angle for all visualizations
-            # Standard fly brain orientation: X: Left-Right, Y: Dorsal-Ventral, Z: Anterior-Posterior
-            # Frontal view: Look from Anterior (negative Z direction)
-            
-            scene_camera_parameters = dict(
-                up=dict(x=0, y=-1, z=0),  # Y is up (inverted in some templates)
-                eye=dict(x=0, y=0, z=-2.5),  # Look from front
-                # center=dict(x=0, y=0, z=0), # Let Plotly auto-center
-            )
-            
-            # Fix for MANC dataset (VNC)
-            # Default Front (-Z) shows Tail. We want to look from Neck (+Z).
-            if 'manc' in self.dataset.lower():
-                 scene_camera_parameters = dict(
-                    up=dict(x=0, y=-1, z=0),  # Dorsal (-Y) is up
-                    eye=dict(x=0, y=0, z=2.5),  # Look from Anterior (+Z)
-                )
-
-            # Fix for hemibrain template mode (JRCFIB2018F)
-            # JRCFIB2018F has Y-axis pointing posterior→anterior, Z is Dorsal-Ventral.
-            # To show Frontal view, we need to look from Anterior (positive Y axis).
-            if 'hemibrain' in self.dataset.lower() and self.brain_mesh == 'template':
-                 scene_camera_parameters = dict(
-                    up=dict(x=0, y=0, z=-1),  # Z is up (Dorsal)
-                    eye=dict(x=0, y=2.0, z=0),  # Look from Front (Anterior is +Y)
-                )
+            # Frontal layout camera from the shared per-dataset table
+            # (default / MANC / hemibrain-template / BANC axis rules).
+            # For interactive HTML the view menu added below re-applies the
+            # same Front camera; non-interactive exports only get this one.
+            scene_camera_parameters = self._frontal_scene_camera()
             
             self.fig_3d.update_layout(
                 colorway = self.synapse_colors,
@@ -15997,49 +16835,10 @@ class VisualizeSkeleton:
                     views_folder = os.path.join(self.save_folder, 'exported_views')
                     os.makedirs(views_folder, exist_ok=True)
                     
-                    # Define camera angles for different views
-                    # Based on the default front view: eye=(0, 0, -2), up=(0, -1, 0)
-                    # X: Left-Right, Y: Dorsal-Ventral (up), Z: Anterior-Posterior (front-back)
-                    view_cameras = {
-                        'front': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-                        'back': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-                        'top': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=1)),
-                        'bottom': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
-                        'left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-                        'right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-                    }
-
-                    # Adjust for MANC (Male Adult Nerve Cord)
-                    # User reports default Front view (-Z) shows Tail (Posterior).
-                    # This implies Tail is at -Z (closest to camera), so Anterior is at +Z.
-                    # Fix: Reverse Z axis for Front/Back views.
-                    if 'manc' in self.dataset.lower():
-                         view_cameras = {
-                            'front': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-                            'back': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-                            'top': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=1)),
-                            'bottom': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=1)),
-                            'left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-                            'right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-                        }
-
-                    # Adjust for hemibrain template (JRCFIB2018F)
-                    # JRCFIB2018F coordinate system:
-                    #   X-axis: Left-Right (as normal fly brain)
-                    #   Y-axis: Posterior→Anterior (front is +Y direction)
-                    #   Z-axis: Ventral→Dorsal (up is +Z direction, but we use -Z as "up" for standard brain viewing)
-                    #
-                    # For front view: eye at +Y, looking at origin, with -Z as up (dorsal up)
-                    # Key insight: When looking from +Y, the up vector should be -Z to match standard viewing
-                    if 'hemibrain' in self.dataset.lower() and self.brain_mesh == 'template':
-                         view_cameras = {
-                            'front': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
-                            'back': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
-                            'top': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=1, z=0)),
-                            'bottom': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=1, z=0)),
-                            'left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
-                            'right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
-                        }
+                    # Per-dataset preset cameras from the shared table
+                    # ('front'-style keys name the exported PNGs).
+                    view_cameras = dataset_view_cameras(
+                        self.dataset, self.brain_mesh, lowercase=True)
                     
                     # Update layout for static export to remove UI elements
                     self.fig_3d.update_layout(
@@ -16451,42 +17250,10 @@ class VisualizeSkeleton:
         self._vprint(f'\n📊 Generating individual plots...')
         self._vprint(f'   Output: {output_dir}')
         
-        # View cameras for PNG export
-        view_cameras = {
-            'front': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-            'back': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-            'top': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=1)),
-            'bottom': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
-            'left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-            'right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-        }
-        
-        # Adjust for MANC (Male Adult Nerve Cord)
-        # Fix Front view (-Z shows Tail) -> Should look from +Z (Neck)
-        if 'manc' in self.dataset.lower():
-             view_cameras = {
-                'front': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-                'back': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-                'top': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=1)),
-                'bottom': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=1)),
-                'left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-                'right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-            }
-
-        # Adjust for hemibrain template (JRCFIB2018F) - front/back swapped due to Y-axis orientation
-        # JRCFIB2018F coordinate system:
-        #   X-axis: Left-Right (as normal fly brain)
-        #   Y-axis: Posterior→Anterior (front is +Y direction)
-        #   Z-axis: Ventral→Dorsal (up is +Z direction, but we use -Z as "up" for standard brain viewing)
-        if 'hemibrain' in self.dataset.lower() and self.brain_mesh == 'template':
-            view_cameras = {
-                'front': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
-                'back': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
-                'top': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=1, z=0)),
-                'bottom': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=1, z=0)),
-                'left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
-                'right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
-            }
+        # View cameras for PNG export (shared per-dataset table,
+        # 'front'-style keys for the exported file names).
+        view_cameras = dataset_view_cameras(
+            self.dataset, self.brain_mesh, lowercase=True)
         
         # Get all traces from the main figure
         all_traces = list(self.fig_3d.data)
@@ -17853,26 +18620,15 @@ class VisualizeSkeleton:
         )
         fig_new = go.Figure(data=fig_traces, layout=fig_layout)
         
-        # Set camera parameters - always use frontal view for consistency
+        # Set camera parameters - always use frontal view for consistency;
+        # the shared table encodes the per-dataset axis conventions
+        # (default, MANC, hemibrain-template, BANC).
+        front_camera = dataset_view_cameras(
+            self.dataset, self.brain_mesh, distance=view_distance)['Front']
         scene_camera_parameters = dict(
-            up=dict(x=0, y=-1, z=0),
-            eye=dict(x=0, y=0, z=-view_distance),
+            up=front_camera['up'],
+            eye=front_camera['eye'],
         )
-        
-        if 'hemibrain' in self.dataset.lower() and self.brain_mesh == 'template':
-             scene_camera_parameters = dict(
-                up=dict(x=0, y=0, z=-1),
-                eye=dict(x=0, y=view_distance, z=0),  # +Y is front (anterior)
-            )
-        
-        # Adjust for MANC (Male Adult Nerve Cord)
-        if 'manc' in self.dataset.lower():
-             # MANC: Anterior is +Z, Posterior is -Z. Dorsal is -Y.
-             # "Front" view should be looking from Anterior -> Posterior, so eye at +Z.
-             scene_camera_parameters = dict(
-                up=dict(x=0, y=-1, z=0),
-                eye=dict(x=0, y=0, z=view_distance),
-            )
 
         
         fig_new.update_layout(

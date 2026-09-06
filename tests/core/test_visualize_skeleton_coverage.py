@@ -270,7 +270,7 @@ class TestWarningBanners:
         got = warn('flywire_FAFB_v783', 'flywire', 'tube', 0.96)
         assert got['family'] == 'FlyWire FAFB' and got['threshold'] == 0.95
         assert warn('flywire_FAFB_v783', 'flywire', 'tube', 0.95) is None
-        assert warn('flywire_BANC_v626', 'flywire', 'tube', 0.99) is None
+        assert warn('banc_v626', 'flywire', 'tube', 0.99) is None
 
     def test_warning_html_variants(self):
         vis = make_vis(skeleton_mode='tube', skeleton_mesh_simplification=0.99,
@@ -840,7 +840,7 @@ class TestCachePaths:
             'hemibrain:v1.2.1': 'HEMI',
             'male-cns:v0.9': 'MCNS',
             'flywire_FAFB_v783': 'FAFB',
-            'flywire_BANC_v626': 'BANC',
+            'banc_v626': 'BANC',
             'optic-lobe:v1.1': 'OL',
             'manc:v1.0': 'MANC',
             'customset': 'CUST',
@@ -1528,12 +1528,14 @@ class TestRealConstructor:
         assert len(hermetic_ctor) == 12
         assert len(vis.synapse_colors) == 11
 
-    def test_banc_dataset_rejected(self, tmp_path, hermetic_ctor):
-        with pytest.raises(RuntimeError, match='BANC'):
-            VisualizeSkeleton(
-                dataset='BANC_v4', neuron_layers=['A00c'],
-                **self.ctor_kwargs(tmp_path))
-        assert hermetic_ctor == []
+    def test_banc_dataset_accepted_with_resolution_default(self, tmp_path, hermetic_ctor):
+        # BANC renders from the public bucket: the constructor no longer
+        # rejects it, and the resolution knob defaults to the coarse L2.
+        visualizer = VisualizeSkeleton(
+            dataset='banc_v888', neuron_layers=['A00c'],
+            **self.ctor_kwargs(tmp_path))
+        assert visualizer.banc_skeleton_resolution == 'l2'
+        assert visualizer._flywire_skeleton_access['ready'] is True
 
     def test_invalid_synapse_mode_raises(self, tmp_path, hermetic_ctor):
         with pytest.raises(ValueError, match='synapse_mode'):
@@ -3403,7 +3405,20 @@ class TestSaveFigure:
     def test_html_hemibrain_template_camera(self, tmp_path):
         vis = make_save_vis(tmp_path, brain_mesh='template')
         vis.save_figure()
-        assert vis.fig_3d.layout.scene.camera.eye.y == 2.0
+        # Normalized onto the shared camera table (2.5), matching the
+        # interactive view menu; the layout used to use a one-off 2.0.
+        assert vis.fig_3d.layout.scene.camera.eye.y == 2.5
+
+    def test_html_banc_camera_non_interactive(self, tmp_path):
+        """Plan item C, non-interactive path: without the view menu the
+        layout camera is the only one applied, so it must still be the
+        BANC frontal view (anterior at -Y) — not the default Z-frontal,
+        which shows BANC's ventral side."""
+        vis = make_save_vis(tmp_path, dataset='banc_v888')
+        vis.save_figure()
+        cam = vis.fig_3d.layout.scene.camera
+        assert cam.eye.y == -2.5
+        assert cam.up.z == 1
 
     def test_interactive_html_view_menu(self, tmp_path):
         vis = make_save_vis(tmp_path, interactive_html=True)

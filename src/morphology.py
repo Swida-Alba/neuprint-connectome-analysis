@@ -77,6 +77,7 @@ except ImportError:
 try:
     from .flywire_ids import (
         body_id_to_api_int,
+        is_banc_dataset,
         is_flywire_dataset,
         normalize_flywire_body_id,
         normalize_flywire_id_columns,
@@ -84,6 +85,7 @@ try:
 except ImportError:
     from flywire_ids import (
         body_id_to_api_int,
+        is_banc_dataset,
         is_flywire_dataset,
         normalize_flywire_body_id,
         normalize_flywire_id_columns,
@@ -280,6 +282,10 @@ SKELETON_DOWNSAMPLE_FACTOR = 10             # legacy compatibility constant
 # header line so later loads can re-simplify to a different target level
 # (only ever coarser; detail cannot be restored).
 SIMPLIFICATION_HEADER = "DROCAT simpl:"
+# Optional provenance line (``# DROCAT source: banc_gcs_full``) written by
+# dataset-specific fetchers (currently the BANC public bucket); parsed on
+# load so reloads keep the fetch-time metadata.
+SOURCE_HEADER = "DROCAT source:"
 DEFAULT_SIMPLIFICATION = 90
 MAX_SIMPLIFICATION = 90
 
@@ -298,7 +304,11 @@ NEUPRINT_FETCH_MAX_THREADS = 3
 
 def _dataset_folder(dataset: str) -> str:
     """Map a dataset name to its cache folder (hemibrain:v1.2.1 -> hemibrain_v1_2_1)."""
-    return dataset.replace(":", "_").replace(".", "_")
+    try:
+        from utils.naming_utils import canonical_dataset_name
+    except ImportError:  # pragma: no cover - src laid bare on sys.path
+        from utils.naming_utils import canonical_dataset_name
+    return canonical_dataset_name(dataset).replace(":", "_").replace(".", "_")
 
 
 def _canonical_dataset_body_id(dataset: str, body_id):
@@ -1071,6 +1081,7 @@ def _load_cached_skeleton_file(path, target_simplification: Optional[int] = None
 
     path = Path(path)
     stored = 0
+    source = ""
     if str(path).endswith(".swc.zst"):
         if zstd is None:
             raise ImportError(
@@ -1079,6 +1090,7 @@ def _load_cached_skeleton_file(path, target_simplification: Optional[int] = None
             with zstd.ZstdDecompressor().stream_reader(handle) as reader:
                 content = reader.read()
         stored = _read_stored_simplification(content)
+        source = _read_stored_source(content)
         neuron = navis.read_swc(io.StringIO(
             content.decode("utf-8", "replace")))
         try:
@@ -1095,6 +1107,7 @@ def _load_cached_skeleton_file(path, target_simplification: Optional[int] = None
         with gzip.open(path, "rt", encoding="utf-8") as handle:
             content = handle.read()
         stored = _read_stored_simplification(content)
+        source = _read_stored_source(content)
         neuron = navis.read_swc(io.StringIO(content))
         try:
             neuron.id = _skeleton_body_id(path)
@@ -1120,6 +1133,11 @@ def _load_cached_skeleton_file(path, target_simplification: Optional[int] = None
         neuron._drocat_simplification = stored
     except Exception:
         pass
+    if source:
+        try:
+            neuron._drocat_source = source
+        except Exception:
+            pass
     return neuron
 
 
@@ -1163,6 +1181,23 @@ def _read_stored_simplification(text) -> int:
             except ValueError:
                 return 0
     return 0
+
+
+def _read_stored_source(text) -> str:
+    """Parse the source provenance recorded in a compressed-SWC header.
+
+    Header line format: ``# DROCAT source: banc_gcs_full``.  Files without
+    a source line (most datasets, legacy caches) return ``''``.
+    """
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", "replace")
+    for line in text.splitlines()[:8]:
+        line = line.strip()
+        if line.startswith("#"):
+            line = line[1:].strip()
+        if line.startswith(SOURCE_HEADER):
+            return line[len(SOURCE_HEADER):].strip()
+    return ""
 
 
 def _relevel_for_target(neuron, stored: int, target: int):
@@ -4341,7 +4376,8 @@ def fetch_skeleton_on_demand(dataset: str, body_id: int,
                              raw_cache: Optional[SkeletonVectorCache] = None,
                              vector_cache: Optional[SkeletonVectorCache] = None,
                              soma_pos=None,
-                             simplification: int = DEFAULT_SIMPLIFICATION
+                             simplification: int = DEFAULT_SIMPLIFICATION,
+                             banc_resolution: str = "l2"
                              ) -> Optional[object]:
     """Fetch one dataset-native neuron if missing.
 
@@ -4374,6 +4410,22 @@ def fetch_skeleton_on_demand(dataset: str, body_id: int,
     if is_flywire_dataset(dataset):
         simplification = 0
     root = Path(project_root) if project_root else Path(__file__).parent.parent
+
+    if is_banc_dataset(dataset):
+        # BANC fetches official SWCs from the public release bucket (the
+        # CAVE graphene/mesh path below is FAFB-only).
+        try:
+            import banc_public_data
+        except ImportError:
+            return None
+        neuron = banc_public_data.fetch_banc_swc(
+            dataset, body_id, resolution=banc_resolution,
+            project_root=str(root), use_cache=bool(persist))
+        if neuron is not None and persist:
+            cache_fetched_skeleton_vectors(
+                dataset, {body_id: neuron}, project_root=str(root),
+                vector_cache=vector_cache, verbose=False)
+        return neuron
 
     if is_flywire_dataset(dataset):
         mesh = _fetch_cave_mesh(
@@ -4600,9 +4652,13 @@ def fetch_skeletons_on_demand_batch(
 
     root = Path(project_root) if project_root else Path(__file__).parent.parent
     flywire = is_flywire_dataset(dataset)
+    banc = is_banc_dataset(dataset)
+    if banc:
+        # BANC SWCs cache raw (level 0) inside banc_public_data itself.
+        simplification = 0
     flywire_soma_positions = (
         _load_flywire_soma_positions(dataset, root, requested)
-        if flywire else {}
+        if flywire and not banc else {}
     )
     loaded: Dict[int, object] = {}
     missing = []
@@ -4610,7 +4666,7 @@ def fetch_skeletons_on_demand_batch(
     # The pipelined NeuPrint path (fetch loop + standalone persist worker)
     # is enabled only for the batched NeuPrint branch below.
     pipeline = False
-    if flywire:
+    if flywire and not banc:
         # A FlyWire caller must never inherit a NeuPrint raw-SWC cache object
         # supplied by an older integration.
         if not getattr(raw_lookup_cache, "mesh_only", False):
@@ -4777,6 +4833,30 @@ def fetch_skeletons_on_demand_batch(
                     len(loaded) + len(fetched_by_id), len(requested),
                     f"Fetching skeletons ({len(loaded) + len(fetched_by_id)}/"
                     f"{len(requested)})")
+        elif banc:
+            # BANC fetches per-neuron SWCs from the public release bucket
+            # (fetch_banc_swc persists its own level-0 raw cache entry).
+            import banc_public_data
+
+            for index, bid in enumerate(missing):
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                try:
+                    neuron = banc_public_data.fetch_banc_swc(
+                        dataset, bid, project_root=str(root),
+                        use_cache=bool(persist))
+                except Exception:
+                    neuron = None
+                if neuron is not None:
+                    fetched_by_id[
+                        _canonical_dataset_body_id(dataset, bid)
+                    ] = neuron
+                if progress_callback:
+                    done = min(len(requested),
+                               len(loaded) + len(fetched_by_id))
+                    progress_callback(
+                        done, len(requested),
+                        f"Fetching BANC skeletons ({done}/{len(requested)})")
         elif flywire:
             # CAVE returns meshes. Keep this branch separate from NeuPrint's
             # TreeNeuron/SWC batching and never call fetch_skeletons().
@@ -5150,10 +5230,11 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
     per run (``simplification``, percent of nodes removed, 0-90, default 90)
     recorded in each file header.
 
-    FlyWire/FAFB/BANC datasets are NOT supported: bulk skeleton downloads
-    are disabled for them (their skeleton bundles are large one-time
-    downloads), and a ``FlyWireSkeletonAccessError`` with the manual Codex
-    download instructions is raised instead.
+    FAFB is not supported: bulk skeleton downloads are disabled (the healed
+    bundle is a large one-time manual download), and a
+    ``FlyWireSkeletonAccessError`` with the manual Codex download
+    instructions is raised instead. BANC pulls fetch per-neuron SWCs from
+    the public release bucket into the raw skeleton cache (level 0).
     Visualization ``fast`` is not a pull mode for either representation.
 
     Vectorization always runs on the RAW fetched neurons first and is
@@ -5178,12 +5259,12 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
 
     _simplification_factor(simplification)  # validate 0..90 up front
 
-    # Bulk skeleton downloads are disabled for FlyWire datasets: the bundles
-    # (e.g. sk_lod1_783_healed.zip for FAFB) are large one-time downloads
-    # that must be fetched manually from the FlyWire Codex and placed by the
-    # converter. On-demand CAVE fetches for individual missing skeletons
-    # still work during visualization.
-    if is_flywire_dataset(dataset):
+    # Bulk skeleton downloads are disabled for FAFB: the healed bundle is a
+    # large one-time download that must be fetched manually from the FlyWire
+    # Codex and placed by the converter. BANC pulls fetch per-neuron SWCs
+    # from the public release bucket instead. On-demand CAVE fetches for
+    # individual missing FAFB skeletons still work during visualization.
+    if is_flywire_dataset(dataset) and not is_banc_dataset(dataset):
         raise FlyWireSkeletonAccessError(
             flywire_manual_skeleton_instruction(dataset))
 
@@ -5206,11 +5287,12 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
     # simplification choices and must never select a different disk format.
     mode = "raw"
     flywire = is_flywire_dataset(dataset)
+    banc = is_banc_dataset(dataset)
     if flywire:
-        # The simplification pipeline is NeuPrint-only; FlyWire pulls persist
-        # prepared meshes and must never be re-leveled or simplified.
+        # The simplification pipeline is NeuPrint-only; FlyWire/BANC pulls
+        # persist level-0 raw representations and must never be re-leveled.
         simplification = 0
-    if flywire:
+    if flywire and not banc:
         raw_cache = find_similar_flywire_mesh_cache(
             dataset, project_root=str(root), n_workers=max_workers,
             verbose=verbose,
@@ -5331,7 +5413,8 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
                   f"healed bundle); nothing to fetch.")
         return {"total": 0, "fetched": 0, "skipped_existing": skipped_existing,
                 "cancelled": False, "errors": 0, "mode": mode,
-                "representation": "mesh" if flywire else "skeleton",
+                "representation": (
+                    "mesh" if flywire and not banc else "skeleton"),
                 "simplification": int(simplification)}
 
     if verbose:
@@ -5350,7 +5433,7 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
     # visualization and similarity workflows. Keep FlyWire's legacy worker
     # path below because its local-bundle/API fallback has per-neuron
     # cancellation semantics that are independent of NeuPrint's SWC API.
-    if not is_flywire_dataset(dataset):
+    if not is_flywire_dataset(dataset) or banc:
         if cancel_event.is_set():
             cancelled = True
         else:
@@ -5435,7 +5518,8 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
                     })
                 except Exception:
                     pass
-            expected_rep = "mesh" if flywire else "skeleton"
+            expected_rep = (
+                "mesh" if flywire and not banc else "skeleton")
             ok = nrn is not None and _neuron_rep(nrn) == expected_rep
         except Exception:
             ok = False
@@ -5472,7 +5556,8 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
         "cancelled": cancelled,
         "errors": errors,
         "mode": mode,
-        "representation": "mesh" if flywire else "skeleton",
+        "representation": (
+            "mesh" if flywire and not banc else "skeleton"),
         "simplification": int(simplification),
     }
     if verbose:
@@ -5857,18 +5942,25 @@ class MorphologyComparer:
                   f"method={self.method} level={self.level} metric={self.metric} "
                   f"candidate_source={source}")
 
-        # BANC has connectivity tables but no skeleton release.  FAFB may use
-        # its local skeleton bundle or CAVE, but must not silently fall into a
-        # failed remote fetch when neither source is configured.
+        # BANC similarity is deliberately deferred: find-similar on the
+        # public L2/full skeletons needs its own vector-quality validation
+        # before it can run.  Raise a clear deferred error instead of
+        # silently reusing the FAFB pipeline.
+        if is_banc_dataset(self.dataset):
+            raise FlyWireSkeletonAccessError(
+                "BANC morphological similarity is deferred: public "
+                "L2/full skeletons still need vector-quality validation. "
+                "3D skeleton visualization for BANC is available."
+            )
+
+        # FAFB may use its local skeleton bundle or CAVE, but must not
+        # silently fall into a failed remote fetch when neither source is
+        # configured.
         require_flywire_skeleton_access(
             self.dataset,
             project_root=self.project_root,
             log=self._log,
         )
-
-        # BANC raises FlyWireSkeletonAccessError in the guard above (no BANC
-        # skeleton source exists); FAFB may proceed because its real skeleton
-        # sources (healed ZIP / CAVE fallback) were validated there.
 
         self._progress(1, total_steps, "Resolving query neuron")
         query_df = self._resolve_query()

@@ -835,7 +835,7 @@ def test_homolog_finder_skips_neuprint_client_for_flywire(tmp_path, capsys):
 
     finder = HomologFinder(
         source_dataset='flywire_FAFB_v783',
-        target_dataset='flywire_BANC_v888',
+        target_dataset='banc_v888',
         output_dir=str(tmp_path),
         verbose=True,
     )

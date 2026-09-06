@@ -160,7 +160,7 @@ def test_html_simplification_warning_uses_dataset_specific_thresholds():
         "male-cns:v1.0", "neuprint", "line", 0.99
     ) is None
     assert VisualizeSkeleton._skeleton_simplification_warning(
-        "flywire_BANC_v888", "flywire", "tube", 0.99
+        "banc_v888", "flywire", "tube", 0.99
     ) is None
 
 

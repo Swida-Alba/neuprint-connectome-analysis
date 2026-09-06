@@ -757,13 +757,16 @@ class TestSkeletonTabIntegration:
         assert file_upload.visible is False
 
     def test_color_editor_panels_only_in_standard_mode(self, monkeypatch, tmp_path):
-        """The three palette-editor containers are visible only in Standard mode."""
+        """The neuron/synapse palette editors are visible only in Standard
+        mode (the Advanced table and the uploaded CSV supply their own
+        color columns). The ROI palette is independent of the layer editor
+        — it defines neuron/synapse colors, never layer colors — and
+        deliberately stays visible in every mode (bfa2180)."""
         self._patch_store(monkeypatch, tmp_path)
         client = self._build_tab(monkeypatch, tmp_path)
         for palette_id in (
             "card-skeleton-neuron-palette",
             "card-skeleton-synapse-palette",
-            "card-skeleton-roi-palette",
         ):
             palette = self._by_id(client, palette_id)
             assert palette.visible is True
@@ -773,6 +776,10 @@ class TestSkeletonTabIntegration:
             assert palette.visible is False
             self._click_button(self._mode_button(client, "Standard"))
             assert palette.visible is True
+        roi = self._by_id(client, "card-skeleton-roi-palette")
+        for mode in ("Advanced", "File upload", "Standard"):
+            self._click_button(self._mode_button(client, mode))
+            assert roi.visible is True, mode
 
     def test_synapse_view_mode_options(self, monkeypatch, tmp_path):
         self._patch_store(monkeypatch, tmp_path)

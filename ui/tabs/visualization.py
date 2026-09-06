@@ -172,6 +172,33 @@ COMMON_ROIS = [
 ]
 
 
+def banc_synapse_view_default(dataset: str) -> str:
+    """Default synapse view mode for *dataset*.
+
+    BANC defaults to 'skip': synapse markers need a one-time ~3.9 GB
+    per-synapse table download, and the release publishes only pre-synaptic
+    site coordinates (markers are drawn at pre-sites).
+    """
+    from ..dataset_service import is_banc_dataset
+
+    return "skip" if is_banc_dataset(dataset) else "synapse"
+
+
+def banc_synapse_warning(dataset: str, view: str):
+    """Explicit warning text when BANC synapse rendering is opted into."""
+    from ..dataset_service import is_banc_dataset
+
+    if not is_banc_dataset(dataset) or view == "skip":
+        return None
+    return (
+        "BANC synapse rendering is enabled: the per-synapse table (~3.9 GB) "
+        "downloads once from the public BANC bucket into "
+        "datasets/<dataset>/downloads/ (resumable). The BANC release provides "
+        "only PRE-synaptic site coordinates, so markers are drawn at "
+        "pre-sites (scatter) regardless of the selected shape."
+    )
+
+
 def create_skeleton_tab():
     skeleton_runner = ScriptRunner()
     skeleton_output = OutputPanel("3D Skeleton Output")
@@ -192,23 +219,29 @@ def create_skeleton_tab():
             section_header("Dataset", "storage")
             dataset = dataset_selector()
             output_dir = dir_input(scope="visualization_skeleton")
-            banc_resolution = select_input(
-                "BANC Skeleton Resolution",
-                ["l2", "full", "full_auto"], "l2",
-                hint="Public-bucket SWC resolution for BANC datasets. "
-                     "'l2': coarse skeletons for every neuron (fast). "
-                     "'full': full-resolution proofread skeletons. "
-                     "'full_auto': prefer full, fall back to L2. "
-                     "Ignored for non-BANC datasets.",
-            )
-            banc_resolution.set_visibility(False)
+            # BANC skeleton source selection removed: the chain is unified
+            # (888 L2 -> 888 full -> v626 pcg), no per-run choice.
+            banc_normalize_radius = checkbox_input(
+                "Normalized Tube Radius", True,
+                hint="Rescale each BANC neuron's radii so its median maps onto "
+                     "a shared target: the release products carry inconsistent "
+                     "radius calibers per neuron, which otherwise shows up as "
+                     "mismatched tube thicknesses in one scene.",
+            ).set_visibility(False)
+            banc_radius_target_nm = number_input(
+                "Radius Target (nm)", 120, 10, 1000, 10,
+                hint="Median tube radius (nm) all BANC neurons are normalized "
+                     "to when Normalized Tube Radius is checked.",
+            ).set_visibility(False)
 
-            def _set_banc_resolution_visible(visible: bool) -> None:
-                """Toggle the whole select wrapper (column) with fallback."""
-                try:
-                    banc_resolution.parent.set_visibility(visible)
-                except Exception:
-                    banc_resolution.set_visibility(visible)
+            def _set_banc_controls_visible(visible: bool) -> None:
+                """Toggle the BANC controls (and their wrapper columns)."""
+                for el in (banc_normalize_radius,
+                           banc_radius_target_nm):
+                    try:
+                        el.parent.set_visibility(visible)
+                    except Exception:
+                        el.set_visibility(visible)
 
         # ================= 3D Skeleton panel =================
         with ui.card().classes("w-full drocat-card").props('id="card-3d"'):
@@ -675,7 +708,9 @@ def create_skeleton_tab():
                 pre_post_shape.set_value(pre_post_default)
                 _sync_synapse_size_default()
 
-            synapse_view_mode.on_value_change(lambda _e: _sync_synapse_view_mode())
+            synapse_view_mode.on_value_change(
+                lambda _e: (_sync_synapse_view_mode(),
+                            _refresh_banc_note_from_view()))
             skeleton_mode.on_value_change(lambda _e: _sync_shape_defaults())
             synapse_shape.on_value_change(lambda _e: _sync_synapse_size_default())
             pre_post_shape.on_value_change(lambda _e: _sync_synapse_size_default())
@@ -844,7 +879,10 @@ def create_skeleton_tab():
                             "Use Default Mesh Simplification", True,
                             hint="Use the method default: fast removes 0.90 of faces; "
                                  "fine/artistic remove 0.95 for NeuPrint and "
-                                 "FlyWire/FAFB. Uncheck to set the value below.",
+                                 "FlyWire/FAFB. For BANC the value applies to "
+                                 "full-resolution sources; L2 tubes are already "
+                                 "cache-level and are never decimated. Uncheck to "
+                                 "set the value below.",
                         )
                         mesh_simplification = number_input(
                             "Mesh Simplification (faces removed)",
@@ -854,7 +892,9 @@ def create_skeleton_tab():
                             0.0, 0.99, 0.05,
                             hint="Fraction of tube-mesh faces REMOVED for rendering: "
                                  "0.95 = keep 5%. Higher = faster/coarser, lower = "
-                                 "more detailed but slower.",
+                                 "more detailed but slower. For BANC the value "
+                                 "applies to full-resolution sources; L2 tubes are "
+                                 "already cache-level and are never decimated.",
                         )
                         mesh_simplification.set_enabled(False)
 
@@ -954,15 +994,44 @@ def create_skeleton_tab():
                     options.append(value)
             roi_select.set_options(options)
 
-        def _sync_banc_resolution_visibility():
-            _set_banc_resolution_visible(is_banc_dataset(dataset.value))
+        _banc_synapse_note = ui.label(
+            "⚠️ BANC synapse rendering: first use downloads the per-synapse "
+            "table (~3.9 GB, one-time, cached). The release provides only "
+            "pre-synaptic site coordinates — markers are drawn at pre-sites."
+        ).classes("text-caption text-amber-8").set_visibility(False)
+
+        def _sync_banc_synapse_default():
+            # Keep the BANC synapse default (skip) in sync with the dataset.
+            if is_banc_dataset(dataset.value):
+                if synapse_view_mode.value != "skip":
+                    synapse_view_mode.set_value("skip")
+                _banc_synapse_note.set_visibility(
+                    synapse_view_mode.value != "skip")
+            else:
+                _banc_synapse_note.set_visibility(False)
+
+        def _sync_banc_controls_visibility():
+            visible = is_banc_dataset(dataset.value)
+            _set_banc_controls_visible(visible)
+            banc_radius_target_nm.set_enabled(
+                visible and banc_normalize_radius.value)
 
         include_lr.on_value_change(lambda _e: _sync_roi_options())
         include_subprimary.on_value_change(lambda _e: _sync_roi_options())
         dataset.on_value_change(lambda _e: _sync_roi_options())
-        dataset.on_value_change(lambda _e: _sync_banc_resolution_visibility())
+        dataset.on_value_change(lambda _e: _sync_banc_controls_visibility())
+        dataset.on_value_change(lambda _e: (
+            _sync_banc_synapse_default(),
+            _refresh_banc_note_from_view(),
+        ))
         _sync_roi_options()
-        _sync_banc_resolution_visibility()
+        _sync_banc_controls_visibility()
+        _sync_banc_synapse_default()
+
+        def _refresh_banc_note_from_view():
+            _banc_synapse_note.set_visibility(
+                is_banc_dataset(dataset.value)
+                and synapse_view_mode.value != "skip")
 
     with results_col:
         skeleton_output.create(run_label="Generate 3D Skeleton", run_icon="view_in_ar")
@@ -1134,9 +1203,17 @@ def create_skeleton_tab():
                 synapse_mode_value = "cone"
             pre_post_scatter_on = False
 
+        # BANC + synapses: explicit warning before the run (the per-synapse
+        # table downloads once; only pre-site markers are drawn).
+        warning = banc_synapse_warning(dataset.value, view)
+        if warning:
+            ui.notify(warning, type="warning", timeout=0, close_button="OK",
+                      multi_line=True)
+
         constructor_params = {
             "dataset": dataset.value,
-            "banc_skeleton_resolution": banc_resolution.value,
+            "banc_normalize_radius": banc_normalize_radius.value,
+            "banc_radius_target_nm": float(banc_radius_target_nm.value),
             "neuron_layers": neuron_layers,
             "search_columns": search_columns.value,
             "hemisphere": hemisphere.value,

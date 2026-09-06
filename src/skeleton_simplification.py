@@ -43,6 +43,16 @@ FAFB_LINE_NODE_REDUCTION = 0.90
 NEUPRINT_LINE_NODE_REDUCTION = 0.50
 """NeuPrint line-mode default removes 50% of nodes (factor ~2)."""
 
+BANC_LINE_FULL_NODE_REDUCTION = 0.50
+"""BANC line mode removes 50% of nodes — and only on full-resolution
+sources; the coarse L2 skeletons keep every node."""
+
+BANC_FULL_MIN_KEEP_FACES = 4_000
+"""Plan §B safety floor: BANC full-resolution tube decimation never keeps
+fewer than this many faces, however aggressive the simplification slider
+is. L2 sources skip the decimation stage entirely, so the floor only
+bounds the full-resolution stage."""
+
 
 def _neuron_node_ids(neuron):
     """Node ids eligible for extra preservation (soma nodes)."""
