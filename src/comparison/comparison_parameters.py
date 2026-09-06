@@ -17,6 +17,16 @@ from datetime import datetime
 import os
 
 try:
+    from ..flywire_ids import is_fafb_dataset
+except ImportError:  # pragma: no cover - direct package imports
+    from flywire_ids import is_fafb_dataset
+
+try:
+    from ..utils.naming_utils import canonical_dataset_name
+except ImportError:  # pragma: no cover - direct package imports
+    from utils.naming_utils import canonical_dataset_name
+
+try:
     from ..utils.naming_utils import make_unique_dataset_labels
 except ImportError:  # pragma: no cover - supports direct ``comparison`` imports
     from utils.naming_utils import make_unique_dataset_labels
@@ -168,7 +178,20 @@ class ComparisonParameters:
     
     # Analysis settings
     thresholds: List[int] = field(default_factory=lambda: [1, 3, 5, 10, 20])
-    """Min synapse count thresholds for comparison (bodyId level filtering)"""
+    """Min synapse count thresholds for comparison (bodyId level filtering).
+    After validation this is the sorted UNION of the global list and every
+    per-dataset override (dataset_thresholds), so report/export loops always
+    iterate a meaningful shared list."""
+
+    dataset_thresholds: Optional[Dict[str, List[int]]] = None
+    """Per-dataset threshold overrides for the vertical comparison run mode
+    (Feature E, threshold-alignment spec §7). Maps dataset name -> its own
+    ascending threshold list; a dataset missing from the dict (or with an
+    empty list) falls back to the global `thresholds`. When set,
+    `thresholds` becomes the sorted union so every existing loop keeps
+    working; horizontal cross-dataset outputs simply have no content at
+    thresholds not shared by >= 2 datasets, and the threshold-alignment
+    files carry the cross-dataset comparison."""
     
     source_labels: Union[str, List[str]] = ''
     """Unified label(s) for source group(s) - string or list matching group count"""
@@ -190,6 +213,40 @@ class ComparisonParameters:
     None = per-mode default (FindAllPath: 1,000,000, applied only for
     max_interlayer >= 3; FindShortestPath: 0 = no trimming, since trimming
     can inflate shortest distances). 0 = complete graph."""
+
+    max_paths_bodyid: Optional[int] = None
+    """Path budget for the StrongestFirst enumerator (the default
+    pathfinding): enumeration emits intact paths strongest-first and stops
+    at the budget, draining ties, so the result is exactly "all intact
+    paths with bottleneck >= the reported tau". None = per-mode default
+    (1,000,000 in 'all' mode); 0 = unlimited (complete MemoizedDFS
+    enumeration). With legacy enumerators this acts as the historical
+    arbitrary-order truncation cap."""
+
+    replay_paths: bool = True
+    """Feature F (threshold-alignment spec §9): in path mode ('all'),
+    enumerate ONCE at the lowest per-dataset threshold and materialize every
+    higher threshold from the bottleneck-annotated path set instead of
+    re-running FindAllPath per threshold. Outputs are identical (paths at
+    threshold t are exactly the t0 paths whose minimum edge weight >= t);
+    disable to force the legacy per-threshold enumeration. Shortest mode is
+    never replayed (min-hop sets are not nested across thresholds)."""
+
+    auto_extend_thresholds: bool = False
+    """F7: when a run's effective tau collapses asked thresholds (every
+    point below tau is a duplicate), extend each dataset's threshold list
+    with k x tau_ref points (tau_ref = max per-dataset tau, k = 2, 3, ...)
+    while the point stays <= 2x the max asked threshold — the schedule is
+    GLOBAL so the expanded points stay shared across datasets. Default
+    off; the effective-threshold banner suggests it on collapse."""
+
+    drop_untyped: bool = True
+    """Drop edges touching untyped neurons from the cross-dataset
+    results (default on). A neuron is untyped when its resolved type
+    label is empty / Unknown / its own bodyId (the fallback label);
+    such edges can never match across datasets. The dropped rows are
+    exported to comparison_results/untyped_dropped_records.csv and the
+    per-run counts appended to user_warning_notes.txt."""
 
     edgeN_limit: int = 500
     """Visualization Edge Limit passed to the FindAllPath visualizations.
@@ -271,11 +328,16 @@ class ComparisonParameters:
               edge presence comparison across datasets.
     """
 
-    pathfinding: str = 'MemoizedDFS'
+    pathfinding: str = 'StrongestFirst'
     """Pathfinding algorithm to use in FindAllPath (names match the
     algorithms):
-    - 'MemoizedDFS': Memoized DFS (forward) - fastest measured at all
-      depths (no reversed-graph copy); the recommended default
+    - 'StrongestFirst' (default, 2026-09-04): budgeted best-first on the
+      path bottleneck - emits intact paths strongest-first; with the path
+      budget (max_paths_bodyid) reached, output = all intact paths with
+      bottleneck >= the reported tau. Without a budget bite the emitted
+      SET equals the complete enumerators.
+    - 'MemoizedDFS': Memoized DFS (forward) - complete enumeration
+      (unordered); the previous default
     - 'DFS': Memoized DFS (backward) - best when targets are few
     - 'MeetInMiddle': Meet-in-the-middle DFS - fastest at shallow depths
     - 'DP': Backward Reachability (DP) - robust, low memory
@@ -340,7 +402,11 @@ class ComparisonParameters:
     allow_single_dataset: bool = True
     """Allow single dataset for threshold sensitivity analysis only"""
 
-    skip_bodyId: bool = False
+    skip_bodyId: bool = True
+    """Skip bodyId-level results for speed. Default True: cross-dataset
+    comparison aggregates by (mapped) type, and skipping the bodyId-level
+    exports cuts multi-GB output files (bodyId connMatrix CSVs, raw path
+    lists) to ~MB scale with type-level outputs untouched."""
     """If True, skip bodyId-level data saving, visualization, and calculations.
     Useful for large-scale analyses where only type-level data is needed."""
 
@@ -534,6 +600,13 @@ class ComparisonParameters:
         
         # Sort thresholds
         self.thresholds = sorted(self.thresholds)
+
+        # Feature E: normalize per-dataset threshold overrides. Values are
+        # coerced to ints, deduped, sorted; empty/None entries are dropped
+        # (the dataset falls back to the global list). `thresholds` becomes
+        # the sorted union so every shared-loop consumer sees a meaningful
+        # list even in the per-dataset run mode.
+        self._normalize_dataset_thresholds()
         
         # Hemisphere analysis validation and enforcement
         # When separate_hemispheres=True, always enable symmetry_analysis
@@ -581,7 +654,7 @@ class ComparisonParameters:
 
         # Warn about FAFB hemisphere annotation when mixed datasets are used
         dataset_names = self.get_dataset_names()
-        has_fafb = any('fafb' in str(ds).lower() or 'flywire' in str(ds).lower() for ds in dataset_names)
+        has_fafb = any(is_fafb_dataset(str(ds)) for ds in dataset_names)
         has_neuprint = any('fafb' not in str(ds).lower() and 'flywire' not in str(ds).lower() for ds in dataset_names)
         if has_fafb and has_neuprint and len(dataset_names) > 1:
             print("\033[33m⚠️  FAFB hemisphere labels are reversed relative to NeuPrint datasets.\n"
@@ -724,6 +797,57 @@ class ComparisonParameters:
     def run_timestamp(self) -> str:
         """Get the cached timestamp string for this run."""
         return self._cached_timestamp
+
+    def _normalize_dataset_thresholds(self) -> None:
+        """Validate/coerce dataset_thresholds and fold it into thresholds.
+
+        Runs once from __post_init__ after the global list is sorted:
+        per-dataset entries become sorted, deduplicated int lists; unknown
+        dataset keys are dropped with a warning; `thresholds` is widened to
+        the sorted union of the global list and all overrides.
+        """
+        if not self.dataset_thresholds:
+            self.dataset_thresholds = None
+            return
+
+        known = set(self.get_dataset_names())
+        normalized: Dict[str, List[int]] = {}
+        for ds, values in self.dataset_thresholds.items():
+            if ds not in known:
+                if self.verbose:
+                    print(f"\033[33m⚠️  dataset_thresholds: ignoring unknown "
+                          f"dataset '{ds}' (not in the run selection)\033[0m")
+                continue
+            cleaned = sorted({int(v) for v in (values or []) if v is not None})
+            if not cleaned:
+                continue  # empty override -> global list
+            normalized[ds] = cleaned
+
+        self.dataset_thresholds = normalized or None
+        if self.dataset_thresholds:
+            self._global_thresholds = list(self.thresholds)
+            union = set(self.thresholds)
+            for values in self.dataset_thresholds.values():
+                union.update(values)
+            self.thresholds = sorted(union)
+
+    def get_thresholds_for_dataset(self, dataset: str) -> List[int]:
+        """Threshold list for one dataset: its override or the global list.
+
+        Feature E (vertical comparison): each dataset can carry its OWN
+        ascending threshold list; datasets without an override run at the
+        ORIGINAL global list (not the union — the union on `thresholds`
+        exists only so shared report/export loops iterate a meaningful
+        superset).
+        """
+        if self.dataset_thresholds:
+            override = self.dataset_thresholds.get(dataset)
+            if override:
+                return list(override)
+        if self.dataset_thresholds and getattr(self, '_global_thresholds', None):
+            return list(self._global_thresholds)
+        return list(self.thresholds)
+
     
     # Dataset single-character abbreviation mapping
     # Keys are lowercased for case-insensitive matching
@@ -859,7 +983,7 @@ class ComparisonParameters:
         Generate combined single-character codes for all datasets.
         
         Uses DATASET_SHORT_CODES mapping. For example:
-        - ['male-cns:v0.9', 'flywire_FAFB_v783', 'flywire_BANC_v626'] -> 'MFB'
+        - ['male-cns:v0.9', 'flywire_FAFB_v783', 'banc_v626'] -> 'MFB'
         - ['hemibrain:v1.2.1', 'male-cns:v0.9'] -> 'HM'
         
         Returns:
@@ -1190,16 +1314,17 @@ class ComparisonParameters:
             'male-cns:v0.9' -> 'male-cns_v0_9'
             'flywire_FAFB_v783' -> 'flywire_FAFB_v783'
         """
-        return name.replace(':', '_').replace('.', '_')
+        return canonical_dataset_name(name).replace(':', '_').replace('.', '_')
     
     def create_output_directories(self) -> None:
         """Create all necessary output directories."""
         # Main output folder
         os.makedirs(self.full_output_path, exist_ok=True)
-        
-        # Dataset data folder and subfolders
+
+        # Dataset data folder and subfolders (per-dataset threshold lists,
+        # Feature E: each dataset gets folders for its OWN thresholds)
         for dataset in self.get_dataset_names():
-            for threshold in self.thresholds:
+            for threshold in self.get_thresholds_for_dataset(dataset):
                 os.makedirs(self.get_dataset_output_path(dataset, threshold), exist_ok=True)
         
         # Comparison results folder
@@ -1261,9 +1386,16 @@ class ComparisonParameters:
             
             # Analysis parameters
             'thresholds': self.thresholds,
+            'dataset_thresholds': self.dataset_thresholds,
             'max_interlayer': self.max_interlayer,
             'top_edges': self.top_edges,
             'graph_edge_limit_bodyid': self.graph_edge_limit_bodyid,
+            'max_paths_bodyid': self.max_paths_bodyid,
+            'replay_paths': self.replay_paths,
+            # F7: auto-extend collapsed thresholds (k x tau_ref, capped at
+            # 2x the max asked threshold) after the run reveals a collapse.
+            'auto_extend_thresholds': self.auto_extend_thresholds,
+            'drop_untyped': self.drop_untyped,
             'edgeN_limit': self.edgeN_limit,
             'comparison_mode': self.comparison_mode,
             'path_mode': self.path_mode,
@@ -1403,8 +1535,13 @@ class ComparisonParameters:
             # Analysis parameters
             max_interlayer=data.get('max_interlayer', 2),
             thresholds=data.get('thresholds', [1, 3, 5, 10, 20]),
+            dataset_thresholds=data.get('dataset_thresholds', None),
             top_edges=data.get('top_edges', 50),
             graph_edge_limit_bodyid=data.get('graph_edge_limit_bodyid', None),
+            max_paths_bodyid=data.get('max_paths_bodyid', None),
+            replay_paths=data.get('replay_paths', True),
+            auto_extend_thresholds=data.get('auto_extend_thresholds', False),
+            drop_untyped=data.get('drop_untyped', True),
             edgeN_limit=data.get('edgeN_limit', 500),
             comparison_mode=data.get('comparison_mode', 'path'),
             path_mode=data.get('path_mode', 'all'),

@@ -102,9 +102,9 @@ def create_find_path_tab():
             interlayer_warning = ui.label(
                 "⚠️ Layers ≥ 4: the path count grows combinatorially (branching^depth) — "
                 "reconstruction can take hours and produce billions of paths. Raise "
-                "Min Synapse Count / Min Connection Ratio / Min Traversal Prob., "
-                "lower Max Paths (BodyId) so StrongestFirst keeps only the "
-                "strongest routes, or minimize/batch the source and target sets."
+                "Min Synapse Count, lower Max Paths (BodyId) or the Edge Budget "
+                "so StrongestFirst keeps only the strongest routes, or "
+                "minimize/batch the source and target sets."
             ).classes("text-caption text-amber-8").set_visibility(False)
             find_reciprocal = checkbox_input(
                 "Find Reciprocal Connections", False,
@@ -207,30 +207,39 @@ def create_find_path_tab():
                 )
 
                 with param_grid(3):
+                    # F9: ratio/probability filters are disabled (ratio is a
+                    # readout column now). The entrances stay in the code,
+                    # hidden, for the future ratio-weighted mode.
                     min_ratio = number_input(
-                        "Min Connection Ratio", get_user_default("min_ratio"), 0, 1, 0.01,
-                        hint="Minimum weight/post ratio (0-1). Higher = stronger connections only. 0 = include all.",
-                    )
+                        "Min Connection Ratio", 0, 0, 1, 0.01,
+                        hint="Disabled: connection_ratio is a readout column "
+                             "(weight / all-post incoming weight) — it no longer "
+                             "filters.",
+                    ).set_visibility(False)
                     min_traversal = number_input(
-                        "Min Traversal Prob.", get_user_default("min_traversal_probability"), 0, 1, 0.01,
-                        hint="Minimum traversal probability (ratio/0.3, capped at 1.0). Controls path confidence threshold.",
-                    )
-                    pathfinding_algo = select_input(
-                        "Algorithm", PATHFINDING_ALGORITHMS, get_user_default("pathfinding"),
-                        hint="StrongestFirst (default): emits intact paths strongest-first; at Max Paths it keeps ALL paths above the reported strength cutoff instead of truncating arbitrarily. MemoizedDFS/DP/DFS/MeetInMiddle/Bidirectional: complete unordered enumeration.",
-                        help_doc="pathfinding_algorithms.html",
-                    )
+                        "Min Traversal Prob.", 0, 0, 1, 0.01,
+                        hint="Disabled: traversal_probability is a readout column "
+                             "(ratio/0.3, capped at 1.0) — it no longer filters.",
+                    ).set_visibility(False)
                 with ui.row().classes("gap-4"):
                     with ui.column().classes("gap-0"):
                         max_paths_bodyid = number_input(
                             "Max Paths (BodyId)", get_user_default("max_paths_bodyid"),
                             0, 100000000,
                             hint="Path budget for StrongestFirst enumeration: when the "
-                                 "search exceeds it, the strongest paths are kept and the "
-                                 "achieved strength cutoff (tau) is reported. "
-                                 "0 = auto (StrongestFirst: 1M budget; complete "
-                                 "enumerators: unbounded). Replaces the deprecated "
-                                 "bodyId edge limit.",
+                                 "search exceeds it, ALL paths above the achieved "
+                                 "strength cutoff (tau) are kept and tau is reported. "
+                                 "0 = auto (StrongestFirst: 1M budget).",
+                        )
+                    with ui.column().classes("gap-0"):
+                        edge_budget = number_input(
+                            "Edge Budget", get_user_default("graph_edge_limit_bodyid"),
+                            0, 100000000,
+                            hint="After the lossless prunes, discovery cones exceeding "
+                                 "this many bodyId edges are floored just above the "
+                                 "N-th strongest edge's weight (w0 = w1 + 1) — exactly "
+                                 "equivalent to raising the threshold; the applied "
+                                 "floor is reported as edge_weight_floor. 0 = off.",
                         )
                 search_columns = select_input(
                     "Search Columns", SEARCH_COLUMNS, get_user_default("search_columns"),
@@ -310,13 +319,17 @@ def create_find_path_tab():
             "targetNeurons": targets,
             "output_dir": output_dir.value,
             "min_synapse_num": int(min_synapse.value),
-            "min_ratio": float(min_ratio.value),
-            "min_traversal_probability": float(min_traversal.value),
+            # F9: ratio/probability filters are disabled — hidden UI, sent 0.
+            "min_ratio": 0.0,
+            "min_traversal_probability": 0.0,
             "max_interlayer": 0 if (src_all or tgt_all) else int(max_interlayer.value),
             "filter_by": filter_by.value,
-            "pathfinding": pathfinding_algo.value,
-            # Fix C: the lossy bodyId edge limit is deprecated/ignored.
-            "graph_edge_limit_bodyid": 0,
+            # F1: StrongestFirst is the only 'all'-mode algorithm; the
+            # selector was removed.
+            "pathfinding": "StrongestFirst",
+            # Fix D: the Edge Budget (lossy floor above the N-th strongest
+            # edge, w0 = w1 + 1). 0 = off.
+            "graph_edge_limit_bodyid": int(edge_budget.value),
             "max_paths_bodyid": int(max_paths_bodyid.value) or None,
             # Complete Paths no longer exposes the early network preview in
             # the UI; keep the backend behavior explicitly disabled.

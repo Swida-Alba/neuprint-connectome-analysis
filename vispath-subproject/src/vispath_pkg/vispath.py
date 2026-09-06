@@ -3977,24 +3977,27 @@ class VisualizePath:
     def _path_selection_score(self, row, records):
         """Return a stable strength key for complete-path selection.
 
-        Endpoint hops are often the weakest hop solely because they are the
-        source/target boundary.  Ranking long paths by their interior weakest
-        hop keeps a strong route from being discarded just because its first
-        or last hop is weak.  Two-hop paths have no strict interior, so their
-        weakest hop remains the primary score.  Path probability and the
-        complete-path minimum weight are deterministic tie breakers.
+        §6c: ranked through the shared strongest-selection core
+        (``strongest_core.path_rank_key``) so display selection and
+        StrongestFirst enumeration share one definition of "strongest":
+        primary = full-path bottleneck; the interior-weakest-hop strength
+        is kept as the first tie-breaker (display policy — boundary hops
+        are often weak solely because they touch the query boundary), and
+        path probability as the second.
         """
         weights = [data['weight'] for _, data in records]
         if not weights:
             return (0, 0, 0)
-        core_weights = weights[1:-1] if len(weights) > 2 else weights
-        core_strength = min(core_weights) if core_weights else min(weights)
+        try:
+            from .strongest_core import path_rank_key
+        except ImportError:  # src laid bare on sys.path
+            from strongest_core import path_rank_key
         path_probability = row.get('path_prob', row.get('path_probability', 0))
         try:
             path_probability = float(path_probability)
         except (TypeError, ValueError):
-            path_probability = 0
-        return (core_strength, path_probability, min(weights))
+            path_probability = 0.0
+        return path_rank_key(weights, path_probability)
 
     @staticmethod
     def _edges_on_source_target_corridor(edges, source_nodes, target_nodes):
@@ -4107,7 +4110,11 @@ class VisualizePath:
                 integrity_relaxed = len(edge_data_dict) > self.edgeN_limit
 
             kept_weights = [d['weight'] for d in edge_data_dict.values()]
-            threshold = min(kept_weights) if kept_weights else 0
+            try:
+                from .strongest_core import selection_threshold
+            except ImportError:  # src laid bare on sys.path
+                from strongest_core import selection_threshold
+            threshold = selection_threshold(kept_weights) or 0
             return (edge_data_dict, False, integrity_relaxed,
                     selected_paths, threshold)
 

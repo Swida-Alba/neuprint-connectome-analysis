@@ -1491,6 +1491,143 @@ class FastGraph:
                         if len(set(fp) & set(bp)) == 1:
                             yield fp + bp[1:]
 
+    def _widest_path_backward(self, targets, cutoff):
+        """Best achievable bottleneck from every node to any target.
+
+        Delegates to the shared strongest-selection core (§6c of
+        plan-cross-dataset-report-fixes). ``W[d][v]`` = max over paths
+        ``v -> any target`` with at most ``d`` edges of the min edge
+        weight (widest-path / maximin value).
+        """
+        try:
+            from .strongest_core import widest_path_backward
+        except ImportError:  # src laid bare on sys.path
+            from strongest_core import widest_path_backward
+        return widest_path_backward(self.adj, targets, int(cutoff))
+
+    def find_paths_strongest_first(self, sources, targets, cutoff,
+                                   budget=None, per_pair_k=None, stats=None,
+                                   verbose=False):
+        """Budgeted best-first enumeration in DESCENDING bottleneck order.
+
+        Emits complete simple paths (source -> ... -> target, at most
+        ``cutoff`` edges, no repeated nodes) strongest-first, where the
+        strength of a path is its BOTTLENECK (minimum edge weight).
+
+        Semantics:
+        - With ``budget=None`` (or a budget >= the total path count) the
+          emitted SET is identical to ``find_paths_memoized_dfs`` (any
+          simple path of 1..cutoff edges ending at a target; paths may
+          pass through other targets). Only the emission order differs.
+        - With a budget, emission continues until ``budget`` paths have
+          been emitted and then drains every remaining tie at the cutoff
+          strength tau (the last emitted bottleneck). The result is
+          exactly "all intact paths with bottleneck >= tau"; ``stats``
+          reports ``tau``, ``emitted`` and ``budget_bitten``.
+        - ``per_pair_k`` (optional) additionally skips emitting paths for
+          a (source, target) pair once it has emitted k paths (fair share;
+          pairs keep being extended). With per_pair_k set, the result is
+          "per-pair top-k", NOT a global bottleneck cutoff, and the
+          threshold-monotone prefix property no longer holds.
+
+        Determinism: neighbors are walked in (-weight, node) order and a
+        monotonic counter breaks priority ties, so repeated runs on the
+        same graph emit the same sequence.
+        """
+        import heapq
+
+        INF = float('inf')
+        cutoff = int(cutoff)
+        if cutoff < 1:
+            return
+        target_set = set(targets)
+        W = self._widest_path_backward(target_set, cutoff)
+
+        heap = []  # (-bound, tie, node, hops, run_bottleneck, path_tuple)
+        counter = 0
+        for s in sources:
+            bound = W[cutoff].get(s)
+            if bound is None:
+                continue
+            heapq.heappush(heap, (-bound, counter, s, 0, INF, (s,)))
+            counter += 1
+
+        emitted = 0
+        tau = None
+        tau_open = False  # True once the budget is reached: drain ties at tau
+        truncated = False  # True when weaker paths were skipped (tau < full)
+        pair_counts = {}
+        last_pop_bound = None
+        # Canonical-tau support: the strongest DROPPED path's bottleneck.
+        # Paths below tau are dropped either by the drain break (this pop's
+        # bound is their best completion) or by the push filter (new_bound
+        # is the prefix's best completion); the max over both is the exact
+        # w2, so the canonical threshold tau_min = w2 + 1 is the minimal
+        # query that reproduces this output set.
+        strongest_dropped = None
+
+        while heap:
+            neg_bound, _, node, hops, run_b, path = heapq.heappop(heap)
+            bound = -neg_bound
+            last_pop_bound = bound
+            if tau_open and bound < tau:
+                truncated = True
+                if strongest_dropped is None or bound > strongest_dropped:
+                    strongest_dropped = bound
+                break  # everything left is strictly weaker than tau
+
+            # A length-0 path (a source that is itself a target) is not part
+            # of the enumerated universe (matching find_paths_memoized_dfs).
+            is_target = node in target_set and hops >= 1
+            if is_target:
+                if per_pair_k is not None:
+                    pair = (path[0], node)
+                    if pair_counts.get(pair, 0) >= per_pair_k:
+                        is_target = False  # fair share reached: no emission
+                    else:
+                        pair_counts[pair] = pair_counts.get(pair, 0) + 1
+                if is_target:
+                    yield list(path)
+                    emitted += 1
+                    tau = run_b
+                    if budget is not None and emitted >= budget:
+                        tau_open = True
+
+            if hops >= cutoff:
+                continue
+            remaining = cutoff - hops - 1
+            # Deterministic expansion: strongest edge first, then node id.
+            neighbors = sorted(self.adj.get(node, {}).items(),
+                               key=lambda kv: (-kv[1], kv[0]))
+            path_set = set(path)
+            for v, w in neighbors:
+                if v in path_set:
+                    continue
+                new_run = run_b if run_b < w else w
+                v_bound = W[remaining].get(v)
+                if v_bound is None:
+                    continue
+                new_bound = new_run if new_run < v_bound else v_bound
+                if tau_open and new_bound < tau:
+                    truncated = True
+                    if (strongest_dropped is None
+                            or new_bound > strongest_dropped):
+                        strongest_dropped = new_bound
+                    continue  # weaker than the cutoff being drained
+                heapq.heappush(
+                    heap,
+                    (-new_bound, counter, v, hops + 1, new_run,
+                     path + (v,)),
+                )
+                counter += 1
+
+        if stats is not None:
+            stats['emitted'] = emitted
+            stats['budget_bitten'] = bool(budget is not None and truncated)
+            stats['tau'] = tau
+            stats['last_bound'] = last_pop_bound
+            stats['strongest_dropped'] = strongest_dropped
+
     def __repr__(self):
         return f"FastGraph(nodes={self.number_of_nodes()}, edges={self.number_of_edges()})"
 

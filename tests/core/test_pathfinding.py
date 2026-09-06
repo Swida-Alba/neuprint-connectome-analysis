@@ -542,9 +542,10 @@ def test_early_viz_type_level_and_bodyid_conditional(monkeypatch, tmp_path):
 
     monkeypatch.setattr(coana, "VisualizePath", FakeVisualizePath)
 
-    def make_fc():
+    def make_fc(skip_bodyid=False):
         fc = object.__new__(coana.FindNeuronConnection)
         fc.allpath_folder = str(tmp_path)
+        fc.skip_bodyId = skip_bodyid
         fc.verbose_mode = "full"
         fc.showfig = False
         fc.edgeN_limit = 500
@@ -566,8 +567,9 @@ def test_early_viz_type_level_and_bodyid_conditional(monkeypatch, tmp_path):
     G.add_edge("2", "3", 5)
     G.add_edge("1", "3", 7)
 
-    # default (skip_bodyId=False): type-level + bodyId-level early networks
-    fc = make_fc()
+    # skip_bodyId=False explicitly: type-level + bodyId-level early networks
+    # (the dataclass default is True since 2026-09-04, so set it here)
+    fc = make_fc(skip_bodyid=False)
     fc._visualize_graph_before_reconstruct(G)
     assert len(calls) == 2
     # both early calls are network-only (no duplicated heatmap/Sankey)
@@ -694,35 +696,47 @@ def test_relocate_viz_outputs_organizes_visualization_folder(tmp_path):
     assert list(saved.columns) == ["path", "length"]
 
 
-def test_trim_bodyid_edges_applies_limit_only_for_deep_searches():
-    """The pan-graph bodyId edge limit applies ONLY when max_interlayer >= 3
-    (deep searches); shallow searches keep the COMPLETE graph — no trim
-    warning is emitted and every row survives."""
+def test_edge_budget_floor_applies_only_when_cone_exceeds_budget():
+    """Fix D: the Edge Budget is a lossy floor in '_all' mode — when the
+    lossless-pruned cone exceeds the budget, w0 = (N-th strongest weight)
+    + 1 is applied (kept edges < N strictly), the floor/landing are
+    recorded on the instance, and a cone within the budget is untouched."""
     import sys
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
     import coana
 
     layers = [pl.DataFrame({
-        "bodyId_pre": ["S", "S", "A", "B", "S", "C"],
-        "bodyId_post": ["A", "B", "T", "T", "C", "T"],
-        "weight": [1, 3, 4, 2, 100, 90],
+        "bodyId_pre": ["S", "A", "S", "B", "S", "C"],
+        "bodyId_post": ["A", "T", "B", "T", "C", "T"],
+        "weight": [10, 9, 8, 2, 1, 1],
     })]
-    for L, expect_trim in ((2, False), (3, True)):
+    for budget, expect_floor in ((4, True), (10, False)):
         fc = object.__new__(coana.FindNeuronConnection)
-        fc.max_interlayer = L
-        fc.graph_edge_limit_bodyid = 2
+        fc.max_interlayer = 2
+        fc.graph_edge_limit_bodyid = budget
         fc._vprint = lambda *a, **k: None
         fc._warn_notes = []
-        out = fc._trim_bodyid_edges(layers, ["S"], ["T"])
-        rows = out.height if hasattr(out, "height") else len(out)
-        if expect_trim:
-            # limit=2: 2 reserved (S->C, A->T) + 2 strongest non-reserved
-            # (C->T, S->B) survive; the weak S->A / B->T rows are cut
-            assert rows == 4, rows
-            assert fc._warn_notes            # trim warning recorded
+        fc.edge_weight_floor = None
+        fc.edge_budget_landing = None
+        out = fc._graph_edge_frames(
+            [df.clone() for df in layers], ["S"], ["T"], path_mode="all")
+        rows = sum(f.height for f in out)
+        if expect_floor:
+            # 6 rows > budget 4: N-th strongest = 2 -> w0 = 3; kept
+            # {10, 9, 8}, then the second lossless pass drops the stranded
+            # S->B (its route to T died with B->T).
+            assert rows == 2, rows
+            assert fc.edge_weight_floor == 3.0
+            assert fc.edge_budget_landing == 2.0
+            assert any("edge budget" in n for n in fc._warn_notes)
+            weights = sorted(
+                w for f in out for w in f["weight"].to_list())
+            assert all(w >= 3 for w in weights)
         else:
-            assert rows == 6, rows          # complete graph kept
-            assert fc._warn_notes == []     # no trim warning
+            # cone within the budget: untouched, no floor record
+            assert rows == 6, rows
+            assert fc.edge_weight_floor is None
+            assert not any("edge budget" in n for n in fc._warn_notes)
 
 
 def test_find_all_path_optimization_fields_exist():
@@ -1580,9 +1594,11 @@ class TestFindShortestPathPipeline:
         assert "[shortest explored-graph scope]" in text
         assert "not proven globally shortest" in text
 
-    def test_shortest_edge_limit_off_by_default_and_opt_in_warns(
+    def test_shortest_edge_limit_never_floors(
             self, monkeypatch, tmp_path):
-        # Default (limit=0): no trim, no shortest-trim warning note.
+        """Fix C/D: shortest mode is never floored — even with an Edge
+        Budget set, shortest results are complete and no notes fire."""
+        # Default (limit=0): no floor, no shortest-trim warning note.
         fc, _, _ = _make_pipeline_fc(
             monkeypatch, tmp_path, _CHAIN_EDGES, max_interlayer=99,
             graph_edge_limit=0)
@@ -1591,14 +1607,14 @@ class TestFindShortestPathPipeline:
                        for n in fc._warn_notes)
 
         _FINDALLPATH_GRAPH_CACHE.clear()
-        # Opt-in limit: trimming applies and the distance-inflation note is
-        # recorded (chain graph survives the integrity-preserving trim).
+        # Opt-in Edge Budget: ignored in shortest mode — results stay
+        # complete (no floor, no deprecation notice).
         fc2, _, _ = _make_pipeline_fc(
             monkeypatch, tmp_path, _CHAIN_EDGES, max_interlayer=99,
             graph_edge_limit=2)
         fc2.FindShortestPath()
-        assert any("shortest mode + graph edge limit" in n
-                   for n in fc2._warn_notes)
+        assert not any("DEPRECATED" in n for n in fc2._warn_notes)
+        assert not any("edge budget" in n for n in fc2._warn_notes)
         path_csv = os.path.join(fc2.allpath_folder, "src_to_tgt_allpaths_type.csv")
         assert len(pl.read_csv(path_csv)) == 1
 
@@ -1621,10 +1637,11 @@ class TestFindShortestPathPipeline:
         fc2.FindShortestPath()
         assert not any("reach the Max Layers bound" in m for m in logs2)
 
-    def test_shortest_mode_unset_limit_defaults_to_no_trim(
+    def test_edge_budget_floor_never_runs_in_shortest_mode(
             self, monkeypatch, tmp_path):
-        """path_mode='shortest' with graph_edge_limit_bodyid unset (None)
-        behaves like 0 — no trimming, no warning note."""
+        """Fix D scope: shortest mode is never floored — even with an Edge
+        Budget set, '_graph_edge_frames' returns the full lossless-pruned
+        cone and records no floor."""
         import sys
         sys.path.insert(0, str(PROJECT_ROOT / "src"))
         import coana
@@ -1633,22 +1650,28 @@ class TestFindShortestPathPipeline:
         layers = [pl.DataFrame({
             "bodyId_pre": ["S", "S", "A", "B"],
             "bodyId_post": ["A", "B", "T", "T"],
-            "weight": [1, 3, 4, 2],
+            "weight": [5, 3, 4, 2],
         })]
         for path_mode in ("shortest", "all"):
             fc = object.__new__(coana.FindNeuronConnection)
             fc.max_interlayer = 3
-            fc.graph_edge_limit_bodyid = None  # unset -> per-mode default
+            fc.graph_edge_limit_bodyid = 3  # below the 4-row cone
             fc._vprint = lambda *a, **k: None
             fc._warn_notes = []
-            out = fc._trim_bodyid_edges(layers, ["S"], ["T"], path_mode=path_mode)
-            rows = out.height if hasattr(out, "height") else len(out)
-            # 4 rows, nothing trimmed in either mode at this size
-            assert rows == 4, (path_mode, rows)
+            fc.edge_weight_floor = None
+            fc.edge_budget_landing = None
+            out = fc._graph_edge_frames(
+                [df.clone() for df in layers], ["S"], ["T"],
+                path_mode=path_mode)
+            rows = sum(f.height for f in out)
             if path_mode == "shortest":
-                # the whole point: unset limit in shortest mode must not
-                # even enter the trim path (no warning note)
-                assert not fc._warn_notes, fc._warn_notes
+                # never floored: the full cone survives, no floor record
+                assert rows == 4, (path_mode, rows)
+                assert fc.edge_weight_floor is None
+            else:
+                # 'all' mode floors (4 rows > budget 2)
+                assert rows < 4, (path_mode, rows)
+                assert fc.edge_weight_floor is not None
 
     def test_normalized_keyword_filter_sentinel_is_noop(self):
         """The 'None' sentinel (field default / UI convention) must never

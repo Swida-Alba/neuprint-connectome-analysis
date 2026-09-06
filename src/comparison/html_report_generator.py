@@ -96,7 +96,11 @@ def generate_html_report(
     
     # Report header
     html_parts.append(_generate_report_header(analyzer, dataset_names, thresholds, mode_specific_note, nickname_map))
-    
+
+    # Concern 2 (report-fixes): in-page banner — applied minimal
+    # thresholds per dataset (Feature G τ collapse + lossy floor marker)
+    html_parts.append(_generate_applied_threshold_banner(analyzer, dataset_names))
+
     # Table of Contents
     html_parts.append(_generate_toc(thresholds))
     
@@ -108,6 +112,9 @@ def generate_html_report(
     
     # 1.5. Neuron Counts Section
     html_parts.append(_generate_neuron_counts_section(analyzer, dataset_names, nickname_map))
+
+    # 1.6. Type Mapping Section (§4 of the report-fixes plan)
+    html_parts.append(_generate_type_mapping_section(analyzer, dataset_names))
 
     # 1.75. Hemisphere Symmetry Section
     html_parts.append(_generate_hemisphere_symmetry_section(analyzer, dataset_names, thresholds, nickname_map))
@@ -362,7 +369,38 @@ def _generate_html_header() -> str:
 """
 
 
-def _generate_report_header(analyzer, dataset_names: List[str], thresholds: List[int], 
+def _generate_applied_threshold_banner(analyzer, dataset_names: List[str]) -> str:
+    """Concern 2: in-page banner stating the APPLIED minimal synapse
+    threshold per dataset (Feature G τ collapse). Shown only when at
+    least one dataset was budget-bitten — otherwise the asked thresholds
+    applied unchanged and no banner is warranted."""
+    applied = {}
+    meta_map = getattr(analyzer, '_path_run_meta', {}) or {}
+    for (ds, _t), meta in meta_map.items():
+        if ds not in dataset_names:
+            continue
+        tau = meta.get('tau')
+        if meta.get('budget_bitten') and tau is not None:
+            applied[ds] = max(applied.get(ds, 0), float(tau))
+    if not applied:
+        return ''
+    rows = ''.join(
+        f'<tr><td>{ds}</td><td style="text-align:center;">{applied[ds]:g}</td></tr>'
+        for ds in dataset_names if ds in applied)
+    return (
+        '<div style="margin:14px 0; padding:10px 14px; border:1px solid #d9a441;'
+        ' background:#fdf6e3; border-radius:6px; font-size:0.95em;">'
+        '<strong>Applied minimal thresholds (StrongestFirst budget reached):</strong>'
+        '<table style="margin-top:6px; border-collapse:collapse;">'
+        f'{rows}</table>'
+        '<div style="margin-top:6px; color:#666;">Each dataset\'s output contains '
+        'exactly the intact paths whose weakest hop is at or above its applied '
+        'threshold — identical to a complete run at that threshold. Lower input '
+        'thresholds were skipped as τ-collapse duplicates of these runs.</div>'
+        '</div>')
+
+
+def _generate_report_header(analyzer, dataset_names: List[str], thresholds: List[int],
                             mode_specific_note: str, nickname_map: Dict[str, str]) -> str:
     """Generate the report header section."""
     from datetime import datetime
@@ -3508,6 +3546,75 @@ def _generate_edge_dataset_table(analyzer, dataset: str, thresholds: List[int],
     return ''.join(html)
 
 
+def _generate_type_mapping_section(analyzer, dataset_names: List[str]) -> str:
+    """§4: auto type mapping section — canonical type → per-dataset names
+    for the run's result types (capped at 100 rows), plus a conflicts
+    summary scoped to the run's datasets. Rendered only when
+    auto_type_mapping is enabled."""
+    params = getattr(analyzer, 'parameters', None)
+    mapper = getattr(params, '_auto_type_mapper', None)
+    if params is None or not getattr(params, 'auto_type_mapping', False) \
+            or mapper is None:
+        return ''
+    try:
+        result_types = list(analyzer._collect_result_types())
+    except Exception:
+        return ''
+    if not result_types:
+        return ''
+
+    cap = 100
+    shown = result_types[:cap]
+    rows = []
+    for t in shown:
+        try:
+            mappings = mapper.resolve_type_across_datasets(t, dataset_names)
+        except Exception:
+            mappings = {ds: t for ds in dataset_names}
+        rows.append((t, mappings))
+
+    conflicts_total = len(getattr(mapper, '_conflicts', []) or [])
+    html = ['<div id="type-mapping" class="section">',
+            '<div class="section-header">🔗 Type Mapping (auto)</div>',
+            '<div class="section-content">',
+            '<p style="color: var(--secondary-color);">',
+            'Canonical (male-cns) type name → equivalent type in each dataset, '
+            'for the types involved in this run.</p>',
+            '<div style="overflow-x: auto;"><table><thead><tr><th>Canonical type</th>']
+    for d in dataset_names:
+        html.append(f'<th>{d}</th>')
+    html.append('</tr></thead><tbody>')
+    for t, mappings in rows:
+        html.append(f'<tr><td><strong>{t}</strong></td>')
+        for d in dataset_names:
+            val = mappings.get(d)
+            html.append(f'<td>{val if val else "—"}</td>')
+        html.append('</tr>')
+    html.append('</tbody></table></div>')
+    html.append(f'<p style="color:#666; font-size:0.9em;">Showing {len(rows)} '
+                f'of {len(result_types)} involved types'
+                + (f'; {conflicts_total} mapping conflicts recorded — see '
+                   f'auto_type_mapping_conflicts.csv' if conflicts_total else '; no mapping conflicts')
+                + '.</p></div></div>')
+    return ''.join(html)
+
+
+def _normalize_path_key(key) -> str:
+    """§3: canonical display-key normalization for hop-weight lookups.
+
+    Unifies separator variants ('->' vs ' → ') and strips display suffixes
+    ('Name(OtherName)') so the path-presence table rows and the hop-weight
+    dict — built through slightly different key forms — always meet."""
+    s = str(key).replace(' → ', ' -> ').replace('->', ' -> ')
+    nodes = []
+    for node in s.split(' -> '):
+        node = node.strip()
+        if '(' in node:
+            node = node.split('(', 1)[0].strip()
+        nodes.append(node)
+    return ' -> '.join(nodes)
+
+
 def _generate_path_matrices_section(analyzer, dataset_names: List[str], thresholds: List[int],
                                      nickname_map: Dict[str, str]) -> str:
     """Generate path presence matrices section with dual toggle (by threshold and by dataset)."""
@@ -3617,36 +3724,46 @@ def _generate_path_presence_table(analyzer, data: pd.DataFrame, dataset_names: L
     
     # Get path hop weights from analyzer
     path_hop_weights = analyzer._get_path_hop_weights_for_threshold(threshold) if hasattr(analyzer, '_get_path_hop_weights_for_threshold') else {}
-    
+    # §3: normalized lookup so display/canonical key variants meet
+    hop_by_norm = {_normalize_path_key(k): v for k, v in path_hop_weights.items()}
+
     # Add threshold caption if provided
     threshold_caption = f'<div style="margin-bottom: 8px; color: var(--primary-color); font-weight: 600;">Threshold = {threshold}</div>' if threshold is not None else ''
-    
-    html = [f'{threshold_caption}<div style="overflow-x: auto;"><table><thead><tr><th>Item</th>']
+
+    html = [f'{threshold_caption}<div style="overflow-x: auto;"><table><thead><tr><th>Item</th><th>Len</th>']
     for d in available:
         html.append(f'<th>{nickname_map[d]}</th>')
     html.append('<th>Conservation</th></tr></thead><tbody>')
-    
+
     # Sort by conservation (count of datasets present), then by total weight
     data_copy = data.copy()
     data_copy['_conservation'] = (data_copy[available] > 0).sum(axis=1)
     data_copy['_total'] = data_copy[available].sum(axis=1)
     data_copy = data_copy.sort_values(['_conservation', '_total'], ascending=[False, False])
     top = data_copy.head(min(50, len(data_copy)))
-    
+
     for key, row in top.iterrows():
         count = sum(1 for d in available if row.get(d, 0) > 0)
         badge = 'badge-success' if count == len(available) else 'badge-warning' if count > 1 else 'badge-danger'
-        
-        html.append(f'<tr><td><strong>{key}</strong></td>')
+
+        # §3: path length = hop count (nodes - 1); prefer the hop-weight
+        # list length, fall back to the key's arrow count.
+        _norm = _normalize_path_key(key)
+        _hop_hits = [hop_by_norm.get(_norm)]
+        if any(_hop_hits):
+            length = max(len(h) for h in _hop_hits if h)
+        else:
+            length = _norm.count(' -> ') + 1
+
+        html.append(f'<tr><td><strong>{key}</strong></td><td>{length}</td>')
         for d in available:
             w = row.get(d, 0)
             safe_name = analyzer.parameters._sanitize_name(d)
             if w > 0:
-                # Get hop weights if available
+                # Get hop weights if available (normalized lookup, §3)
                 hop_weights_str = ''
-                if key in path_hop_weights and safe_name in path_hop_weights[key]:
-                    hop_weights = path_hop_weights[key][safe_name]
-                    if hop_weights:
+                hop_weights = hop_by_norm.get(_norm, {}).get(safe_name)
+                if hop_weights:
                         min_w = min(hop_weights)
                         # Format with bolded minimum
                         formatted = []
@@ -3694,6 +3811,7 @@ def _generate_path_dataset_table(analyzer, dataset: str, thresholds: List[int],
         
         # Get hop weights for this threshold
         hop_weights_dict = analyzer._get_path_hop_weights_for_threshold(threshold) if hasattr(analyzer, '_get_path_hop_weights_for_threshold') else {}
+        hop_weights_norm = {_normalize_path_key(k): v for k, v in hop_weights_dict.items()}
         
         # Only iterate over top paths (using vectorized access)
         if top_paths_set:
@@ -3710,6 +3828,10 @@ def _generate_path_dataset_table(analyzer, dataset: str, thresholds: List[int],
                 path_data[path_key] = {}
             
             hop_weights = hop_weights_dict.get(path_key, {}).get(safe_name, []) if hop_weights_dict else []
+            if not hop_weights and hop_weights_dict:
+                # §3: normalized lookup — display/canonical key variants
+                _norm = _normalize_path_key(path_key)
+                hop_weights = hop_weights_norm.get(_norm, {}).get(safe_name, [])
             path_data[path_key][threshold] = (weight, hop_weights)
     
     if not path_data:
@@ -3722,13 +3844,18 @@ def _generate_path_dataset_table(analyzer, dataset: str, thresholds: List[int],
     )[:50]
     
     html = [f'<div style="margin-bottom: 8px; color: var(--primary-color); font-weight: 600;">Dataset: {nick} (all thresholds)</div>']
-    html.append('<div style="overflow-x: auto;"><table><thead><tr><th>Path</th>')
+    html.append('<div style="overflow-x: auto;"><table><thead><tr><th>Path</th><th>Len</th>')
     for t in thresholds:
         html.append(f'<th>t={t}</th>')
     html.append('</tr></thead><tbody>')
     
     for path_key, weights in sorted_paths:
-        html.append(f'<tr><td><strong>{path_key}</strong></td>')
+        # §3: path length = max hop-list length across thresholds, else
+        # derived from the key's hop count.
+        _lens = [len(h) for (_w, h) in weights.values() if h]
+        _norm_key = _normalize_path_key(path_key)
+        length = max(_lens) if _lens else (_norm_key.count(' -> ') + 1)
+        html.append(f'<tr><td><strong>{path_key}</strong></td><td>{length}</td>')
         for t in thresholds:
             w, hop_weights = weights.get(t, (0, []))
             if w > 0:

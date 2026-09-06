@@ -162,6 +162,9 @@ def test_single_dataset_pipeline_runs_each_threshold(monkeypatch):
         verbose=False,
     )
     analyzer = ComparisonAnalyzer(params, verbose=False)
+    # legacy per-threshold routing under test (Feature F replay would
+    # otherwise route the whole list through FindAllPathMultiThreshold)
+    analyzer.parameters.replay_paths = False
     calls = []
 
     def fake_run_path_analysis(dataset, threshold, verbose_mode="simple"):

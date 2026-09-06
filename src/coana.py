@@ -67,6 +67,11 @@ from vispath_pkg import VisualizePath
 from connection_map import ThresholdedConnectionMap
 
 try:
+    from .utils.naming_utils import canonical_dataset_name
+except ImportError:  # pragma: no cover - src laid bare on sys.path
+    from utils.naming_utils import canonical_dataset_name
+
+try:
     from .neuron_index_builder import (
         build_search_cache_frame,
         is_search_cache_compatible,
@@ -280,6 +285,17 @@ _FNC_CACHE = {}
 # Structure: {dataset: {'cache_only': bool, 'reason': str, 'warned': bool}}
 # ============================================================================
 _CACHE_ONLY_DATASETS = {}
+
+
+def cache_only_skips_local_fetch(dataset: str, cache_only: bool) -> bool:
+    """Gate for the layer-expansion cache-only skip.
+
+    Cache-only runs skip the local-table fetch for server-backed datasets,
+    but NEVER for BANC: BANC connectivity IS the local merged table (there
+    is no API to fetch instead), so a cache miss must always fall through
+    to it — otherwise the network silently comes back empty.
+    """
+    return bool(cache_only) and not is_banc_dataset(dataset)
 
 # ============================================================================
 # Module-level cache for FindAllPath graph data (bodyId-level)
@@ -623,6 +639,344 @@ def _match_path_edges_to_layers(edges_in_paths, conn_layers):
     return valid_pairs_by_layer, matched_edges
 
 
+def prune_layers_hop_budget(conn_layers, sources, targets, bound,
+                            pre_col='bodyId_pre', post_col='bodyId_post',
+                            vprint=None, warn_notes=None, label='bodyId'):
+    """Lossless hop-budget pruning of the discovery layer tables.
+
+    Drops every edge (u, v) that cannot lie on ANY simple source->target
+    path within ``bound`` edges, BEFORE the pathfinding graph is built:
+
+    1. BFS hop distances distS(.) from the sources and distT(.) to the
+       targets over the union of the layer tables.
+    2. Keep row (u, v) iff distS(u) + 1 + distT(v) <= bound.
+
+    Exactness: if an admissible simple path through (u, v) exists, its
+    prefix/suffix prove distS(u) <= a and distT(v) <= b with
+    a + 1 + b <= bound, so the filter NEVER removes an edge that is on a
+    path. (The converse only holds for walks, so the filter may keep a
+    few edges that no SIMPLE path uses — pruning is lossless, not
+    complete.)
+
+    Unlike ``_trim_edges_with_path_integrity`` (a strength-based trim with
+    a lossy budget), this pass is applied at EVERY depth and in both path
+    modes; no admissible path is removed, so threshold-monotonicity and
+    downstream replay semantics are unaffected.
+
+    Returns (pruned_tables, stats). Inputs are never mutated — the cached
+    FindAllPath graph entries stay shareable across thresholds. ``stats``
+    reports rows_before/rows_dropped/nodes for logging.
+    """
+    from collections import deque
+
+    import numpy as np
+
+    tables = [
+        c for c in (conn_layers or [])
+        if not (c.is_empty() if hasattr(c, 'is_empty') else c.empty)
+    ]
+    stats = {'rows_before': 0, 'rows_dropped': 0, 'nodes': 0,
+             'strongest_retained': None}
+    if not tables or bound is None or bound < 1:
+        return conn_layers, stats
+
+    # Pass 1: intern node strings -> int32 codes and build the union
+    # adjacency in one sweep (same memory-conscious scheme as
+    # _trim_edges_with_path_integrity). Per-table code arrays are kept for
+    # the vectorized mask pass; the row lists themselves are released after
+    # each table so the peak stays at one table, not the concat.
+    node_codes = {}
+
+    def _code(value):
+        existing = node_codes.get(value)
+        if existing is None:
+            existing = len(node_codes)
+            node_codes[value] = existing
+        return existing
+
+    adj = {}
+    radj = {}
+    adj_w = {}  # u -> {v: max weight} for the strongest-retained report
+    code_pairs = []  # (pre_codes, post_codes) per table
+    for table in tables:
+        pre_iter = (table[pre_col].to_list()
+                    if hasattr(table, 'iter_rows') else table[pre_col].tolist())
+        post_iter = (table[post_col].to_list()
+                     if hasattr(table, 'iter_rows') else table[post_col].tolist())
+        w_iter = (table['weight'].to_list()
+                  if hasattr(table, 'iter_rows') else table['weight'].tolist())
+        n = len(pre_iter)
+        stats['rows_before'] += n
+        pre_codes = np.empty(n, dtype=np.int32)
+        post_codes = np.empty(n, dtype=np.int32)
+        for i in range(n):
+            u = _code(str(pre_iter[i]))
+            v = _code(str(post_iter[i]))
+            pre_codes[i] = u
+            post_codes[i] = v
+            w = float(w_iter[i]) if i < len(w_iter) else 1.0
+            adj.setdefault(u, set()).add(v)
+            radj.setdefault(v, set()).add(u)
+            prev_w = adj_w.setdefault(u, {}).get(v)
+            if prev_w is None or w > prev_w:
+                adj_w[u][v] = w
+        code_pairs.append((pre_codes, post_codes))
+        del pre_iter, post_iter, w_iter
+
+    stats['nodes'] = len(node_codes)
+
+    def bfs(starts, edges):
+        dist = {}
+        dq = deque()
+        for s in starts:
+            if s not in dist:
+                dist[s] = 0
+                dq.append(s)
+        while dq:
+            u = dq.popleft()
+            du = dist[u] + 1
+            for v in edges.get(u, ()):
+                if v not in dist:
+                    dist[v] = du
+                    dq.append(v)
+        return dist
+
+    src_codes = [node_codes[str(s)] for s in set(str(x) for x in sources)
+                 if str(s) in node_codes]
+    tgt_codes = [node_codes[str(s)] for s in set(str(x) for x in targets)
+                 if str(s) in node_codes]
+    if not src_codes or not tgt_codes:
+        # Nothing to anchor the BFS on: keep the tables untouched rather
+        # than pruning the whole graph by accident.
+        return conn_layers, stats
+    dist_s = bfs(src_codes, adj)
+    dist_t = bfs(tgt_codes, radj)
+
+    # Pass 2: vectorized mask per table; drop nothing when nothing fails.
+    BIG = np.iinfo(np.int64).max // 4
+    pruned_tables = []
+    dropped_total = 0
+    for table, (pre_codes, post_codes) in zip(tables, code_pairs):
+        ds = np.fromiter((dist_s.get(int(c), BIG) for c in pre_codes),
+                         dtype=np.int64, count=len(pre_codes))
+        dt = np.fromiter((dist_t.get(int(c), BIG) for c in post_codes),
+                         dtype=np.int64, count=len(post_codes))
+        mask = (ds < BIG) & (dt < BIG) & (ds + 1 + dt <= bound)
+        dropped = int((~mask).sum())
+        dropped_total += dropped
+        if dropped == 0:
+            pruned_tables.append(table)
+            continue
+        if hasattr(table, 'iter_rows'):  # polars
+            pruned_tables.append(
+                table.filter(pl.Series(mask.tolist())))
+        else:
+            pruned_tables.append(table.loc[mask])
+    stats['rows_dropped'] = dropped_total
+
+    # Strongest-retained report (§6b): the widest-path bottleneck of the
+    # best source->target path. Pruning is lossless, so this value is
+    # IDENTICAL before and after pruning — stating it tells the user the
+    # top paths are untouched by the pass. Computed unconditionally so the
+    # stats contract is stable.
+    strongest_retained = None
+    if True:
+        import heapq
+        INF = float('inf')
+        best = {c: INF for c in src_codes}
+        heap = [(-INF, c) for c in src_codes]
+        heapq.heapify(heap)
+        settled = set()
+        while heap:
+            neg_b, u = heapq.heappop(heap)
+            b = -neg_b
+            if u in settled:
+                continue
+            settled.add(u)
+            for v, w in adj_w.get(u, {}).items():
+                nb = min(b, w)
+                if nb > best.get(v, -INF):
+                    best[v] = nb
+                    heapq.heappush(heap, (-nb, v))
+        cand = [best[c] for c in tgt_codes if c in best]
+        if cand:
+            strongest_retained = max(cand)
+    stats['strongest_retained'] = strongest_retained
+
+    if dropped_total and vprint is not None:
+        if strongest_retained is not None:
+            vprint(
+                f'  Hop-budget pruning (lossless): removed {dropped_total:,} of '
+                f'{stats["rows_before"]:,} {label} edges that cannot lie on any '
+                f'source->target path within {bound} edges — strongest '
+                f'retained path bottleneck: {strongest_retained:g} synapses; '
+                f'the strongest (top) paths are unchanged.',
+                level='full',
+            )
+            if warn_notes is not None:
+                warn_notes.append(
+                    f'- [hop-budget pruning, lossless] {dropped_total:,} of '
+                    f'{stats["rows_before"]:,} {label} discovery edges cannot lie '
+                    f'on any source->target path within {bound} edges and were '
+                    f'removed before pathfinding. No admissible path was lost; '
+                    f'the strongest retained path bottleneck is '
+                    f'{strongest_retained:g} synapses — the top paths and '
+                    f'their order are unchanged.'
+                )
+        else:
+            vprint(
+                f'  Hop-budget pruning (lossless): removed {dropped_total:,} of '
+                f'{stats["rows_before"]:,} {label} edges that cannot lie on any '
+                f'source->target path within {bound} edges.',
+                level='full',
+            )
+            if warn_notes is not None:
+                warn_notes.append(
+                    f'- [hop-budget pruning, lossless] {dropped_total:,} of '
+                    f'{stats["rows_before"]:,} {label} discovery edges cannot lie '
+                    f'on any source->target path within {bound} edges and were '
+                    f'removed before pathfinding. No admissible path was lost.'
+                )
+    return pruned_tables, stats
+
+
+def apply_edge_budget_floor(conn_layers, budget, sources, targets, bound,
+                            pre_col='bodyId_pre', post_col='bodyId_post',
+                            vprint=None, warn_notes=None):
+    """Lossy Edge-Budget floor (Fix D): w0 = (N-th strongest edge) + 1.
+
+    After the lossless prunes, when the pruned cone still exceeds
+    ``budget`` edges, the N-th strongest edge's weight w1 is located
+    (O(E) quickselect) and every edge with ``weight < w1 + 1`` is
+    dropped. Edges STRICTLY heavier than w1 number fewer than N by
+    definition of the N-th rank, so the floored cone always fits the
+    budget — the boundary-tie mass (millions of equal-weight weak
+    edges) cannot blow it up, and on locally truncated products (e.g.
+    BANC at weight >= 3) a landing at w1 = 3 floors at 4 instead of
+    being a no-op.
+
+    Semantics: the floor is a pure threshold raise — the run is exactly
+    a complete run at ``max(asked threshold, w0)``; every enumerated
+    path has bottleneck >= w0, so the reported tau satisfies
+    tau >= w0. Reported honestly as a LOSSY stage: paths with
+    bottleneck < w0 do not exist in the output.
+
+    A cheap second lossless pass (``prune_layers_hop_budget``) re-runs
+    on the floored tables to drop edges whose routes died with the
+    floor. Inputs are never mutated — cached graph entries stay
+    shareable.
+
+    Returns (floored_tables, stats) with stats: {applied,
+    edges_before, landing (w1), floor (w0), edges_after, dropped,
+    prune_dropped, strongest_retained}.
+    """
+    import numpy as np
+
+    tables = [
+        c for c in (conn_layers or [])
+        if not (c.is_empty() if hasattr(c, 'is_empty') else c.empty)
+    ]
+    stats = {'applied': False, 'edges_before': 0, 'landing': None,
+             'floor': None, 'edges_after': 0, 'dropped': 0,
+             'prune_dropped': 0, 'strongest_retained': None}
+    if not tables or not budget or int(budget) < 1:
+        return conn_layers, stats
+    budget = int(budget)
+
+    weight_arrays = []
+    total = 0
+    for table in tables:
+        w = (table['weight'].to_list() if hasattr(table, 'iter_rows')
+             else table['weight'].tolist())
+        weight_arrays.append(np.asarray(w, dtype=np.float64))
+        total += len(w)
+    stats['edges_before'] = total
+    if total <= budget:
+        return conn_layers, stats
+
+    weights = np.concatenate(weight_arrays)
+    # N-th strongest edge weight (ascending partition indexed from the
+    # top); O(E).
+    kth = total - budget
+    w1 = float(np.partition(weights, kth)[kth])
+    w0 = w1 + 1.0
+
+    floored_tables = []
+    after = 0
+    for table, w in zip(tables, weight_arrays):
+        mask = w >= w0
+        kept = int(mask.sum())
+        after += kept
+        if kept == len(w):
+            floored_tables.append(table)
+            continue
+        if hasattr(table, 'iter_rows'):  # polars
+            floored_tables.append(table.filter(pl.Series(mask.tolist())))
+        else:
+            floored_tables.append(table.loc[mask])
+    stats['landing'] = w1
+    stats['floor'] = w0
+    stats['edges_after'] = after
+    stats['dropped'] = total - after
+
+    # Production semantics (user directive): the Edge Budget is honored
+    # RESTRICTIVELY — no degenerate revert. When flooring empties the
+    # cone (the top-N edges share one weight tier, or the second
+    # lossless pass strands every route), the empty result IS the
+    # correct answer: the run is exactly a complete run at w0 finding
+    # no paths. The notices below say so; raise the Edge Budget to keep
+    # weaker tiers.
+
+    # Second lossless pass on the floored tables (routes that died with
+    # the floor can strand further dead edges; still O(E), still
+    # lossless).
+    floored_tables, prune_stats = prune_layers_hop_budget(
+        floored_tables, sources, targets, bound,
+        pre_col=pre_col, post_col=post_col,
+        vprint=None, warn_notes=None,
+    )
+    stats['prune_dropped'] = prune_stats.get('rows_dropped', 0)
+    stats['strongest_retained'] = prune_stats.get('strongest_retained')
+    surviving = sum(
+        f.height if hasattr(f, 'height') else len(f)
+        for f in floored_tables)
+    degenerate_empty = after == 0 or surviving == 0
+    stats['applied'] = True
+
+    if vprint is not None:
+        vprint(
+            f'  Edge budget (lossy floor): pruned cone exceeded {budget:,} '
+            f'edges ({total:,}). Top-N landing w1 = {w1:g}, applied floor '
+            f'w0 = w1 + 1 = {w0:g} — {stats["dropped"]:,} edges dropped '
+            f'({total:,} -> {after:,}'
+            + (f', second lossless pass -{stats["prune_dropped"]:,}'
+               if stats['prune_dropped'] else '')
+            + f'). Equivalent to a complete run at min synapse = {w0:g}; '
+            f'paths with bottleneck < {w0:g} do not exist in this output.',
+            level='always')
+    if warn_notes is not None:
+        strongest_txt = (
+            f' Strongest retained path bottleneck: '
+            f'{stats["strongest_retained"]:g} synapses.'
+            if stats['strongest_retained'] is not None else '')
+        degenerate_txt = (
+            ' NOTE: the floored cone is EMPTY — the run found no paths.'
+            if degenerate_empty else '')
+        warn_notes.append(
+            '- [edge budget, lossy floor] the lossless-pruned cone '
+            f'exceeded the edge budget ({stats["edges_before"]:,} edges > '
+            f'{budget:,}). Floor applied: top-N landing w1 = {w1:g}, '
+            f'w0 = w1 + 1 = {w0:g} — {stats["dropped"]:,} edges dropped '
+            f'({stats["edges_before"]:,} -> {stats["edges_after"]:,}'
+            + (f', second lossless pass -{stats["prune_dropped"]:,}'
+               if stats['prune_dropped'] else '')
+            + f').{strongest_txt}{degenerate_txt} This run is exactly a '
+            f'complete run at min synapse = {w0:g}: paths with '
+            f'bottleneck < {w0:g} do not exist in the output. Raise the '
+            'Edge Budget to keep weaker tiers.')
+    return floored_tables, stats
+
+
 def clear_findallpath_cache(dataset: str = None):
     """
     Clear the module-level FindAllPath graph cache.
@@ -638,7 +992,7 @@ def clear_findallpath_cache(dataset: str = None):
         # (dataset_safe: ':' and '.' replaced with '_'), so matching must
         # normalize too - otherwise e.g. 'hemibrain:v1.2.1' never matches
         # 'hemibrain_v1_2_1_...' and the clear silently no-ops.
-        dataset_safe = dataset.replace(':', '_').replace('.', '_')
+        dataset_safe = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
         keys_to_delete = [
             k for k in _FINDALLPATH_GRAPH_CACHE
             if k.startswith(dataset_safe) or k.startswith(dataset)
@@ -1099,16 +1453,44 @@ class FindNeuronConnection:
                 prob_missing = _all_null_or_empty('traversal_probability')
 
                 if ratio_missing or prob_missing:
-                    totals = df.group_by(post_col).agg(pl.col('weight').sum().alias('_total_weight'))
-                    df = df.join(totals, on=post_col, how='left')
-                    df = df.with_columns(
-                        pl.when(pl.col('_total_weight') > 0)
-                        .then(pl.col('weight') / pl.col('_total_weight'))
-                        .otherwise(None)
-                        .alias('connection_ratio')
-                    )
+                    # F9: the denominator is the ALL-POST incoming weight
+                    # (threshold-free). The global fetch is authoritative;
+                    # the in-cone total is the last-resort fallback (it
+                    # understates the denominator and is kept only for
+                    # offline / fetch-failure cases).
+                    global_totals = None
+                    if post_col == 'type_post':
+                        try:
+                            types = df[post_col].drop_nulls().unique().to_list()
+                            global_totals = (self._fetch_total_incoming_weight_by_type(
+                                types, 1) if types else None)
+                        except Exception:
+                            global_totals = None
+                    if global_totals is not None and len(global_totals) > 0:
+                        totals_pl = pl.from_pandas(global_totals).with_columns(
+                            pl.col('type_post').cast(pl.Utf8))
+                        df = df.with_columns(pl.col(post_col).cast(pl.Utf8))
+                        df = df.join(
+                            totals_pl.rename({'type_post': post_col}),
+                            on=post_col, how='left')
+                        df = df.with_columns(
+                            pl.when(pl.col('total_incoming_weight') > 0)
+                            .then(pl.col('weight') / pl.col('total_incoming_weight'))
+                            .otherwise(None)
+                            .alias('connection_ratio')
+                        )
+                        df = df.drop('total_incoming_weight')
+                    else:
+                        totals = df.group_by(post_col).agg(pl.col('weight').sum().alias('_total_weight'))
+                        df = df.join(totals, on=post_col, how='left')
+                        df = df.with_columns(
+                            pl.when(pl.col('_total_weight') > 0)
+                            .then(pl.col('weight') / pl.col('_total_weight'))
+                            .otherwise(None)
+                            .alias('connection_ratio')
+                        )
+                        df = df.drop('_total_weight')
                     df = df.with_columns((pl.col('connection_ratio') / 0.3).clip(upper_bound=1.0).alias('traversal_probability'))
-                    df = df.drop('_total_weight')
                 return df
         except Exception:
             pass
@@ -1138,7 +1520,22 @@ class FindNeuronConnection:
         prob_missing = ('traversal_probability' not in df.columns) or _pd_all_null_or_empty(df['traversal_probability'])
 
         if ratio_missing or prob_missing:
-            total_incoming = df.groupby(post_col)['weight'].transform('sum').replace(0, np.nan)
+            # F9: all-post (threshold-free) denominator via the global
+            # type-level totals; the in-cone total is the last resort.
+            global_totals = None
+            if post_col == 'type_post':
+                try:
+                    types = df[post_col].dropna().unique().tolist()
+                    global_totals = (self._fetch_total_incoming_weight_by_type(
+                        types, 1) if types else None)
+                except Exception:
+                    global_totals = None
+            if global_totals is not None and len(global_totals) > 0:
+                total_incoming = df[post_col].map(
+                    global_totals.set_index('type_post')['total_incoming_weight']
+                ).replace(0, np.nan)
+            else:
+                total_incoming = df.groupby(post_col)['weight'].transform('sum').replace(0, np.nan)
             df['connection_ratio'] = df['weight'] / total_incoming
             df['traversal_probability'] = (df['connection_ratio'] / 0.3).clip(upper=1.0)
         return df
@@ -1773,8 +2170,10 @@ class FindNeuronConnection:
 
     def _prepare_flywire_data(self):
         '''
-        Check and prepare FlyWire data from downloaded archives.
-        Uses FAFB_file_converter or BANC_file_converter to ensure data validity and conversion.
+        Check and prepare FlyWire (FAFB) data from downloaded archives.
+        Uses FAFB_file_converter to ensure data validity and conversion.
+        BANC routes through _prepare_banc_data instead (standalone bucket
+        source; it never presents itself as a FlyWire client).
         
         If force_API_fetching is True for FAFB, skip local file preparation and use CAVE API later.
         If cache already exists with complete data, source files are not required.
@@ -1785,14 +2184,7 @@ class FindNeuronConnection:
         # ``use_cache=False`` is an online-only mode.  Do not inspect the
         # persistent connection/index cache or prepare/read converted FlyWire
         # tables here; FAFB connections are fetched through CAVE instead.
-        # BANC has no supported public CAVE path, so fail clearly rather than
-        # silently falling back to local data and violating the setting.
         if not self.use_cache:
-            if is_banc_dataset(self.dataset):
-                raise RuntimeError(
-                    "use_cache=False requires an online FlyWire API fetch, "
-                    "but BANC does not support CAVE API connectivity."
-                )
             self.force_API_fetching = True
             self._vprint(
                 "use_cache=False: FlyWire is in online-only mode; "
@@ -1800,31 +2192,24 @@ class FindNeuronConnection:
                 level='simple',
             )
             return
-
+        
         dataset_safe = dataset_folder(self.dataset)
         dataset_dir = os.path.join(self.script_path, 'datasets', dataset_safe)
         cache_dir = os.path.join(self.script_path, 'cache', dataset_safe)
         
         # If force_API_fetching is True for FAFB, we'll use CAVE API instead of local files
-        # Note: BANC does not support force_API_fetching due to API access restrictions
         if self.force_API_fetching:
-            if is_banc_dataset(self.dataset):
-                self._vprint("⚠️  force_API_fetching=True is not supported for BANC (API access restricted).", level='simple')
-                self._vprint("   Falling back to local data mode.", level='simple')
-                self.force_API_fetching = False
-            else:
-                # Check for API cache first
-                api_cache_dir = os.path.join(cache_dir, 'API_cache')
-                api_conn_cache = os.path.join(api_cache_dir, 'connections.parquet')
-                api_index_cache = os.path.join(api_cache_dir, 'neuron_index.parquet')
-
-                if os.path.exists(api_conn_cache) and os.path.exists(api_index_cache):
-                    self._vprint(f"Using API cache for {self.dataset}", level='simple')
-                    return
-                
-                self._vprint(f"force_API_fetching=True: Will fetch data via CAVE API for {self.dataset}", level='simple')
-                # Don't require local files - we'll fetch via API
+            api_cache_dir = os.path.join(cache_dir, 'API_cache')
+            api_conn_cache = os.path.join(api_cache_dir, 'connections.parquet')
+            api_index_cache = os.path.join(api_cache_dir, 'neuron_index.parquet')
+    
+            if os.path.exists(api_conn_cache) and os.path.exists(api_index_cache):
+                self._vprint(f"Using API cache for {self.dataset}", level='simple')
                 return
+            
+            self._vprint(f"force_API_fetching=True: Will fetch data via CAVE API for {self.dataset}", level='simple')
+            # Don't require local files - we'll fetch via API
+            return
         
         # Check if cache already exists and is complete
         # If so, we don't need the source files
@@ -1867,6 +2252,119 @@ class FindNeuronConnection:
                 print("   Downloading local data is strongly recommended.\n")
             sys.exit(1)
 
+    def _normalize_client_type(self):
+        """Normalize ``client_type`` from the dataset (init-time).
+
+        BANC datasets normalize to the standalone 'banc' public-bucket
+        source (integration plan §I) so no client_type-keyed site can
+        ever route them into the NeuPrint or FlyWire machinery — whether
+        the caller left the 'neuprint' default or explicitly passed
+        'neuprint'/'banc'.  Other values are rejected.  The BANC check
+        runs FIRST: ``is_flywire_dataset`` deliberately includes BANC
+        ("FAFB and BANC are both FlyWire datasets"), and without the
+        ordering a default-'neuprint' BANC init flipped to 'flywire' —
+        the mislabel behind audit defects BANC-09 #1–#3.
+        """
+        if is_banc_dataset(self.dataset):
+            if self.client_type not in ('neuprint', 'banc'):
+                raise ValueError(
+                    f"client_type='{self.client_type}' is not valid for "
+                    f"BANC dataset '{self.dataset}': use 'banc' (the "
+                    f"standalone bucket source) or the default 'neuprint', "
+                    f"which normalizes to it.")
+            if self.client_type != 'banc':
+                self.client_type = 'banc'
+                self._vprint(f"Auto-detected client_type='banc' from dataset '{self.dataset}'", level='full')
+            return
+
+        if self.client_type == 'neuprint' and is_flywire_dataset(self.dataset):
+            self.client_type = 'flywire'
+            self._vprint(f"Auto-detected client_type='flywire' from dataset '{self.dataset}'", level='full')
+
+    def _ensure_banc_connection_cache(self):
+        """Refresh BANC's per-version connection cache (init or
+        InitializeNeuronInfo).
+
+        A missing/False result means the tables are absent (fresh
+        install): mirror _prepare_banc_data — fetch from the bucket,
+        print instructions on failure, then derive the cache from the
+        restored tables.  Deliberately NOT gated on use_cache: the cache
+        is the local table derivation every BANC path reads.
+        """
+        if not HAS_BANC_CONVERTER:
+            raise RuntimeError(
+                "BANC preparation requires BANC_file_converter, which "
+                "ships with the repository (src/BANC_file_converter.py)."
+            )
+        dataset_safe = dataset_folder(self.dataset)
+        dataset_dir = os.path.join(self.script_path, 'datasets', dataset_safe)
+        cache_dir = os.path.join(self.script_path, 'cache', dataset_safe)
+        cache_ready = False
+        try:
+            cache_ready = BANC_file_converter.build_connection_cache_from_tables(
+                dataset_dir, cache_dir)
+        except Exception as exc:
+            self._vprint(
+                f'  ⚠️ BANC connection cache refresh failed: {exc}',
+                level='simple')
+        if not cache_ready:
+            if not BANC_file_converter.ensure_banc_data(
+                    self.dataset, dataset_dir):
+                try:
+                    from .utils.flywire_readiness import \
+                        print_download_instructions
+                except ImportError:
+                    from utils.flywire_readiness import \
+                        print_download_instructions
+                print_download_instructions(self.dataset, dataset_dir)
+                sys.exit(1)
+            if not BANC_file_converter.build_connection_cache_from_tables(
+                    dataset_dir, cache_dir):
+                print(f'  ⚠️ BANC connection cache could not be derived '
+                      f'from the restored tables in {dataset_dir}')
+                sys.exit(1)
+
+    def _prepare_banc_data(self):
+        """Prepare BANC's standalone local source (public bucket, no auth).
+
+        BANC is neither FlyWire nor NeuPrint: it has no CAVE/NeuPrint
+        server.  Connectivity comes from the bucket-prepared, per-version
+        local tables (v626 and v888 are distinct id spaces).  Ensures the
+        converted tables exist and refreshes the per-neuron connection
+        cache whenever the merged table is newer — the pathfinding layer
+        reads the cache, never the merged table directly.
+        """
+        if not self.use_cache:
+            raise RuntimeError(
+                "use_cache=False requires an online connectivity fetch, "
+                "but BANC uses a standalone public-bucket fetch (local "
+                "tables; no auth, no CAVE). Rerun with caching enabled."
+            )
+        if self.force_API_fetching:
+            # force_API_fetching targets CAVE/NeuPrint — meaningless for
+            # BANC's standalone bucket source; local mode applies.
+            self._vprint("⚠️  force_API_fetching=True does not apply to BANC connectivity (local bucket-prepared tables).", level='simple')
+            self._vprint("   Falling back to local data mode.", level='simple')
+            self.force_API_fetching = False
+        dataset_safe = dataset_folder(self.dataset)
+        dataset_dir = os.path.join(self.script_path, 'datasets', dataset_safe)
+        cache_dir = os.path.join(self.script_path, 'cache', dataset_safe)
+
+        if not HAS_BANC_CONVERTER:
+            raise RuntimeError(
+                "BANC preparation requires BANC_file_converter, which ships "
+                "with the repository (src/BANC_file_converter.py)."
+            )
+        if not BANC_file_converter.ensure_banc_data(self.dataset, dataset_dir):
+            try:
+                from .utils.flywire_readiness import print_download_instructions
+            except ImportError:
+                from utils.flywire_readiness import print_download_instructions
+            print_download_instructions(self.dataset, dataset_dir)
+            sys.exit(1)
+        BANC_file_converter.build_connection_cache_from_tables(
+            dataset_dir, cache_dir)
+
     source_path: str = os.path.dirname(os.path.abspath(__file__))
     '''absolute path to the src/ directory where coana.py is located'''
     
@@ -1904,7 +2402,10 @@ class FindNeuronConnection:
     '''
     
     client_type: str = 'neuprint'
-    '''client type: 'neuprint' (default) or 'flywire' '''
+    '''client type: 'neuprint' (default), 'flywire', or 'banc'.  BANC
+    datasets normalize to the standalone 'banc' source (public bucket,
+    no credentials) at init — they are never presented as NeuPrint or
+    FlyWire clients.'''
 
     client_hemibrain: Client | None = None
     '''neuprint client'''
@@ -2019,10 +2520,14 @@ class FindNeuronConnection:
     helping to focus on inter-type communication pathways.
     '''
     
-    skip_bodyId: bool = False
+    skip_bodyId: bool = True
     '''
     If True, skip saving bodyId-level data, visualizations, and calculations in FindAllPath.
     This significantly reduces processing time and disk usage when only type-level analysis is needed.
+    Default True (2026-09-04): bodyId paths are still enumerated in memory
+    (type-level outputs are derived from them), but the multi-GB bodyId
+    exports (connMatrix CSVs, raw path lists) are suppressed — measured
+    3.6 GB -> ~30 MB per run folder on a 4x5-type L2 query.
     '''
 
     find_reciprocal: bool = False
@@ -2072,11 +2577,16 @@ class FindNeuronConnection:
     exceed the neuron count, so a high bound is never reached in practice.
     '''
     
-    pathfinding: str = 'MemoizedDFS'
+    pathfinding: str = 'StrongestFirst'
     '''
     Pathfinding algorithm to use in FindAllPath (names match the algorithms):
-    - 'MemoizedDFS': Memoized DFS (forward) - fastest measured at all
-      depths (no reversed-graph copy); the recommended default
+    - 'StrongestFirst' (default, 2026-09-04): budgeted best-first on the
+      path bottleneck — emits intact paths strongest-first; with the path
+      budget (max_paths_bodyid) reached, output = all intact paths with
+      bottleneck >= the reported tau. Without a budget bite the emitted
+      SET equals the complete enumerators.
+    - 'MemoizedDFS': Memoized DFS (forward) - complete enumeration
+      (unordered); the previous default
     - 'DFS': Memoized DFS (backward) - same algorithm started from the
       targets; best when targets are few
     - 'MeetInMiddle': Meet-in-the-middle DFS - fastest at shallow depths,
@@ -2104,16 +2614,28 @@ class FindNeuronConnection:
 
     max_paths_bodyid: Optional[int] = None
     '''
-    Opt-in safety cap on how many bodyId-level paths FindAllPath /
-    FindShortestPath may materialize.  Enumeration is unbounded by default
-    and the number of simple paths grows combinatorially; each collected
-    path costs ~100+ bytes, so pathological queries can exhaust memory
-    before any output is produced.
+    Path budget for bodyId-level path enumeration.
 
-    None (default) = exactly the historical unbounded behavior.  When set,
-    enumeration stops at the cap, a loud warning plus a note in the run
-    summary explain that the path set is truncated, and the pipeline
-    continues with the paths collected so far.
+    With ``pathfinding='StrongestFirst'`` (the default) this is the
+    STRONGEST-FIRST budget: enumeration emits intact paths in descending
+    bottleneck order and stops at the budget, draining ties, so the result
+    is exactly "all intact paths with bottleneck >= the reported tau".
+    None (default) = 1,000,000 in 'all' mode; 0 = unlimited (falls back to
+    the complete MemoizedDFS enumerator).
+    With the legacy enumerators this remains the opt-in safety cap: when
+    set, enumeration stops at the cap in enumeration order (arbitrary —
+    the path set is TRUNCATED and undercounts alternatives) and a loud
+    warning plus a note in the run summary explain it.
+    '''
+
+    capture_replay: bool = False
+    '''
+    Feature F (threshold-alignment spec §9): when True and the run is
+    FindAllPath ('all' mode), the bottleneck-annotated path set is stashed
+    (compactly encoded) after enumeration so ``FindAllPathMultiThreshold``
+    can materialize higher thresholds without re-enumeration. Set
+    automatically by the multi-threshold orchestrator; recordable in
+    all_attributes.json for provenance.
     '''
 
     graph_edge_limit_groups: int = 5000
@@ -2435,6 +2957,7 @@ class FindNeuronConnection:
         # Local FAFB/FlyWire connection table: (mtime, DataFrame), so layer
         # fetches stop re-reading the multi-million-row CSV each time.
         self._fafb_local_conn_cache = None
+        self._banc_local_conn_cache = None
         # Signatures of the disk files represented by the shared in-memory
         # snapshots.  Settings-tab pulls update these files in another
         # thread, so a cached frame must be reloaded when the signature moves.
@@ -2442,14 +2965,16 @@ class FindNeuronConnection:
         self._neuron_index_signature_value = None
         
         self._vprint('Initializing...', level='full')
-        
-        # Auto-detect client_type from dataset if not explicitly set to flywire
-        if self.client_type == 'neuprint' and is_flywire_dataset(self.dataset):
-            self.client_type = 'flywire'
-            self._vprint(f"Auto-detected client_type='flywire' from dataset '{self.dataset}'", level='full')
+
+        # Normalize client_type from the dataset.  BANC lands on its own
+        # standalone 'banc' source, parallel to 'flywire' and 'neuprint'
+        # (integration plan §I) — the legacy flywire auto-detect that used
+        # to flip BANC to 'flywire' lives inside _normalize_client_type,
+        # BANC-first, so it can never mislabel a BANC dataset again.
+        self._normalize_client_type()
 
         # Auto-detect version from dataset if not provided
-        if self.client_type == 'flywire' and self.version is None:
+        if self.client_type in ('flywire', 'banc') and self.version is None:
             import re
             # Look for v783 or version 783
             match = re.search(r'v(\d+)', self.dataset)
@@ -2457,8 +2982,12 @@ class FindNeuronConnection:
                 self.version = int(match.group(1))
                 self._vprint(f"Auto-detected version={self.version} from dataset '{self.dataset}'", level='full')
         
-        # Prepare FlyWire data if needed
-        if self.client_type == 'flywire':
+        # Prepare the local data source: FlyWire (FAFB) from local files or
+        # CAVE; BANC from its standalone public-bucket fetch (no auth, no
+        # server — neither FlyWire nor NeuPrint).
+        if is_banc_dataset(self.dataset):
+            self._prepare_banc_data()
+        elif self.client_type == 'flywire':
             self._prepare_flywire_data()
         
         # Initialize cache folder early (needed for cache check)
@@ -2466,7 +2995,20 @@ class FindNeuronConnection:
         self._dataset_safe = dataset_safe
         
         # Initialize NeuPrint client if needed
-        if self.client_type == 'neuprint' and self.client_hemibrain is None:
+        if (self.client_type == 'banc' and self.client_hemibrain is None
+                and self.use_cache):
+            # BANC connectivity is local (bucket-prepared tables): there is
+            # no NeuPrint/CAVE client for it and none is needed. Skip the
+            # client (and its doomed server round-trip) entirely and keep
+            # the run in normal mode, so the local merged-table fallbacks
+            # below stay reachable. Never downgrade BANC to cache_only —
+            # that mode skips the local-table lookups and silently empties
+            # the pathfinding network.
+            self._vprint(
+                f"BANC dataset '{self.dataset}': using local "
+                "bucket-prepared tables (no NeuPrint client).",
+                level='full')
+        elif self.client_type == 'neuprint' and self.client_hemibrain is None:
             from neuprint import Client, set_default_client, default_client
             
             # Check if this dataset is already known to be cache-only (from previous instances)
@@ -2636,6 +3178,14 @@ class FindNeuronConnection:
         '''
         if self.client_type != 'neuprint':
             return  # Not using NeuPrint
+
+        if is_banc_dataset(self.dataset):
+            # BANC has no NeuPrint dataset and no connectivity API: its
+            # connectivity comes from the local bucket-prepared tables.
+            # Never create a client (the attempt 404s against the server)
+            # and never downgrade the run to cache_only — the local-table
+            # fallbacks must stay reachable.
+            return
         
         # In cache-only mode, we don't need a server connection
         if self.cache_only:
@@ -2696,8 +3246,11 @@ class FindNeuronConnection:
         tune the chunk size and concurrency of that download.  All fall back to
         the instance fields / defaults when not supplied.
         '''
-        if self.client_type == 'flywire':
-            # No need to print anything - FlyWire uses local files or CAVE API, not downloaded dataset
+        if self.client_type in ('flywire', 'banc'):
+            # Nothing to download: FlyWire uses local files or the CAVE
+            # API, and BANC's bucket-prepared tables are complete by
+            # construction (it has no ROI data, so the ROI-count check
+            # below could never pass anyway).
             return
         
         # In cache-only mode, skip download attempts
@@ -2711,7 +3264,7 @@ class FindNeuronConnection:
             os.makedirs(datasets_folder)
             self._vprint(f'Created datasets folder: {datasets_folder}', level='full')
         
-        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+        dataset_safe = canonical_dataset_name(self.dataset).replace(':', '_').replace('.', '_')
         dataset_dir = os.path.join(datasets_folder, dataset_safe)
         if not os.path.exists(dataset_dir):
             os.makedirs(dataset_dir)
@@ -5389,8 +5942,11 @@ class FindNeuronConnection:
         the Polars frame.
         """
         post_bodyIds = combined['bodyId_post'].unique().to_list()
+        # F9: the ratio denominator is the ALL-POST incoming weight
+        # (threshold-free) — the ratio definition no longer moves with
+        # the query threshold.
         total_incoming = self._fetch_total_incoming_weight(
-            post_bodyIds, min_weight
+            post_bodyIds, 1
         )
 
         combined = combined.with_columns(pl.col('bodyId_post').cast(pl.Utf8))
@@ -5806,7 +6362,7 @@ class FindNeuronConnection:
                 if col not in columns:
                     columns.append(col)
 
-        is_flywire = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
+        is_flywire = is_flywire_dataset(self.dataset)
 
         # In online-only mode type resolution must also come from the API.
         # CAVEDataFetcher searches the public annotation/tag table; a legacy
@@ -6002,7 +6558,7 @@ class FindNeuronConnection:
         )
             
         # Setup API cache paths
-        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+        dataset_safe = canonical_dataset_name(self.dataset).replace(':', '_').replace('.', '_')
         api_cache_dir = os.path.join(self.script_path, 'cache', dataset_safe, 'API_cache')
         api_conn_cache = os.path.join(api_cache_dir, 'connections.parquet')
         api_neuron_cache = os.path.join(api_cache_dir, 'neuron_index.parquet')
@@ -6675,9 +7231,56 @@ class FindNeuronConnection:
             except Exception as e:
                 self._vprint(f"  ⚠️ Error loading local FAFB data: {e}", level='full')
 
+        if (self.use_cache and is_banc_dataset(self.dataset)
+                and not fetched_locally):
+            # BANC: serve uncached upstream rows from the SAME per-version
+            # merged table the connection cache was derived from.  BANC has
+            # no online connectivity API — never route into the NeuPrint
+            # fetch below.
+            dataset_safe = dataset_folder(self.dataset)
+            merged_path = os.path.join(
+                self.script_path, 'datasets', dataset_safe,
+                f'{dataset_safe}_merged_connections.parquet')
+            if os.path.exists(merged_path):
+                try:
+                    merged_mtime = os.path.getmtime(merged_path)
+                except OSError:
+                    merged_mtime = None
+                if (self._banc_local_conn_cache is not None
+                        and self._banc_local_conn_cache[0] == merged_mtime):
+                    full_conn = self._banc_local_conn_cache[1]
+                else:
+                    full_conn = pl.read_parquet(
+                        merged_path,
+                        columns=['bodyId_pre', 'bodyId_post', 'weight',
+                                 'roi']).to_pandas()
+                    for _col in ('bodyId_pre', 'bodyId_post'):
+                        full_conn[_col] = full_conn[_col].astype(str)
+                    self._banc_local_conn_cache = (merged_mtime, full_conn)
+                upstream_strs = {str(b) for b in uncached_upstream}
+                api_conn = full_conn[
+                    full_conn['bodyId_pre'].isin(upstream_strs)].copy()
+                if downstream_bodyIds is not None:
+                    downstream_strs = {str(b) for b in downstream_bodyIds}
+                    api_conn = api_conn[
+                        api_conn['bodyId_post'].isin(downstream_strs)].copy()
+                if 'roi' not in api_conn.columns:
+                    api_conn['roi'] = 'WholeBrain'
+                fetched_locally = True
+                self._vprint(f"  ✓ Loaded {len(api_conn)} connections from "
+                             "local BANC tables", level='full')
+
         if not fetched_locally:
+            if is_banc_dataset(self.dataset):
+                # BANC: no online connectivity API — name the bucket-data
+                # fix, never FAFB's codex instructions.
+                self._vprint(f"\n  ⚠️  Local BANC tables not found for dataset '{self.dataset}'.", level='full')
+                self._vprint("  Run the BANC dataset preparation (public bucket download) or place", level='full')
+                self._vprint(f"  the tables under: datasets/{dataset_folder(self.dataset)}", level='full')
+                self._vprint("  Skipping the online fetch: BANC has no NeuPrint connectivity API.", level='full')
+                return None
             # Check if we should enforce local-only for FAFB/FlyWire
-            if 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower():
+            if is_flywire_dataset(self.dataset):
                 self._vprint(f"\n  ⚠️  Local connection data not found for dataset '{self.dataset}'.", level='full')
                 self._vprint("  Please download the synapse table from: https://codex.flywire.ai/api/download?dataset=fafb", level='full')
                 self._vprint(f"  Save the file to: datasets/{self.dataset.replace(':', '_')}", level='full') 
@@ -6936,8 +7539,12 @@ class FindNeuronConnection:
         # Step 2: Fetch uncached neurons from API if needed
         api_conn = pd.DataFrame()
         if len(uncached_upstream) > 0:
-            # In cache-only mode, we cannot fetch from API - use only cached data
-            if self.cache_only:
+            # In cache-only mode we cannot fetch from API - use only cached
+            # data.  Exception: BANC has no API at all — its connectivity IS
+            # the local merged table, so route the miss through the
+            # local-table fetch instead of silently returning an empty
+            # network.
+            if cache_only_skips_local_fetch(self.dataset, self.cache_only):
                 self._vprint(f'  ⚠️  {len(uncached_upstream)} neurons not in cache (cache-only mode - skipping API fetch)', level='full')
                 self._vprint(f'     Using only cached data. Results may be incomplete.', level='full')
                 # Return only cached connections
@@ -7091,7 +7698,9 @@ class FindNeuronConnection:
         # Step 2: Fetch uncached neurons from the API (shared pandas helper)
         api_conn = pd.DataFrame()
         if len(uncached_upstream) > 0:
-            if self.cache_only:
+            # Cache-only skip does not apply to BANC: its connectivity IS
+            # the local merged table (see the pandas twin above).
+            if cache_only_skips_local_fetch(self.dataset, self.cache_only):
                 self._vprint(f'  ⚠️  {len(uncached_upstream)} neurons not in cache (cache-only mode - skipping API fetch)', level='full')
                 self._vprint(f'     Using only cached data. Results may be incomplete.', level='full')
                 if cached_conn.is_empty():
@@ -7353,13 +7962,19 @@ class FindNeuronConnection:
         
         This is used for calculating the true connection ratio:
         ratio = weight(A→B) / total_incoming_to_B_from_ALL_sources
+
+        F9 (2026-09-05): ratio is a threshold-free READOUT — callers
+        computing ratios MUST pass ``min_weight=1`` (all-post). The
+        historical threshold-based denominator made ratios jump with the
+        query threshold and broke cone nesting under ratio filters.
         
         Parameters:
         -----------
         post_bodyIds : list
             List of post-synaptic bodyIds to fetch incoming connections for
         min_weight : int
-            Minimum weight threshold for filtering connections
+            Minimum weight for filtering connections. Ratio callers pass 1
+            (all-post).
         auto_build_cache : bool
             If True and cache doesn't exist, automatically build connection cache.
             This may take significant time for large datasets. Default: True
@@ -7444,10 +8059,11 @@ class FindNeuronConnection:
             except Exception as e:
                 self._vprint(f'     ⚠️ Error querying connection DB: {e}', level='full')
         
-        # FlyWire/FAFB has no NeuPrint default client. If local data was not
-        # available, return a correctly typed empty result rather than trying
-        # the NeuPrint fallback and producing a misleading client error.
-        if self.client_type == 'flywire':
+        # FlyWire/FAFB and BANC have no NeuPrint default client. If local
+        # data was not available, return a correctly typed empty result
+        # rather than trying the NeuPrint fallback and producing a
+        # misleading client error.
+        if self.client_type in ('flywire', 'banc'):
             self._vprint(
                 '     ⚠️ Local FlyWire data unavailable for incoming weights',
                 level='full',
@@ -7503,8 +8119,9 @@ class FindNeuronConnection:
         # Get unique post-synaptic bodyIds
         post_bodyIds = combined['bodyId_post'].unique().tolist()
         
-        # Fetch total incoming weight from ALL sources (not just provided sources)
-        total_incoming = self._fetch_total_incoming_weight(post_bodyIds, min_weight)
+        # Fetch total incoming weight from ALL sources (not just provided sources).
+        # F9: all-post (min_weight=1) — the denominator is threshold-free.
+        total_incoming = self._fetch_total_incoming_weight(post_bodyIds, 1)
         
         # Ensure bodyId_post is string type for merge
         combined['bodyId_post'] = combined['bodyId_post'].astype(str)
@@ -9010,7 +9627,7 @@ class FindNeuronConnection:
             _print(f"   ✓ Repaired {len(falsely_complete):,} entries")
         
         # Enrich with type/instance from neuron_df
-        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+        dataset_safe = canonical_dataset_name(self.dataset).replace(':', '_').replace('.', '_')
         ndf_path = os.path.join(
             self.script_path, 'datasets', dataset_safe,
             f"{dataset_safe}_allneurons_neuron_df.csv"
@@ -9509,8 +10126,13 @@ class FindNeuronConnection:
 
     def InitializeNeuronInfo(self):
         # Ensure neuprint Client is set for the CORRECT dataset
-        if self.client_type != 'flywire':
+        if self.client_type not in ('flywire', 'banc'):
             self._ensure_neuprint_client()
+        # BANC: scripts (and the docs' usage pattern) may assign ``dataset``
+        # after construction, so refresh the per-version connection cache
+        # here as well — __post_init__ only covers constructor-passed names.
+        if is_banc_dataset(self.dataset):
+            self._ensure_banc_connection_cache()
         ''' initialize neuron info '''
         # Step 1 of the 5-step pathfinding/network protocol shared by
         # FindAllPath, FindShortestPath and FindNetwork.
@@ -10013,13 +10635,13 @@ class FindNeuronConnection:
         # (denominator = ALL incoming connections in the dataset, not just the
         # connections fetched for this query - see ScoreCalculation_Guide).
         post_types = self.conn_df['type_post'].dropna().unique().tolist() if 'type_post' in self.conn_df.columns else []
-        global_incoming_weights = self._fetch_total_incoming_weight_by_type(post_types, min_weight=self.min_synapse_num) if post_types else None
+        global_incoming_weights = self._fetch_total_incoming_weight_by_type(post_types, min_weight=1) if post_types else None  # F9: all-post denominator
         
         # Global bodyId-level denominators for accurate bodyId-level ratios
         # (post neurons missing from the global table fall back to local totals
         # inside EnrichConnectionTable, so ratios never collapse to 0)
         post_bodyIds = self.conn_df['bodyId_post'].dropna().unique().tolist()
-        global_incoming_body_weights = self._fetch_total_incoming_weight(post_bodyIds, min_weight=self.min_synapse_num) if post_bodyIds else None
+        global_incoming_body_weights = self._fetch_total_incoming_weight(post_bodyIds, min_weight=1) if post_bodyIds else None  # F9: all-post denominator
         
         # Type-level prob follows the aggregate method (default 'product':
         # 1 - prod(1 - p_pair) over the deduplicated pairs; 'average':
@@ -10527,9 +11149,9 @@ class FindNeuronConnection:
         neurons_df = pl.from_pandas(neurons_df_pd)
 
         post_types = conn_df['type_post'].dropna().unique().tolist() if 'type_post' in conn_df.columns else []
-        global_incoming_weights = self._fetch_total_incoming_weight_by_type(post_types, min_weight=self.min_synapse_num) if post_types else None
+        global_incoming_weights = self._fetch_total_incoming_weight_by_type(post_types, min_weight=1) if post_types else None  # F9: all-post denominator
         post_bodyIds = conn_df['bodyId_post'].dropna().unique().tolist()
-        global_incoming_body_weights = self._fetch_total_incoming_weight(post_bodyIds, min_weight=self.min_synapse_num) if post_bodyIds else None
+        global_incoming_body_weights = self._fetch_total_incoming_weight(post_bodyIds, min_weight=1) if post_bodyIds else None  # F9: all-post denominator
 
         conn_df, conn_type, conn_group = sv.EnrichConnectionTable(
             conn_df,
@@ -10825,76 +11447,70 @@ class FindNeuronConnection:
     def _graph_edge_frames(self, conn_layers, sources, targets, path_mode='all'):
         """Return the frame(s) to feed ``FastGraph.build_from_dataframe``.
 
-        When the pan-graph edge limit does not apply, the raw non-empty
-        layer tables are returned so the caller can build the graph layer
-        by layer — identical result (add_edge sums duplicate pairs across
-        layers) without materializing a full ``pl.concat`` copy of every
-        layer (~1 GB at a few million rows).  With the limit active, a
-        single trimmed frame (the ``_trim_bodyid_edges`` result) is
-        returned instead.
+        A lossless hop-budget pruning pass runs FIRST at every depth and in
+        both modes: edges that cannot lie on any source->target path within
+        ``max_interlayer + 1`` edges are removed before the graph is built
+        (see ``prune_layers_hop_budget`` — no admissible path is lost).
+        Cached FindAllPath entries are never mutated (filtering returns new
+        frames), so threshold reuse stays safe.
+
+        Fix C (2026-09-04): the old top-N bodyId edge trim is retired.
+        Fix D (2026-09-05): ``graph_edge_limit_bodyid`` is repurposed as
+        the EDGE BUDGET — in 'all' mode a lossy weight floor
+        (``apply_edge_budget_floor``, w0 = w1 + 1) caps the cone when it
+        still exceeds the budget after the lossless prunes; the
+        StrongestFirst path budget (``max_paths_bodyid``) bounds the
+        OUTPUT and reports τ. Shortest mode is never floored.
+
+        The pruned non-empty layer tables are returned so the caller can
+        build the graph layer by layer — identical result (add_edge sums
+        duplicate pairs across layers) without materializing a full
+        ``pl.concat`` copy of every layer (~1 GB at a few million rows).
         """
-        limit = self.graph_edge_limit_bodyid
-        if limit is None:
-            limit = 1000000 if path_mode == 'all' else 0
-        apply_trim = (self.max_interlayer >= 3) if path_mode == 'all' \
-            else (limit > 0)
-        if apply_trim:
-            return [self._trim_bodyid_edges(
-                conn_layers, sources, targets, path_mode=path_mode,
-            )]
+        conn_layers, prune_stats = prune_layers_hop_budget(
+            conn_layers, sources, targets, self.max_interlayer + 1,
+            vprint=self._vprint, warn_notes=self._warn_notes,
+            label='bodyId',
+        )
+        # Explicit pruning record (report-fixes concern 1): the stats ride
+        # on the instance so all_attributes.json and the run guide carry
+        # the lossless-reduction numbers for every materialized folder.
+        if prune_stats.get('rows_dropped'):
+            self.graph_pruning_record = {
+                'lossless': True,
+                'edges_before': prune_stats.get('rows_before'),
+                'edges_removed': prune_stats.get('rows_dropped'),
+                'bound_edges': self.max_interlayer + 1,
+            }
+        # Fix D (Edge Budget): a LOSSY weight floor caps the enumeration
+        # cone when it still exceeds the budget after the lossless
+        # prunes. w0 = (N-th strongest edge weight) + 1 guarantees the
+        # kept-edge count < N and is reported honestly. 'all' mode only —
+        # shortest mode is never floored (Fix C scope).
+        if path_mode == 'all' and self.graph_edge_limit_bodyid:
+            conn_layers, floor_stats = apply_edge_budget_floor(
+                conn_layers, self.graph_edge_limit_bodyid,
+                sources, targets, self.max_interlayer + 1,
+                vprint=self._vprint, warn_notes=self._warn_notes,
+            )
+            if floor_stats.get('applied'):
+                self.edge_weight_floor = floor_stats.get('floor')
+                self.edge_budget_landing = floor_stats.get('landing')
+                self.graph_pruning_record = {
+                    'lossless': False,
+                    'stage': 'edge_budget_floor',
+                    'edge_budget': self.graph_edge_limit_bodyid,
+                    'landing_weight': floor_stats.get('landing'),
+                    'floor_weight': floor_stats.get('floor'),
+                    'edges_before': floor_stats.get('edges_before'),
+                    'edges_after': floor_stats.get('edges_after'),
+                    'second_lossless_pass_dropped': floor_stats.get(
+                        'prune_dropped'),
+                }
         return [
             c for c in conn_layers
             if not (c.is_empty() if hasattr(c, 'is_empty') else c.empty)
         ]
-
-    def _trim_bodyid_edges(self, conn_layers, sources, targets, path_mode='all'):
-        """Return the bodyId-level edge table for the discovery graph.
-
-        In 'all' mode the pan-graph bodyId edge limit is applied ONLY for
-        deep searches (``max_interlayer >= 3``), where the path count grows
-        combinatorially (branching^depth); shallow searches (<= 2 layers)
-        keep the COMPLETE graph — there the limit would only drop real
-        paths. The per-mode default is 1,000,000 when the caller left
-        ``graph_edge_limit_bodyid`` unset (None).
-
-        In 'shortest' mode the default is OFF (0): shortest enumeration is
-        polynomial so there is no path count to bound, and trimming by
-        strength preserves pair reachability but NOT shortest distances
-        (a dropped weak edge can inflate a reported distance). Only an
-        explicit ``graph_edge_limit_bodyid > 0`` enables trimming.
-
-        Returns a single DataFrame (the trimmed table, or the
-        concatenated layer tables when no trim applies).
-        """
-        # None = per-mode default (1M for 'all', 0 for 'shortest'); an
-        # explicit 0 always means "no trimming".
-        limit = self.graph_edge_limit_bodyid
-        if limit is None:
-            limit = 1000000 if path_mode == 'all' else 0
-        apply_trim = (self.max_interlayer >= 3) if path_mode == 'all' \
-            else (limit > 0)
-        if apply_trim:
-            trimmed, _removed, _thr = self._trim_edges_with_path_integrity(
-                conn_layers, limit, 'bodyId',
-                sources=sources, targets=targets,
-                pre_col='bodyId_pre', post_col='bodyId_post',
-            )
-            if path_mode == 'shortest':
-                self._warn_notes.append(
-                    '- [shortest mode + graph edge limit] reported distances are '
-                    'the shortest paths WITHIN THE TRIMMED graph: trimming keeps '
-                    'pair reachability but not minimum hop distances, so true '
-                    'shortest routes using dropped weak edges are missed and '
-                    'distances can be inflated.'
-                )
-            return trimmed
-        non_empty = [c for c in conn_layers
-                     if not (c.is_empty() if hasattr(c, 'is_empty') else c.empty)]
-        if not non_empty:
-            return conn_layers[0] if conn_layers else pd.DataFrame()
-        if hasattr(non_empty[0], 'is_empty'):  # polars frame
-            return pl.concat(non_empty, how='diagonal_relaxed')
-        return pd.concat(non_empty, ignore_index=True)
 
     def _discover_shortest_backward(self, source_ID, target_ID, max_hops):
         """Discover a shortest-path graph backward from target bodyIds.
@@ -11506,7 +12122,18 @@ class FindNeuronConnection:
         # combinatorial path count, branching^depth). Applied ONLY for deep
         # searches (max_interlayer >= 3); shallow searches keep the
         # complete graph.
-        conn_trimmed = self._trim_bodyid_edges(conn_layers, sources, targets)
+        # Fix C/D: the lossy top-N trim is retired — this legacy entry
+        # enumerates the full threshold-filtered cone (bounding lives in
+        # FindAllPath's StrongestFirst budget + Edge Budget floor).
+        non_empty_layers = [c for c in conn_layers
+                            if not (c.is_empty() if hasattr(c, 'is_empty')
+                                    else c.empty)]
+        if not non_empty_layers:
+            conn_trimmed = conn_layers[0] if conn_layers else pd.DataFrame()
+        elif hasattr(non_empty_layers[0], 'is_empty'):  # polars frame
+            conn_trimmed = pl.concat(non_empty_layers, how='diagonal_relaxed')
+        else:
+            conn_trimmed = pd.concat(non_empty_layers, ignore_index=True)
         # Build graph from the connections
         G = FastGraph()
         G.build_from_dataframe(conn_trimmed, 'bodyId_pre', 'bodyId_post', 'weight')
@@ -11570,13 +12197,13 @@ class FindNeuronConnection:
             # appear in paths, inflating the true fraction of B's total input
             # that comes from A (see ScoreCalculation_Guide).
             post_types = conn_df['type_post'].dropna().unique().tolist() if 'type_post' in conn_df.columns else []
-            global_incoming_weights = self._fetch_total_incoming_weight_by_type(post_types, min_weight=self.min_synapse_num) if post_types else None
+            global_incoming_weights = self._fetch_total_incoming_weight_by_type(post_types, min_weight=1) if post_types else None  # F9: all-post denominator
             
             # Global bodyId-level denominators for accurate bodyId-level ratios
             # (post neurons missing from the global table fall back to local totals
             # inside EnrichConnectionTable, so ratios never collapse to 0)
             post_bodyIds = conn_df['bodyId_post'].dropna().unique().tolist()
-            global_incoming_body_weights = self._fetch_total_incoming_weight(post_bodyIds, min_weight=self.min_synapse_num) if post_bodyIds else None
+            global_incoming_body_weights = self._fetch_total_incoming_weight(post_bodyIds, min_weight=1) if post_bodyIds else None  # F9: all-post denominator
             
             conn_df, conn_type, conn_group = sv.EnrichConnectionTable(
                 conn_df, 
@@ -12435,6 +13062,375 @@ class FindNeuronConnection:
             find_reciprocal=find_reciprocal,
         )
 
+    # Feature F §9.4: refuse to stash replays whose encoded path set would
+    # exceed this budget — the analyzer falls back to per-threshold
+    # enumeration instead of risking memory blow-up on path explosions.
+    REPLAY_BUDGET_BYTES = 2 * 1024 ** 3
+
+    def _encode_replay_capture(self, all_paths, path_bottlenecks,
+                               all_connections, layer_neurons, targets_found,
+                               source_ID, tau, budget_bitten):
+        """Compact the bottleneck-annotated path set for replay (§9.4).
+
+        Paths become (int64 flat node-index array + offsets); bottlenecks
+        become a float64 array. Node identity (str or int bodyIds) is
+        preserved through ``node_list``. Returns None when the encoding
+        would exceed ``REPLAY_BUDGET_BYTES``.
+        """
+        from array import array
+        import numpy as np
+
+        node_index = {}
+        node_list = []
+        flat = array('q')
+        offsets = array('q', [0])
+        for path in all_paths:
+            for node in path:
+                key = str(node)
+                idx = node_index.get(key)
+                if idx is None:
+                    idx = len(node_list)
+                    node_index[key] = idx
+                    node_list.append(node)
+                flat.append(idx)
+            offsets.append(len(flat))
+        if len(flat) * flat.itemsize > self.REPLAY_BUDGET_BYTES:
+            return None
+        return {
+            'node_list': node_list,
+            'flat': np.asarray(flat, dtype=np.int64),
+            'offsets': np.asarray(offsets, dtype=np.int64),
+            'bottlenecks': np.asarray(path_bottlenecks, dtype=np.float64),
+            'all_connections': list(all_connections),
+            'layer_neurons': [set(layer) for layer in layer_neurons],
+            'targets_found': list(targets_found),
+            'source_ID': list(source_ID),
+            'threshold': self.min_synapse_num,
+            'tau': tau,
+            'budget_bitten': bool(budget_bitten),
+            'tau_canonical': getattr(self, 'tau_canonical', None),
+            'strongest_dropped_bottleneck': getattr(
+                self, 'strongest_dropped_bottleneck', None),
+            # Fix D: the Edge-Budget floor applied at t0 — replayed slices
+            # inherit it (every captured path already has bottleneck >=
+            # the floor, so slices at any t >= t0 inherit it too).
+            'edge_weight_floor': getattr(self, 'edge_weight_floor', None),
+        }
+
+    def _replay_decode_paths(self, capture, surviving_indices):
+        """Decode surviving paths from the compact capture (numpy slice)."""
+        flat = capture['flat']
+        offsets = capture['offsets']
+        node_list = capture['node_list']
+        paths = []
+        for i in surviving_indices:
+            lo = int(offsets[i])
+            hi = int(offsets[i + 1])
+            paths.append([node_list[j] for j in flat[lo:hi]])
+        return paths
+
+    def _replay_output_folder_for_threshold(self, threshold, base_threshold):
+        """Redirect the run's output folder to ``minsyn_{threshold}`` and
+        write that folder's run attributes/parameters files."""
+        import re
+        base = self.allpath_folder or self.save_folder
+        new_base = re.sub(r'minsyn_\d+(?=/|$)', f'minsyn_{threshold}', base)
+        os.makedirs(new_base, exist_ok=True)
+        self.save_folder = new_base
+        self.allpath_folder = new_base
+
+        public_attrs = self._run_export_attributes(path_mode='all')
+        public_attrs['replay_source_threshold'] = base_threshold
+        with open(os.path.join(new_base, 'all_attributes.json'), 'w') as f:
+            json.dump(public_attrs, f, indent=4,
+                      default=lambda o: '<not serializable>')
+        with open(os.path.join(new_base, 'parameters.txt'), 'w') as f:
+            f.write(f'Parameters for processing {self.source_fname} to '
+                    f'{self.target_fname}:\n')
+            for key, value in self.parameter_dict.items():
+                keylen = len(key)
+                f.write(f'{key}:{" " * (30 - keylen)}{value}\n')
+            f.write(f'path_mode:{" " * 21}all\n')
+            _tau = getattr(self, 'strongest_first_cutoff', None)
+            _tau_str = f'{_tau:g}' if _tau is not None else 'not reached'
+            f.write(f'applied_tau (min path bottleneck):{" " * 4}{_tau_str}\n')
+            _floor = getattr(self, 'edge_weight_floor', None)
+            _floor_str = (f'{_floor:g}' if _floor is not None
+                          else 'not applied')
+            f.write(f'edge_weight_floor:{" " * 18}{_floor_str}\n')
+            f.write(f'replayed_from:{" " * 17}{base_threshold}\n')
+            f.write('\n')
+
+    def _replay_slice_tau(self, sorted_bn, start, threshold, t0_tau, t0_bitten):
+        """Per-threshold tau semantics for a replay slice (§9.7)."""
+        total = len(sorted_bn)
+        if start >= total:
+            return None, True  # empty set: trivially complete at t
+        if t0_bitten and threshold < (t0_tau if t0_tau is not None else 0):
+            # slice is still the tau0-bounded set
+            return float(t0_tau), False
+        return float(sorted_bn[start]), True
+
+    def FindAllPathMultiThreshold(self, thresholds, find_bodyId_path=True,
+                                  forward_only=True, use_graph_cache=True,
+                                  find_reciprocal: bool = False):
+        """Enumerate ONCE at the lowest threshold, materialize the rest.
+
+        Feature F (threshold-alignment spec §9.3): for thresholds
+        ``[t0, t1, ...]`` ascending, this runs the ordinary
+        ``_find_paths_core`` pipeline at t0 (discovery, enumeration,
+        materialization into the t0 output folder) while capturing the
+        bottleneck-annotated path set; every higher threshold t is then
+        materialized from the path slice ``bottleneck >= t`` against the
+        threshold-filtered layer tables — identical outputs, no
+        re-enumeration (paths at threshold t are exactly the t0 paths whose
+        minimum edge weight >= t; §9.2).
+
+        Shortest mode is NOT replayable (per-pair min-hop sets are not
+        nested across thresholds, §9.2.3) and is not offered here.
+
+        Returns ``{threshold: {tau, budget_bitten, paths_complete,
+        replayed}}`` plus ``results['_fallback'] = True`` when the replay
+        capture was declined (budget exceeded / capture failure) and the
+        caller should enumerate remaining thresholds individually.
+        """
+        thresholds = sorted({int(t) for t in thresholds})
+        if not thresholds:
+            raise ValueError(
+                'FindAllPathMultiThreshold requires at least one threshold')
+
+        t0 = thresholds[0]
+        self.min_synapse_num = t0
+        # Directive: unify the pipeline — the replay orchestrator ALWAYS
+        # enumerates via the StrongestFirst core (the bottleneck-sorted
+        # τ-prefix array its slices are cut from only exists there), with
+        # its internal budget default when the caller left the knob at
+        # auto/None. The replayed slices are exact complete runs at
+        # max(t, w0-floor) once Fix D lands (report-fixes §2c).
+        self.pathfinding = 'StrongestFirst'
+        if not getattr(self, 'max_paths_bodyid', None):
+            self.max_paths_bodyid = 1000000
+        self.capture_replay = True
+        try:
+            self._find_paths_core(
+                path_mode='all',
+                find_bodyId_path=find_bodyId_path,
+                forward_only=forward_only,
+                use_graph_cache=use_graph_cache,
+                find_reciprocal=find_reciprocal,
+            )
+        finally:
+            self.capture_replay = False
+
+        results = {
+            t0: {
+                'tau': getattr(self, 'strongest_first_cutoff', None),
+                'tau_canonical': getattr(self, 'tau_canonical', None),
+                'strongest_dropped_bottleneck': getattr(
+                    self, 'strongest_dropped_bottleneck', None),
+                'budget_bitten': bool(getattr(
+                    self, 'strongest_first_budget_bitten', False)),
+                'paths_complete': not getattr(
+                    self, 'strongest_first_budget_bitten', False),
+                'replayed': False,
+            }
+        }
+        capture = getattr(self, '_replay_capture', None)
+
+        # Re-stamp the t0 folder's run attributes now that the final
+        # state (tau / trim_policy / graph_pruning) is known — the early
+        # all_attributes.json write ran before enumeration.
+        try:
+            final_attrs = self._run_export_attributes(path_mode='all')
+            with open(os.path.join(
+                    self.allpath_folder, 'all_attributes.json'), 'w') as af:
+                json.dump(final_attrs, af, indent=4,
+                          default=lambda o: '<not serializable>')
+        except Exception:
+            pass
+
+        if capture is None:
+            results['_fallback'] = True
+            return results
+
+        if len(thresholds) == 1:
+            return results
+
+        import numpy as np
+        import polars as pl
+        import shutil
+
+        bottlenecks = capture['bottlenecks']
+        order = np.argsort(bottlenecks, kind='stable')
+        sorted_bn = bottlenecks[order]
+        t0_tau = capture['tau']
+        t0_bitten = capture['budget_bitten']
+        t0_folder = self.allpath_folder
+
+        def _materialize_threshold(t):
+            start = int(np.searchsorted(sorted_bn, t, side='left'))
+            surviving = order[start:]
+            all_paths = self._replay_decode_paths(capture, surviving)
+
+            neurons_in_paths = set()
+            edges_in_paths = set()
+            for path in all_paths:
+                neurons_in_paths.update(path)
+                edges_in_paths.update(zip(path, path[1:]))
+
+            tau, paths_complete = self._replay_slice_tau(
+                sorted_bn, start, t, t0_tau, t0_bitten)
+            # Reflect THIS slice's state in the folder metadata (the t0
+            # run's values would be stale here).
+            self.strongest_first_cutoff = tau
+            self.strongest_first_budget_bitten = (
+                not paths_complete and t0_bitten)
+            self.tau_canonical = int(tau) if tau is not None else None
+            self.strongest_dropped_bottleneck = None
+            # Per-slice note freshness: the t0 enumeration appended its own
+            # [path budget] note (landing tau of the ENUMERATION); this
+            # folder's slice has its own threshold state — rewrite the
+            # entry so the materialized folder's notes describe IT.
+            notes = getattr(self, '_warn_notes', None)
+            if notes is not None:
+                budget_used = getattr(self, 'max_paths_bodyid', None) \
+                    or 1000000
+                slice_note = (
+                    '- [path budget] StrongestFirst slice for threshold '
+                    f'{t}: materialized from the t={capture["threshold"]} '
+                    f'enumeration (budget max_paths_bodyid={budget_used:,}, '
+                    f'landing tau = {t0_tau:g}); this slice keeps ALL '
+                    f'paths with bottleneck >= {t:g}.')
+                notes[:] = [
+                    (slice_note if isinstance(n, str)
+                     and n.startswith('- [path budget]') else n)
+                    for n in notes]
+
+            # Rebuild the bodyId discovery-layer map from the (unchanged)
+            # layer sets — the t0 materialization mutated the original map
+            # with target appearance layers, which each run recomputes.
+            real_layer_map_bodyId = {}
+            for layer_idx, layer_set in enumerate(capture['layer_neurons']):
+                for neuron_id in layer_set:
+                    if neuron_id not in real_layer_map_bodyId:
+                        real_layer_map_bodyId[neuron_id] = layer_idx
+
+            self.min_synapse_num = t
+            filtered_tables = []
+            for tbl in capture['all_connections']:
+                if tbl is None or tbl.is_empty():
+                    filtered_tables.append(tbl)
+                else:
+                    filtered_tables.append(tbl.filter(pl.col('weight') >= t))
+
+            self._replay_output_folder_for_threshold(t, capture['threshold'])
+            self._materialize_paths(
+                'all',
+                all_connections=filtered_tables,
+                all_connections_filtered=filtered_tables,
+                all_paths=all_paths,
+                path_count=len(all_paths),
+                neurons_in_paths=neurons_in_paths,
+                edges_in_paths=edges_in_paths,
+                edges_in_paths_with_layer=edges_in_paths,
+                source_ID=capture['source_ID'],
+                targets_found=capture['targets_found'],
+                layer_neurons=capture['layer_neurons'],
+                real_layer_map_bodyId=real_layer_map_bodyId,
+                backward_shortest=False,
+                find_bodyId_path=find_bodyId_path,
+                find_reciprocal=find_reciprocal,
+                forward_only=forward_only,
+            )
+            return {
+                'tau': tau,
+                'budget_bitten': not paths_complete and t0_bitten,
+                'paths_complete': paths_complete,
+                'replayed': True,
+                'skipped': False,
+                'duplicate_of': None,
+                'applied_folder': int(t),
+                'tau_canonical': self.tau_canonical,
+                'strongest_dropped_bottleneck': None,
+                'edge_weight_floor': capture.get('edge_weight_floor'),
+            }
+        
+        # F5 (tau-folder discipline): folders exist only for REAL
+        # thresholds — the canonical tau folder (w2 + 1 when the budget
+        # bit; freshly materialized with canonical denominators when it is
+        # not itself an asked threshold) and every asked t above the
+        # collapse bound (the landing tau). Asked t <= landing tau get NO
+        # folder; the analyzer aliases their frames to the canonical
+        # folder.
+        eff_tau = t0_tau
+        tau_int = int(round(eff_tau)) if eff_tau is not None else None
+        canon_int = int(round(capture.get('tau_canonical') or eff_tau)) \
+            if eff_tau is not None else None
+        floor_w0 = capture.get('edge_weight_floor')
+        if canon_int is not None and canon_int > t0 \
+                and canon_int not in thresholds:
+            results[canon_int] = _materialize_threshold(canon_int)
+        for t in thresholds[1:]:
+            if (eff_tau is not None and t <= tau_int and t != canon_int):
+                if floor_w0 is not None and t < floor_w0:
+                    # W4: this asked threshold sits BELOW the Edge-Budget
+                    # floor — the floored slice destroyed exactly the
+                    # paths in [t, w0) that its own complete run needs,
+                    # so the slice cannot serve it (neither collapse nor
+                    # materialize). Flag it for individual
+                    # re-enumeration by the analyzer batch.
+                    results[t] = {
+                        'replayed': False,
+                        '_reenumerate': True,
+                        'tau': None,
+                        'paths_complete': True,
+                        'skipped': False,
+                        'edge_weight_floor': None,
+                    }
+                    continue
+                # Collapsed onto the canonical set — no folder, no work.
+                results[t] = {
+                    'tau': eff_tau,
+                    'tau_canonical': canon_int,
+                    'budget_bitten': t0_bitten,
+                    'paths_complete': False,
+                    'replayed': True,
+                    'skipped': True,
+                    'duplicate_of': canon_int,
+                    'applied_folder': canon_int,
+                    'strongest_dropped_bottleneck': capture.get(
+                        'strongest_dropped_bottleneck'),
+                    'edge_weight_floor': capture.get('edge_weight_floor'),
+                }
+                continue
+            results[t] = _materialize_threshold(t)
+        
+        if canon_int is not None and canon_int > t0:
+            # The t0 asked threshold collapsed onto the canonical folder:
+            # mark it and remove the intermediate minsyn_{t0} output (its
+            # content is exactly the canonical folder's).
+            results[t0] = {
+                'tau': eff_tau,
+                'tau_canonical': canon_int,
+                'budget_bitten': t0_bitten,
+                'paths_complete': False,
+                'replayed': True,
+                'skipped': True,
+                'duplicate_of': canon_int,
+                'applied_folder': canon_int,
+                'strongest_dropped_bottleneck': capture.get(
+                    'strongest_dropped_bottleneck'),
+                'edge_weight_floor': capture.get('edge_weight_floor'),
+            }
+            shutil.rmtree(t0_folder, ignore_errors=True)
+            self._vprint(
+                f'   Threshold collapse: input t={t0} ran at effective tau '
+                f'= {eff_tau:g} — output materialized as minsyn_{canon_int}; '
+                f'the intermediate minsyn_{t0} folder was removed.',
+                level='always')
+        
+        return results
+
     def _find_paths_core(self, path_mode, find_bodyId_path=True, forward_only=True,
                          exclude_searched_neurons=None,
                          use_graph_cache=True, find_reciprocal: bool = False):
@@ -12455,6 +13451,43 @@ class FindNeuronConnection:
         self._reset_temp_columns()
         backward_shortest = path_mode == 'shortest'
         self._shortest_backward_active = backward_shortest
+        # Record run-relevant knobs early so all_attributes.json (written
+        # before enumeration) captures them (N8).
+        self.forward_only = bool(forward_only)
+        self.trim_policy = 'none'
+        # Feature G: effective-threshold state (set unconditionally so
+        # early returns still leave the fields readable).
+        self.strongest_first_cutoff = None
+        self.strongest_first_budget_bitten = False
+        self._replay_capture = None
+        # Edge-Budget floor (Fix D) reporting state — recorded in
+        # all_attributes.json / parameters.txt by the post-run re-stamp.
+        self.edge_weight_floor = None
+        self.edge_budget_landing = None
+        # Canonical-tau state: tau_canonical is the minimal threshold that
+        # reproduces this run's output set (w2 + 1 when the budget bit, the
+        # natural tau otherwise); strongest_dropped_bottleneck is w2.
+        self.tau_canonical = None
+        self.strongest_dropped_bottleneck = None
+        # F9: ratio/probability thresholds are DISABLED —
+        # connection_ratio and traversal_probability are readout columns
+        # computed against the all-post denominator, not filter knobs.
+        # Zeroing them (a) skips every legacy filter branch and (b) keeps
+        # the graph-cache key stable regardless of saved user values.
+        if getattr(self, 'min_ratio', 0) or getattr(
+                self, 'min_traversal_probability', 0):
+            self._vprint(
+                'ℹ️  Min Connection Ratio / Min Traversal Prob. filters are '
+                'disabled (ratio is a readout column) — the saved values '
+                'are ignored.', level='always')
+        self.min_ratio = 0.0
+        self.min_traversal_probability = 0.0
+        self._warn_notes.append(
+            '- [ratio definition] connection_ratio = weight / ALL-POST '
+            'incoming weight of the target (threshold-free, all sources '
+            'in the dataset); traversal_probability = ratio / 0.3 (capped '
+            'at 1). Ratio and probability are readout columns — they no '
+            'longer filter the pathfinding graph.')
         
         # Check if source or target dataframes are empty
         if self.source_df.empty:
@@ -12689,7 +13722,13 @@ class FindNeuronConnection:
         else:
             # ===== STANDARD PATH: Fetch connections and build graph =====
             all_connections_filtered = None  # Will be set in Phase 1
-        
+
+        # Feature F rollout step 1: phase timers (log-only). Stored on the
+        # instance so all_attributes.json records the per-phase wall time.
+        import time as _time_mod
+        self.phase_timers = {}
+        _phase_t0 = _time_mod.time()
+
         # PHASE 1: Fetch all connections in the network up to the search depth
         self._progress(
             2, 5,
@@ -12911,6 +13950,8 @@ class FindNeuronConnection:
             )
         
         # PHASE 2: Identify which targets exist in the searched network
+        self.phase_timers['discovery_s'] = round(_time_mod.time() - _phase_t0, 3)
+        _phase_t0 = _time_mod.time()
         if self.verbose_mode == 'simple':
             self._vprint(f'Phase 2: Identifying Targets...', level='simple')
             self._vprint(f'identifying targets...', level='simple', end='', flush=True)
@@ -13031,6 +14072,9 @@ class FindNeuronConnection:
         self._vprint(f'  Note: Target real layers will be updated after pathfinding completes', level='full')
         
         # Build a directed graph from all connections
+        self.phase_timers['target_identification_s'] = round(
+            _time_mod.time() - _phase_t0, 3)
+        _phase_t0 = _time_mod.time()
         self._vprint('Building connection graph...', level='full', end=' ')
         # Pan-graph edge limit on the per-pair edge TABLE (path integrity:
         # reachability filter + adaptive dead-end refill; bounds the
@@ -13107,6 +14151,21 @@ class FindNeuronConnection:
                 # subgraph() already returns a standalone new graph; the
                 # extra .copy() duplicated every edge a second time.
                 G = G.subgraph(nodes_that_can_reach_targets)
+                # §6b: state that the lossless node prune keeps the top
+                # paths — report the strongest retained path bottleneck.
+                try:
+                    _w = self._widest_path_backward(
+                        set(targets_found), self.max_interlayer + 1)
+                    _vals = [_w[-1].get(s) for s in source_ID
+                             if _w[-1].get(s) not in (None, float('inf'))]
+                    _wstar = max(_vals) if _vals else None
+                    if _wstar is not None:
+                        self._vprint(
+                            f'— strongest retained path bottleneck: '
+                            f'{_wstar:g} synapses; top paths unchanged '
+                            f'(pruning is lossless).', level='full')
+                except Exception:
+                    pass
                 self._vprint(f'Done! ({original_node_count} -> {G.number_of_nodes()} nodes)', level='full')
             else:
                 self._vprint('Warning: No targets found in graph (should have been caught earlier).', level='full')
@@ -13130,21 +14189,48 @@ class FindNeuronConnection:
         
         # Select pathfinding algorithm ('all' mode only; 'shortest' mode
         # uses the fixed BFS-distance-guided enumerator below).
+        # Fix C (2026-09-04): a positive max_paths_bodyid ALWAYS routes
+        # through the StrongestFirst enumerator (τ-bounded), regardless of
+        # the Algorithm selector — the arbitrary-order legacy cap is gone.
+        # The selector then only distinguishes the UNBOUNDED complete
+        # enumerators. StrongestFirst without a budget uses its internal
+        # default (1,000,000).
         algo = None
+        strongest_first_stats = None
+        sf_budget = 0
+        use_strongest_first = False
         if path_mode == 'all':
             algo = self.pathfinding
-            valid_algos = ['DP', 'Bidirectional', 'DFS', 'MemoizedDFS', 'MeetInMiddle', 'Backtracking']
+            valid_algos = ['StrongestFirst', 'DP', 'Bidirectional', 'DFS', 'MemoizedDFS', 'MeetInMiddle', 'Backtracking']
             if algo not in valid_algos:
-                self._vprint(f'Warning: Unknown pathfinding algorithm "{algo}", defaulting to "DP"', level='always')
-                algo = 'DP'
+                self._vprint(f'Warning: Unknown pathfinding algorithm "{algo}", defaulting to "StrongestFirst"', level='always')
+                algo = 'StrongestFirst'
+            sf_budget = self.max_paths_bodyid if self.max_paths_bodyid else 0
+            if algo == 'StrongestFirst':
+                # StrongestFirst NEVER runs unbounded: None/0 → the internal
+                # 1,000,000 budget (an unbounded 'complete' run at L ≥ 3 is
+                # exactly the explosion this algorithm exists to prevent —
+                # measured 782M+ paths on a 4x5-type L5 query).
+                use_strongest_first = True
+                if sf_budget <= 0:
+                    sf_budget = 1000000
+            elif sf_budget > 0:
+                use_strongest_first = True  # Fix C: budget → StrongestFirst
+            self.trim_policy = (
+                'strongest_first_path_budget' if use_strongest_first
+                else 'unbounded_complete')
         
         path_count = 0
         all_paths = []  # Initialize list to store all found paths
         pairs_with_paths_dict = {}
+        path_bottlenecks = None  # 'all' mode: per-path min edge weight (Features F/G)
         
         import time
         start_time = time.time()
         
+        self.phase_timers['graph_build_and_pruning_s'] = round(
+            _time_mod.time() - _phase_t0, 3)
+        _phase_t0 = _time_mod.time()
         path_gen = None
         
         if path_mode == 'shortest':
@@ -13164,6 +14250,27 @@ class FindNeuronConnection:
                 ),
             )
         
+        elif use_strongest_first:
+            # Budgeted best-first on the path bottleneck (widest-path
+            # ordering): emits INTACT paths strongest-first and stops at the
+            # path budget with a well-defined strength cutoff tau. Without a
+            # budget bite the emitted SET equals the legacy enumerators.
+            # Fix C: this branch also runs when a legacy algorithm was
+            # selected but a positive budget is set (routing per §2b).
+            strongest_first_stats = {}
+            if self.verbose_mode == 'simple':
+                self._vprint(f'Finding strongest paths (budget {sf_budget:,})...', level='simple')
+            elif self.verbose_mode == 'full':
+                self._vprint(f'Using strongest-first enumeration '
+                             f'(best-first on the path bottleneck, budget '
+                             f'{sf_budget:,} intact paths)...', level='full')
+            path_gen = G.find_paths_strongest_first(
+                source_ID, targets_found, self.max_interlayer + 1,
+                budget=sf_budget,
+                stats=strongest_first_stats,
+                verbose=(self.verbose_mode in ['simple', 'full']),
+            )
+
         elif algo == 'Bidirectional':
             if self.verbose_mode == 'simple':
                 self._vprint(f'Finding path [bidirectional]...', level='simple')
@@ -13225,40 +14332,14 @@ class FindNeuronConnection:
         if path_gen:
             path_iter = path_gen
 
-            # The shortest enumerator is already distance-guided, but enforce
-            # the semantic contract at the shared pipeline boundary as well.
-            # This protects type aggregation and bodyId exports from any
-            # generator/cache path that might contain a longer alternative.
-            # With max_paths_bodyid set, collect at most that many paths:
-            # each collected path costs ~100+ bytes and enumeration is
-            # combinatorial, so an uncapped pathological query exhausts
-            # memory before any output is produced.
-            cap = getattr(self, 'max_paths_bodyid', None)
-            if cap is not None:
-                all_paths = []
-                path_cap_reached = False
-                for path in path_iter:
-                    all_paths.append(path)
-                    if len(all_paths) >= cap:
-                        path_cap_reached = True
-                        break
-                if path_cap_reached:
-                    warning = (
-                        '- [path enumeration] stopped at max_paths_bodyid='
-                        f'{cap:,}: the path set is TRUNCATED and results '
-                        'undercount alternatives. Raise min_synapse_num or '
-                        'lower max_interlayer to shrink the search, or raise '
-                        'max_paths_bodyid (currently unbounded when unset).'
-                    )
-                    self._warn_notes.append(warning)
-                    self._vprint(
-                        f'\n⚠️  Path cap reached: stopped enumerating at '
-                        f'{len(all_paths):,} paths (max_paths_bodyid={cap:,}). '
-                        f'Results cover a subset of all existing paths.',
-                        level='always',
-                    )
-            else:
-                all_paths = list(path_iter)
+            # Fix C (2026-09-04): the arbitrary-order legacy path cap is
+            # DELETED. Bounding is unified in the StrongestFirst enumerator
+            # (strongest-first emission with a drained tau tie group) —
+            # a positive max_paths_bodyid routes there automatically, and
+            # unlimited runs collect the complete path set. There is no
+            # arbitrary truncation anymore.
+
+            all_paths = list(path_iter)
             raw_path_count = len(all_paths)
             if path_mode == 'shortest':
                 all_paths = self._keep_shortest_bodyid_paths(all_paths)
@@ -13295,14 +14376,28 @@ class FindNeuronConnection:
                     )
 
             path_count = len(all_paths)
+            # Feature G/F: per-path bottleneck (min edge weight) annotated
+            # while the graph is still alive — the natural tau for complete
+            # runs (G §13.5 item 4) and the replay filter key (F §9.3).
+            path_bottlenecks = [] if path_mode == 'all' else None
             for p in all_paths:
                 s = p[0]
                 t = p[-1]
                 pairs_with_paths_dict[(s, t)] = True
                 neurons_in_paths.update(p)
-                for i in range(len(p) - 1):
-                    edges_in_paths.add((p[i], p[i+1]))
-                    edges_in_paths_with_layer.add((i, p[i], p[i+1]))
+                if path_bottlenecks is not None:
+                    bn = None
+                    for i in range(len(p) - 1):
+                        edges_in_paths.add((p[i], p[i+1]))
+                        edges_in_paths_with_layer.add((i, p[i], p[i+1]))
+                        w = G.adj.get(p[i], {}).get(p[i+1])
+                        if bn is None or w < bn:
+                            bn = w
+                    path_bottlenecks.append(bn)
+                else:
+                    for i in range(len(p) - 1):
+                        edges_in_paths.add((p[i], p[i+1]))
+                        edges_in_paths_with_layer.add((i, p[i], p[i+1]))
             
             pairs_with_paths = len(pairs_with_paths_dict)
             
@@ -13327,6 +14422,109 @@ class FindNeuronConnection:
 
         self._vprint(f'\n✅ Pathfinding complete!', level='full')
         self._vprint(f'   Total paths found: {path_count:,}', level='full')
+        self.phase_timers['enumeration_s'] = round(_time_mod.time() - _phase_t0, 3)
+        _phase_t0 = _time_mod.time()
+        # Feature G (§13.5 item 3): the effective threshold tau is reported
+        # for EVERY 'all'-mode run — the budget cutoff when StrongestFirst
+        # was budget-bitten, otherwise the NATURAL tau (the weakest emitted
+        # path's bottleneck: "every threshold up to this value yields this
+        # identical set"). The analyzer's skip logic keys off both fields.
+        self.strongest_first_cutoff = None
+        self.strongest_first_budget_bitten = False
+        self.path_bottlenecks = None
+        if strongest_first_stats:
+            self.strongest_first_cutoff = strongest_first_stats.get('tau')
+            self.strongest_first_budget_bitten = bool(
+                strongest_first_stats.get('budget_bitten'))
+            _dropped = strongest_first_stats.get('strongest_dropped')
+            if self.strongest_first_budget_bitten and self.strongest_first_cutoff is not None:
+                tau = self.strongest_first_cutoff
+                budget_used = self.max_paths_bodyid if self.max_paths_bodyid else 1000000
+                emitted = strongest_first_stats.get('emitted')
+                emitted_txt = f', emitted {emitted:,}' if emitted else ''
+                # Canonical tau: the landing tau may sit above a gap in
+                # the bottleneck distribution — every threshold in
+                # [w2+1, tau] yields this identical set, and w2+1 is the
+                # minimal (canonical) one. The LANDING tau stays the
+                # collapse/skip bound.
+                self.strongest_dropped_bottleneck = _dropped
+                self.tau_canonical = (int(_dropped) + 1
+                                      if _dropped is not None else int(tau))
+                gap_txt = (
+                    f', strongest dropped path bottleneck w2 = {_dropped:g}'
+                    f' — every threshold in [{self.tau_canonical}, {tau:g}] '
+                    'yields this identical set.'
+                    if _dropped is not None else '.')
+                self._vprint(
+                    f'   Strongest-first budget reached: kept ALL intact paths '
+                    f'with bottleneck >= {tau:g} synapses (tau); weaker '
+                    f'alternatives were not enumerated.',
+                    level='always',
+                )
+                # F4: the tie-drain can overshoot the budget — report
+                # budget and emitted counts honestly.
+                self._warn_notes.append(
+                    '- [path budget] StrongestFirst kept ALL intact paths '
+                    f'with bottleneck >= {self.tau_canonical} (canonical '
+                    f'tau): budget max_paths_bodyid={budget_used:,}'
+                    f'{emitted_txt}, landing tau = {tau:g}'
+                    + gap_txt
+                    + ' Unlike an arbitrary truncation this is a '
+                    'well-defined strength cutoff — raise max_paths_bodyid '
+                    '(or the Edge Budget) to enumerate weaker alternatives.'
+                )
+        elif path_mode == 'all' and path_bottlenecks:
+            # Legacy complete enumerators: natural tau = min bottleneck
+            # (weights were only reachable via G.adj before its release).
+            self.strongest_first_cutoff = min(path_bottlenecks)
+            self.strongest_first_budget_bitten = False
+        # F4: natural-tau transparency for COMPLETE runs — the weakest
+        # emitted path's bottleneck means "every threshold up to this
+        # value yields this identical set" (Feature G keys off it too).
+        if (path_mode == 'all' and self.strongest_first_cutoff is not None
+                and not self.strongest_first_budget_bitten):
+            _ntau = self.strongest_first_cutoff
+            # Complete runs have no dropped paths — the natural tau IS the
+            # canonical (minimal) threshold for this set.
+            self.tau_canonical = _ntau
+            self.strongest_dropped_bottleneck = None
+            self._vprint(
+                f'   Complete run: weakest emitted path bottleneck '
+                f'{_ntau:g} synapses — every Min Synapse Count up to this '
+                f'value yields this identical set.',
+                level='full')
+            self._warn_notes.append(
+                '- [natural tau] Complete enumeration: the weakest emitted '
+                f'path has bottleneck {_ntau:g} synapses — every threshold '
+                f'up to this value yields this identical path set.'
+            )
+
+        # Feature F (§9.3/§9.4): stash the bottleneck-annotated path set
+        # (compactly encoded) + the threshold-filtered layer tables so a
+        # FindAllPathMultiThreshold orchestrator can materialize every
+        # higher threshold by a prefix slice + re-materialization instead
+        # of a fresh enumeration.
+        self._replay_capture = None
+        if path_mode == 'all' and path_bottlenecks and getattr(
+                self, 'capture_replay', False):
+            try:
+                self._replay_capture = self._encode_replay_capture(
+                    all_paths, path_bottlenecks, all_connections,
+                    layer_neurons, targets_found, source_ID,
+                    self.strongest_first_cutoff,
+                    self.strongest_first_budget_bitten,
+                )
+                if self._replay_capture is None:
+                    self._vprint(
+                        '⚠️  Replay capture skipped: encoded path set '
+                        'exceeds the replay budget — the analyzer will '
+                        'fall back to per-threshold enumeration.',
+                        level='always',
+                    )
+            except Exception as capture_exc:
+                self._vprint(f'⚠️  Replay capture failed: {capture_exc}',
+                             level='always')
+                self._replay_capture = None
         if path_mode == 'shortest':
             # Per-pair shortest distance summary (all tied paths of a pair
             # share the same length; pairs are the (source, target) combos).
@@ -13358,6 +14556,108 @@ class FindNeuronConnection:
         self._vprint(f'   Unique edges in valid paths: {len(edges_in_paths):,}', level='full')
         self._vprint(f'   Layer-specific edges in valid paths: {len(edges_in_paths_with_layer):,}', level='full')
         
+        # Now extract connections, keeping ALL layer-specific occurrences
+        # This means if neuron A→B exists in both Layer 0→1 and Layer 2→3, both are kept
+        # Initialize lists for accumulation (more efficient than repeated concat)
+        _phase_t0 = _time_mod.time()
+        self._materialize_paths(
+            path_mode,
+            all_connections=all_connections,
+            all_connections_filtered=all_connections_filtered,
+            all_paths=all_paths,
+            path_count=path_count,
+            neurons_in_paths=neurons_in_paths,
+            edges_in_paths=edges_in_paths,
+            edges_in_paths_with_layer=edges_in_paths_with_layer,
+            source_ID=source_ID,
+            targets_found=targets_found,
+            layer_neurons=layer_neurons,
+            real_layer_map_bodyId=real_layer_map_bodyId,
+            backward_shortest=backward_shortest,
+            find_bodyId_path=find_bodyId_path,
+            find_reciprocal=find_reciprocal,
+            forward_only=forward_only,
+        )
+        self.phase_timers['materialization_s'] = round(
+            _time_mod.time() - _phase_t0, 3)
+        self._vprint(
+            'Phase timers: ' + ' | '.join(
+                f"{name} {val:g}s" for name, val in self.phase_timers.items()),
+            level='full')
+
+        if path_mode == 'all':
+            # F4: re-stamp the run metadata now that the final state (tau,
+            # edge-weight floor) is known — the early writes ran before
+            # enumeration (the multi-threshold orchestrator re-stamps its
+            # own folders the same way).
+            try:
+                final_attrs = self._run_export_attributes(path_mode=path_mode)
+                with open(os.path.join(self.allpath_folder,
+                                       'all_attributes.json'), 'w') as af:
+                    json.dump(final_attrs, af, indent=4,
+                              default=lambda o: '<not serializable>')
+                with open(os.path.join(self.allpath_folder,
+                                       'parameters.txt'), 'w') as f:
+                    f.write(f'Parameters for processing {self.source_fname} '
+                            f'to {self.target_fname}:\n')
+                    for key, value in self.parameter_dict.items():
+                        keylen = len(key)
+                        f.write(f'{key}:{" " * (30 - keylen)}{value}\n')
+                    f.write(f'path_mode:{" " * 21}{path_mode}\n')
+                    _tau = getattr(self, 'strongest_first_cutoff', None)
+                    _tau_str = f'{_tau:g}' if _tau is not None else 'not reached'
+                    f.write(f'applied_tau (min path bottleneck):'
+                            f'{" " * 4}{_tau_str}\n')
+                    _floor = getattr(self, 'edge_weight_floor', None)
+                    _floor_str = (f'{_floor:g}' if _floor is not None
+                                  else 'not applied')
+                    f.write(f'edge_weight_floor:{" " * 18}{_floor_str}\n')
+                    f.write('\n')
+            except Exception:
+                pass
+
+    def _materialize_paths(
+        self,
+        path_mode,
+        all_connections,
+        all_connections_filtered,
+        all_paths,
+        path_count,
+        neurons_in_paths,
+        edges_in_paths,
+        edges_in_paths_with_layer,
+        source_ID,
+        targets_found,
+        layer_neurons,
+        real_layer_map_bodyId,
+        backward_shortest,
+        find_bodyId_path,
+        find_reciprocal,
+        forward_only,
+    ):
+        """Materialization phase: enrichment, type-path derivation, saves, viz.
+
+        Feature F (threshold-alignment spec §9.3): everything AFTER path
+        collection, extracted verbatim from the former tail of
+        ``_find_paths_core`` so a replay orchestrator can re-run it for any
+        threshold with a filtered path set + threshold-filtered layer
+        tables. The single-threshold path behavior is unchanged: the direct
+        call below passes exactly the locals the region consumed before.
+
+        Consumes the collected path set (already annotated with
+        bottlenecks by the caller when ``all_paths`` carries tuples) and
+        the layer tables filtered at the CURRENT ``self.min_synapse_num``;
+        writes every per-threshold output file into
+        ``self.allpath_folder``.
+        """
+        # Names imported mid-body in the original region are bound here so
+        # earlier uses resolve (function-local names need a top assignment).
+        import polars as pl
+        import ast
+        import glob
+        import traceback
+        from neuprint import NeuronCriteria as NC
+
         # Now extract connections, keeping ALL layer-specific occurrences
         # This means if neuron A→B exists in both Layer 0→1 and Layer 2→3, both are kept
         # Initialize lists for accumulation (more efficient than repeated concat)
@@ -13420,13 +14720,13 @@ class FindNeuronConnection:
             
             # Get unique post types for global incoming weight calculation
             post_types = conn_filtered_no_layer['type_post'].unique().to_list() if 'type_post' in conn_filtered_no_layer.columns else []
-            global_incoming_weights = self._fetch_total_incoming_weight_by_type(post_types, min_weight=self.min_synapse_num) if post_types else None
+            global_incoming_weights = self._fetch_total_incoming_weight_by_type(post_types, min_weight=1) if post_types else None  # F9: all-post denominator
             
             # Global bodyId-level denominators for accurate bodyId-level ratios
             # (post neurons missing from the global table fall back to local totals
             # inside EnrichConnectionTable, so ratios never collapse to 0)
             post_bodyIds = conn_filtered_no_layer['bodyId_post'].unique().to_list()
-            global_incoming_body_weights = self._fetch_total_incoming_weight(post_bodyIds, min_weight=self.min_synapse_num) if post_bodyIds else None
+            global_incoming_body_weights = self._fetch_total_incoming_weight(post_bodyIds, min_weight=1) if post_bodyIds else None  # F9: all-post denominator
             
             # Enrich with traversal probability (use local dataset if available)
             # Unified entry point: polars input -> polars engine (auto)
@@ -13933,12 +15233,12 @@ class FindNeuronConnection:
                 
                 # Get unique post types for global incoming weight calculation
                 post_types = layer_conn['type_post'].unique().to_list() if 'type_post' in layer_conn.columns else []
-                layer_global_incoming_weights = self._fetch_total_incoming_weight_by_type(post_types, min_weight=self.min_synapse_num) if post_types else None
+                layer_global_incoming_weights = self._fetch_total_incoming_weight_by_type(post_types, min_weight=1) if post_types else None  # F9: all-post denominator
                 
                 # Global bodyId-level denominators (local fallback inside
                 # EnrichConnectionTable prevents 0 ratios for untyped posts)
                 post_bodyIds = layer_conn['bodyId_post'].unique().to_list()
-                layer_global_incoming_body_weights = self._fetch_total_incoming_weight(post_bodyIds, min_weight=self.min_synapse_num) if post_bodyIds else None
+                layer_global_incoming_body_weights = self._fetch_total_incoming_weight(post_bodyIds, min_weight=1) if post_bodyIds else None  # F9: all-post denominator
                 
                 # Enrich (unified entry point: polars input -> polars engine)
                 _, layer_conn_type, layer_conn_group = sv.EnrichConnectionTable(
@@ -14243,7 +15543,7 @@ class FindNeuronConnection:
             # Use the same mapping function that EnrichConnectionTablePolars uses
             ndf_path = None
             if self.dataset and self.script_path:
-                dataset_clean = self.dataset.replace(':', '_').replace('.', '_')
+                dataset_clean = canonical_dataset_name(self.dataset).replace(':', '_').replace('.', '_')
                 ndf_path = os.path.join(
                     self.script_path, 'datasets', dataset_clean,
                     f"{dataset_clean}_allneurons_neuron_df.csv"
@@ -14255,7 +15555,11 @@ class FindNeuronConnection:
                     )
             
             if ndf_path and os.path.exists(ndf_path):
-                ndf_complete = pl.read_csv(ndf_path, infer_schema_length=10000)
+                # infer_schema_length=0 (all Utf8): BANC neuron tables carry
+                # comma-joined id lists (e.g. manc_match = "22586, 21696")
+                # that break i64 inference past the schema window. This
+                # block only needs bodyId/label text columns.
+                ndf_complete = pl.read_csv(ndf_path, infer_schema_length=0)
                 if 'bodyId' in ndf_complete.columns:
                     ndf_complete = ndf_complete.with_columns(pl.col('bodyId').cast(pl.Utf8))
                 bodyid_to_label = sv.build_bodyid_label_map(self.label_mapper, self.dataset, ndf_complete)

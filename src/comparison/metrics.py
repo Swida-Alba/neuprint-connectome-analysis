@@ -1190,11 +1190,25 @@ class ComparisonMetrics:
             # Keep edge index as column
             top['edge'] = top.index
             all_top_edges.append(top.reset_index(drop=True))
-        
+
         if not all_top_edges:
             return pd.DataFrame()
-        
-        return pd.concat(all_top_edges, ignore_index=True)
+
+        result = pd.concat(all_top_edges, ignore_index=True)
+
+        # N4 cleanup: drop the redundant per-dataset weight columns (the
+        # dataset + weight columns already carry the value), and fill the
+        # self-referencing present/weight columns instead of leaving them
+        # None for the reference dataset's own rows.
+        for dataset in available:
+            if f'present_in_{dataset}' in result.columns:
+                self_mask = result['dataset'] == dataset
+                result.loc[self_mask, f'present_in_{dataset}'] = True
+                result.loc[self_mask, f'weight_in_{dataset}'] = \
+                    result.loc[self_mask, 'weight']
+            if dataset in result.columns:
+                result = result.drop(columns=[dataset])
+        return result
     
     def compare_top_edges_overlap(
         self,

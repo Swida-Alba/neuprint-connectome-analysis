@@ -224,6 +224,17 @@ class OutputPanel:
                 ).classes("drocat-cancel-btn")
                 self.cancel_button.disable()
 
+            # Persistent run notice (F6): a banner parked above the log —
+            # the effective-threshold summary survives log streams and
+            # file refreshes until the next run overwrites it.
+            self.notice_label = ui.label("").classes(
+                "w-full text-caption"
+            ).style(
+                "background: #fff8e1; border: 1px solid #ffd54f; "
+                "border-radius: 6px; padding: 6px 10px; "
+                "white-space: pre-wrap; color: #5d4037;"
+            ).set_visibility(False)
+
             # Keep the tracker in the original progress-row position, directly
             # above the execution log. Its bar is intentionally 3x the old
             # 4px height (12px), while the compatibility attributes continue
@@ -381,6 +392,20 @@ class OutputPanel:
         if self.log_area is None:
             return
         ui.run_javascript(_COPY_LOG_JS.replace("__LOG_ID__", self._log_dom_id))
+
+    def set_notice(self, message: str) -> None:
+        """Show the persistent notice banner (F6 effective-threshold
+        summary). Empty text clears it."""
+        notice_label = getattr(self, "notice_label", None)
+        if not notice_label:
+            return
+        text = (message or "").strip()
+        notice_label.set_text(text)
+        notice_label.set_visibility(bool(text))
+
+    def clear_notice(self) -> None:
+        """Hide the persistent notice banner."""
+        self.set_notice("")
 
     def set_status(self, status: str, color: str = "grey"):
         """Update the status pill."""

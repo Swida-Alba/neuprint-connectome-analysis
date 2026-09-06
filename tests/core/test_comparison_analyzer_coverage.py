@@ -426,6 +426,9 @@ def test_query_edges_neuprint(monkeypatch, analyzer):
 # ---------------------------------------------------------------------------
 
 def test_run_all_path_analyses(monkeypatch, analyzer):
+    # legacy per-threshold loop semantics (Feature F replay disabled —
+    # under replay the batch routes through FindAllPathMultiThreshold)
+    analyzer.parameters.replay_paths = False
     calls = []
 
     def fake_run(dataset, threshold, verbose_mode="simple"):
@@ -919,7 +922,7 @@ class _FakeAutoTypeMapper:
                        only_different=True):
         self.exported.append(("mapping", path))
 
-    def export_conflicts(self, path, filter_types=None):
+    def export_conflicts(self, path, filter_types=None, datasets=None):
         self.exported.append(("conflicts", path))
 
     def _detect_type_source(self, type_name):

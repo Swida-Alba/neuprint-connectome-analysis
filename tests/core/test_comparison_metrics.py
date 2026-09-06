@@ -388,9 +388,11 @@ def test_top_edges(metrics):
     assert "rank_in_dataset" in top.columns
     assert "present_in_d2" in top.columns
 
-    # top_n <= 0 -> all positive edges
+    # top_n <= 0 -> all positive edges (N4 layout: per-dataset weight
+    # columns are dropped; use the dataset + weight columns)
     top_all = metrics.get_top_edges_per_dataset(aligned, ["d1"], top_n=0)
-    assert (top_all["d1"] > 0).all()
+    d1_rows = top_all[top_all["dataset"] == "d1"]
+    assert (d1_rows["weight"] > 0).all()
 
     assert metrics.get_top_edges_per_dataset(aligned, ["zzz"]).empty
 

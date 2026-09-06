@@ -30,6 +30,11 @@ import pandas as pd
 import numpy as np
 from tqdm import tqdm
 
+try:
+    from ..flywire_ids import is_fafb_dataset
+except ImportError:  # pragma: no cover - direct package imports
+    from flywire_ids import is_fafb_dataset
+
 from .dataset_config import DatasetConfig
 from .comparison_parameters import ComparisonParameters
 from .label_mapper import LabelMapper
@@ -150,6 +155,23 @@ class ComparisonAnalyzer:
         self._hemisphere_symmetry_cache: Dict[int, Dict[str, Dict]] = {}
         self._network_aligned_cache: Dict[int, pd.DataFrame] = {}
         self._output_base_printed: bool = False  # Track if base dir was printed
+        # Fix A: StrongestFirst effective cutoff (τ) per (dataset, threshold).
+        # None = complete enumeration; a number = τ-bounded (budget bit).
+        self._path_taus: Dict[tuple, Optional[float]] = {}
+        # Feature G/F: full per-run state for the skip logic and the
+        # sensitivity exports: {tau, budget_bitten, paths_complete,
+        # skipped, duplicate_of, pathfinding} per (dataset, threshold).
+        self._path_run_meta: Dict[tuple, Dict] = {}
+        # Feature F: per-threshold state from FindAllPathMultiThreshold
+        # runs (tau/budget_bitten/paths_complete/replayed), keyed like
+        # _path_run_meta entries.
+        self._replay_results: Dict[tuple, Dict] = {}
+        # Untyped-neuron drop (default on): edges touching untyped neurons
+        # (bodyId-fallback / Unknown / empty type labels) are removed from
+        # the cross-dataset results; the dropped rows are exported and the
+        # counts appended to the run's user_warning_notes.
+        self._untyped_dropped_records: list = []
+        self._untyped_drop_stats: Dict[tuple, Dict] = {}
         
         # Resolve dataset configurations from strings
         self._dataset_configs: Dict[str, DatasetConfig] = {}
@@ -662,7 +684,7 @@ class ComparisonAnalyzer:
         # - If dataset contains 'flywire' or 'fafb' -> uses local data
         # - Otherwise -> uses NeuPrint (creates client using dataset name and token from env var)
         # Determine if force_API_fetching should be applied (only for FAFB/FlyWire datasets)
-        is_fafb = 'flywire' in dataset_name.lower() or 'fafb' in dataset_name.lower()
+        is_fafb = is_fafb_dataset(dataset_name)
         use_force_api = self.parameters.force_API_fetching if is_fafb else False
         
         fnc = FindNeuronConnection(
@@ -682,6 +704,7 @@ class ComparisonAnalyzer:
             label_mapper=self.label_mapper,  # Pass label mapper for standardization
             pathfinding=self.parameters.pathfinding,  # Pass pathfinding algorithm
             graph_edge_limit_bodyid=self.parameters.graph_edge_limit_bodyid,  # bodyId edge limit (deep searches)
+            max_paths_bodyid=self.parameters.max_paths_bodyid,  # StrongestFirst path budget (None = per-mode default)
             edgeN_limit=self.parameters.edgeN_limit,  # Visualization Edge Limit
             search_columns=self.parameters.search_columns,  # Column scope for neuron name resolution
             force_API_fetching=use_force_api,  # Use CAVE API for FAFB if enabled
@@ -709,19 +732,55 @@ class ComparisonAnalyzer:
             fnc.FindShortestPath(find_reciprocal=self.parameters.find_reciprocal)
         else:
             fnc.FindAllPath(find_reciprocal=self.parameters.find_reciprocal)
+            # Fix A + Feature G: record the effective cutoff (τ) and the
+            # full run state per (dataset, threshold). τ is the budget
+            # cutoff when StrongestFirst was budget-bitten, else the
+            # NATURAL τ (min emitted-path bottleneck: every threshold up
+            # to τ yields this identical set) — the skip rule of Feature G
+            # keys off both cases uniformly.
+            tau = getattr(fnc, 'strongest_first_cutoff', None)
+            bitten = bool(getattr(fnc, 'strongest_first_budget_bitten', False))
+            self._path_taus[(dataset_name, threshold)] = tau
+            self._path_run_meta[(dataset_name, threshold)] = {
+                'tau': tau,
+                'tau_canonical': getattr(fnc, 'tau_canonical', None),
+                'strongest_dropped_bottleneck': getattr(
+                    fnc, 'strongest_dropped_bottleneck', None),
+                'budget_bitten': bitten,
+                'paths_complete': not bitten,
+                'skipped': False,
+                'duplicate_of': None,
+                'applied_folder': threshold,
+                'edge_weight_floor': getattr(fnc, 'edge_weight_floor', None),
+                'pathfinding': self.parameters.pathfinding,
+            }
         
         # Get results - FindAllPath saves both path data and connection data
         # For comparison metrics, we need the connection data (edge-level) format:
         # - data_details/connection_info_bodyId.csv has bodyId_pre, bodyId_post, weight, etc.
         # - This is the correct format for comparison metrics
+        return self._load_fnc_results(fnc, dataset_name, threshold)
+
+    def _load_fnc_results(
+        self,
+        fnc,
+        dataset_name: str,
+        threshold: int,
+    ) -> pd.DataFrame:
+        """Load the per-threshold connection table from a finished FNC run.
+
+        Shared by ``run_path_analysis`` and the Feature F replay path (the
+        multi-threshold orchestrator materializes each threshold's folder;
+        the analyzer reads the same files it always did).
+        """
         conn_df = pd.DataFrame()
-        
+
         if hasattr(fnc, 'allpath_folder') and fnc.allpath_folder:
             # Try to load connection data (edge-level format for metrics)
             conn_file = os.path.join(
                 fnc.allpath_folder, 'data_details', 'connection_info_bodyId.csv'
             )
-            
+
             if os.path.exists(conn_file):
                 try:
                     # Use Polars for faster CSV reading
@@ -743,29 +802,33 @@ class ComparisonAnalyzer:
                         self._log(f"Loaded {len(conn_df)} connections from connection_type.csv")
                     except Exception as e:
                         self._log(f"Warning: Could not read connection type file: {e}")
-        
+
         # Add dataset identifier
         if not conn_df.empty:
             conn_df = conn_df.copy()
             conn_df['dataset'] = dataset_name
             conn_df['threshold'] = threshold
-            
+
             # Apply label mapping if available
             if self.label_mapper and not self.label_mapper.is_empty:
                 self._log(f"Applying label mapping to {dataset_name} results")
                 conn_df = self.label_mapper.apply_to_dataframe(conn_df, dataset_name)
-                
+
                 # Overwrite original types with standardized labels
                 # This ensures merging in downstream analysis and visualizations
                 if 'std_label_pre' in conn_df.columns:
                     # Only overwrite if label is not empty
                     mask = conn_df['std_label_pre'] != ''
                     conn_df.loc[mask, 'type_pre'] = conn_df.loc[mask, 'std_label_pre']
-                    
+
                 if 'std_label_post' in conn_df.columns:
                     mask = conn_df['std_label_post'] != ''
                     conn_df.loc[mask, 'type_post'] = conn_df.loc[mask, 'std_label_post']
-        
+
+        # Untyped-neuron drop (default on): edges touching untyped neurons
+        # never match across datasets and only dilute the comparison.
+        conn_df = self._drop_untyped_neurons(dataset_name, threshold, conn_df)
+
         return conn_df
     
     def run_edge_analysis(
@@ -1096,58 +1159,806 @@ class ComparisonAnalyzer:
         else:
             return self._run_all_path_analyses(skip_existing)
     
+    # ------------------------------------------------------------------
+    # Feature G helpers: per-threshold run-meta persistence (resume)
+    # ------------------------------------------------------------------
+
+    def _threshold_meta_path(self, dataset_name: str) -> str:
+        safe_name = self.parameters._sanitize_name(dataset_name)
+        return os.path.join(
+            self.parameters.full_output_path, 'dataset_data',
+            safe_name, 'threshold_meta.json')
+
+    def _load_threshold_meta(self, dataset_name: str) -> Dict[int, Dict]:
+        """Load persisted per-threshold run state ({tau, budget_bitten,
+        skipped, duplicate_of, ...}) so a resumed run reconstructs the
+        skip state instead of re-running collapsed thresholds (G §13.5
+        item 6)."""
+        meta_path = self._threshold_meta_path(dataset_name)
+        if not os.path.exists(meta_path):
+            return {}
+        try:
+            with open(meta_path, 'r', encoding='utf-8') as f:
+                raw = json.load(f)
+            return {int(k): v for k, v in raw.items()}
+        except Exception as e:
+            self._log(f"Warning: could not load threshold meta for "
+                      f"{dataset_name}: {e}")
+        return {}
+
+    def _store_threshold_meta(self, dataset_name: str, meta_map: Dict[int, Dict]) -> None:
+        meta_path = self._threshold_meta_path(dataset_name)
+        try:
+            os.makedirs(os.path.dirname(meta_path), exist_ok=True)
+            with open(meta_path, 'w', encoding='utf-8') as f:
+                json.dump({str(k): v for k, v in meta_map.items()}, f,
+                          indent=2, default=str)
+        except Exception as e:
+            self._log(f"Warning: could not persist threshold meta for "
+                      f"{dataset_name}: {e}")
+
+    def _effective_tau(self, meta: Optional[Dict]) -> Optional[float]:
+        """Effective threshold of a run: the budget τ when the run was
+        budget-bitten, else its natural τ (min emitted bottleneck). None
+        = unknown/no paths (never skip)."""
+        if not meta:
+            return None
+        return meta.get('tau')
+
+    def _g_skip_allowed(self, dataset_name: str, threshold: int,
+                        prev_meta: Optional[Dict]) -> bool:
+        """Feature G duplicate-threshold skip rule (§13.1/§13.5).
+
+        'all' mode only, path comparison mode only. Skip iff the previous
+        actual run of this dataset collapsed everything up to its
+        effective τ >= this threshold (identical path sets by the
+        τ-equivalence), the algorithm is unchanged, and the threshold was
+        not already materialized independently. Shortest mode never skips
+        (min-hop sets are NOT nested across thresholds — §13.5 item 1).
+        """
+        if self.parameters.path_mode != 'all':
+            return False
+        if not prev_meta:
+            return False
+        if prev_meta.get('skipped'):
+            return False  # prev was itself aliased; its τ is carried by an earlier run
+        if prev_meta.get('tau') is None:
+            return False
+        if threshold > prev_meta['tau']:
+            return False  # new material exists above τ
+        if prev_meta.get('pathfinding') != self.parameters.pathfinding:
+            return False  # paranoia clause: only skip identical algorithm (§13.5 item 8)
+        return True
+
+    def _is_duplicate_threshold(self, dataset_name: str, threshold: int) -> bool:
+        """Feature G: True when this input threshold was skipped as a
+        τ-collapse duplicate for this dataset (its results alias an
+        earlier run)."""
+        meta = self._path_run_meta.get((dataset_name, threshold))
+        return bool(meta and meta.get('skipped'))
+
+    def _analysis_thresholds(self) -> List[int]:
+        """Input thresholds minus Feature-G duplicates — the list the
+        heavy per-threshold analysis, rendering, and exports iterate.
+
+        A threshold is dropped only when EVERY dataset skipped it (its
+        results alias an earlier run); if any dataset ran fresh, the
+        threshold still carries new material for the combined exports."""
+        dataset_names = self.parameters.get_dataset_names()
+        out = []
+        for t in self.parameters.thresholds:
+            if any(not self._is_duplicate_threshold(ds, t)
+                   for ds in dataset_names):
+                out.append(t)
+        return out
+
+    def _applied_state_for(self, dataset: str, threshold: int):
+        """F5/F6 + canonical tau: (applied_threshold, pruned,
+        edge_weight_floor) for one (dataset, threshold) from the run
+        meta.
+
+        applied_threshold is the CANONICAL (minimal) threshold that
+        reproduces this run's output: w2 + 1 for a budget-bitten run
+        (w2 = strongest dropped path bottleneck; the gap (w2, tau]
+        contains no paths, so every threshold in [w2+1, tau] yields the
+        identical set), else the asked threshold for complete runs (the
+        natural tau is reported alongside). ``pruned`` is True only when
+        the Edge-Budget floor (the sole lossy stage) fired for that run.
+        """
+        meta = self._path_run_meta.get((dataset, threshold)) or {}
+        floor = meta.get('edge_weight_floor')
+        tau = meta.get('tau')
+        canonical = meta.get('tau_canonical')
+        complete = bool(meta.get('paths_complete', True))
+        applied_folder = meta.get('applied_folder')
+        if tau is not None and not complete:
+            if canonical is not None:
+                applied = canonical
+            elif meta.get('skipped') and applied_folder is not None:
+                # Collapsed row with missing canonical bookkeeping: the
+                # applied folder IS the materialized equivalent threshold
+                # — never fall back to the bare landing tau here.
+                applied = applied_folder
+            else:
+                applied = tau
+        else:
+            applied = threshold
+        # W5: a lossy Edge-Budget floor RAISES the run's effective
+        # cutoff — a floored complete run is exactly a complete run at
+        # w0, so the applied threshold is at least the floor (the asked
+        # threshold stays visible as the requested value).
+        if floor is not None:
+            applied = max(applied, floor)
+        return applied, (floor is not None), floor
+
+    def _export_effective_threshold_banner(self):
+        """F6: persist the asked -> applied threshold collapse for the
+        output panel's persistent banner (effective_thresholds.json in
+        the run root). Written only when at least one threshold was
+        τ-collapsed."""
+        if self.parameters.path_mode != 'all':
+            return
+        dataset_names = self.parameters.get_dataset_names()
+        datasets_out = {}
+        banner_parts = []
+        any_skip = False
+        for ds in dataset_names:
+            thresholds = self.parameters.get_thresholds_for_dataset(ds)
+            mapping = {}
+            skipped = []
+            effective = []
+            aliased_folders = []
+            tau_seen = None
+            for t in thresholds:
+                meta = self._path_run_meta.get((ds, t), {})
+                applied = meta.get('applied_folder')
+                if meta.get('skipped') and applied is not None:
+                    mapping[str(t)] = applied
+                    skipped.append(t)
+                    any_skip = True
+                    # The aliased canonical folder is a REAL applied
+                    # point on disk (e.g. minsyn_9) — keep it visible in
+                    # the applied list so the reader sees what the asked
+                    # threshold became.
+                    if applied not in thresholds:
+                        aliased_folders.append(applied)
+                else:
+                    effective.append(t)
+                tau = meta.get('tau_canonical') or meta.get('tau')
+                if tau is not None and not meta.get('skipped'):
+                    tau_seen = tau if tau_seen is None else max(tau_seen, tau)
+            if mapping:
+                # When every asked threshold collapsed, the applied
+                # folders ARE the effective points — show them instead of
+                # an empty list. Aliased canonical folders (materialized
+                # at w2+1) join the applied list too.
+                effective = effective or sorted(set(mapping.values()))
+                effective = sorted(set(effective) | set(aliased_folders))
+                datasets_out[ds] = {
+                    'input': thresholds,
+                    'effective': effective,
+                    'skipped': skipped,
+                    'applied_folder': mapping,
+                    'tau': tau_seen,
+                }
+                eff_txt = ', '.join(str(t) for t in effective) or '—'
+                alias_txt = ''
+                if mapping:
+                    alias_txt = ' (aliased: ' + ', '.join(
+                        f'{t}→{applied}'
+                        for t, applied in mapping.items()) + ')'
+                head = f"{ds}: input [{', '.join(map(str, thresholds))}]"
+                if tau_seen is not None:
+                    banner_parts.append(
+                        f"{head} → applied [{eff_txt}] (τ={tau_seen:g})"
+                        f"{alias_txt}")
+                else:
+                    banner_parts.append(
+                        f"{head} → applied [{eff_txt}]{alias_txt}")
+        if not any_skip:
+            return
+        payload = {
+            'banner': ('Threshold collapse: ' + '; '.join(banner_parts)
+                       + ' — thresholds below τ skipped as duplicates '
+                         '(aliased to the applied folder).'),
+            'datasets': datasets_out,
+        }
+        try:
+            out_path = os.path.join(self.parameters.full_output_path,
+                                    'effective_thresholds.json')
+            with open(out_path, 'w', encoding='utf-8') as f:
+                json.dump(payload, f, indent=2, default=str)
+            self._log("Saved: effective_thresholds.json")
+        except Exception as e:
+            self._log(f"Warning: could not write effective_thresholds.json: {e}")
+
+    def _is_untyped_type_value(self, value) -> bool:
+        """True when a type label means 'untyped': empty, an explicit
+        Unknown/none sentinel, or the bodyId-fallback label (the neuron's
+        own id used as its type when no name resolved)."""
+        s = str(value).strip()
+        if not s or s.lower() in {"unknown", "nan", "none"}:
+            return True
+        return s.isdigit()
+
+    def _drop_untyped_neurons(self, dataset_name: str, threshold: int,
+                              df: pd.DataFrame) -> pd.DataFrame:
+        """Drop edges touching untyped neurons (drop_untyped=True).
+
+        A neuron is untyped when its resolved type label is empty / an
+        Unknown sentinel / its own bodyId (the fallback label). Such
+        edges can never match across datasets (each dataset's bodyIds
+        are disjoint) and only dilute the aligned comparisons, so they
+        are removed from the cross-dataset results by default. The
+        dropped rows are kept for the explicit records export and the
+        dropped-neuron counts are appended to user_warning_notes.
+        """
+        if df is None or df.empty:
+            return df
+        if not getattr(self.parameters, "drop_untyped", True):
+            return df
+        if "type_pre" not in df.columns or "type_post" not in df.columns:
+            return df
+        pre = df["type_pre"].astype(str).str.strip()
+        post = df["type_post"].astype(str).str.strip()
+        untyped_pre = pre.map(self._is_untyped_type_value)
+        untyped_post = post.map(self._is_untyped_type_value)
+        drop_mask = untyped_pre | untyped_post
+        if not drop_mask.any():
+            return df
+        dropped = df[drop_mask].copy()
+        # The loader paths may have added these provenance columns already
+        # (connection_type/connection_info branches pre-fill them) —
+        # overwrite instead of insert so the drop never raises on a
+        # duplicate column.
+        if "threshold" in dropped.columns:
+            dropped["threshold"] = threshold
+        else:
+            dropped.insert(0, "threshold", threshold)
+        if "dataset" in dropped.columns:
+            dropped["dataset"] = dataset_name
+        else:
+            dropped.insert(0, "dataset", dataset_name)
+        self._untyped_dropped_records.append(dropped)
+        neurons = set()
+        for col in ("bodyId_pre", "bodyId_post"):
+            if col in dropped.columns:
+                neurons |= set(dropped[col].astype(str))
+        self._untyped_drop_stats[(dataset_name, threshold)] = {
+            "rows": len(dropped),
+            "neurons": len(neurons),
+            "untyped_pre": int(untyped_pre[drop_mask].sum()),
+            "untyped_post": int(untyped_post[drop_mask].sum()),
+        }
+        return df[~drop_mask].copy()
+
+    def _export_untyped_drop_records(self):
+        """Export the dropped untyped rows and append the per-run counts
+        to the run root's user_warning_notes.txt."""
+        if not self._untyped_drop_stats:
+            return
+        out_dir = self.parameters.full_output_path
+        if self._untyped_dropped_records:
+            recs = pd.concat(self._untyped_dropped_records, ignore_index=True)
+            rec_dir = os.path.join(out_dir, "comparison_results")
+            os.makedirs(rec_dir, exist_ok=True)
+            rec_path = os.path.join(rec_dir, "untyped_dropped_records.csv")
+            recs.to_csv(rec_path, index=False)
+        lines = []
+        total_rows = 0
+        for (ds, t), s in sorted(self._untyped_drop_stats.items()):
+            total_rows += s["rows"]
+            lines.append(
+                f"- [untyped dropped] {ds} @ t={t}: {s['rows']} edges / "
+                f"{s['neurons']} distinct untyped neurons dropped "
+                f"(drop_untyped=True; pre-side {s['untyped_pre']}, "
+                f"post-side {s['untyped_post']})")
+        note_path = os.path.join(out_dir, "user_warning_notes.txt")
+        try:
+            with open(note_path, "a", encoding="utf-8") as f:
+                f.write("\n" + "\n".join(lines) + "\n")
+        except Exception as e:
+            self._log(f"Warning: could not append untyped-drop notes: {e}")
+        self._log(f"Untyped neurons dropped by default: {total_rows} edges "
+                  f"across {len(self._untyped_drop_stats)} dataset-threshold "
+                  f"runs (records: comparison_results/"
+                  f"untyped_dropped_records.csv; counts appended to "
+                  f"user_warning_notes.txt)")
+
     def _run_all_path_analyses(self, skip_existing: bool = True) -> Dict[str, Dict[int, pd.DataFrame]]:
-        """Run path-based analyses for all datasets and thresholds.
-        
-        Thresholds are processed in ascending order to enable graph caching:
-        the lowest threshold is processed first, its graph is cached, and 
-        higher thresholds reuse the cached graph with edge filtering.
+        """Run path-based analyses for all datasets and their thresholds.
+
+        Feature E: each dataset iterates its OWN threshold list
+        (``get_thresholds_for_dataset``) — per-dataset overrides make this
+        a vertical comparison run.
+
+        Feature G: iterating ascending, an input threshold t whose
+        previous (same-dataset) run has effective τ >= t is SKIPPED — its
+        path set is identical to that run's by the τ-equivalence; the
+        frame is aliased and the exports carry
+        ``skipped/duplicate_of/tau`` markers.
+
+        Feature F: when ``replay_paths`` is enabled and path_mode='all',
+        the dataset's pending thresholds are executed in ONE
+        ``FindAllPathMultiThreshold`` call — enumeration happens at the
+        lowest pending threshold only and higher thresholds are
+        materialized from the bottleneck-annotated path set.
         """
         dataset_names = self.parameters.get_dataset_names()
-        # Sort thresholds ascending so lowest is processed first (enables graph cache)
-        sorted_thresholds = sorted(self.parameters.thresholds)
-        lowest_threshold = sorted_thresholds[0] if sorted_thresholds else None
-        
+        replay_enabled = (
+            self.parameters.replay_paths
+            and self.parameters.path_mode == 'all'
+        )
+
         for dataset_name in dataset_names:
             if dataset_name not in self.raw_results:
                 self.raw_results[dataset_name] = {}
-            
-            self._log(f"Processing \033[94m{dataset_name}\033[0m ({len(sorted_thresholds)} thresholds)")
-            
-            # Use progress bar for threshold iteration
-            threshold_iter = tqdm(
-                sorted_thresholds, 
-                desc=f"  {dataset_name} thresholds",
-                leave=False,
-                unit="thr"
-            )
-            
-            for threshold in threshold_iter:
-                threshold_iter.set_postfix(threshold=threshold)
-                
-                # Check if already computed
+
+            thresholds_ds = self.parameters.get_thresholds_for_dataset(dataset_name)
+            self._log(f"Processing \033[94m{dataset_name}\033[0m "
+                      f"({len(thresholds_ds)} thresholds: {thresholds_ds})")
+
+            meta_map = self._load_threshold_meta(dataset_name)
+            lowest_threshold = thresholds_ds[0] if thresholds_ds else None
+
+            # Thresholds iterate ASCENDING. prev_meta tracks the most
+            # recent ACTUAL run (fresh or resumed) so the Feature G skip
+            # rule sees τ from runs executed earlier in this same loop.
+            prev_meta: Optional[Dict] = None
+            prev_t: Optional[int] = None
+            pending: list = []
+
+            def _note_actual(threshold, meta):
+                nonlocal prev_meta, prev_t
+                meta.setdefault('_threshold', threshold)
+                self._path_run_meta[(dataset_name, threshold)] = meta
+                meta_map[threshold] = dict(meta)
+                if not meta.get('skipped'):
+                    prev_meta = meta
+                    prev_t = threshold
+
+            for threshold in thresholds_ds:
+                meta = meta_map.get(threshold)
+
+                # Already in memory (fresh run earlier in this session)?
                 if skip_existing and threshold in self.raw_results[dataset_name]:
+                    if meta and not meta.get('skipped'):
+                        _note_actual(threshold, meta)
                     continue
-                
-                # Check if cached on disk
+
                 if skip_existing and self.parameters.output_folder:
-                    cached = self._try_load_cached(dataset_name, threshold)
-                    if cached is not None:
-                        self.raw_results[dataset_name][threshold] = cached
-                        continue
-                
-                # Run path analysis
-                # Use 'simple' verbose for lowest threshold (builds cache), 'silent' for others (uses cache)
+                    if meta and meta.get('skipped'):
+                        dup_df = self.raw_results[dataset_name].get(
+                            meta.get('duplicate_of'))
+                        if dup_df is None and meta.get('applied_folder'):
+                            # F5: the applied (tau) folder holds the real
+                            # output for collapsed thresholds — alias its
+                            # cached frame.
+                            dup_df = self._try_load_cached(
+                                dataset_name, meta.get('applied_folder'))
+                        if dup_df is not None:
+                            # Resume key is the aliased frame (G §13.5 item 9)
+                            self.raw_results[dataset_name][threshold] = dup_df
+                            self._path_run_meta[(dataset_name, threshold)] = meta
+                            continue
+                        # duplicate frame unavailable: fall through and
+                        # re-run this threshold normally
+                    else:
+                        cached = self._try_load_cached(dataset_name, threshold)
+                        if cached is not None:
+                            self.raw_results[dataset_name][threshold] = cached
+                            if meta:
+                                _note_actual(threshold, meta)
+                            continue
+
+                # Feature G duplicate-threshold skip (legacy mode decides
+                # here; the replay batch marks collapses post-execution).
+                if not replay_enabled and self._g_skip_allowed(
+                        dataset_name, threshold, prev_meta):
+                    tau = prev_meta.get('tau')
+                    bitten = bool(prev_meta.get('budget_bitten'))
+                    skip_meta = {
+                        'tau': tau,
+                        'budget_bitten': bitten,
+                        'paths_complete': bool(prev_meta.get(
+                            'paths_complete', not bitten)),
+                        'skipped': True,
+                        'duplicate_of': prev_t,
+                        'pathfinding': prev_meta.get('pathfinding'),
+                    }
+                    # G §13.5 item 5: alias the frame as an independent
+                    # COPY — never mutate it, and never share it by
+                    # reference (a future in-place edit of one key would
+                    # otherwise corrupt the other).
+                    self.raw_results[dataset_name][threshold] = \
+                        self.raw_results[dataset_name][prev_t].copy()
+                    _note_actual(threshold, skip_meta)
+                    self._store_threshold_meta(dataset_name, meta_map)
+                    self._log(
+                        f"  threshold={threshold}: SKIPPED (duplicate of "
+                        f"t={prev_t}: identical set up to τ={tau:g})"
+                        if tau is not None else
+                        f"  threshold={threshold}: SKIPPED (duplicate of t={prev_t})")
+                    continue
+
+                if replay_enabled:
+                    pending.append(threshold)
+                    continue
+
+                # Legacy per-threshold run (interleaved so later skip
+                # decisions see this run's τ).
                 verbose = 'simple' if threshold == lowest_threshold else 'silent'
-                result_df = self.run_path_analysis(dataset_name, threshold, verbose_mode=verbose)
+                result_df = self.run_path_analysis(dataset_name, threshold,
+                                                   verbose_mode=verbose)
                 self.raw_results[dataset_name][threshold] = result_df
-                
-                # Save to disk
+                run_meta = self._path_run_meta.get((dataset_name, threshold), {
+                    'tau': None, 'budget_bitten': False,
+                    'paths_complete': True, 'skipped': False,
+                    'duplicate_of': None,
+                    'pathfinding': self.parameters.pathfinding,
+                })
+                _note_actual(threshold, run_meta)
                 if self.parameters.output_folder:
                     self._save_result(dataset_name, threshold, result_df)
-        
+
+            if pending:
+                self._execute_replay_batch(
+                    dataset_name, pending, lowest_threshold, meta_map,
+                    _note_actual,
+                    prev_meta_init=prev_meta, prev_t_init=prev_t)
+                self._store_threshold_meta(dataset_name, meta_map)
+            elif any(m.get('skipped') for m in meta_map.values()):
+                self._store_threshold_meta(dataset_name, meta_map)
+
+        # F7: auto-extend collapsed thresholds (opt-in). Global schedule:
+        # points = k * tau_ref while <= 2x the max asked threshold, so the
+        # expanded points stay shared across datasets and every dataset
+        # gains fresh material at each one. Each point is a REAL threshold
+        # (own key + folder) run through the same replay batch; Feature G
+        # skipping applies between the points as usual.
+        if (self.parameters.auto_extend_thresholds
+                and self.parameters.path_mode == 'all'
+                and self.parameters.replay_paths):
+            asked_max = 0
+            taus = []
+            for ds in dataset_names:
+                for t in self.parameters.get_thresholds_for_dataset(ds):
+                    asked_max = max(asked_max, t)
+                    m = self._path_run_meta.get((ds, t), {})
+                    tau = m.get('tau')
+                    if tau is not None and not m.get('skipped'):
+                        taus.append(tau)
+            if taus:
+                tau_ref = int(round(max(taus)))
+                points = []
+                k = 2
+                while k * tau_ref <= 2 * asked_max:
+                    points.append(k * tau_ref)
+                    k += 1
+                points = sorted({p for p in points if p > tau_ref})
+            else:
+                points = []
+            if not points:
+                self._log("  F7: tau exceeds the 2x asked-max cap — no "
+                          "auto-extension (raise thresholds >= tau to probe "
+                          "further)")
+            else:
+                for dataset_name in dataset_names:
+                    current = self.parameters.get_thresholds_for_dataset(
+                        dataset_name)
+                    new_points = [p for p in points if p not in current]
+                    if not new_points:
+                        continue
+                    merged = sorted(set(current) | set(new_points))
+                    # Persist the extended lists — exports iterate them.
+                    self.parameters.dataset_thresholds[dataset_name] = merged
+                    self.parameters.thresholds = sorted(
+                        set(self.parameters.thresholds) | set(merged))
+                    meta_map = self._load_threshold_meta(dataset_name)
+                    self._log(f"  F7 auto-extension for {dataset_name}: "
+                              f"+{new_points}")
+
+                    def _note_expansion(t, m, _ds=dataset_name):
+                        m.setdefault('_threshold', t)
+                        self._path_run_meta[(_ds, t)] = m
+                        meta_map[t] = dict(m)
+
+                    self._execute_replay_batch(
+                        dataset_name, new_points, min(merged), meta_map,
+                        _note_expansion)
+                    self._store_threshold_meta(dataset_name, meta_map)
+                self._export_effective_threshold_banner()
+
+        self._export_untyped_drop_records()
+        self._export_effective_threshold_banner()
         self._log(f"Completed path analysis for {len(dataset_names)} datasets")
         return self.raw_results
+
+    def _execute_replay_batch(
+        self,
+        dataset_name: str,
+        pending: list,
+        lowest_threshold: Optional[int],
+        meta_map: Dict[int, Dict],
+        note_actual,
+        prev_meta_init: Optional[Dict] = None,
+        prev_t_init: Optional[int] = None,
+    ) -> None:
+        """Run the pending thresholds of one dataset via ONE
+        FindAllPathMultiThreshold call (Feature F).
+
+        The orchestrator enumerates at the first pending threshold and
+        materializes every higher threshold from the bottleneck slice —
+        thresholds collapsed by τ (Feature G) keep their materialized
+        folder (built from the same slice, §9.7) and are additionally
+        marked/aliased for the exports. On replay declination (budget
+        exceeded / capture failure) this falls back to the interleaved
+        legacy per-threshold loop, skip logic included.
+        """
+        executed: Dict[int, Dict] = {}
+        verbose = 'simple' if pending[0] == lowest_threshold else 'silent'
+        thresholds_str = ', '.join(str(t) for t in pending)
+        self._log(f"  Replay batch for {dataset_name}: [{thresholds_str}] "
+                  f"(enumerate at {pending[0]}, materialize the rest)")
+        results = self._run_multi_threshold_replay(
+            dataset_name, list(pending), verbose)
+
+        if results is None:
+            self._log("  Replay unavailable — falling back to "
+                      "per-threshold enumeration", level='warn')
+            # Seed the fallback chain with the last resumed run so skip
+            # decisions span the batch boundary.
+            prev_meta = prev_meta_init
+            prev_t = prev_t_init
+            for threshold in pending:
+                if self._g_skip_allowed(dataset_name, threshold, prev_meta):
+                    tau = prev_meta.get('tau')
+                    bitten = bool(prev_meta.get('budget_bitten'))
+                    skip_meta = {
+                        'tau': tau,
+                        'budget_bitten': bitten,
+                        'paths_complete': bool(prev_meta.get(
+                            'paths_complete', not bitten)),
+                        'skipped': True,
+                        'duplicate_of': prev_t,
+                        'pathfinding': prev_meta.get('pathfinding'),
+                        '_threshold': threshold,
+                    }
+                    # Independent copy (directive 2): shared references
+                    # would let a future in-place edit corrupt both keys.
+                    self.raw_results[dataset_name][threshold] = \
+                        self.raw_results[dataset_name][prev_t].copy()
+                    self._path_run_meta[(dataset_name, threshold)] = skip_meta
+                    meta_map[threshold] = dict(skip_meta)
+                    self._log(f"  threshold={threshold}: SKIPPED (duplicate "
+                              f"of t={prev_t})")
+                    continue
+                verbose = 'simple' if threshold == lowest_threshold else 'silent'
+                df = self.run_path_analysis(dataset_name, threshold,
+                                            verbose_mode=verbose)
+                self.raw_results[dataset_name][threshold] = df
+                run_meta = self._path_run_meta.get((dataset_name, threshold), {
+                    'tau': None, 'budget_bitten': False,
+                    'paths_complete': True, 'skipped': False,
+                    'duplicate_of': None,
+                    'pathfinding': self.parameters.pathfinding,
+                })
+                run_meta.setdefault('_threshold', threshold)
+                self._path_run_meta[(dataset_name, threshold)] = run_meta
+                meta_map[threshold] = dict(run_meta)
+                if self.parameters.output_folder:
+                    self._save_result(dataset_name, threshold, df)
+                if not run_meta.get('skipped'):
+                    prev_meta = run_meta
+                    prev_t = threshold
+            return
+
+        prev_t = None
+        prev_meta = None
+        for t in pending:
+            raw = results.get(t)
+            if raw is None:
+                continue
+            if raw.get('_reenumerate'):
+                # W4: the threshold sits below the floored slice's floor
+                # (t0 < t < w0) — the slice cannot serve it. Enumerate
+                # individually; its own floor/budget semantics apply.
+                verbose = 'simple' if t == lowest_threshold else 'silent'
+                df = self.run_path_analysis(dataset_name, t,
+                                            verbose_mode=verbose)
+                self.raw_results[dataset_name][t] = df
+                run_meta = self._path_run_meta.get((dataset_name, t), {
+                    'tau': None, 'budget_bitten': False,
+                    'paths_complete': True, 'skipped': False,
+                    'duplicate_of': None,
+                    'pathfinding': self.parameters.pathfinding,
+                })
+                run_meta.setdefault('_threshold', t)
+                self._path_run_meta[(dataset_name, t)] = run_meta
+                meta_map[t] = dict(run_meta)
+                if self.parameters.output_folder:
+                    self._save_result(dataset_name, t, df)
+                if not run_meta.get('skipped'):
+                    prev_t = t
+                    prev_meta = run_meta
+                continue
+            # F5 tau-folder discipline: the orchestrator decides the
+            # folders — collapsed thresholds carry skipped=True plus the
+            # applied folder (the tau folder) and have NO minsyn_{t} on
+            # disk; their frames alias the applied folder's output.
+            if raw.get('skipped'):
+                applied = raw.get('applied_folder')
+                meta = {
+                    'tau': raw.get('tau'),
+                    'tau_canonical': raw.get('tau_canonical', applied),
+                    'strongest_dropped_bottleneck': raw.get(
+                        'strongest_dropped_bottleneck'),
+                    'budget_bitten': bool(raw.get('budget_bitten')),
+                    'paths_complete': bool(raw.get('paths_complete', False)),
+                    'skipped': True,
+                    'duplicate_of': raw.get('duplicate_of', applied),
+                    'applied_folder': applied,
+                    'pathfinding': self.parameters.pathfinding,
+                    'edge_weight_floor': raw.get('edge_weight_floor'),
+                }
+                df = self._load_multi_threshold_result(dataset_name, applied)
+                self.raw_results[dataset_name][t] = df
+                note_actual(t, meta)
+                executed[t] = meta
+                self._path_taus[(dataset_name, t)] = meta.get('tau')
+                if meta.get('tau') is not None:
+                    self._log(
+                        f"  threshold={t}: SKIPPED (duplicate of "
+                        f"minsyn_{applied}: identical set at "
+                        f"τ={meta['tau']:g})")
+                else:
+                    self._log(
+                        f"  threshold={t}: SKIPPED (duplicate of "
+                        f"minsyn_{applied})")
+                continue
+            meta = {
+                'tau': raw.get('tau'),
+                'tau_canonical': raw.get('tau_canonical'),
+                'strongest_dropped_bottleneck': raw.get(
+                    'strongest_dropped_bottleneck'),
+                'budget_bitten': bool(raw.get('budget_bitten')),
+                'paths_complete': bool(raw.get('paths_complete', True)),
+                'skipped': False,
+                'duplicate_of': None,
+                'applied_folder': int(t),
+                'pathfinding': self.parameters.pathfinding,
+                'edge_weight_floor': raw.get('edge_weight_floor'),
+            }
+            df = self._load_multi_threshold_result(dataset_name, t)
+            self.raw_results[dataset_name][t] = df
+            # Feature G collapse within the replay batch: the folder was
+            # materialized from the same slice (no extra enumeration),
+            # and the exports mark the threshold as skipped/aliased.
+            if prev_meta is not None and self._g_skip_allowed(
+                    dataset_name, t, prev_meta):
+                meta['skipped'] = True
+                meta['duplicate_of'] = prev_t
+                tau_txt = (f"{meta.get('tau'):g}" if meta.get('tau')
+                           is not None else "?")
+                self._log(f"  threshold={t}: collapsed (≡ t={prev_t} at "
+                          f"τ={tau_txt}) — materialized from the same "
+                          f"replay slice")
+            note_actual(t, meta)
+            executed[t] = meta
+            self._path_taus[(dataset_name, t)] = meta.get('tau')
+            if self.parameters.output_folder and not meta.get('skipped'):
+                self._save_result(dataset_name, t, df)
+            if not meta.get('skipped'):
+                prev_t = t
+                prev_meta = meta
+
+    def _run_multi_threshold_replay(self, dataset_name: str, thresholds: list,
+                                    verbose_mode: str = 'simple') -> Optional[Dict[int, Dict]]:
+        """One FindNeuronConnection run materializing all thresholds (F).
+
+        Returns {threshold: meta} or None when replay was declined and the
+        caller must fall back to per-threshold enumeration.
+        """
+        from coana import FindNeuronConnection
+
+        threshold = thresholds[0]
+        if verbose_mode != 'silent':
+            self._log(f"Running replay analysis: \033[94m{dataset_name} "
+                      f"@ thresholds={thresholds}\033[0m")
+
+        config = self._get_dataset_config(dataset_name)
+        source_neurons = self.parameters.get_source_neurons_for_dataset(dataset_name)
+        target_neurons = self.parameters.get_target_neurons_for_dataset(dataset_name)
+        max_interlayer = self.parameters.max_interlayer
+
+        safe_dataset_name = self.parameters._sanitize_name(dataset_name)
+        fnc_output_path = self.parameters.get_dataset_output_path(dataset_name, threshold)
+
+        custom_source_name = ''
+        if self.parameters.source_labels and len(self.parameters.source_labels) == 1:
+            custom_source_name = self.parameters.source_labels[0]
+        custom_target_name = ''
+        if self.parameters.target_labels and len(self.parameters.target_labels) == 1:
+            custom_target_name = self.parameters.target_labels[0]
+
+        is_fafb = is_fafb_dataset(dataset_name)
+        use_force_api = self.parameters.force_API_fetching if is_fafb else False
+
+        fnc = FindNeuronConnection(
+            sourceNeurons=source_neurons,
+            targetNeurons=target_neurons,
+            custom_source_name=custom_source_name,
+            custom_target_name=custom_target_name,
+            max_interlayer=max_interlayer,
+            min_synapse_num=threshold,
+            min_traversal_probability=0,
+            min_ratio=0,
+            dataset=dataset_name,
+            saveas=fnc_output_path,
+            verbose_mode=verbose_mode,
+            skip_bodyId=self.parameters.skip_bodyId,
+            label_mapper=self.label_mapper,
+            pathfinding=self.parameters.pathfinding,
+            graph_edge_limit_bodyid=self.parameters.graph_edge_limit_bodyid,
+            max_paths_bodyid=self.parameters.max_paths_bodyid,
+            edgeN_limit=self.parameters.edgeN_limit,
+            search_columns=self.parameters.search_columns,
+            force_API_fetching=use_force_api,
+            cache_only=self.parameters.cache_only,
+            separate_hemispheres=self.parameters.separate_hemispheres,
+            symmetry_analysis=self.parameters.symmetry_analysis,
+            keep_only_hemisphere_conserved_connections=self.parameters.keep_only_hemisphere_conserved_connections,
+        )
+
+        fnc.InitializeNeuronInfo()
+        if self.parameters.path_mode == 'shortest':
+            # Not reachable: replay is only enabled for path_mode='all'
+            fnc.FindShortestPath(find_reciprocal=self.parameters.find_reciprocal)
+            return None
+        try:
+            results = fnc.FindAllPathMultiThreshold(
+                thresholds,
+                find_reciprocal=self.parameters.find_reciprocal,
+            )
+        except Exception as e:
+            # Any orchestrator failure degrades to the legacy
+            # per-threshold enumeration rather than losing the run.
+            self._log(f"  Replay run failed ({e}) — falling back to "
+                      f"per-threshold enumeration", level='warn')
+            return None
+
+        if results.get('_fallback'):
+            return None
+
+        for t in thresholds:
+            meta = results.get(t)
+            if not meta:
+                continue
+            self._replay_results[(dataset_name, t)] = dict(meta)
+
+        return results
+
+    def _load_multi_threshold_result(self, dataset_name: str, threshold: int) -> pd.DataFrame:
+        """Read one replayed threshold's connection table from its folder.
+
+        The multi-threshold orchestrator materialized the folder already;
+        reuse the standard cached-result loader (the same file the next
+        ``_try_load_cached`` resume would find). Applies the same post-load
+        label-mapper fold-in as ``_load_fnc_results`` so mapper runs match
+        the legacy per-threshold flow.
+        """
+        df = self._try_load_cached(dataset_name, threshold)
+        if df is None:
+            df = pd.DataFrame()
+        if not df.empty and self.label_mapper and not self.label_mapper.is_empty:
+            df = self.label_mapper.apply_to_dataframe(df, dataset_name)
+            if 'std_label_pre' in df.columns:
+                mask = df['std_label_pre'] != ''
+                df.loc[mask, 'type_pre'] = df.loc[mask, 'std_label_pre']
+            if 'std_label_post' in df.columns:
+                mask = df['std_label_post'] != ''
+                df.loc[mask, 'type_post'] = df.loc[mask, 'std_label_post']
+        return df
     
     def _run_all_edge_analyses(self, skip_existing: bool = True) -> Dict[str, Dict[int, pd.DataFrame]]:
         """
@@ -1165,61 +1976,65 @@ class ComparisonAnalyzer:
         - Runs the path tool for other thresholds only to generate path output files
         """
         from core.fast_graph import FastGraph
-        
+
         dataset_names = self.parameters.get_dataset_names()
-        lowest_threshold = min(self.parameters.thresholds)
-        sorted_thresholds = sorted(self.parameters.thresholds)
         path_tool = 'FindShortestPath' if self.parameters.path_mode == 'shortest' else 'FindAllPath'
-        
+
         for dataset_name in dataset_names:
             if dataset_name not in self.raw_results:
                 self.raw_results[dataset_name] = {}
-            
-            self._log(f"Edge mode analysis for \033[94m{dataset_name}\033[0m ({len(sorted_thresholds)} thresholds)")
-            
+
+            # Feature E: this dataset's OWN threshold list (vertical
+            # comparison overrides); the lowest drives the single fetch.
+            dataset_thresholds = sorted(
+                self.parameters.get_thresholds_for_dataset(dataset_name))
+            lowest_threshold = dataset_thresholds[0] if dataset_thresholds else None
+
+            self._log(f"Edge mode analysis for \033[94m{dataset_name}\033[0m ({len(dataset_thresholds)} thresholds: {dataset_thresholds})")
+
             # ===== Step 1: Run the path tool for LOWEST threshold =====
             self._log(f"Running {path_tool} for {dataset_name} @ threshold={lowest_threshold}")
             self.run_path_analysis(dataset_name, lowest_threshold, verbose_mode='simple')
-            
+
             # ===== Step 2: Get bodyId-level connections =====
             bodyid_df, label_map = self._get_bodyid_connections_for_dataset(
                 dataset_name, lowest_threshold, skip_existing=True
             )
-            
+
             if bodyid_df is None or bodyid_df.empty:
                 self._log(f"Warning: No bodyId connections found for {dataset_name}")
-                for threshold in self.parameters.thresholds:
+                for threshold in dataset_thresholds:
                     self.raw_results[dataset_name][threshold] = pd.DataFrame()
                 # Still run the path tool for other thresholds for output consistency
-                remaining_thresholds = [t for t in sorted_thresholds if t != lowest_threshold]
+                remaining_thresholds = [t for t in dataset_thresholds if t != lowest_threshold]
                 for threshold in tqdm(remaining_thresholds, desc=f"  {dataset_name} thresholds", leave=False, unit="thr"):
                     self.run_path_analysis(dataset_name, threshold, verbose_mode='silent')
                 continue
-            
+
             self._log(f"Loaded {len(bodyid_df)} bodyId-level connections from threshold={lowest_threshold}")
-            
+
             # Get source/target types for path finding
             source_types = set(self.parameters.get_source_neurons_for_dataset(dataset_name))
             target_types = set(self.parameters.get_target_neurons_for_dataset(dataset_name))
             max_layers = self.parameters.max_interlayer + 1
             if self.parameters.path_mode == 'shortest' and self.parameters.max_interlayer <= 0:
                 max_layers = None  # unlimited depth in shortest mode
-            
+
             # ===== Step 3: Filter and aggregate for ALL thresholds at once =====
-            self._log(f"Aggregating edges for all {len(sorted_thresholds)} thresholds...")
-            for threshold in tqdm(sorted_thresholds, desc=f"  Aggregating", leave=False, unit="thr"):
+            self._log(f"Aggregating edges for all {len(dataset_thresholds)} thresholds...")
+            for threshold in tqdm(dataset_thresholds, desc=f"  Aggregating", leave=False, unit="thr"):
                 self._process_threshold_aggregation(
                     dataset_name, threshold, bodyid_df, label_map,
                     source_types, target_types, max_layers, skip_existing,
                     path_mode=self.parameters.path_mode
                 )
-            
+
             # ===== Step 4: Run the path tool for remaining thresholds (output consistency only) =====
-            remaining_thresholds = [t for t in sorted_thresholds if t != lowest_threshold]
+            remaining_thresholds = [t for t in dataset_thresholds if t != lowest_threshold]
             if remaining_thresholds:
                 for threshold in tqdm(remaining_thresholds, desc=f"  {dataset_name} thresholds", leave=False, unit="thr"):
                     self.run_path_analysis(dataset_name, threshold, verbose_mode='silent')
-        
+
         self._log(f"Completed edge analysis for {len(dataset_names)} datasets")
         return self.raw_results
     
@@ -1587,13 +2402,31 @@ class ComparisonAnalyzer:
                 },
                 'coverage_notes': self._get_coverage_notes(dataset_name)
             }
-            
+
+            # Feature A: per-neuron synapse density. NeuPrint neuron tables
+            # carry pre + post, so one fetch_neurons call provides everything;
+            # on failure the block is simply absent (density stays optional).
+            try:
+                from .metadata_density import compute_synapse_density
+                neuron_df = client.fetch_neurons(
+                    'MATCH (n:Neuron) RETURN n.bodyId AS bodyId, '
+                    'n.pre AS pre, n.post AS post',
+                    format='pandas')
+                density = compute_synapse_density(
+                    neuron_df, is_flywire_source=False)
+                if density:
+                    metadata['synapse_density'] = density
+                    metadata['density_generated_at'] = datetime.now().isoformat()
+            except Exception as density_exc:
+                self._log(f"Note: synapse density not computed for {dataset_name}: "
+                          f"{density_exc}", level='debug')
+
             return metadata
-            
+
         except Exception as e:
             self._log(f"Warning: Failed to fetch NeuPrint metadata for {dataset_name}: {e}")
             return self._create_empty_metadata(dataset_name, str(e))
-    
+
     def _fetch_local_metadata(self, dataset_name: str) -> Dict:
         """Fetch metadata from local dataset files."""
         safe_name = self.parameters._sanitize_name(dataset_name)
@@ -1629,8 +2462,10 @@ class ComparisonAnalyzer:
                 break
         
         if type_col:
-            typed_neurons = neuron_df[type_col].notna().sum()
-            typed_neurons = int(typed_neurons - (neuron_df[type_col] == '').sum())
+            # 'Unknown' is the untyped placeholder — exclude it from the
+            # typed count (otherwise coverage reads a misleading 100%).
+            _tv = neuron_df[type_col].astype('string').str.strip().fillna('')
+            typed_neurons = int(((_tv != '') & (_tv != 'Unknown')).sum())
         else:
             typed_neurons = 0
         
@@ -1691,7 +2526,21 @@ class ComparisonAnalyzer:
             },
             'coverage_notes': self._get_coverage_notes(dataset_name)
         }
-        
+
+        # Feature A: per-neuron synapse density. Local flywire-family
+        # tables carry post only — pre is derived from
+        # merged_connections.parquet and flagged in pre_source.
+        try:
+            from .metadata_density import compute_synapse_density
+            density = compute_synapse_density(
+                neuron_df, dataset_path=dataset_path)
+            if density:
+                metadata['synapse_density'] = density
+                metadata['density_generated_at'] = datetime.now().isoformat()
+        except Exception as density_exc:
+            self._log(f"Note: synapse density not computed for {dataset_name}: "
+                      f"{density_exc}", level='debug')
+
         return metadata
     
     def _create_empty_metadata(self, dataset_name: str, error_msg: str) -> Dict:
@@ -1785,7 +2634,8 @@ class ComparisonAnalyzer:
             nc = metadata.get('neuron_counts', {})
             sc = metadata.get('synapse_counts', {})
             rc = metadata.get('roi_coverage', {})
-            
+            sd = metadata.get('synapse_density', {})
+
             rows.append({
                 'dataset': dataset_name,
                 'total_neurons': nc.get('total', 0),
@@ -1795,8 +2645,18 @@ class ComparisonAnalyzer:
                 'total_presynaptic': sc.get('total_presynaptic', 0),
                 'total_postsynaptic': sc.get('total_postsynaptic', 0),
                 'total_synapses': sc.get('total', 0),
+                # Feature A: median synapses (pre+post) per neuron — the
+                # whole-dataset density used by the threshold-equivalence
+                # note (NaN when the metadata predates the density block).
+                'median_synapse_density_per_neuron': round(
+                    sd['per_neuron_median'], 2)
+                    if sd.get('per_neuron_median') is not None else None,
+                'synapse_density_pre_source': sd.get('pre_source', ''),
                 'roi_count': rc.get('roi_count', 0),
-                'coverage_notes': metadata.get('coverage_notes', '')
+                # N7: fall back to the built-in coverage note when the cached
+                # metadata JSON predates note generation.
+                'coverage_notes': metadata.get('coverage_notes')
+                    or self._get_coverage_notes(dataset_name)
             })
         
         return pd.DataFrame(rows)
@@ -1815,7 +2675,7 @@ class ComparisonAnalyzer:
                 df = self._read_csv(filepath)
                 if not df.empty:
                     self._log(f"Loading cached: {dataset_name} @ {threshold}", 'debug')
-                    return df
+                    return self._drop_untyped_neurons(dataset_name, threshold, df)
             except (pd.errors.EmptyDataError, Exception):
                 pass  # File is empty or corrupted, try other sources
         
@@ -1826,7 +2686,7 @@ class ComparisonAnalyzer:
                 df = self._read_csv(filepath)
                 if not df.empty:
                     self._log(f"Loading cached: {dataset_name} @ {threshold}", 'debug')
-                    return df
+                    return self._drop_untyped_neurons(dataset_name, threshold, df)
             except (pd.errors.EmptyDataError, Exception):
                 pass
         
@@ -1841,7 +2701,7 @@ class ComparisonAnalyzer:
                     if 'dataset' not in df.columns:
                         df['dataset'] = dataset_name
                         df['threshold'] = threshold
-                    return df
+                    return self._drop_untyped_neurons(dataset_name, threshold, df)
             except (pd.errors.EmptyDataError, Exception):
                 pass
         
@@ -1856,7 +2716,7 @@ class ComparisonAnalyzer:
                     if 'dataset' not in df.columns:
                         df['dataset'] = dataset_name
                         df['threshold'] = threshold
-                    return df
+                    return self._drop_untyped_neurons(dataset_name, threshold, df)
             except (pd.errors.EmptyDataError, Exception):
                 pass
         
@@ -1966,13 +2826,18 @@ class ComparisonAnalyzer:
 
         self._log("  Step 2/2: Calculating cross-threshold similarities...")
 
+        # Feature G: τ-collapse duplicates share their predecessor's path
+        # set — skip their similarity computation (identical rows) and let
+        # the report show the effective thresholds only.
+        similarity_thresholds = self._analysis_thresholds()
+
         # Calculate cross-threshold similarities and cache them
         # Pass label_mapper=None because raw_results are already mapped
         # Pass path_data_func to enable path rank correlation computation
         similarities = self.metrics.calculate_similarity_across_thresholds(
             results=self.raw_results,
             datasets=dataset_names,
-            thresholds=self.parameters.thresholds,
+            thresholds=similarity_thresholds,
             label_mapper=None,
             path_data_func=self._get_path_data_for_threshold,
             type_mapper=type_mapper,
@@ -2565,7 +3430,8 @@ class ComparisonAnalyzer:
                     conflicts_path = os.path.join(out_dir, "auto_type_mapping_conflicts.csv")
                     self.parameters._auto_type_mapper.export_conflicts(
                         conflicts_path,
-                        filter_types=result_types if result_types else None
+                        filter_types=result_types if result_types else None,
+                        datasets=dataset_names,
                     )
                     self._log_file(conflicts_path, "Type mapping conflicts")
 
@@ -2636,9 +3502,16 @@ class ComparisonAnalyzer:
         
         # === Cross-dataset comparison results ===
         self._export_cross_dataset_comparisons(comparison_results_dir)
-        
+
         # === Intra-dataset threshold sensitivity ===
         self._export_intra_dataset_comparisons(comparison_results_dir)
+
+        # === Threshold alignment (Features C/D data: prober best matches,
+        # typed matrix, extended-grid density) ===
+        try:
+            self._export_threshold_alignment(comparison_results_dir)
+        except Exception as e:
+            self._log(f"Warning: threshold alignment export failed: {e}")
 
         self._log("  Step 3: Generating visualizations...")
         self._progress(5, 5, "Generating comparison visualizations and HTML report")
@@ -2822,12 +3695,23 @@ class ComparisonAnalyzer:
         dataset_names = self.parameters.get_dataset_names()
         
         # 1. Path count comparison across datasets
+        # N6: count UNIQUE (source, target) pairs, not rows — conn rows
+        # keep per-layer occurrences of the same pair.
         path_counts = []
         for dataset in dataset_names:
             for threshold in self.parameters.thresholds:
                 df = self.raw_results.get(dataset, {}).get(threshold, pd.DataFrame())
-                count = len(df) if not df.empty else 0
-                total_weight = df['weight'].sum() if 'weight' in df.columns else 0
+                if not df.empty:
+                    if 'type_pre' in df.columns and 'type_post' in df.columns:
+                        count = df[['type_pre', 'type_post']].drop_duplicates().shape[0]
+                    elif 'source' in df.columns and 'target' in df.columns:
+                        count = df[['source', 'target']].drop_duplicates().shape[0]
+                    else:
+                        count = len(df)
+                    total_weight = df['weight'].sum() if 'weight' in df.columns else 0
+                else:
+                    count = 0
+                    total_weight = 0
                 path_counts.append({
                     'dataset': dataset,
                     'threshold': threshold,
@@ -2852,14 +3736,18 @@ class ComparisonAnalyzer:
         all_motif_data = []
         
         # Use progress bar for threshold exports
+        # Feature G: thresholds skipped as τ-collapse duplicates are
+        # excluded here — their matrices would be identical to the
+        # duplicated run's (directive: skip downstream analysis/export).
+        analysis_thresholds = self._analysis_thresholds()
         threshold_iter = tqdm(
-            self.parameters.thresholds,
+            analysis_thresholds,
             desc="  Exporting matrices",
             unit="thr",
             leave=False
-        ) if self.verbose else self.parameters.thresholds
-        
-        for threshold in threshold_iter:
+        ) if self.verbose else analysis_thresholds
+
+        for threshold in analysis_thresholds:
             aligned = self.get_aligned_data(threshold)
             if aligned.empty:
                 continue
@@ -2901,24 +3789,41 @@ class ComparisonAnalyzer:
             
             # Build threshold dataframe using vectorized operations
             # Ensure index is a flat string index (not MultiIndex)
+            # N2: wrap in pd.Series — Index.astype(str) returns an Index,
+            # and Index.str.split(expand=True) yields a MultiIndex (not a
+            # DataFrame), which silently sent every row to the whole-key
+            # fallback (source = full key, target = '').
             if isinstance(aligned.index, pd.MultiIndex):
                 edge_keys = pd.Series([f"{idx[0]} -> {idx[1]}" for idx in aligned.index], index=aligned.index)
             else:
-                edge_keys = aligned.index.astype(str)
+                edge_keys = pd.Series(aligned.index.astype(str), index=aligned.index)
             
-            # Parse edge keys vectorized with defensive handling
+            # Parse edge keys vectorized with defensive handling.
+            # N2 fix: rsplit (not fillna-with-Series, which raises on the
+            # duplicate aligned-index labels that per-layer rows produce)
+            # and dedupe rows to one per edge key.
             try:
-                split_keys = edge_keys.str.split(' -> ', n=1, expand=True)
-                if isinstance(split_keys, pd.DataFrame):
-                    source_col = split_keys[0].fillna(edge_keys)
-                    target_col = split_keys[1].fillna('') if 1 in split_keys.columns else pd.Series('', index=aligned.index)
+                split_keys = edge_keys.str.rsplit(' -> ', n=1, expand=True)
+                if isinstance(split_keys, pd.DataFrame) and split_keys.shape[1] == 2:
+                    source_col = split_keys[0].fillna('')
+                    target_col = split_keys[1].fillna('')
                 else:
                     source_col = edge_keys
                     target_col = pd.Series('', index=aligned.index)
             except Exception:
-                source_col = edge_keys
-                target_col = pd.Series('', index=aligned.index)
-            
+                src_list, tgt_list = [], []
+                for _k in edge_keys:
+                    _s = str(_k)
+                    if ' -> ' in _s:
+                        _a, _b = _s.rsplit(' -> ', 1)
+                        src_list.append(_a)
+                        tgt_list.append(_b)
+                    else:
+                        src_list.append(_s)
+                        tgt_list.append('')
+                source_col = pd.Series(src_list, index=aligned.index)
+                target_col = pd.Series(tgt_list, index=aligned.index)
+
             threshold_df = pd.DataFrame({
                 'edge_key': edge_keys,
                 'source': source_col.values,
@@ -2955,8 +3860,22 @@ class ComparisonAnalyzer:
             # Handle cases where min is 0 but has_multiple is True
             threshold_df.loc[has_multiple & (min_vals == 0), 'weight_ratio'] = ''
             threshold_df.loc[~has_multiple, 'weight_ratio'] = 1.0
-            
-            all_threshold_dfs.append(threshold_df.reset_index(drop=True))
+
+            # Aligned rows keep per-layer occurrences of the same pair —
+            # collapse to one row per edge key (per-dataset weights are
+            # identical across those rows).
+            threshold_df = threshold_df.reset_index(drop=True).drop_duplicates(
+                subset=['edge_key'])
+
+            # N5: label untyped-neuron bodyId fallbacks so bodyId-vs-type
+            # rows are visible in cross-dataset comparisons.
+            for _col in ['source', 'target']:
+                _is_bodyid = threshold_df[_col].astype(str).str.fullmatch(r'\d+')
+                threshold_df.loc[_is_bodyid, _col] = (
+                    'bodyId:' + threshold_df.loc[_is_bodyid, _col].astype(str)
+                    + ' (untyped)')
+
+            all_threshold_dfs.append(threshold_df)
         
         if all_threshold_dfs:
             edge_weight_df = pd.concat(all_threshold_dfs, ignore_index=True)
@@ -2997,29 +3916,82 @@ class ComparisonAnalyzer:
         Compares how connections change across different threshold levels within each dataset.
         """
         dataset_names = self.parameters.get_dataset_names()
-        
+
         sensitivity_data = []
-        
+
+        def _cap_fields(dataset, threshold):
+            """Fix A + Feature G + F6: per-row run state.
+
+            Returns (tau, paths_complete, skipped, duplicate_of, floor).
+            tau is the budget cutoff for budget-bitten runs; for COMPLETE
+            runs it is the natural τ (min emitted bottleneck) with
+            paths_complete=True — meaning "every threshold up to τ yields
+            this identical set". Skipped thresholds (Feature G τ collapse)
+            carry the duplicated run's state plus the markers. floor is
+            the Edge-Budget floor (Fix D) when the lossy floor fired.
+            """
+            meta = self._path_run_meta.get((dataset, threshold))
+            if meta is not None:
+                tau = meta.get('tau')
+                complete = bool(meta.get('paths_complete', tau is None))
+                return (tau, complete, bool(meta.get('skipped')),
+                        meta.get('duplicate_of'),
+                        meta.get('edge_weight_floor'))
+            tau = self._path_taus.get((dataset, threshold))
+            if tau is not None:
+                return tau, False, False, None, None   # budgeted: complete only at >= tau
+            return None, True, False, None, None       # complete enumeration
+
         for dataset in dataset_names:
             prev_edges = None
             prev_threshold = None
-            
-            for threshold in self.parameters.thresholds:
+
+            for threshold in self.parameters.get_thresholds_for_dataset(dataset):
                 df = self.raw_results.get(dataset, {}).get(threshold, pd.DataFrame())
-                
+                tau, paths_complete, skipped, duplicate_of, floor = _cap_fields(dataset, threshold)
+
+                # Concern 1: asked vs APPLIED threshold side by side.
+                # applied = the CANONICAL minimal threshold reproducing
+                # this run's output (w2 + 1 for a budget-bitten run, the
+                # asked threshold for complete runs); tau is the budget
+                # landing (the collapse bound — every threshold in
+                # [applied, tau] yields this identical set).
+                applied, pruned, floor = self._applied_state_for(dataset, threshold)
+                dropped = (self._path_run_meta.get(
+                    (dataset, threshold), {}) or {}).get(
+                    'strongest_dropped_bottleneck')
+                drop_stats = self._untyped_drop_stats.get((dataset, threshold), {})
+                row = {
+                    'dataset': dataset,
+                    'threshold': threshold,
+                    'applied_threshold': applied,
+                    'tau': tau,
+                    'strongest_dropped': dropped,
+                    'paths_complete': paths_complete,
+                    'skipped': skipped,
+                    'duplicate_of': duplicate_of,
+                    # F6: the Edge-Budget floor (Fix D) — the only lossy
+                    # stage; tau-collapsed rows are marked skipped, not
+                    # pruned.
+                    'pruned': pruned,
+                    'edge_weight_floor': floor,
+                    # Untyped-neuron drop (default on).
+                    'untyped_dropped_rows': drop_stats.get('rows', 0),
+                    'untyped_dropped_neurons': drop_stats.get('neurons', 0),
+                }
+
                 if df.empty:
-                    sensitivity_data.append({
-                        'dataset': dataset,
-                        'threshold': threshold,
+                    row.update({
                         'edge_count': 0,
                         'edges_retained_from_prev': None,
                         'retention_rate': None,
                         'edges_lost': None,
                     })
+                    sensitivity_data.append(row)
                     prev_edges = set()
                     prev_threshold = threshold
                     continue
-                
+
                 # Create edge identifiers
                 if 'type_pre' in df.columns and 'type_post' in df.columns:
                     current_edges = set(zip(df['type_pre'], df['type_post']))
@@ -3027,9 +3999,9 @@ class ComparisonAnalyzer:
                     current_edges = set(zip(df['bodyId_pre'], df['bodyId_post']))
                 else:
                     current_edges = set(range(len(df)))
-                
+
                 edge_count = len(current_edges)
-                
+
                 if prev_edges is not None:
                     retained = len(current_edges & prev_edges)
                     lost = len(prev_edges - current_edges)
@@ -3038,16 +4010,15 @@ class ComparisonAnalyzer:
                     retained = None
                     lost = None
                     retention_rate = None
-                
-                sensitivity_data.append({
-                    'dataset': dataset,
-                    'threshold': threshold,
+
+                row.update({
                     'edge_count': edge_count,
                     'edges_retained_from_prev': retained,
                     'retention_rate': retention_rate,
                     'edges_lost': lost,
                 })
-                
+                sensitivity_data.append(row)
+
                 prev_edges = current_edges
                 prev_threshold = threshold
         
@@ -3055,6 +4026,255 @@ class ComparisonAnalyzer:
             sensitivity_df = pd.DataFrame(sensitivity_data)
             self._save_csv(sensitivity_df, os.path.join(comparison_results_dir, "threshold_sensitivity.csv"))
             self._log("Saved: threshold_sensitivity.csv")
+
+    # ------------------------------------------------------------------
+    # Feature C: query-specific threshold alignment (alignment spec §6)
+    # ------------------------------------------------------------------
+
+    def _alignment_extract_for_dataset(self, dataset_name: str):
+        """Lowest-threshold extract feeding the prober (spec §6.1).
+
+        Prefers the run's mapped lowest-threshold frame (in memory, both
+        modes, type-mapped); falls back to the persisted bodyId CSV /
+        direct query used by edge mode.
+        """
+        mapped = self.get_mapped_results()
+        thresholds_ds = self.parameters.get_thresholds_for_dataset(dataset_name)
+        lowest = thresholds_ds[0] if thresholds_ds else None
+        df = mapped.get(dataset_name, {}).get(lowest) if lowest is not None else None
+        if isinstance(df, pd.DataFrame) and not df.empty \
+                and {'type_pre', 'type_post', 'weight'} <= set(df.columns):
+            return df
+        # Fallback: bodyId-level extract (path mode at the lowest threshold
+        # or the edge-mode direct query). Type names there are unmapped —
+        # consistent per dataset, still valid for edge-count matching.
+        bodyid_df, _ = self._get_bodyid_connections_for_dataset(
+            dataset_name, lowest, skip_existing=True)
+        if isinstance(bodyid_df, pd.DataFrame) and not bodyid_df.empty \
+                and {'type_pre', 'type_post', 'weight'} <= set(bodyid_df.columns):
+            return bodyid_df
+        return None
+
+    def _export_threshold_alignment(self, comparison_results_dir: str):
+        """Export the alignment outputs (spec §6.4) and log the summary.
+
+        - threshold_alignment_best_matches.csv — prober best matches per
+          (dataset pair, anchor threshold) incl. named anchor rows and a
+          global-best row; Jaccard/rank computed ONLY at best_t; carries
+          the anchor's per-run tau/paths_complete state.
+        - threshold_alignment_matrix.csv (+ heatmap) — typed grid points
+          only (§6.3).
+        - edge_density_per_threshold.csv — typed counts + the prober's
+          extended-grid counts (feeds the Feature D curve plot).
+        """
+        try:
+            from .threshold_alignment import (
+                EdgeDensityProber, build_alignment_matrix,
+                edge_count_distance, jaccard, rank_similarity,
+                ALIGNMENT_TOLERANCE,
+            )
+        except ImportError:  # pragma: no cover - direct package imports
+            from threshold_alignment import (
+                EdgeDensityProber, build_alignment_matrix,
+                edge_count_distance, jaccard, rank_similarity,
+                ALIGNMENT_TOLERANCE,
+            )
+
+        dataset_names = self.parameters.get_dataset_names()
+        if len(dataset_names) < 1:
+            return
+
+        # --- Build one prober per dataset on the lowest-threshold extract
+        probers: Dict[str, EdgeDensityProber] = {}
+        extract_sizes: Dict[str, int] = {}
+        for ds in dataset_names:
+            extract = self._alignment_extract_for_dataset(ds)
+            probers[ds] = EdgeDensityProber(extract)
+            extract_sizes[ds] = 0 if extract is None else len(extract)
+
+        typed_map = {ds: self.parameters.get_thresholds_for_dataset(ds)
+                     for ds in dataset_names}
+        max_typed = max((max(ts) for ts in typed_map.values() if ts), default=10)
+        cap = max(3 * int(max_typed), 30)
+        extended_grid = list(range(1, cap + 1))
+
+        # --- Edge density per threshold (typed + extended grid)
+        density_rows = []
+        neuron_totals = {}
+        try:
+            if not getattr(self, '_dataset_metadata', None):
+                self.collect_dataset_metadata(force_refresh=False)
+            neuron_totals = {
+                ds: int(self._dataset_metadata.get(ds, {}).get(
+                    'neuron_counts', {}).get('total', 0) or 0)
+                for ds in dataset_names
+            }
+        except Exception:
+            pass
+
+        typed_set = {t: set(ts) for t, ts in typed_map.items()}
+        for ds in dataset_names:
+            for t in extended_grid:
+                count = probers[ds].count(t)
+                density_rows.append({
+                    'dataset': ds,
+                    'threshold': t,
+                    'pair_count': count,
+                    'pairs_per_neuron': round(count / neuron_totals[ds], 4)
+                        if neuron_totals.get(ds) else None,
+                    'is_typed_threshold': t in typed_set[ds],
+                })
+        density_df = pd.DataFrame(density_rows)
+        density_path = os.path.join(comparison_results_dir, "edge_density_per_threshold.csv")
+        self._save_csv(density_df, density_path)
+        self._log("Saved: edge_density_per_threshold.csv")
+        self._alignment_density_df = density_df
+        self._alignment_grid_points = [
+            (ds, t) for ds in dataset_names for t in typed_map[ds]]
+        self._alignment_anchor_map = {}
+
+        # --- Typed-threshold-only alignment matrix (§6.3)
+        grid_points = self._alignment_grid_points
+        mapped_names = bool(
+            self.parameters.auto_type_mapping
+            and self.parameters._auto_type_mapper)
+        matrix_df = build_alignment_matrix(grid_points, probers, mapped_names)
+        if not matrix_df.empty:
+            matrix_path = os.path.join(comparison_results_dir, "threshold_alignment_matrix.csv")
+            self._save_csv(matrix_df, matrix_path)
+            self._log("Saved: threshold_alignment_matrix.csv")
+        self._alignment_matrix_df = matrix_df
+
+        # --- Best matches via the prober (bisection, extended range)
+        best_rows = []
+        refs = [ds for ds in dataset_names if typed_map[ds]]
+        for ref_ds in refs:
+            ref_taus = typed_map[ref_ds]
+            for anchor_t in ref_taus:
+                n_a = probers[ref_ds].count(anchor_t)
+                anchor_meta = self._path_run_meta.get((ref_ds, anchor_t), {})
+                for other_ds in dataset_names:
+                    if other_ds == ref_ds:
+                        continue
+                    if probers[other_ds].total_pairs == 0:
+                        continue
+                    match = probers[other_ds].best_match(n_a, cap=cap)
+                    if match['best_t'] is None:
+                        continue
+                    best_t = match['best_t']
+                    jac = rank = None
+                    if mapped_names:
+                        set_a = probers[ref_ds].edge_set(anchor_t)
+                        set_b = probers[other_ds].edge_set(best_t)
+                        jac = jaccard(set_a, set_b)
+                        rank = rank_similarity(
+                            probers[ref_ds].edge_weights(anchor_t),
+                            probers[other_ds].edge_weights(best_t))
+                    best_rows.append({
+                        'reference_dataset': ref_ds,
+                        'anchor_threshold': anchor_t,
+                        'target_dataset': other_ds,
+                        'anchor_pair_count': n_a,
+                        'best_t': best_t,
+                        'count_at_best_t': match['count_at_best_t'],
+                        'count_distance': round(match['count_distance'], 4),
+                        'within_tolerance': match['count_distance'] <= ALIGNMENT_TOLERANCE,
+                        'jaccard_at_best': round(jac, 4) if jac is not None else None,
+                        'rank_similarity_at_best': round(rank, 4) if rank is not None else None,
+                        'anchor_tau': anchor_meta.get('tau'),
+                        'anchor_paths_complete': anchor_meta.get(
+                            'paths_complete', anchor_meta.get('tau') is None),
+                        'anchor_skipped': bool(anchor_meta.get('skipped')),
+                        'match_kind': 'anchor',
+                    })
+                    key = (ref_ds, anchor_t)
+                    self._alignment_anchor_map.setdefault(key, {})[other_ds] = best_t
+
+        # Global best row: the (reference anchor, target) pair with the
+        # minimal edge-count distance overall.
+        if best_rows:
+            global_best = min(best_rows, key=lambda r: (
+                r['count_distance'],
+                -(r['jaccard_at_best'] or 0),
+                -(r['rank_similarity_at_best'] or -1),
+            ))
+            global_row = dict(global_best)
+            global_row.update({
+                'reference_dataset': global_best['reference_dataset'],
+                'match_kind': 'global_best',
+                'anchor_threshold': global_best['anchor_threshold'],
+                'target_dataset': global_best['target_dataset'],
+            })
+            best_rows.append(global_row)
+
+        if best_rows:
+            best_df = pd.DataFrame(best_rows)
+            best_path = os.path.join(comparison_results_dir, "threshold_alignment_best_matches.csv")
+            self._save_csv(best_df, best_path)
+            self._log("Saved: threshold_alignment_best_matches.csv")
+            self._alignment_best_df = best_df
+
+            # One log line per run, anchor rows of the first dataset (§6.4)
+            first_ds = refs[0]
+            anchor_rows = [r for r in best_rows if r['match_kind'] == 'anchor']
+            parts = []
+            for anchor_t in typed_map[first_ds][:3]:
+                segs = []
+                for r in anchor_rows:
+                    if r['reference_dataset'] == first_ds \
+                            and r['anchor_threshold'] == anchor_t:
+                        segs.append(f"{r['target_dataset']}@{r['best_t']} "
+                                    f"(d={r['count_distance']:.2f})")
+                if segs:
+                    parts.append(f"{first_ds}@{anchor_t} aligns best with "
+                                 + ", ".join(segs))
+            if parts:
+                self._log("Alignment: " + "; ".join(parts))
+
+    def _export_threshold_alignment_heatmap(self, vis_dir: str):
+        """Render the typed-grid alignment distance heatmap (§6.4)."""
+        matrix_df = getattr(self, '_alignment_matrix_df', None)
+        grid_points = getattr(self, '_alignment_grid_points', None)
+        if matrix_df is None or matrix_df.empty or not grid_points:
+            return
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            import numpy as np
+
+            labels = [f"{ds}@{t}" for ds, t in grid_points]
+            index = {gp: i for i, gp in enumerate(grid_points)}
+            n = len(grid_points)
+            dist = np.full((n, n), np.nan)
+            for _, row in matrix_df.iterrows():
+                i = index[(row['dataset_a'], row['threshold_a'])]
+                j = index[(row['dataset_b'], row['threshold_b'])]
+                dist[i, j] = dist[j, i] = row['edge_count_distance']
+            np.fill_diagonal(dist, 0.0)
+
+            fig, ax = plt.subplots(figsize=(1.1 * n + 2.5, 0.95 * n + 2.0))
+            masked = np.ma.masked_invalid(dist)
+            im = ax.imshow(masked, cmap='RdYlGn_r', vmin=0, vmax=1)
+            ax.set_xticks(range(n))
+            ax.set_yticks(range(n))
+            ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=8)
+            ax.set_yticklabels(labels, fontsize=8)
+            for i in range(n):
+                for j in range(n):
+                    if not np.isnan(dist[i, j]):
+                        ax.text(j, i, f"{dist[i, j]:.2f}",
+                                ha='center', va='center', fontsize=7)
+            ax.set_title('Threshold alignment: edge-count distance\n'
+                         '(typed thresholds; 0 = same connection-pair density)')
+            fig.colorbar(im, ax=ax, shrink=0.8, label='edge-count distance')
+            fig.tight_layout()
+            out = os.path.join(vis_dir, "threshold_alignment_matrix.png")
+            fig.savefig(out, dpi=200, bbox_inches='tight')
+            plt.close(fig)
+            self._log_file(out, "Threshold alignment matrix heatmap")
+        except Exception as e:
+            self._log(f"Warning: alignment heatmap failed: {e}")
     
     def _export_top_edges_comparison(self, comparison_results_dir: str):
         """Export report tables capped by the top_edges parameter.
@@ -3206,6 +4426,11 @@ class ComparisonAnalyzer:
                 else:
                     source = str(edge_key)
                     target = ''
+                # N5: label untyped bodyId fallbacks
+                if isinstance(source, str) and source.isdigit():
+                    source = f'bodyId:{source} (untyped)'
+                if isinstance(target, str) and target.isdigit():
+                    target = f'bodyId:{target} (untyped)'
                 
                 edge_data = {
                     'edge_key': edge_key,
@@ -3220,7 +4445,8 @@ class ComparisonAnalyzer:
                     safe_name = self.parameters._sanitize_name(dataset)
                     weight = row[dataset] if dataset in row else 0
                     edge_data[f'{safe_name}_weight'] = weight
-                    edge_data[f'{safe_name}_present'] = True if weight > 0 else 0
+                    # N3: consistent 1/0 presence (mixed True/0 broke CSV typing)
+                    edge_data[f'{safe_name}_present'] = int(weight > 0)
                     if weight > 0:
                         conservation_count += 1
                 
@@ -3240,6 +4466,17 @@ class ComparisonAnalyzer:
             
             for threshold in self.parameters.thresholds:
                 df = self.raw_results.get(dataset, {}).get(threshold, pd.DataFrame())
+                # F6: asked vs applied threshold + run state on every row.
+                applied, pruned, floor = self._applied_state_for(dataset, threshold)
+                run_meta = self._path_run_meta.get((dataset, threshold), {})
+                applied_state = {
+                    'applied_threshold': applied,
+                    'tau': run_meta.get('tau'),
+                    'paths_complete': bool(run_meta.get('paths_complete', True)),
+                    'skipped': bool(run_meta.get('skipped', False)),
+                    'pruned': pruned,
+                    'edge_weight_floor': floor,
+                }
                 
                 if df.empty:
                     summary_data.append({
@@ -3250,6 +4487,7 @@ class ComparisonAnalyzer:
                         'mean_weight': 0,
                         'unique_sources': 0,
                         'unique_targets': 0,
+                        **applied_state,
                     })
                     continue
                 
@@ -3271,11 +4509,17 @@ class ComparisonAnalyzer:
                 summary_data.append({
                     'dataset': safe_name,
                     'threshold': threshold,
-                    'total_edges': len(df),
+                    # N6: unique (source, target) pairs — conn rows keep
+                    # per-layer occurrences of the same pair.
+                    'total_edges': int(df[['type_pre', 'type_post']].drop_duplicates().shape[0])
+                        if 'type_pre' in df.columns and 'type_post' in df.columns
+                        else len(df),
+                    'total_layer_rows': len(df),
                     'total_weight': round(total_weight, 2),
                     'mean_weight': round(mean_weight, 2),
                     'unique_sources': sources,
                     'unique_targets': targets,
+                    **applied_state,
                 })
         
         if summary_data:
@@ -3339,9 +4583,10 @@ class ComparisonAnalyzer:
                     safe_name = self.parameters._sanitize_name(dataset)
                     weight = row[dataset] if dataset in row else 0
                     
-                    # Presence marker: dataset_threshold (True/0 for CSV readability)
+                    # Presence marker: N3 — consistent 1/0 (mixed True/0
+                    # produced unparseable CSV columns)
                     pres_col = f'{safe_name}_t{threshold}'
-                    all_edges[edge_key][pres_col] = True if weight > 0 else 0
+                    all_edges[edge_key][pres_col] = int(weight > 0)
                     
                     # Weight column: weight_dataset_threshold
                     weight_col = f'w_{safe_name}_t{threshold}'
@@ -3372,6 +4617,23 @@ class ComparisonAnalyzer:
             presence_df['conserved_at_lowest'] = presence_df[presence_cols].apply(
                 lambda x: sum(1 for v in x if v == True), axis=1
             )
+
+        # F6: asked vs applied — constant per-(dataset, threshold) columns
+        # state the real cutoff (tau-raised or Edge-Budget floored). The
+        # presence columns stay keyed by the ASKED threshold on purpose:
+        # renaming them would break downstream name reconstruction (the
+        # report key-findings build f'{safe}_t{t}' directly).
+        applied_cols = []
+        for dataset in dataset_names:
+            safe_name = self.parameters._sanitize_name(dataset)
+            for t in thresholds:
+                applied, pruned, floor = self._applied_state_for(dataset, t)
+                col = f'applied_{safe_name}_t{t}'
+                pruned_col = f'pruned_{safe_name}_t{t}'
+                if col not in presence_df.columns:
+                    presence_df[col] = int(applied) if applied is not None else ''
+                    presence_df[pruned_col] = int(bool(pruned))
+                    applied_cols.extend([col, pruned_col])
         
         # Reorder columns: edge info first, then by threshold
         col_order = ['edge_key', 'source', 'target']
@@ -3401,6 +4663,8 @@ class ComparisonAnalyzer:
         
         if 'conserved_at_lowest' in presence_df.columns:
             col_order.append('conserved_at_lowest')
+        # F6: applied/pruned state columns trail the per-threshold block.
+        col_order.extend([c for c in applied_cols if c in presence_df.columns])
         
         # Filter and reorder
         col_order = [c for c in col_order if c in presence_df.columns]
@@ -3532,9 +4796,19 @@ class ComparisonAnalyzer:
             safe_name = self.parameters._sanitize_name(dataset)
             
             # Load from the lowest threshold output (source/target neurons are the same across thresholds)
+            # N1: FNC writes source/target_neurons.csv at the minsyn folder
+            # ROOT; older runs had them under data_details/ — try both.
             dataset_output_path = self.parameters.get_dataset_output_path(dataset, lowest_threshold)
-            source_file = os.path.join(dataset_output_path, 'data_details', 'source_neurons.csv')
-            target_file = os.path.join(dataset_output_path, 'data_details', 'target_neurons.csv')
+            source_candidates = [
+                os.path.join(dataset_output_path, 'source_neurons.csv'),
+                os.path.join(dataset_output_path, 'data_details', 'source_neurons.csv'),
+            ]
+            target_candidates = [
+                os.path.join(dataset_output_path, 'target_neurons.csv'),
+                os.path.join(dataset_output_path, 'data_details', 'target_neurons.csv'),
+            ]
+            source_file = next((p for p in source_candidates if os.path.exists(p)), source_candidates[0])
+            target_file = next((p for p in target_candidates if os.path.exists(p)), target_candidates[0])
             
             source_count = 0
             target_count = 0
@@ -4561,12 +5835,13 @@ class ComparisonAnalyzer:
             mapped_results = self.get_mapped_results()
             
             # Generate all standard plots, passing cached similarity function
+            # Feature G: render only the effective (non-duplicate) thresholds
             visualizer.save_all_plots(
                 results=mapped_results,
                 aligned_data=aligned,
                 similarities=pairwise_sim,
                 output_dir=vis_dir,
-                thresholds=self.parameters.thresholds,
+                thresholds=self._analysis_thresholds(),
                 align_func=self.get_aligned_data,  # Pass function to get aligned data at any threshold
                 similarity_func=self.get_cached_similarities,  # Pass cached similarity function
                 current_threshold=mid_threshold,
@@ -4582,6 +5857,35 @@ class ComparisonAnalyzer:
             self._log_file(vis_dir, "Saved visualizations")
         except Exception as e:
             self._log(f"Warning: Failed to generate some visualizations: {e}")
+
+        # Feature D: edge-density-vs-threshold curves from the alignment
+        # prober's extended grid (costs nothing once the prober ran).
+        density_df = getattr(self, '_alignment_density_df', None)
+        if density_df is not None and not density_df.empty:
+            try:
+                import matplotlib
+                matplotlib.use('Agg')
+                import matplotlib.pyplot as plt
+                from .visualizations import ComparisonVisualizer as _CV
+                fig = _CV(verbose=self.verbose).plot_edge_density_curves(
+                    density_df,
+                    nickname_map=nickname_map,
+                    best_matches=getattr(self, '_alignment_best_df', None),
+                    log_y=True,
+                )
+                out_path = os.path.join(
+                    vis_dir, "edge_density_threshold_curves.png")
+                fig.savefig(out_path, dpi=200, bbox_inches='tight')
+                plt.close(fig)
+                self._log_file(out_path, "Edge density vs threshold curves")
+            except Exception as e:
+                self._log(f"Warning: edge density curve plot failed: {e}")
+
+        # Feature C: typed-grid alignment distance heatmap.
+        try:
+            self._export_threshold_alignment_heatmap(vis_dir)
+        except Exception as e:
+            self._log(f"Warning: alignment heatmap failed: {e}")
         
         # Generate VisualizePath interactive heatmaps (no separate network files)
         self._generate_vispath_visualizations(vis_dir)
@@ -6869,9 +8173,12 @@ class ComparisonAnalyzer:
     def _generate_html_content(self, has_plotly: bool = True) -> str:
         """Generate the HTML content for the report - static version showing all thresholds."""
         from .html_report_generator import generate_html_report
-        
+
         dataset_names = self.parameters.get_dataset_names()
-        thresholds = self.parameters.thresholds
+        # Feature G: per-threshold report sections render the effective
+        # thresholds only — τ-collapse duplicates are marked in the
+        # sensitivity export instead of rendered twice.
+        thresholds = self._analysis_thresholds()
         
         # Generate mode-specific note
         mode_specific_note = self._generate_mode_specific_note()

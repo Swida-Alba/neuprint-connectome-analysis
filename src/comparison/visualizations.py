@@ -11,6 +11,11 @@ import pandas as pd
 import numpy as np
 from tqdm import tqdm
 
+try:
+    from ..utils.naming_utils import canonical_dataset_name
+except ImportError:  # pragma: no cover - direct package imports
+    from utils.naming_utils import canonical_dataset_name
+
 # Check for optional dependencies
 try:
     import matplotlib.pyplot as plt
@@ -913,6 +918,83 @@ class ComparisonVisualizer:
         plt.tight_layout()
         return fig
     
+    def plot_edge_density_curves(
+        self,
+        density_df: pd.DataFrame,
+        nickname_map: Optional[Dict[str, str]] = None,
+        best_matches: Optional[pd.DataFrame] = None,
+        log_y: bool = False,
+        figsize: Optional[Tuple[int, int]] = None,
+        title: str = "Edge density vs synapse threshold"
+    ) -> plt.Figure:
+        """Edge-density-vs-threshold curves (alignment spec, Feature D).
+
+        One line per dataset over the prober's extended threshold grid:
+        left panel = distinct type-pair count, right panel = pairs per
+        neuron (the cross-dataset comparable normalization). Typed
+        thresholds are marked; vertical guides show each dataset's
+        best-matching thresholds for the anchors' typed points.
+
+        Args:
+            density_df: edge_density_per_threshold.csv content
+                (dataset, threshold, pair_count, pairs_per_neuron,
+                is_typed_threshold).
+            nickname_map: dataset -> short display name.
+            best_matches: threshold_alignment_best_matches.csv content —
+                anchor rows add guides at each target dataset's best_t.
+            log_y: logarithmic y axis (counts span orders of magnitude).
+        """
+        figsize = figsize or (14, 6)
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+
+        if density_df is None or density_df.empty:
+            for ax in (ax1, ax2):
+                ax.text(0.5, 0.5, "No edge density data", ha='center', va='center')
+            return fig
+
+        def _label(ds: str) -> str:
+            return (nickname_map or {}).get(ds, ds)
+
+        for ds, group in density_df.groupby('dataset'):
+            group = group.sort_values('threshold')
+            typed = group[group['is_typed_threshold'] == True]  # noqa: E712
+            style = 'o-' if len(typed) else 'o:'
+            ax1.plot(group['threshold'], group['pair_count'], style,
+                     label=_label(ds), markersize=4)
+            if group['pairs_per_neuron'].notna().any():
+                ax2.plot(group['threshold'], group['pairs_per_neuron'], style,
+                         label=_label(ds), markersize=4)
+            for _, trow in typed.iterrows():
+                for ax in (ax1, ax2):
+                    ax.axvline(trow['threshold'], color='grey',
+                               alpha=0.18, lw=0.8, zorder=0)
+
+        # Best-match guides: for the anchor rows, mark each target
+        # dataset's best_t with a dashed vertical in its own color.
+        if best_matches is not None and not best_matches.empty:
+            anchors = best_matches[best_matches.get('match_kind') == 'anchor']
+            for _, row in anchors.iterrows():
+                ax1.axvline(row['best_t'], color='grey', ls='--',
+                            alpha=0.35, lw=1.0, zorder=0)
+
+        for ax, ylabel in ((ax1, 'Distinct connection pairs (type level)'),
+                           (ax2, 'Pairs per neuron')):
+            ax.set_xlabel('Synapse weight threshold')
+            ax.set_ylabel(ylabel)
+            if log_y:
+                ax.set_yscale('log')
+            ax.grid(False)
+
+        ax1.set_title('Edge count per threshold')
+        ax2.set_title('Normalized per neuron (density-aligned)')
+        handles, labels = ax1.get_legend_handles_labels()
+        fig.legend(handles, labels, loc='upper center',
+                   ncol=min(len(labels), 6), frameon=False,
+                   bbox_to_anchor=(0.5, 1.02))
+        fig.suptitle(title, y=1.12 if labels else 1.0)
+        plt.tight_layout()
+        return fig
+
     # =========================================================================
     # Utility Methods
     # =========================================================================
@@ -2162,12 +2244,12 @@ class ComparisonVisualizer:
                     
                     # Edge counts per dataset
                     for ds in available_ds:
-                        safe_ds = ds.replace(':', '_').replace('.', '_').replace('-', '_')
+                        safe_ds = canonical_dataset_name(ds).replace(':', '_').replace('.', '_').replace('-', '_')
                         row_data[f'edges_{safe_ds}'] = int((aligned_t[ds] > 0).sum())
                     
                     # Unique edges per dataset
                     for ds in available_ds:
-                        safe_ds = ds.replace(':', '_').replace('.', '_').replace('-', '_')
+                        safe_ds = canonical_dataset_name(ds).replace(':', '_').replace('.', '_').replace('-', '_')
                         other_ds = [d for d in available_ds if d != ds]
                         if other_ds:
                             ds_present = aligned_t[ds] > 0
@@ -2482,7 +2564,7 @@ class ComparisonVisualizer:
                     # Use path presence matrix if available
                     # Try original name first, then sanitized name (replace : and . with _)
                     col_orig = f"{dataset}_t{t}"
-                    dataset_safe = dataset.replace(':', '_').replace('.', '_')
+                    dataset_safe = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
                     col_safe = f"{dataset_safe}_t{t}"
                     
                     col_name = None
@@ -2602,7 +2684,7 @@ class ComparisonVisualizer:
                 available_cols = []
                 for d in datasets:
                     col_orig = f"{d}_t{t}"
-                    d_safe = d.replace(':', '_').replace('.', '_')
+                    d_safe = canonical_dataset_name(d).replace(':', '_').replace('.', '_')
                     col_safe = f"{d_safe}_t{t}"
                     
                     if col_orig in path_presence_matrix.columns:
@@ -3338,7 +3420,7 @@ class ComparisonVisualizer:
                     # Use path presence matrix if available
                     # Try original name first, then sanitized name (replace : and . with _)
                     col_orig = f"{dataset}_t{t}"
-                    dataset_safe = dataset.replace(':', '_').replace('.', '_')
+                    dataset_safe = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
                     col_safe = f"{dataset_safe}_t{t}"
                     
                     col_name = None
@@ -3493,7 +3575,7 @@ class ComparisonVisualizer:
                 available_cols = []
                 for d in datasets:
                     col_orig = f"{d}_t{t}"
-                    d_safe = d.replace(':', '_').replace('.', '_')
+                    d_safe = canonical_dataset_name(d).replace(':', '_').replace('.', '_')
                     col_safe = f"{d_safe}_t{t}"
                     
                     if col_orig in path_presence_matrix.columns:

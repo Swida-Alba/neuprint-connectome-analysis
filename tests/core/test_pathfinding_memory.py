@@ -64,15 +64,21 @@ class TestPathCap:
         assert coana.FindNeuronConnection.__dataclass_fields__[
             "max_paths_bodyid"].default is None
 
-    def test_cap_truncates_and_records_warning(self, monkeypatch, tmp_path):
+    def test_cap_routes_to_strongest_first(self, monkeypatch, tmp_path):
+        # unequal weights so the budget genuinely drops the weaker route
+        edges = [("S", "A", 5), ("A", "T", 3), ("S", "B", 2), ("B", "T", 6)]
+        """Fix C (2026-09-04): a positive max_paths_bodyid routes through
+        the StrongestFirst enumerator regardless of the selected algorithm
+        — the arbitrary-order TRUNCATED cap no longer exists. The output is
+        the strongest path(s) with the reported tau."""
         fc, _fetch_calls, _logs = _make_pipeline_fc(
-            monkeypatch, tmp_path, _DIAMOND_EDGES, max_interlayer=2)
+            monkeypatch, tmp_path, edges, max_interlayer=2)
         fc.max_paths_bodyid = 1
         fc.FindAllPath()
 
+        # strongest path kept; weakest alternative dropped at tau
         assert any("max_paths_bodyid" in note for note in fc._warn_notes)
-        assert any("TRUNCATED" in note for note in fc._warn_notes)
-        # Only one of the two diamond paths survived the cap
+        assert not any("TRUNCATED" in note for note in fc._warn_notes)
         type_csv = os.path.join(
             fc.allpath_folder, "src_to_tgt_allpaths_type.csv")
         assert os.path.exists(type_csv)

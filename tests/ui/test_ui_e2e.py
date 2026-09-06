@@ -3872,31 +3872,16 @@ class TestTabs:
             if getattr(el, "text", "")
         ]
         all_text = labels + texts
-        # only the bodyId-level pan-graph edge limit remains in the UI:
-        # type-level paths are derived from the bodyId discovery and
-        # custom-group paths are found on the full group table (no limits)
-        assert "Edge Limit – BodyIds" in all_text
-        limits = {}
-        for el in client.elements.values():
-            label = getattr(el, "_props", {}).get("label")
-            if label == "Edge Limit – BodyIds":
-                limits[label] = el
-        assert limits["Edge Limit – BodyIds"].value == 1000000, limits
-        # the bodyId edge limit only applies to deep searches: with the
-        # default Layers = 2 the control starts DISABLED
-        assert limits["Edge Limit – BodyIds"]._props.get("disable") is True
-        disabled_hint = next(
+        # Fix C: the lossy Edge Limit – BodyIds control was retired — the
+        # StrongestFirst path budget (Max Paths (BodyId)) is the single
+        # bounding knob (0 = auto).
+        assert "Max Paths (BodyId)" in all_text
+        assert "Edge Limit – BodyIds" not in all_text
+        max_paths = next(
             el for el in client.elements.values()
-            if "Unavailable for shallow searches" in getattr(el, "text", "")
+            if getattr(el, "_props", {}).get("label") == "Max Paths (BodyId)"
         )
-        assert disabled_hint.visible is True
-        max_layers = next(
-            el for el in client.elements.values()
-            if getattr(el, "_props", {}).get("label") == "Max Intermediate Layers"
-        )
-        max_layers.value = 3
-        assert limits["Edge Limit – BodyIds"]._props.get("disable") is not True
-        assert disabled_hint.visible is False
+        assert max_paths.value == 0  # auto (StrongestFirst: 1M budget)
         # the type/group edge-limit controls are gone from the UI
         assert "Limit Graph Edges" not in all_text
         assert "Edge Limit – Groups" not in all_text
@@ -4391,10 +4376,11 @@ class TestTabs:
         assert cons._props.get("disable") is True
 
     def test_interdataset_edge_limits_shared_with_find_path(self):
-        """The cross-dataset tab carries both FindAllPath edge limits: the
-        bodyId-level pan-graph edge limit used for PATHFINDING (deep
-        searches, Layers >= 3) and the Visualization Edge Limit whose
-        default comes from the shared DEFAULTS (same as Find All Paths)."""
+        """The cross-dataset tab carries the report-row cap and the
+        Visualization Edge Limit (shared DEFAULTS, same as Find All
+        Paths). Fix C removed the bodyId edge limit entirely: the
+        StrongestFirst path budget (Max Paths (BodyId)) is the single
+        pathfinding knob."""
         from nicegui import Client
         from nicegui.page import page
         from ui.config import DEFAULTS
@@ -4408,28 +4394,21 @@ class TestTabs:
             label = getattr(el, "_props", {}).get("label")
             if label in (
                 "Top Edges in Analysis Reports",
-                "Edge Limit – BodyIds",
+                "Max Paths (BodyId)",
                 "Visualization Edge Limit",
             ):
                 by_label[label] = el
         assert "Top Edges in Analysis Reports" in by_label, by_label
         assert by_label["Top Edges in Analysis Reports"].value == 500
-        assert "Edge Limit – BodyIds" in by_label, by_label
-        # the pathfinding edge limit: 1M bodyId edges, deep searches only
-        assert by_label["Edge Limit – BodyIds"].value == 1000000
-        assert by_label["Edge Limit – BodyIds"]._props.get("min") == 0
-        bodyid_hint = next(
-            el for el in client.elements.values()
-            if "Unavailable for shallow searches" in getattr(el, "text", "")
-        )
-        assert bodyid_hint.visible is True
-        max_layers = next(
-            el for el in client.elements.values()
-            if getattr(el, "_props", {}).get("label") == "Max Intermediate Layers"
-        )
-        max_layers.value = 3
-        assert by_label["Edge Limit – BodyIds"]._props.get("disable") is not True
-        assert bodyid_hint.visible is False
+        # single pathfinding knob: 0 = auto (StrongestFirst 1M budget)
+        assert "Max Paths (BodyId)" in by_label, by_label
+        assert by_label["Max Paths (BodyId)"].value == DEFAULTS["max_paths_bodyid"]
+        labels = [
+            getattr(el, "_props", {}).get("label")
+            for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label")
+        ]
+        assert "Edge Limit – BodyIds" not in labels
         # the visualization edge limit default follows the shared config
         assert by_label["Visualization Edge Limit"].value == DEFAULTS["edgeN_limit"]
         assert DEFAULTS["edgeN_limit"] == 500
@@ -4479,9 +4458,9 @@ class TestTabs:
             assert "checkbox-early-viz" not in ids
 
     def test_interdataset_mode_switch_resets_mode_defaults(self):
-        """Switching Path Enumeration resets the mode-specific defaults
-        (shortest: Max Layers 8 + Edge Limit – BodyIds 0; all: 2 + 1M) and
-        warns the user their values were reset."""
+        """Switching Path Enumeration resets the mode-specific Max Layers
+        default (shortest: 8; all: 2) and warns the user their values were
+        reset. Fix C: no edge-limit control participates anymore."""
         from nicegui import Client
         from nicegui.page import page
         from ui.tabs.inter_dataset import create_inter_dataset_tab
@@ -4492,18 +4471,16 @@ class TestTabs:
         by_label = {}
         for el in client.elements.values():
             label = getattr(el, "_props", {}).get("label")
-            if label in ("Path Enumeration", "Max Intermediate Layers",
-                         "Edge Limit – BodyIds"):
+            if label in ("Path Enumeration", "Max Intermediate Layers"):
                 by_label[label] = el
         mode = by_label["Path Enumeration"]
         layers = by_label["Max Intermediate Layers"]
-        limit = by_label["Edge Limit – BodyIds"]
-        # 'all' defaults
-        assert layers.value == 2 and limit.value == 1000000, (layers.value, limit.value)
+        # 'all' default
+        assert layers.value == 2, layers.value
         mode.value = "shortest"
-        assert layers.value == 8 and limit.value == 0, (layers.value, limit.value)
+        assert layers.value == 8, layers.value
         mode.value = "all"
-        assert layers.value == 2 and limit.value == 1000000, (layers.value, limit.value)
+        assert layers.value == 2, layers.value
 
     def test_path_tabs_uncheck_hemisphere_dependents(self):
         """Find All Paths and Find Shortest UNCHECK (not just disable) the
@@ -4540,8 +4517,9 @@ class TestTabs:
 
     def test_interdataset_path_enumeration_selector(self):
         """The cross-dataset tab exposes a Path Enumeration selector
-        (all / shortest); shortest disables the algorithm selector and
-        defaults the bodyId edge limit off (0)."""
+        (all / shortest). F1 removed the Pathfinding Algorithm selector
+        (StrongestFirst is built-in); F1/F3 removed the Edge Limit field in
+        favor of the Edge Budget."""
         from nicegui import Client
         from nicegui.page import page
         from ui.tabs.inter_dataset import create_inter_dataset_tab
@@ -4553,18 +4531,18 @@ class TestTabs:
         for el in client.elements.values():
             label = getattr(el, "_props", {}).get("label")
             if label in ("Path Enumeration", "Pathfinding Algorithm",
-                         "Edge Limit – BodyIds"):
+                         "Edge Budget", "Max Paths (BodyId)"):
                 by_label[label] = el
         assert "Path Enumeration" in by_label, sorted(by_label)
         assert by_label["Path Enumeration"].value == "all"
-        # defaults for 'all' mode: algorithm enabled, edge limit 1M
-        assert by_label["Pathfinding Algorithm"]._props.get("disable") is not True
-        assert by_label["Edge Limit – BodyIds"].value == 1000000
-        # switching to shortest: algorithm disabled, edge limit off (0)
+        # F1: the Pathfinding Algorithm selector is gone entirely
+        assert "Pathfinding Algorithm" not in by_label
+        # F3: the Edge Budget + Max Paths knobs are present
+        assert "Edge Budget" in by_label
+        assert "Max Paths (BodyId)" in by_label
+        # switching to shortest: the Edge Budget is disabled (never floors)
         by_label["Path Enumeration"].value = "shortest"
-        # value-change handlers run synchronously in NiceGUI element updates
-        assert by_label["Pathfinding Algorithm"]._props.get("disable") is True
-        assert by_label["Edge Limit – BodyIds"].value == 0
+        assert by_label["Edge Budget"].enabled is False
 
     def test_network_tab_is_find_network_with_scope_notice(self):
         """The Network tab (Connection group) hosts FindNetwork: a single

@@ -120,6 +120,17 @@ def create_inter_dataset_tab():
                 hint="List of min synapse thresholds to analyze. "
                      "Type one threshold per chip (e.g. 3, 5, 10), or keep the defaults.",
             ).classes("w-full drocat-full-row-control")
+            # Feature B: static rough-range hint (whole-dataset
+            # connection-pair density per neuron). Informational only —
+            # query-specific alignment is exported per run in the
+            # threshold_alignment files.
+            ui.label(
+                "Rough whole-dataset hint (connection-pair density per neuron): "
+                "BANC ≥ 3 ≈ FAFB ≥ ~6–7 ≈ male-cns ≥ ~7–9; BANC ≥ 5 ≈ FAFB ≥ ~9–11 ≈ "
+                "male-cns ≥ ~12–15 (FAFB v783, male-cns v1.0; BANC v626/v888). "
+                "Query-specific alignment differs — check the threshold_alignment files "
+                "in your run output."
+            ).classes("text-xs opacity-60 w-full").style("line-height:1.35")
             find_reciprocal = checkbox_input(
                 "Find Reciprocal Connections", False,
                 hint="Build reciprocal graphs and include them in reports.",
@@ -164,21 +175,23 @@ def create_inter_dataset_tab():
                 "Advanced Settings", icon="settings_suggest",
             ).classes("w-full drocat-section-expansion"):
                 with param_grid(2):
-                    pathfinding = select_input(
-                        "Pathfinding Algorithm", PATHFINDING_ALGORITHMS, get_user_default("pathfinding"),
-                        hint="StrongestFirst (default): emits intact paths strongest-first; "
-                             "at Max Paths it keeps ALL paths above the reported strength "
-                             "cutoff instead of truncating arbitrarily. MemoizedDFS/DP/DFS/"
-                             "MeetInMiddle/Bidirectional: complete unordered enumeration.",
-                        help_doc="pathfinding_algorithms.html",
-                    )
+                    # F1: StrongestFirst is the only 'all'-mode algorithm —
+                    # the selector was removed; the payload sends the
+                    # constant.
                     max_paths_bodyid = number_input(
                         "Max Paths (BodyId)", get_user_default("max_paths_bodyid"), 0, 100000000,
                         hint="Path budget for StrongestFirst enumeration: when the search "
-                             "exceeds it, the strongest paths are kept and the achieved "
-                             "strength cutoff (tau) is reported in the run notes. "
-                             "0 = auto (StrongestFirst: 1M budget; complete "
-                             "enumerators: unbounded).",
+                             "exceeds it, ALL paths above the achieved strength cutoff "
+                             "(tau) are kept and tau is reported in the run notes. "
+                             "0 = auto (StrongestFirst: 1M budget).",
+                    )
+                    edge_budget = number_input(
+                        "Edge Budget", get_user_default("graph_edge_limit_bodyid"), 0, 100000000,
+                        hint="After the lossless prunes, discovery cones exceeding this "
+                             "many bodyId edges are floored just above the N-th strongest "
+                             "edge's weight (w0 = w1 + 1) — exactly equivalent to raising "
+                             "the threshold; the applied floor is reported as "
+                             "edge_weight_floor. 0 = off. Shortest mode never floors.",
                     )
                     top_edges = number_input(
                         "Top Edges in Analysis Reports", 500, 10, 5000,
@@ -204,15 +217,122 @@ def create_inter_dataset_tab():
                              "neuron info (e.g. FAFB MTe07 <-> male-cns MeVPLo2) when no "
                              "custom LabelMapper preset is selected.",
                     )
+                # Feature F: single enumeration + per-threshold replay.
+                replay_paths = checkbox_input(
+                    "Replay Paths (single enumeration)", get_user_default("replay_paths"),
+                    hint="Path mode 'all': enumerate ONCE at the lowest threshold and "
+                         "materialize every higher threshold from the bottleneck-annotated "
+                         "path set — identical outputs, no re-enumeration. Disable to "
+                         "force legacy per-threshold enumeration. Shortest mode is never "
+                         "replayed (min-hop sets are not nested across thresholds).",
+                )
+                auto_extend_thresholds = checkbox_input(
+                    "Auto-extend Collapsed Thresholds", False,
+                    hint="F7: when a run's effective tau collapses asked thresholds, extend "
+                         "each dataset with k × τ_ref points (τ_ref = max per-dataset tau) "
+                         "while ≤ 2× the max asked threshold — the schedule is global, so "
+                         "the expanded points stay shared across datasets. Default off; "
+                         "suggested by the banner on collapse.",
+                )
+                drop_untyped = checkbox_input(
+                    "Drop Untyped Neurons", get_user_default("drop_untyped"),
+                    hint="Remove edges touching untyped neurons (Unknown / bodyId-fallback "
+                         "labels) from the cross-dataset results — they can never match "
+                         "across datasets. Dropped rows are exported to "
+                         "untyped_dropped_records.csv and the dropped-neuron counts are "
+                         "appended to user_warning_notes.txt.",
+                )
+
+                # Feature E: per-dataset thresholds (vertical comparison).
+                # One ascending threshold list per selected dataset; empty =
+                # fall back to the global list.
+                dataset_thresholds_toggle = checkbox_input(
+                    "Per-dataset thresholds", False,
+                    hint="Assign a DIFFERENT threshold list per dataset (vertical "
+                         "comparison run mode). Each dataset then runs its own ascending "
+                         "list; horizontal cross-dataset tables only have content at "
+                         "thresholds shared by ≥ 2 datasets, and the threshold_alignment "
+                         "files carry the cross-dataset comparison.",
+                )
+                dataset_thresholds_container = ui.column().classes("w-full gap-1")
+                dataset_threshold_inputs: dict = {}
+
+                def _parse_threshold_list(text: str):
+                    values = []
+                    for part in str(text or '').replace(' ', '').split(','):
+                        if not part:
+                            continue
+                        values.append(int(part))
+                    return sorted(set(values))
+
+                def _rebuild_dataset_threshold_rows():
+                    dataset_threshold_inputs.clear()
+                    dataset_thresholds_container.clear()
+                    selected = list(datasets_select.value or [])
+                    if not dataset_thresholds_toggle.value or not selected:
+                        return
+                    global_values = thresholds_input.get_value()[1]
+                    with dataset_thresholds_container:
+                        for ds in selected:
+                            with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                                ui.label(ds).classes("text-xs font-medium min-w-[180px]")
+                                initial = ",".join(str(v) for v in global_values)
+                                inp = ui.input(
+                                    value=initial,
+                                    placeholder="e.g. 3, 5, 10 (empty = global list)",
+                                    on_change=None,
+                                ).classes("flex-1 min-w-[220px]").props("dense outlined")
+                                inp.on("blur", lambda e, i=inp: _normalize_row(i))
+                                dataset_threshold_inputs[ds] = inp
+
+                    def _normalize_row(inp):
+                        try:
+                            values = _parse_threshold_list(inp.value)
+                            inp.value = ",".join(str(v) for v in values)
+                        except (TypeError, ValueError):
+                            ui.notify(
+                                f"Invalid thresholds for per-dataset editor — use "
+                                f"comma-separated integers.",
+                                type="negative",
+                            )
+
+                def _collect_dataset_thresholds():
+                    if not dataset_thresholds_toggle.value:
+                        return None
+                    overrides = {}
+                    for ds, inp in dataset_threshold_inputs.items():
+                        text = (inp.value or "").strip()
+                        if not text:
+                            continue  # empty = fall back to global
+                        try:
+                            values = _parse_threshold_list(text)
+                        except (TypeError, ValueError):
+                            raise ValueError(
+                                f"Invalid per-dataset thresholds for {ds}: '{text}' "
+                                f"(use comma-separated integers)")
+                        if values:
+                            overrides[ds] = values
+                    return overrides or None
+
+                dataset_thresholds_toggle.on_value_change(
+                    lambda _e: _rebuild_dataset_threshold_rows())
+                datasets_select.on_value_change(
+                    lambda _e: _rebuild_dataset_threshold_rows())
                 with param_grid(3):
+                    # F9: ratio/probability filters are disabled (ratio is a
+                    # readout column now). The entrances stay in the code,
+                    # hidden, for the future ratio-weighted mode.
                     min_ratio = number_input(
-                        "Min Connection Ratio", get_user_default("min_ratio"), 0, 1, 0.01,
-                        hint="Minimum weight/post ratio for an edge to be kept.",
-                    )
+                        "Min Connection Ratio", 0, 0, 1, 0.01,
+                        hint="Disabled: connection_ratio is a readout column "
+                             "(weight / all-post incoming weight) — it no longer "
+                             "filters.",
+                    ).set_visibility(False)
                     min_prob = number_input(
-                        "Min Traversal Prob.", get_user_default("min_traversal_probability"), 0, 1, 0.01,
-                        hint="Minimum traversal probability for an edge to be kept.",
-                    )
+                        "Min Traversal Prob.", 0, 0, 1, 0.01,
+                        hint="Disabled: traversal_probability is a readout column "
+                             "(ratio/0.3, capped at 1.0) — it no longer filters.",
+                    ).set_visibility(False)
                     output_format = select_input(
                         "Output Format", ["csv", "xlsx"], get_user_default("output_format"),
                         hint="Format for exported data tables.",
@@ -238,19 +358,21 @@ def create_inter_dataset_tab():
 
                 def _apply_path_mode_defaults(notify=False):
                     """A mode switch resets the mode-specific defaults:
-                    shortest -> Max Layers 8, Edge Limit – BodyIds 0 (off);
-                    all -> Max Layers 2, Edge Limit – BodyIds 1M (deep
+                    shortest -> Max Layers 8, Edge Budget 0 (off, never
+                    floors); all -> Max Layers 2, Edge Budget 1M (deep
                     searches). The user is warned their values were reset."""
                     if path_mode.value == 'shortest':
-                        pathfinding.disable()
                         max_interlayer.value = 8
+                        edge_budget.value = 0
+                        edge_budget.disable()
                     else:
-                        pathfinding.enable()
                         max_interlayer.value = 2
+                        edge_budget.enable()
+                        edge_budget.value = get_user_default("graph_edge_limit_bodyid") or 1000000
                     if notify:
                         ui.notify(
                             f"Path Enumeration switched to '{path_mode.value}': "
-                            "Max Layers and Edge Limit – BodyIds were reset to the "
+                            "Max Layers and Edge Budget were reset to the "
                             "mode defaults — re-enter custom values if needed.",
                             type="warning",
                         )
@@ -292,6 +414,13 @@ def create_inter_dataset_tab():
             ui.notify("Please enter at least one synapse threshold", type="warning")
             return
 
+        # Feature E: per-dataset threshold overrides (vertical comparison)
+        try:
+            dataset_thresholds = _collect_dataset_thresholds()
+        except ValueError as exc:
+            ui.notify(str(exc), type="negative")
+            return
+
         # Resolve custom grouping (preset or inline); inline group labels are
         # compulsory for cross-dataset comparisons and validated here.
         mapping_path, mapping_ok = resolve_grouping()
@@ -310,19 +439,27 @@ def create_inter_dataset_tab():
             "path_mode": path_mode.value,
             "max_interlayer": int(max_interlayer.value),
             "thresholds": thresholds,
+            "dataset_thresholds": dataset_thresholds,
+            "replay_paths": replay_paths.value,
+            "auto_extend_thresholds": auto_extend_thresholds.value,
+            "drop_untyped": drop_untyped.value,
             "top_edges": int(top_edges.value),
-            # Fix C: graph_edge_limit_bodyid is deprecated/ignored by the
-            # FindAllPath pipeline — pass 0 (never trim).
-            "graph_edge_limit_bodyid": 0,
+            # Fix D: the Edge Budget (lossy floor above the N-th strongest
+            # edge, w0 = w1 + 1). 0 = off; shortest mode never floors.
+            "graph_edge_limit_bodyid": int(edge_budget.value),
             "max_paths_bodyid": int(max_paths_bodyid.value) or None,
             "edgeN_limit": int(edge_limit_viz.value),
-            "pathfinding": pathfinding.value,
+            # F1: StrongestFirst is the only 'all'-mode algorithm; the
+            # selector was removed.
+            "pathfinding": "StrongestFirst",
             "search_columns": search_columns.value,
             "skip_bodyId": skip_bodyid.value,
             "cache_only": cache_only.value,
             "auto_type_mapping": auto_type_mapping.value,
-            "_min_ratio": float(min_ratio.value),
-            "_min_prob": float(min_prob.value),
+            # F9: ratio/probability filters are disabled — hidden UI,
+            # metadata-only keys, sent 0.
+            "_min_ratio": 0.0,
+            "_min_prob": 0.0,
             "_output_format": output_format.value,
             "parallel": parallel.value,
             "max_workers": int(max_workers.value) if parallel.value else None,
@@ -336,6 +473,25 @@ def create_inter_dataset_tab():
 
         result = await output_panel.run(runner, "inter_dataset", constructor_params, "run",
                                         output_dir=output_dir.value)
+
+        # F6: persistent effective-threshold banner — the analyzer writes
+        # effective_thresholds.json when a τ collapse happened; surface it
+        # as a durable notice above the log.
+        try:
+            notice_path = os.path.join(output_dir.value or "",
+                                       "effective_thresholds.json")
+            if os.path.isfile(notice_path):
+                with open(notice_path, "r", encoding="utf-8") as nf:
+                    notice = json.load(nf)
+                banner = notice.get("banner")
+                if banner:
+                    output_panel.set_notice(banner)
+                else:
+                    output_panel.clear_notice()
+            else:
+                output_panel.clear_notice()
+        except Exception:
+            pass
 
         # Each dataset-level path analysis initializes its neuron sets before
         # comparing them. Record only when at least one source/target pair was

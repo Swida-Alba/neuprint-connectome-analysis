@@ -798,8 +798,10 @@ class TestPathHelpers:
             assert token in text
 
     def test_write_user_warning_notes_empty(self, tmp_path):
+        # skip_bodyId=False keeps the config-derived '[output]' note out so
+        # the writer has nothing to record.
         fc, _ = make_fc(min_ratio=0.0, min_traversal_probability=0.0,
-                        hemisphere_filter="both")
+                        hemisphere_filter="both", skip_bodyId=False)
         fc._write_user_warning_notes(str(tmp_path))
         assert not (tmp_path / "user_warning_notes.txt").exists()
 
@@ -2314,7 +2316,7 @@ class TestPrepareFlywireData:
     def test_online_mode_banc_raises(self, tmp_path):
         fc, _ = _flywire_fc(tmp_path, dataset="BANC:v1.0", use_cache=False)
         with pytest.raises(RuntimeError):
-            fc._prepare_flywire_data()
+            fc._prepare_banc_data()
 
     def test_online_mode_fafb_forces_api(self, tmp_path):
         fc, _ = _flywire_fc(tmp_path, use_cache=False)
@@ -2331,8 +2333,12 @@ class TestPrepareFlywireData:
             def ensure_banc_data(dataset, dataset_dir):
                 return True
 
+            @staticmethod
+            def build_connection_cache_from_tables(dataset_dir, cache_dir):
+                return True
+
         monkeypatch.setattr(coana, "BANC_file_converter", FakeBANC)
-        fc._prepare_flywire_data()
+        fc._prepare_banc_data()
         assert fc.force_API_fetching is False
 
     def test_force_api_with_api_cache(self, tmp_path):

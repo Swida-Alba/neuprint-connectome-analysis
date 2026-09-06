@@ -204,9 +204,51 @@ COLUMN_GLOSSARY = {
     "anchor": ("Anchor type name the mapping row was resolved from.", "text"),
     "same name": ("The dataset uses the identical type name (no mapping needed).", "boolean"),
     # --- Cross-dataset comparison ------------------------------------------------
-    "threshold": ("Minimum synapse threshold applied.", "integer"),
+    "threshold": ("Minimum synapse threshold applied (ASKED value — see "
+                  "applied_threshold for the real cutoff in effect).", "integer"),
+    "applied_threshold": ("The CANONICAL (minimal) threshold that reproduces "
+                          "this run's output: w2 + 1 for a budget-bitten run "
+                          "(w2 = strongest dropped path bottleneck — every "
+                          "threshold in [w2+1, tau] yields the identical set), "
+                          "else the asked threshold for complete runs (whose "
+                          "natural tau equals it).", "integer"),
+    "strongest_dropped": ("w2 — the strongest path bottleneck NOT in the "
+                          "output (budget-bitten runs): lowering the threshold "
+                          "to w2 or below admits new paths; any value in "
+                          "[w2+1, tau] changes nothing. Empty for complete "
+                          "runs.", "number"),
+    "pruned": ("True when the Edge-Budget floor (the only lossy stage) fired "
+               "for this run: the cone exceeded the budget and was floored at "
+               "w0 = (N-th strongest edge) + 1 — the run is exactly a "
+               "complete run at edge_weight_floor. τ-collapsed rows are "
+               "marked skipped, not pruned.", "boolean"),
+    "edge_weight_floor": ("Fix D floor weight (w0) when the Edge Budget fired; "
+                          "every path in the output has bottleneck >= this value "
+                          "and the run is equivalent to a complete run at this "
+                          "threshold. Empty when no floor was applied.", "number"),
     "conservation": ("Number/fraction of datasets in which the edge is present.", "text"),
     "conserved_at_lowest": ("Edge present in every dataset at the lowest threshold.", "boolean"),
+    "tau": ("StrongestFirst budget LANDING: the weakest kept path's "
+           "bottleneck — the maximal threshold equivalent to this run (the "
+           "collapse bound; every threshold up to this value yields the "
+           "identical set). For COMPLETE runs this is the natural tau — the "
+           "weakest emitted path's bottleneck, which is also the canonical "
+           "minimal threshold.", "number"),
+    "paths_complete": ("True when the path set is complete; False when a budget "
+                       "cutoff applied.", "boolean"),
+    "skipped": ("Feature G (duplicate-threshold skipping): True when this input "
+                "threshold was NOT re-enumerated — its path set is identical to the "
+                "earlier run it duplicates (every threshold up to that run's tau "
+                "yields the same set). 'all' path mode only.", "boolean"),
+    "duplicate_of": ("For skipped thresholds: the earlier input threshold (or "
+                     "the tau folder, applied_folder) whose run this row "
+                     "duplicates.", "integer"),
+    "applied_folder": ("F5 tau-folder discipline: the minsyn_{N} folder holding "
+                       "this threshold's real output. Collapsed thresholds have "
+                       "no folder of their own — their frames alias this "
+                       "folder's materialization (fresh tau denominators).", "integer"),
+    "max_paths_bodyid": ("Path budget for StrongestFirst enumeration (0 = unlimited "
+                         "or algorithm default).", "integer"),
     "jaccard_similarity": ("Jaccard similarity of the two datasets' edge sets: "
                             "$\\lvert E_1 \\cap E_2\\rvert / "
                             "\\lvert E_1 \\cup E_2\\rvert$.", "0-1"),
@@ -859,9 +901,16 @@ TOOL_GUIDE_SPECS = {
                  "total_postsynaptic", "total_synapses", "roi_count",
                  "coverage_notes"]},
             {"pattern": "auto_type_mapping.csv",
-             "description": "Cross-dataset type mapping table."},
+             "description": "Cross-dataset type mapping table. The "
+                            "mapping_origin column states how each row "
+                            "was derived: crosswalk, same name, or the "
+                            "annotation bridge (additional_type(s) / "
+                            "Alternative Cell Type(s)) with its tokens."},
             {"pattern": "auto_type_mapping_conflicts.csv",
-             "description": "Conflicting cross-dataset type mappings."},
+             "description": "Conflicting cross-dataset type mappings "
+                            "(N-to-1 / 1-to-N, never guessed). The origin "
+                            "column distinguishes crosswalk conflicts from "
+                            "annotation-bridge ones."},
             {"pattern": "comparison_report_used_data/*.csv",
              "description": "Aggregated metrics per dataset backing the "
                             "report (avg_prob, avg_ratio, edge_count, "
@@ -903,7 +952,22 @@ TOOL_GUIDE_SPECS = {
             {"pattern": "comparison_results/motif_analysis.csv",
              "description": "Network motif analysis."},
             {"pattern": "comparison_results/threshold_sensitivity.csv",
-             "description": "Threshold sensitivity analysis."},
+             "description": "Per-dataset edge counts per threshold with retention vs the previous threshold (unique source-target pairs). tau/paths_complete state whether a run was complete (tau = natural weakest-path bottleneck) or budget-bounded; skipped/duplicate_of mark Feature G τ-collapsed thresholds whose path set is identical to the duplicated run."},
+            {"pattern": "comparison_results/threshold_alignment_best_matches.csv",
+             "description": "Feature C: per (dataset pair, anchor threshold) the "
+                            "best-matching threshold in the other dataset, found by a "
+                            "bisection prober over the whole-dataset edge-density curve "
+                            "(edge-count distance is primary; Jaccard/rank similarity "
+                            "at the matched point). Includes a global-best row."},
+            {"pattern": "comparison_results/threshold_alignment_matrix.csv",
+             "description": "Feature C: pairwise alignment metrics over the TYPED "
+                            "threshold grid points only (edge-count distance, Jaccard, "
+                            "rank similarity per dataset-pair/threshold-pair)."},
+            {"pattern": "comparison_results/edge_density_per_threshold.csv",
+             "description": "Feature D data: per dataset, distinct connection-pair "
+                            "counts (absolute and per-neuron) over the extended "
+                            "threshold grid used by the prober; typed thresholds are "
+                            "flagged. Rendered as edge_density_threshold_curves.png."},
             {"pattern": "comparison_results/path_count_comparison.csv",
              "description": "Path-count comparison across datasets."},
             {"pattern": "comparison_visualizations/*.png",
