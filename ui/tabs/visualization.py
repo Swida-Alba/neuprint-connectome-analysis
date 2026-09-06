@@ -221,28 +221,8 @@ def create_skeleton_tab():
             dataset = dataset_selector()
             output_dir = dir_input(scope="visualization_skeleton")
             # BANC skeleton source selection removed: the chain is unified
-            # (888 L2 -> 888 full -> v626 pcg), no per-run choice.
-            banc_normalize_radius = checkbox_input(
-                "Normalized Tube Radius", True,
-                hint="Rescale each BANC neuron's radii so its median maps onto "
-                     "a shared target: the release products carry inconsistent "
-                     "radius calibers per neuron, which otherwise shows up as "
-                     "mismatched tube thicknesses in one scene.",
-            ).set_visibility(False)
-            banc_radius_target_nm = number_input(
-                "Radius Target (nm)", 120, 10, 1000, 10,
-                hint="Median tube radius (nm) all BANC neurons are normalized "
-                     "to when Normalized Tube Radius is checked.",
-            ).set_visibility(False)
-
-            def _set_banc_controls_visible(visible: bool) -> None:
-                """Toggle the BANC controls (and their wrapper columns)."""
-                for el in (banc_normalize_radius,
-                           banc_radius_target_nm):
-                    try:
-                        el.parent.set_visibility(visible)
-                    except Exception:
-                        el.set_visibility(visible)
+            # (888 L2 -> 888 full -> v626 pcg), no per-run choice. The BANC
+            # tube-radius controls live in General Appearance.
 
         # ================= 3D Skeleton panel =================
         with ui.card().classes("w-full drocat-card").props('id="card-3d"'):
@@ -482,6 +462,30 @@ def create_skeleton_tab():
                         "Brain Mesh", BRAIN_MESH_OPTIONS, get_user_default("brain_mesh"),
                         hint="'template': brain outline. 'whole': full brain surface. 'none': no mesh.",
                     )
+                    # BANC tube-radius normalization: appearance knobs that
+                    # only surface when a BANC dataset is selected (the
+                    # rescale is a no-op elsewhere).
+                    banc_normalize_radius = checkbox_input(
+                        "Normalized Tube Radius", True,
+                        hint="Rescale each BANC neuron's radii so its median maps onto "
+                             "a shared target: the release products carry inconsistent "
+                             "radius calibers per neuron, which otherwise shows up as "
+                             "mismatched tube thicknesses in one scene.",
+                    ).set_visibility(False)
+                    banc_radius_target_nm = number_input(
+                        "Radius Target (nm)", 240, 10, 1000, 10,
+                        hint="Median tube radius (nm) all BANC neurons are normalized "
+                             "to when Normalized Tube Radius is checked.",
+                    ).set_visibility(False)
+
+                def _set_banc_controls_visible(visible: bool) -> None:
+                    """Toggle the BANC controls (and their wrapper columns)."""
+                    for el in (banc_normalize_radius,
+                               banc_radius_target_nm):
+                        try:
+                            el.parent.set_visibility(visible)
+                        except Exception:
+                            el.set_visibility(visible)
 
                 # Mesh extras share one compact row: the VNC toggle plus the
                 # brain outline color (Auto follows the background
