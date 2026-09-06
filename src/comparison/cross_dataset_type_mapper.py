@@ -78,11 +78,13 @@ DATASET_TO_TYPE_COL = {
     # optic-lobe not in male-cns mapping
 }
 
-# FlyWire schema namespaces kept in the type mappings.  FAFB and BANC share
-# the male-cns ``flywireType`` crosswalk column, but each dataset renames
-# types independently through its own additional-type column, so their
-# resolved names can differ and they keep separate mapping entries.
-FLYWIRE_MAPPING_KEYS = ('flywire_FAFB_v783', 'banc_v626')
+# FlyWire schema namespaces kept in the type mappings.  FAFB and the BANC
+# releases share the male-cns ``flywireType`` crosswalk column, but each
+# release renames types independently through its own additional-type
+# column, so their resolved names live under separate mapping keys —
+# selecting BANC v888 must resolve against the v888 tables, never v626
+# (§version control, user 2026-09-06).
+FLYWIRE_MAPPING_KEYS = ('flywire_FAFB_v783', 'banc_v626', 'banc_v888')
 
 # Per FlyWire namespace: which neuron table carries the primary ``type``
 # column and which additional-type column records renamed types.
@@ -95,6 +97,11 @@ FLYWIRE_TYPE_SOURCES = {
     'banc_v626': {
         'dataset_dir': 'banc_v626',
         'neuron_df': 'banc_v626_allneurons_neuron_df.csv',
+        'alt_column': 'Alternative Cell Type(s)',
+    },
+    'banc_v888': {
+        'dataset_dir': 'banc_v888',
+        'neuron_df': 'banc_v888_allneurons_neuron_df.csv',
         'alt_column': 'Alternative Cell Type(s)',
     },
 }
@@ -175,13 +182,15 @@ CROSSWALK_HOME = "male-cns:v1.0"
 BRIDGE_SOURCE_MAP: Dict[tuple, Set[str]] = {
     (BRIDGE_IDENTITY, "type"): set(),  # same-name identity, any namespace
     (CROSSWALK_HOME, "flywireType"): {
-        "flywire_FAFB_v783", "banc_v626"},
+        "flywire_FAFB_v783", "banc_v626", "banc_v888"},
     (CROSSWALK_HOME, "hemibrainType"): {"hemibrain:v1.2.1"},
     # the same male-cns column carries the names for both manc releases
     (CROSSWALK_HOME, "mancType"): {"manc:v1.0", "manc:v1.2.1"},
     ("flywire_FAFB_v783", "additional_type(s)"): {"flywire_FAFB_v783"},
     ("banc_v626", "Alternative Cell Type(s)"): {
         "banc_v626"},
+    ("banc_v888", "Alternative Cell Type(s)"): {
+        "banc_v888"},
 }
 
 # §bridge rules (2026-09-06): the licensed single-intermediate routes.
@@ -194,12 +203,16 @@ BRIDGE_SOURCE_MAP: Dict[tuple, Set[str]] = {
 # chain would have to revisit a namespace, which the walk forbids).
 ROUTE_MIDS: Dict[frozenset, Set[str]] = {
     frozenset({"male-cns:v1.0", "banc_v626"}): {"flywire_FAFB_v783"},
+    frozenset({"male-cns:v1.0", "banc_v888"}): {"flywire_FAFB_v783"},
     frozenset({"hemibrain:v1.2.1", "flywire_FAFB_v783"}): {"male-cns:v1.0"},
     frozenset({"hemibrain:v1.2.1", "banc_v626"}): {"male-cns:v1.0"},
+    frozenset({"hemibrain:v1.2.1", "banc_v888"}): {"male-cns:v1.0"},
     frozenset({"manc:v1.0", "flywire_FAFB_v783"}): {"male-cns:v1.0"},
     frozenset({"manc:v1.0", "banc_v626"}): {"male-cns:v1.0"},
+    frozenset({"manc:v1.0", "banc_v888"}): {"male-cns:v1.0"},
     frozenset({"manc:v1.2.1", "flywire_FAFB_v783"}): {"male-cns:v1.0"},
     frozenset({"manc:v1.2.1", "banc_v626"}): {"male-cns:v1.0"},
+    frozenset({"manc:v1.2.1", "banc_v888"}): {"male-cns:v1.0"},
     frozenset({"hemibrain:v1.2.1", "manc:v1.0"}): {"male-cns:v1.0"},
     frozenset({"hemibrain:v1.2.1", "manc:v1.2.1"}): {"male-cns:v1.0"},
 }
@@ -698,12 +711,33 @@ class CrossDatasetTypeMapper:
             # Primary types double as the authoritative "does this name exist
             # in the dataset" check for alias candidates.
             self._flywire_primaries[key] = primaries
+            # §T3 (user 2026-09-06): a FAFB additional_type(s) cell may list
+            # SEVERAL names; only the in-use ones (a FAFB primary, a male-cns
+            # type name — the crosswalk's left side, e.g. APDN3 rows
+            # annotating 'LMTe01, CL125' — or a male-cns flywireType cell
+            # value) may carry bridge evidence — the never-used leftovers
+            # are historical noise and are dropped from the bridge tables
+            # when the cell also names a used name (when NOTHING in the
+            # cell is used, the names are indistinguishable and all stay).
+            used_values = None
+            if (key == 'flywire_FAFB_v783'
+                    and getattr(self, '_neuron_df', None) is not None
+                    and 'flywireType' in self._neuron_df.columns):
+                used_values = set(primaries)
+                used_values.update(
+                    self._neuron_df['type'].dropna().astype(str).str.strip())
+                for cw_cell in self._neuron_df['flywireType'].dropna().astype(str):
+                    used_values.update(self._split_type_cell(cw_cell))
             alt_to_primary: Dict[str, Set[str]] = {}
             annotation_primaries: Dict[str, Set[str]] = defaultdict(set)
             for cell, primary in zip(table[alt_column], table['type']):
                 names = self._split_type_cell(cell)
                 if not names or not isinstance(primary, str):
                     continue
+                if used_values is not None and len(names) >= 2:
+                    filtered = [n for n in names if n in used_values]
+                    if filtered:
+                        names = filtered
                 primary = primary.strip()
                 if not primary:
                     continue
@@ -995,6 +1029,7 @@ class CrossDatasetTypeMapper:
             'male-cns:v1.0': {},
             'flywire_FAFB_v783': {},
             'banc_v626': {},
+            'banc_v888': {},
             'hemibrain:v1.2.1': {},
             'manc:v1.0': {},
             'manc:v1.2.1': {},
@@ -1238,6 +1273,12 @@ class CrossDatasetTypeMapper:
             for dst_key in keys:
                 if dst_key == src_key:
                     continue
+                if (src_key.startswith('banc')
+                        and dst_key.startswith('banc')):
+                    # §version control: BANC <-> BANC cross-release mapping
+                    # is not licensed — each release resolves against its
+                    # own tables, with no crosswalk evidence between them.
+                    continue
                 dst_column = self._flywire_alt_column(dst_key)
                 for src_type in sorted(self._flywire_primaries.get(src_key, ())):
                     if self._is_untyped_value(src_type):
@@ -1409,14 +1450,24 @@ class CrossDatasetTypeMapper:
         """
         normalized = self._normalize_dataset_name(dataset)
 
+        if normalized == 'male-cns:v0.9':
+            # §version control: v0.9 is a distinct release whose type names
+            # the v1.0 crosswalk cannot verify — it keeps its own (empty)
+            # namespace instead of silently resolving through v1.0.
+            return normalized
         if normalized.startswith('male-cns:'):
             return 'male-cns:v1.0'
 
         if normalized.startswith('flywire_FAFB_'):
             return 'flywire_FAFB_v783'
 
+        # BANC releases are per-release namespaces (§version control):
+        # each release resolves against its own neuron tables, so a
+        # banc_v888 selection can never land v626 names ("via banc v626")
+        # or pool the other release's bodyIds.
         if normalized.startswith(('banc_', 'flywire_BANC_')):
-            return 'banc_v626'
+            return normalized if normalized.startswith('banc_') \
+                else 'banc_v626'
 
         return normalized
 
@@ -2802,6 +2853,11 @@ class CrossDatasetTypeMapper:
                 if chain_key not in seen_chains:
                     seen_chains.add(chain_key)
                     bridges.append([dict(h) for h in chain])
+                if not has_registry:
+                    # §bridge rules: registry-less pairs stop at the
+                    # arrival — no annotation continuation (see
+                    # has_registry above).
+                    return
                 # Arrival does NOT end the walk: the reached primary's own
                 # annotation edges continue the two-linker registry
                 # standard (crosswalk primary -> its annotated siblings,
@@ -2882,6 +2938,14 @@ class CrossDatasetTypeMapper:
         # §bridge rules: this pair's licensed intermediate namespaces
         route_mids = set(ROUTE_MIDS.get(
             frozenset({source_key, target_key}), ()))
+        # The post-arrival annotation continuation is the two-linker
+        # REGISTRY standard (crosswalk primary -> its annotated siblings).
+        # Registry-less pairs (every BANC pair) have no such standard —
+        # continuing would wander the target's annotation classes
+        # (APDN3 -> R8_unclear -> T1) and land coarse hub names.
+        has_registry = bool(
+            BRIDGE_STANDARD.get((source_dataset, target_dataset))
+            or BRIDGE_STANDARD.get((target_dataset, source_dataset)))
 
         chain0 = [{"dataset": source_key, "column": "type", "value": source_type}]
         _walk(start, chain0, 0, {(source_key, source_type)})

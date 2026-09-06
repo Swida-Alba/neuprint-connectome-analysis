@@ -460,13 +460,16 @@ def test_normalize_dataset_name(mapper):
 
 def test_get_type_mapping_key(mapper):
     key = mapper._get_type_mapping_key
-    assert key('male-cns:v0.9') == 'male-cns:v1.0'
+    # §version control: releases are per-release namespaces — a banc_v888
+    # selection must never resolve through v626 names, and male-cns v0.9
+    # must not silently borrow the v1.0 crosswalk.
+    assert key('male-cns:v0.9') == 'male-cns:v0.9'
     assert key('male-cns:v1.0') == 'male-cns:v1.0'
     assert key('flywire_FAFB_v783') == 'flywire_FAFB_v783'
-    # BANC keeps its own namespace: it resolves renames through its own
-    # "Alternative Cell Type(s)" column, so names can differ from FAFB.
+    # BANC releases each keep their own namespace: they resolve renames
+    # through their own "Alternative Cell Type(s)" column and own tables.
     assert key('banc_v626') == 'banc_v626'
-    assert key('banc_v888') == 'banc_v626'
+    assert key('banc_v888') == 'banc_v888'
     assert key('hemibrain:v1.2.1') == 'hemibrain:v1.2.1'
 
 
@@ -508,8 +511,11 @@ def test_get_mapped_type_basic(mapper):
 
 def test_get_mapped_type_same_namespace_and_suffix(mapper):
     # same schema namespace -> native name returned
-    assert mapper.get_mapped_type('aMe12', MCNS, 'male-cns:v0.9') == 'aMe12'
+    assert mapper.get_mapped_type('aMe12', MCNS, 'male-cns:v1.0') == 'aMe12'
     assert mapper.get_mapped_type('MTe07', FW, BANC) == 'MTe07'
+    # §version control: male-cns v0.9 is its own namespace — the v1.0
+    # crosswalk cannot verify its names, so nothing silently maps
+    assert mapper.get_mapped_type('aMe12', MCNS, 'male-cns:v0.9') is None
     # hemisphere suffix preserved on mapped name
     assert mapper.get_mapped_type('aMe12_L', MCNS, FW) == 'MTe07_L'
     assert mapper.get_mapped_type('aMe12_R', MCNS, FW) == 'MTe07_R'

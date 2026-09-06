@@ -34,7 +34,11 @@ FAFB = 'flywire_FAFB_v783'
 BANC = 'banc_v626'
 MCNS = 'male-cns:v1.0'
 FAFB_RELEASE = 'flywire_FAFB_v783'
-BANC_RELEASE = 'banc_v888'
+# §version control: releases are per-release namespaces — the banc_v626
+# namespace is selected by its own release name (or the legacy flywire_BANC_*
+# alias); banc_v888 resolves against ITS OWN tables and never sees these
+# entries.
+BANC_RELEASE = 'banc_v626'
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MCNS_TABLE = (REPO_ROOT / 'datasets' / 'male-cns_v1_0'
@@ -413,10 +417,12 @@ def test_export_conflicts_resolves_release_keys(tmp_path):
     )
     m._apply_annotation_bridge_overlay()
     out = tmp_path / 'conflicts.csv'
-    # The run selected the RELEASE name banc_v888; the conflict is keyed
-    # by the MAPPING namespace banc_v626 — it must survive the scope
-    # filter and carry its origin.
-    m.export_conflicts(str(out), datasets=[FAFB_RELEASE, BANC_RELEASE])
+    # The run selected the LEGACY release spelling flywire_BANC_v626; the
+    # conflict is keyed by the MAPPING namespace banc_v626 — it must
+    # survive the release-name resolution and carry its origin.  (A
+    # banc_v888-scoped export must NOT surface banc_v626 conflicts —
+    # per-release namespaces, §version control.)
+    m.export_conflicts(str(out), datasets=[FAFB_RELEASE, 'flywire_BANC_v626'])
     df = pd.read_csv(out)
     assert len(df) == 1
     assert df['source_dataset'].iloc[0] == FAFB

@@ -3257,6 +3257,40 @@ def enrich_native_type_matches(
         cache[foreign_type] = annotation
         return annotation
 
+    def _annotation_for(foreign_type: str, foreign_ds: str) \
+            -> Optional[Dict[str, Any]]:
+        """Alias annotation UNION the derivation-bridge targets.
+
+        The type-mapping panel resolves through ``get_type_bridges``
+        (crosswalk + overlay + annotation bridges); the alias path above
+        knows only the stored crosswalk entries and conflicts.  Union the
+        two so every surface reports the SAME mapped target set — the
+        bridge-only pairs (e.g. FAFB LPN -> LPN_a/LPN_b) and the overlay
+        1-to-N splits (5th-LNv -> 5thsLNv_LNd6 + s-LNv) can no longer
+        vanish from the viewer's mapped view.
+        """
+        ann = _annotation(foreign_type)
+        try:
+            chains = mapper.get_type_bridges(
+                foreign_type, foreign_ds, selected_dataset)
+        except Exception:
+            chains = []
+        ends = {
+            str(c[-1]['value']) for c in (chains or [])
+            if c and c[-1].get('value')
+        }
+        if not ends:
+            return ann
+        targets = set(ends)
+        if ann:
+            targets.update(ann.get('targets') or [])
+        if len(targets) == 1 and ann:
+            return {'kind': ann['kind'], 'targets': sorted(targets)}
+        return {
+            'kind': 'one of N' if len(targets) > 1 else 'bridged',
+            'targets': sorted(targets),
+        }
+
     for entry in native_matches:
         foreign_ds = entry.get("dataset", "")
         mapped_names = set()
@@ -3286,7 +3320,7 @@ def enrich_native_type_matches(
             return info["text"] or NO_DERIVATION_TEXT
 
         for cand in types_iter:
-            cand["mapped"] = _annotation(cand["name"])
+            cand["mapped"] = _annotation_for(cand["name"], foreign_ds)
             if cand["mapped"]:
                 mapped_names.update(cand["mapped"]["targets"])
                 cand["map_used"] = "; ".join(
@@ -3304,7 +3338,8 @@ def enrich_native_type_matches(
             # sort last) from the mapped-type view.
             for covered in (label.get("covered_all")
                             or label.get("types", [])):
-                covered["mapped"] = _annotation(covered["name"])
+                covered["mapped"] = _annotation_for(
+                    covered["name"], foreign_ds)
                 if covered["mapped"]:
                     mapped_names.update(covered["mapped"]["targets"])
                     covered["map_used"] = "; ".join(

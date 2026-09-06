@@ -96,12 +96,16 @@ class TestMapperNamespace:
         assert mapper._normalize_dataset_name("flywire_BANC_v888") == "banc_v888"
         assert mapper._normalize_dataset_name("banc") == "banc_v626"
         assert mapper._get_type_mapping_key("flywire_BANC_v626") == "banc_v626"
-        assert mapper._get_type_mapping_key("banc_v888") == "banc_v626"
+        # §version control: per-release namespaces — banc_v888 resolves
+        # against ITS OWN tables, never through the banc_v626 namespace.
+        assert mapper._get_type_mapping_key("banc_v888") == "banc_v888"
 
     def test_fafb_namespace_untouched(self):
         mapper = self._mapper()
         assert mapper._get_type_mapping_key("flywire_FAFB_v783") == "flywire_FAFB_v783"
-        assert mapper._get_type_mapping_key("male-cns:v0.9") == "male-cns:v1.0"
+        # §version control: male-cns v0.9 keeps its own namespace (the v1.0
+        # crosswalk cannot verify v0.9 names).
+        assert mapper._get_type_mapping_key("male-cns:v0.9") == "male-cns:v0.9"
 
 
 class TestReadinessPredicates:
