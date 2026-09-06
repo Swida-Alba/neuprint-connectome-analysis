@@ -80,6 +80,7 @@
     <tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr>
     <tr><td>Max Intermediate Layers (optional)</td><td>5</td><td>0 = direct only; &gt;0 caps path length at <i>layers + 1</i> edges</td></tr>
     <tr><td>Min Synapse Count</td><td>3</td><td>Minimum edge weight</td></tr>
+    <tr><td>Max Paths (BodyId)</td><td>0 = auto (1M)</td><td>StrongestFirst budget on min-hop paths: when the search exceeds it, all min-hop paths above the achieved strength cutoff (tau) are kept and tau is reported; unbitten runs are the complete min-hop set</td></tr>
     <tr><td>Min Connection Ratio</td><td>hidden</td><td>F9: readout column only (weight / ALL-POST incoming weight); no longer filters</td></tr>
     <tr><td>Min Traversal Prob.</td><td>hidden</td><td>F9: readout column only (ratio/0.3, capped at 1.0); no longer filters</td></tr>
     <tr><td>Edge Budget</td><td>off in shortest mode</td><td>Shortest mode is never floored (the tab disables the input) — flooring would raise the threshold and can inflate shortest distances</td></tr>
@@ -112,8 +113,19 @@
   <div class="callout tip">
     <b>No algorithm selector:</b> shortest enumeration is a backward-BFS
     distance pass plus a guided DFS over the shortest-path DAG — polynomial
-    in graph size. The combinatorial path explosion of Find All Paths does
-    not exist here.
+    in graph size per pair. The branching^depth explosion of Find All Paths
+    does not exist here, but the total number of min-hop paths can still
+    grow quickly at depth (tied routes multiply at every layer).
+  </div>
+
+  <div class="callout tip">
+    <b>Path budget (Max Paths, BodyId):</b> the min-hop enumeration runs
+    through the StrongestFirst budget — paths are emitted strongest-first
+    (descending bottleneck) and, when the budget (<code>max_paths_bodyid</code>,
+    0 = auto → 1,000,000) is reached, all ties at the achieved cutoff
+    <b>tau</b> are drained and weaker paths dropped: the output is exactly
+    "all min-hop paths with bottleneck ≥ tau". Unbitten runs are identical
+    to the complete min-hop set.
   </div>
 
   <div class="callout warn">
@@ -123,7 +135,8 @@
     <i>shortest distance</i> — a dropped weak edge can silently inflate a
     reported distance. The tab disables the Edge Budget input in shortest
     mode; API callers passing <code>graph_edge_limit_bodyid</code> get the
-    full un-floored graph here.
+    full un-floored graph here. The <b>Max Paths (BodyId)</b> input is the
+    knob that bounds this mode.
   </div>
 
   <h2>BodyId enrollment</h2>

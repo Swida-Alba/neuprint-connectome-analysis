@@ -131,6 +131,14 @@ def create_find_shortest_tab():
                     "Min Synapse Count", get_user_default("min_synapse_num"), 1, 100,
                     hint="Minimum number of synapses for a connection to be included. Filters out weak/noisy connections.",
                 )
+                max_paths = number_input(
+                    "Max Paths (BodyId)", get_user_default("max_paths_bodyid"),
+                    0, 100000000,
+                    hint="Path budget for the StrongestFirst min-hop enumeration: "
+                         "when the search exceeds it, ALL min-hop paths above the "
+                         "achieved strength cutoff (tau) are kept and tau is "
+                         "reported. 0 = auto (1M budget).",
+                )
                 edge_limit = number_input(
                     "Visualization Edge Limit", get_user_default("edgeN_limit"), 10, 5000,
                     hint="Maximum edges drawn per visualization (network / Sankey / heatmap, "
@@ -348,7 +356,9 @@ def create_find_shortest_tab():
             "min_traversal_probability": float(min_traversal.value),
             "max_interlayer": 0 if (src_all or tgt_all) else int(max_interlayer.value),
             "filter_by": filter_by.value,
-            # Fix C: deprecated/ignored — shortest mode never trims.
+            "max_paths_bodyid": int(max_paths.value) or None,
+            # Fix C/D: shortest mode is never floored — the Edge Budget
+            # does not apply here.
             "graph_edge_limit_bodyid": 0,
             # Shortest Paths no longer exposes the early network preview in
             # the UI; keep the backend behavior explicitly disabled.

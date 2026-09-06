@@ -1,14 +1,22 @@
 # StrongestFirst Pathfinding — Technical Report
 
-**Status:** implemented (2026-09-04; revised 2026-09-05). Scope: the
-unified path-bounding stack for `FindAllPath` / `FindShortestPath` and
-every consumer that ranks or limits paths (cross-dataset comparison,
-Complete Paths tab, path visualization).
+**Status:** implemented (2026-09-04; revised 2026-09-05 and 2026-09-06).
+Scope: the unified path-bounding stack for `FindAllPath` /
+`FindShortestPath` and every consumer that ranks or limits paths
+(cross-dataset comparison, Complete Paths tab, path visualization).
 2026-09-05 revision: **StrongestFirst is the only selectable 'all'-mode
 algorithm** (the UI selector was removed; the `pathfinding` parameter
 stays for scripts/tests), the retired edge-limit knob was repurposed as
-the lossy **Edge Budget** floor (Fix D, w0 = w1 + 1), and complete runs
-report their natural tau.
+the lossy **Edge Budget** floor (Fix D), and complete runs report their
+natural tau.
+2026-09-06 revision: the Edge Budget landing was refined into the
+**budget-fit search** (`fit_edge_budget` — weakest tier whose closed
+cone fits the cap), the lossless prune **iterates to a fixpoint**, the
+shortest mode runs **StrongestFirst with a path budget**
+(`find_paths_shortest_strongest_first`, Shortest-tab Max Paths field),
+and the comprehensive re-query mode deduplicates cross-layer pairs.
+See [PATHFINDING_PIPELINE.md](PATHFINDING_PIPELINE.md) for the
+end-to-end report.
 Companion plans: `plan-cross-dataset-pathfinding-optimization.md`
 (implementation), `plan-cross-dataset-report-fixes.md` (Fix A cap
 policy, Fix C trim unification, §6b/§6c),
@@ -59,7 +67,11 @@ effect"; see TYPE_AGGREGATION_AND_BODYID_DISCOVERY.md).
 2. **Lossless hop-budget pruning** (`prune_layers_hop_budget`): drops
    edges with `dist_S(u) + 1 + dist_T(v) > max_interlayer + 1` — they
    cannot lie on any admissible path. Lossless by proof; measured
-   39–77% cone reduction on real queries.
+   39–77% cone reduction on real queries. The pass **iterates on the
+   already-pruned tables until a pass drops nothing** (capped passes):
+   still lossless — every admissible path survives every pass — and
+   strictly tighter than a single pass, since distances recomputed on
+   the pruned graph can only grow.
 3. **Dead-end node pruning**: nodes that cannot reach any target
    (post-pruning) are removed. Also lossless. Both passes report a
    **strongest-retained bottleneck** — the widest-path maximin value
@@ -80,12 +92,13 @@ runs in FindAllPath/FindShortestPath — it bounded the graph but not the
 paths, was not nested across thresholds, and could silently remove the
 weakest hop of a top path. The arbitrary-order `max_paths_bodyid`
 truncation for legacy enumerators is likewise gone: any budget routes
-through StrongestFirst. **Fix D (2026-09-05)** repurposed the former
-knob as the **Edge Budget**: after the lossless prunes, a cone exceeding
-the budget is floored at `w0 = (N-th strongest edge weight) + 1`
-(`apply_edge_budget_floor`) — see §4b. The old `_trim_bodyid_edges`
-top-N trim was deleted; `_trim_edges_with_path_integrity` survives only
-for the FindNetwork type-level group trims.
+through StrongestFirst. **Fix D (2026-09-05, refined by the budget-fit
+search)** repurposed the former knob as the **Edge Budget**: after the
+lossless prunes, a cone exceeding the budget is floored by
+`fit_edge_budget` at the weakest tier whose closed cone fits the cap —
+see §4b. The old `_trim_bodyid_edges` top-N trim was deleted;
+`_trim_edges_with_path_integrity` survives only for the FindNetwork
+type-level group trims.
 
 ## 3. Guarantees
 
@@ -140,22 +153,33 @@ A complete run (budget not bitten) reports its natural τ = the weakest
 path's bottleneck with `paths_complete = true` — meaning every
 threshold up to that value yields the identical set.
 
-**Implemented (Fix D, 2026-09-05): the Edge Budget floor.** After the
-lossless prunes, if the pruned cone still exceeds the Edge Budget
-(`graph_edge_limit_bodyid`, default 1M; 0/None = off) the N-th
-strongest edge weight w1 is located by quickselect and every edge with
-`weight < w0 = w1 + 1` is dropped, followed by a second lossless pass.
-The **+1 is the load-bearing part**: edges strictly heavier than w1
-number fewer than N by definition of the N-th rank, so the floored cone
-always fits the budget — a multi-million-edge tie tier at w1 cannot
-blow it up, and on locally truncated products (BANC ≥ 3) a landing at
-w1 = 3 floors at 4 instead of being a no-op. Degenerate cones (a single
-weight tier, or a budget below the distinct-weight support) revert with
-an honest note instead of returning an empty graph. The floor is a pure
-threshold raise: **effective cutoff = max(τ_budget, w0)**, reported as
-`edge_weight_floor` / `edge_budget_landing` in the run attributes,
-`parameters.txt`, and a lossy-floor note. Shortest mode is never
-floored.
+**Implemented (Fix D, 2026-09-05; refined by the budget-fit search):**
+the Edge Budget floor. After the lossless prunes, if the pruned cone
+still exceeds the Edge Budget (`graph_edge_limit_bodyid`, default 1M;
+0/None = off) a floor is applied. The original one-shot landing located
+the N-th strongest edge weight w1 by quickselect and dropped every edge
+with `weight < w0 = w1 + 1` — the **+1 was load-bearing** (edges
+strictly heavier than w1 number fewer than N, so the floored cone
+always fit the budget), but it *discarded the boundary-tie tier* and
+whatever slack the closure left unused, which on real connectomes can
+be most of the cap (measured: 95–98% waste; in one case the one-shot
+declined entirely where the fit search delivered a valid floor).
+
+The **budget-fit search** (`fit_edge_budget`) now floors at the
+*weakest tier whose lossless-closed cone fits the cap*: it probes tiers
+downward from the one-shot landing (gallop, then bisect between the
+last fitting and first overshooting tier, under a probe budget of 8)
+with single-pass closures, and floors at the winner. Every probe is a
+pure threshold raise, so the floored run is exactly a complete run at
+`min_synapse_num = t*` — **effective cutoff = max(τ_budget, t\*)**,
+reported as `edge_weight_floor` / `edge_budget_landing` in the run
+attributes, `parameters.txt`, and a lossy-floor note together with the
+residual slack, probe trace, and whether the budget is fully used (the
+next weaker tier exceeds the cap). When even the full closed cone fits
+the cap, no floor is applied (`floor_skipped`); degenerate cones (a
+single weight tier, or a budget below the distinct-weight support)
+revert with an honest note instead of returning an empty graph.
+Shortest mode is never floored.
 
 ## 5. API reference
 
@@ -163,22 +187,40 @@ floored.
   budget=None, per_pair_k=None, stats=None, verbose=False)` — budgeted
   strongest-first enumeration. `stats` receives `emitted`, `tau`,
   `budget_bitten`, `last_bound`.
+- `FastGraph.find_paths_shortest_strongest_first(targets, sources,
+  cutoff=None, budget=None, stats=None, target_cutoffs=None,
+  verbose=False)` — §7.2: budgeted best-first over each target's
+  shortest-path DAG with a per-target maximin DP; per-target streams are
+  k-way merged and the global budget drains ties at τ. A bitten run is
+  exactly "all min-hop paths with bottleneck ≥ τ"; unbitten runs equal
+  `find_paths_shortest_backward` as a set. `stats` receives `emitted`,
+  `tau`, `budget_bitten`, `strongest_dropped`, `per_target`.
 - `FastGraph._widest_path_backward(targets, cutoff)` — delegates to
   `strongest_core.widest_path_backward(adj, targets, cutoff)`.
 - `vispath_pkg/strongest_core.py` — the shared core:
   `widest_path_backward`, `path_bottleneck`, `interior_strength`,
   `path_rank_key`, `selection_threshold`, `drain_budget`.
-- `coana.prune_layers_hop_budget(conn_layers, sources, targets, bound, …)`
-  — the lossless pass; returns `(pruned_tables, stats)` with
-  `strongest_retained`.
+- `coana.prune_layers_hop_budget(conn_layers, sources, targets, bound, …,
+  max_passes=4)` — the lossless pass, iterated to a fixpoint (a probe of
+  the budget-fit uses `max_passes=1`, the historical single pass);
+  returns `(pruned_tables, stats)` with `strongest_retained` and
+  `passes`.
+- `coana.fit_edge_budget(conn_layers, budget, sources, targets, bound, …,
+  max_probes=8)` — the budget-fit search: floors at the weakest tier
+  whose closed cone fits the cap; returns `(floored_tables, stats)` with
+  `applied`, `floor` (t\*), `landing` (first overshooting tier weight),
+  `edges_after`, `residual_slack`, `budget_fully_used`, `probes`,
+  `truncated`, `floor_skipped`, `search_seconds`, `probe_trace`,
+  `strongest_retained`. Never mutates its inputs; reverts honestly when
+  no non-empty tier fits.
 - `coana.apply_edge_budget_floor(conn_layers, budget, sources, targets,
-  bound, …)` — the Fix D lossy floor; returns `(floored_tables, stats)`
-  with `applied`, `landing` (w1), `floor` (w0), `dropped`,
-  `prune_dropped`, `strongest_retained`. Never mutates its inputs;
-  reverts honestly when flooring would empty the graph.
+  bound, …)` — the original one-shot Fix D floor (w0 = w1 + 1, single
+  lossless pass), retained as the probe-0 reference and for tests; the
+  pipeline uses `fit_edge_budget`.
 - `ComparisonParameters.max_paths_bodyid` — `None`/0 = auto
-  (StrongestFirst: internal 1M budget; legacy enumerators: unbounded);
-  `>0` = that budget, always routed through StrongestFirst.
+  (StrongestFirst: internal 1M budget in 'all' and 'shortest' modes;
+  legacy enumerators: unbounded); `>0` = that budget, always routed
+  through StrongestFirst.
 - `ComparisonParameters.graph_edge_limit_bodyid` — the **Edge Budget**
   (default 1M in the UI; `None`/0 = off for API callers). Lossy floor,
   'all' mode only.

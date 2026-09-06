@@ -129,8 +129,8 @@ expected outputs, and a runnable launcher command.
   cache coverage.
 - Prefer CSV for large intermediate tables; use Excel only when the user needs
   workbook sheets.
-- Limit graph size with `edgeN_limit`/`graph_edge_limit_bodyid` before generating
-  an interactive HTML.
+- Limit the run with `edgeN_limit`/`max_paths_bodyid`/`graph_edge_limit_bodyid`
+  before generating an interactive HTML.
 - For 3D renders start with `skeleton_mode="line"` and disable exports during a
   first smoke test; use tube/WebDriver/PDF/video only after the HTML is valid.
 - For PlotPath pass `path_file` from a completed FindPath result; use

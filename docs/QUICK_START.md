@@ -69,6 +69,13 @@ fc.FindPath()
 
 **v4.4.0**: Priority-based search (bodyId → type → instance), accepts both int and string bodyIds!
 
+**v4.5.0**: `FindAllPath()` runs on the **StrongestFirst** pipeline — paths are
+emitted strongest-first under a path budget (`max_paths_bodyid`, 0 = auto →
+1,000,000) with a reported cutoff **τ** (a budgeted run at τ equals a complete
+run at `min_synapse_num = τ`), and the discovery cone can be capped with the
+Edge Budget (`graph_edge_limit_bodyid`). Few-target queries rarely need these
+knobs — the built-in lossless pruning already does most of the work.
+
 ## 2. Direct Connections
 
 Find direct connections between a set of neurons (1-hop).

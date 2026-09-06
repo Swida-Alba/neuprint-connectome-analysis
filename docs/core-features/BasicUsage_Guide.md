@@ -510,7 +510,7 @@ min_ratio = min_traversal_probability * 0.3
 
 | Parameter                   | Description                    | Default         | Values            |
 | --------------------------- | ------------------------------ | --------------- | ----------------- |
-| `max_interlayer`            | Maximum intermediate layers    | 1               | 1-6               |
+| `max_interlayer`            | Maximum intermediate layers    | 1 (API) / 2 (UI) | 1-6             |
 | `pathfinding`               | Algorithm choice               | `'StrongestFirst'` | See table below   |
 | `show_top_n_paths`          | Limit output paths (-1 = all)  | -1              | 100-1000          |
 | `keyword_in_path_to_remove` | Exclude paths with these types | `[]`            | `['None', 'APL']` |

@@ -6,7 +6,7 @@ All paths are relative to the repo root unless noted.
 
 ## coana (`src/coana.py`)
 
-- `FindNeuronConnection(dataset, sourceNeurons, targetNeurons, output_dir, min_synapse_num, min_ratio, min_traversal_probability, max_interlayer, filter_by, pathfinding, graph_edge_limit_bodyid, visualize_before_reconstruct, search_columns, network_layout, use_cache, edgeN_limit, output_format, skip_bodyId, showfig, custom_source_name, custom_target_name, keyword_in_path_to_remove, cache_only, saveas, separate_hemispheres, hemisphere_filter, keep_only_hemisphere_conserved_connections, symmetry_analysis, find_reciprocal, custom_mapping_file)`
+- `FindNeuronConnection(dataset, sourceNeurons, targetNeurons, output_dir, min_synapse_num, min_ratio, min_traversal_probability, max_interlayer, filter_by, pathfinding, max_paths_bodyid, graph_edge_limit_bodyid, visualize_before_reconstruct, search_columns, network_layout, use_cache, edgeN_limit, output_format, skip_bodyId, showfig, custom_source_name, custom_target_name, keyword_in_path_to_remove, cache_only, saveas, separate_hemispheres, hemisphere_filter, keep_only_hemisphere_conserved_connections, symmetry_analysis, find_reciprocal, custom_mapping_file)`
   - `InitializeNeuronInfo()`
   - `FindDirectConnections()`
   - `FindPath(find_bodyId_path=None)`
@@ -28,7 +28,7 @@ All paths are relative to the repo root unless noted.
 
 ## comparison (`src/comparison/__init__.py`)
 
-- `ComparisonParameters(datasets, source_neurons, target_neurons, output_folder, comparison_mode, path_mode, max_interlayer, thresholds, top_edges, graph_edge_limit_bodyid, edgeN_limit, pathfinding, search_columns, skip_bodyId, cache_only, auto_type_mapping, _min_ratio, _min_prob, _output_format, parallel, max_workers, separate_hemispheres, keep_only_hemisphere_conserved_connections, symmetry_analysis, find_reciprocal, overall_mapping_json)`
+- `ComparisonParameters(datasets, source_neurons, target_neurons, output_folder, comparison_mode, path_mode, max_interlayer, thresholds, top_edges, max_paths_bodyid, graph_edge_limit_bodyid, edgeN_limit, pathfinding, search_columns, skip_bodyId, cache_only, auto_type_mapping, _min_ratio, _min_prob, _output_format, parallel, max_workers, separate_hemispheres, keep_only_hemisphere_conserved_connections, symmetry_analysis, find_reciprocal, overall_mapping_json)`
 - `ComparisonAnalyzer(params, verbose=True)` → `run_comparison()`, `run_all_analyses()`, `run_path_analysis()`, `run_edge_analysis()`, `export_results()`, `generate_report()`, `generate_html_report()`
 - `quick_compare(datasets, source_neurons, target_neurons, ...)`
 - `CrossDatasetTypeMapper`, `LabelMapper`, `DatasetConfig`, `DataLoader`, `ComparisonVisualizer`

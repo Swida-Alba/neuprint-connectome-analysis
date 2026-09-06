@@ -32,6 +32,18 @@ Optimizations specific to heatmap generation and rendering.
 - Rendering performance
 - Memory usage reduction
 
+### [Pathfinding Pipeline](./PATHFINDING_PIPELINE.md)
+**Start here** — comprehensive current-state report of the pathfinding
+strategies: discovery, the lossless fixpoint pruning stack, the
+budget-fit Edge Budget, StrongestFirst in both modes (simple paths and
+min-hop paths), guarantees (τ-equivalence, cap honesty), complexity,
+measured real-data performance, and design decisions.
+
+### [StrongestFirst Pathfinding](./STRONGEST_FIRST_PATHFINDING.md)
+Design record for the StrongestFirst family: the widest-path DP,
+best-first enumeration, budget + τ drain semantics, W\* vs τ, and the
+Fix C / Fix D history.
+
 ### [Pathfinding Optimization Summary](./PATHFINDING_OPTIMIZATION_SUMMARY.md)
 Complete overview of path finding algorithm optimizations.
 
@@ -43,7 +55,7 @@ Complete overview of path finding algorithm optimizations.
 
 ### [Pathfinding Algorithm Evaluation](./PATHFINDING_ALGORITHM_EVALUATION.md)
 Theoretical (complexity) and practical (measured time + memory) evaluation
-of the five `FastGraph` pathfinding algorithms, with measured results on a
+of the complete-enumerator `FastGraph` pathfinding algorithms, with measured results on a
 real hemibrain v1.2.1 connectome query and synthetic scaling graphs.
 
 **Key findings**:
@@ -52,7 +64,8 @@ real hemibrain v1.2.1 connectome query and synthetic scaling graphs.
   DFS forward; MeetInMiddle runs meet-in-the-middle)
 - Lazy reverse-adjacency index eliminated the ~250 MB reversed-graph
   copies: all algorithms except Bidirectional run in <10 MB at 2-4 layers
-- MemoizedDFS is the default; MeetInMiddle fastest at 2-3 layers,
+- MemoizedDFS is the fastest *complete* enumerator (StrongestFirst is the
+  pipeline default); MeetInMiddle fastest at 2-3 layers,
   MemoizedDFS at 4, Bidirectional at 5 (but 18.9 -> 892 MB memory)
 - Bitmask visited sets and degree-2 compression were measured and rejected
   (not faster on real connectomes)

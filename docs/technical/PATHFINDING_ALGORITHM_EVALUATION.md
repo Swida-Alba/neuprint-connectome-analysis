@@ -1,6 +1,6 @@
 # Pathfinding Algorithm Evaluation
 
-Evaluation of the four `FastGraph` pathfinding algorithms used by DROCAT
+Evaluation of the complete-enumerator `FastGraph` pathfinding algorithms used by DROCAT
 (Find All Paths, Find Path, Cross-Dataset Comparison), both theoretically
 (complexity analysis of the implementations in
 `vispath-subproject/src/vispath_pkg/fast_graph_core.py`) and practically
@@ -13,7 +13,7 @@ Machine: macOS, Python 3.11 (drocat conda env).
 
 ## 1. What the algorithms have in common
 
-All four algorithms solve the **all-simple-paths** problem: enumerate every
+All complete enumerators solve the **all-simple-paths** problem: enumerate every
 acyclic path from any source to any target with length ≤ L (the cutoff).
 The number of paths P is exponential in L in the worst case (branching
 factor b → O(b^L) paths), so *no* algorithm can be faster than O(P·L) —
@@ -236,10 +236,13 @@ in < 10 ms — for small queries the choice is irrelevant.
 
 ## 4. Recommendations
 
-1. **Default: MemoizedDFS (forward)** — fastest measured at every depth
+1. **Pipeline default: StrongestFirst** (2026-09-04, not in the measured
+   tables below) — budgeted best-first on the path bottleneck; the
+   enumerators benchmarked here are its unbounded complete references
+   (script/API only). **Fastest complete enumerator: MemoizedDFS
+   (forward)** — fastest measured at every depth
    (0.01 s at 2 layers → 5.20 s at 5) with the smallest peak allocation at
-   2–4 layers (no reversed-graph copy). The 2026-08 default in the UI and
-   in `FindNeuronConnection` / `ComparisonParameters` is MemoizedDFS.
+   2–4 layers (no reversed-graph copy).
 2. **Few targets, many sources**: **DFS** (backward memoized) starts from
    the smaller set — fastest at 5 layers (4.91 s), but it pays ~250 MB for
    the reversed graph.

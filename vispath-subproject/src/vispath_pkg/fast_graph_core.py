@@ -1395,6 +1395,167 @@ class FastGraph:
                 except Exception:
                     pass
 
+    def find_paths_shortest_strongest_first(self, targets, sources, cutoff=None,
+                                            budget=None, stats=None,
+                                            target_cutoffs=None, verbose=False):
+        """Budgeted best-first enumeration of MINIMUM-HOP paths (§7.2).
+
+        For every target ``t``: one backward BFS gives ``dist_t`` (hops to
+        t); the shortest-path DAG is the dist-descending subgraph, and a
+        per-target maximin DP ``Wt[v]`` — the best bottleneck over DAG
+        paths ``v -> t`` — makes best-first expansion emit that target's
+        min-hop paths in DESCENDING-bottleneck order. The per-target
+        streams are k-way merged, and the global ``budget`` applies with a
+        tau tie-drain: a bitten run is exactly "all min-hop paths with
+        bottleneck >= tau" (tau-equivalent to a complete shortest run at
+        ``min_synapse_num = tau``). Unbitten runs return the same SET as
+        ``find_paths_shortest_backward`` — only the order differs (global
+        descending vs target-major). Zero-hop pairs (source == target) are
+        excluded, matching the siblings.
+
+        The DAG's strictly decreasing distances make cycles impossible, so
+        no visited bookkeeping is needed inside a path.
+
+        ``target_cutoffs`` optionally caps each target's hop depth (same
+        contract as ``find_paths_shortest_backward``). ``stats`` receives
+        ``emitted``, ``tau``, ``budget_bitten``, ``strongest_dropped`` and
+        ``per_target`` ({target: emitted}).
+
+        Memory note: the merge keeps every per-target stream (BFS dist +
+        DAG maximin DP) alive simultaneously — state is bounded by
+        ``hop_cap`` per target and is modest for the depth-explosion
+        scenario this budget exists for (few targets, deep), but queries
+        with MANY broad targets scale it linearly in the target count.
+
+        Cost: per target O(V_t + E_t) for the BFS/DP plus best-first work
+        proportional to the emitted prefix tree — no branching^depth
+        explosion over non-shortest branches.
+        """
+        import heapq
+        from collections import deque
+
+        INF = float('inf')
+        target_set = set(t for t in targets if t in self.adj)
+        source_list = [s for s in dict.fromkeys(sources) if s in self.adj]
+        if not target_set or not source_list:
+            return
+        radj = self._ensure_radj()
+        adj = self.adj
+
+        def target_stream(target, hop_cap):
+            """All min-hop paths to ``target``, descending bottleneck."""
+            # Backward BFS: dist[v] = min hops from v to target.
+            dist = {target: 0}
+            queue = deque([target])
+            while queue:
+                node = queue.popleft()
+                node_dist = dist[node]
+                if hop_cap is not None and node_dist >= hop_cap:
+                    continue
+                for predecessor in radj.get(node, ()):
+                    if predecessor not in dist:
+                        dist[predecessor] = node_dist + 1
+                        queue.append(predecessor)
+            # Per-target maximin DP over the shortest-path DAG (edges with
+            # dist[v] == dist[u] - 1): Wt[v] = best bottleneck over DAG
+            # paths v -> target. Nodes processed by INCREASING dist so a
+            # node's DAG successors are settled first.
+            by_dist = {}
+            for node, d in dist.items():
+                by_dist.setdefault(d, []).append(node)
+            Wt = {target: INF}
+            for d in sorted(by_dist):
+                if d == 0:
+                    continue
+                for u in by_dist[d]:
+                    best = None
+                    for v, w in adj.get(u, {}).items():
+                        if dist.get(v) != d - 1:
+                            continue
+                        tail = Wt.get(v)
+                        if tail is None:
+                            continue
+                        cand = w if tail == INF else min(w, tail)
+                        if best is None or cand > best:
+                            best = cand
+                    if best is not None:
+                        Wt[u] = best
+            # Best-first over DAG prefixes seeded from the sources: the pop
+            # bound min(run_b, Wt[node]) is the exact best completion of
+            # the prefix, so paths are emitted in descending bottleneck
+            # order without any budget.
+            heap = []
+            counter = 0
+            for s in source_list:
+                if s == target:
+                    continue
+                ds = dist.get(s)
+                if ds is None or (hop_cap is not None and ds > hop_cap):
+                    continue
+                bound = Wt.get(s)
+                if bound is None:
+                    continue
+                heapq.heappush(heap, (-bound, counter, s, INF, (s,)))
+                counter += 1
+            while heap:
+                neg_bound, _, node, run_b, path = heapq.heappop(heap)
+                if node == target:
+                    yield -neg_bound, list(path), target
+                d = dist[node]
+                if d == 0:
+                    continue
+                neighbors = sorted(adj.get(node, {}).items(),
+                                   key=lambda kv: (-kv[1], kv[0]))
+                for v, w in neighbors:
+                    if dist.get(v) != d - 1:
+                        continue
+                    new_run = run_b if run_b < w else w
+                    v_bound = Wt.get(v)
+                    if v_bound is None:
+                        continue
+                    new_bound = new_run if new_run < v_bound else v_bound
+                    heapq.heappush(heap, (-new_bound, counter, v, new_run,
+                                          path + (v,)))
+                    counter += 1
+
+        streams = []
+        for target in sorted(target_set, key=str):
+            hop_cap = cutoff
+            if target_cutoffs is not None:
+                configured = target_cutoffs.get(target)
+                if configured is None:
+                    configured = target_cutoffs.get(str(target))
+                if configured is not None:
+                    hop_cap = max(0, int(configured))
+            streams.append(target_stream(target, hop_cap))
+
+        emitted = 0
+        tau = None
+        tau_open = False
+        strongest_dropped = None
+        per_target = {}
+        for bottleneck, path, target in heapq.merge(
+                *streams, key=lambda item: -item[0]):
+            if tau_open and bottleneck < tau:
+                # Everything left across all streams is strictly weaker:
+                # the first sub-tau item in the merged (descending) order
+                # is the strongest dropped path (w2).
+                strongest_dropped = bottleneck
+                break
+            yield path
+            emitted += 1
+            per_target[target] = per_target.get(target, 0) + 1
+            tau = bottleneck
+            if budget is not None and emitted >= budget:
+                tau_open = True
+        if stats is not None:
+            stats['emitted'] = emitted
+            stats['tau'] = tau
+            stats['budget_bitten'] = bool(budget is not None and tau_open
+                                          and strongest_dropped is not None)
+            stats['strongest_dropped'] = strongest_dropped
+            stats['per_target'] = per_target
+
     def find_paths_bidirectional_bfs(self, sources, targets, cutoff, verbose=False):
         """
         Bidirectional BFS (Layer-based) pathfinding.

@@ -367,6 +367,7 @@ DEFAULTS = {
     "pathfinding": "StrongestFirst",
     # Fix A: 0 = auto (StrongestFirst uses its internal 1M budget;
     # complete enumerators run unbounded). Explicit >0 = that budget.
+    # Applies to FindAllPath and FindShortestPath (min-hop paths) alike.
     "max_paths_bodyid": 0,
     # Fix D (Edge Budget): after lossless pruning, cones exceeding this
     # many bodyId edges are floored just above the N-th strongest edge's

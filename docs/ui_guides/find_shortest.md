@@ -55,9 +55,21 @@ source-target pairs are needed.
 ## Why there is no algorithm selector
 
 Shortest enumeration is a backward-BFS distance pass plus a guided DFS over
-the shortest-path DAG — polynomial in the graph size. The combinatorial
-path explosion that makes Find All Paths expensive does not exist here, so
-the algorithm choice and the deep-search warning do not apply.
+the shortest-path DAG — polynomial in the graph size per pair. The
+branching^depth explosion that makes Find All Paths expensive (it explores
+non-shortest branches) does not exist here, but the *total* number of
+min-hop paths can still grow quickly at depth: tied routes multiply at
+every layer of equal-length parallel corridors.
+
+## Path budget (Max Paths, BodyId)
+
+The min-hop enumeration runs through the **StrongestFirst** budget:
+paths are emitted strongest-first (descending bottleneck) and, when the
+budget (`max_paths_bodyid`, 0 = auto → 1,000,000) is reached, all ties
+at the achieved cutoff **tau** are drained and weaker paths dropped —
+the output is exactly "all min-hop paths with bottleneck ≥ tau",
+reported in the run notes. Unbitten runs are identical to the complete
+min-hop set. The Edge Budget floor never applies here.
 
 ## Edge Budget: off in shortest mode
 
@@ -73,6 +85,7 @@ value, including 1M defaults:
 
 The tab disables the Edge Budget input in shortest mode; API callers
 passing `graph_edge_limit_bodyid` get the full un-floored graph here.
+The **Max Paths (BodyId)** input is the knob that bounds this mode.
 
 ## Visualization Edge Limit
 

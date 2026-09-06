@@ -9,7 +9,11 @@ and remain verified), and `max_paths_bodyid` bounds the output with a
 reported τ while `graph_edge_limit_bodyid` is the **Edge Budget** that
 floors the discovery cone.
 
-The four algorithms are also evaluated theoretically and by measured time/memory in [PATHFINDING_ALGORITHM_EVALUATION.md](../technical/PATHFINDING_ALGORITHM_EVALUATION.md), with the benchmark harness at `examples/performance/benchmark_pathfinding.py`.
+> 📖 **For the end-to-end technical picture** — every pipeline stage,
+> guarantee, complexity figure, and measured result — see
+> [PATHFINDING_PIPELINE.md](../technical/PATHFINDING_PIPELINE.md).
+
+The complete enumerators are also evaluated theoretically and by measured time/memory in [PATHFINDING_ALGORITHM_EVALUATION.md](../technical/PATHFINDING_ALGORITHM_EVALUATION.md); the benchmark harness has been archived to `archive/examples/performance/benchmark_pathfinding.py`.
 
 **Why pathfinding runs at the bodyId level first:** FindAllPath discovers
 all paths on the bodyId-level graph and only then aggregates the in-path
@@ -62,21 +66,23 @@ Emits complete intact paths **strongest-first** under a path budget
     FindAllPath/FindShortestPath. The single bounding mechanism is the path
     budget with its τ report — a budgeted run at threshold t is
     *equivalent to a complete run at min_synapse_num = τ*.
-*   **Edge Budget (Fix D, 2026-09-05)**: `graph_edge_limit_bodyid`
-    (default 1M, 0 = off) caps the cone itself: after the lossless
-    prunes, a cone exceeding the budget is floored at
-    `w0 = (N-th strongest edge weight) + 1` — the +1 excludes the
-    boundary-tie mass, so the kept-edge count is *strictly* below the
-    budget. The floor is a pure threshold raise (effective cutoff =
-    max(τ_budget, w0)), reported as `edge_weight_floor` /
-    `edge_budget_landing` in the run attributes and an honest lossy
-    note. Shortest mode is never floored.
-*   Before enumeration, a **lossless hop-budget pruning pass**
-    (`prune_layers_hop_budget`) removes every discovery edge that cannot
-    lie on any source→target path within the layer bound — at every
-    depth, in both 'all' and 'shortest' modes. No admissible path is
-    lost (each kept-path set is unchanged); the removed-row count is
-    logged and noted as lossless in `user_warning_notes.txt`.
+*   **Edge Budget (Fix D, 2026-09-05; budget-fit refined)**:
+    `graph_edge_limit_bodyid` (default 1M, 0 = off) caps the cone itself:
+    after the lossless prunes, the **budget-fit search** finds the weakest
+    weight tier whose lossless-closed cone fits the cap and floors the
+    cone there — a pure threshold raise (effective cutoff =
+    max(τ_budget, t*)), reported as `edge_weight_floor` /
+    `edge_budget_landing` with the residual slack and probe trace. This
+    replaces the one-shot `w0 = (N-th strongest edge weight) + 1`
+    landing, which could waste most of the cap on boundary-tie mass.
+    Shortest mode is never floored.
+*   Before enumeration, **lossless hop-budget pruning passes**
+    (`prune_layers_hop_budget`, iterated to a fixpoint) remove every
+    discovery edge that cannot lie on any source→target path within the
+    layer bound — at every depth, in both 'all' and 'shortest' modes. No
+    admissible path is lost (each kept-path set is unchanged); the
+    removed-row count is logged and noted as lossless in
+    `user_warning_notes.txt`.
 *   **Ratio/probability filters retired (F9, 2026-09-05)**:
     `connection_ratio` (weight / ALL-POST incoming weight — the
     denominator is now threshold-free) and `traversal_probability`
@@ -110,7 +116,7 @@ This algorithm performs a simultaneous Breadth-First Search (BFS) from both the 
 **Parameter:** `pathfinding='DP'`
 **Method:** `FastGraph.find_paths_backward_dp`
 
-A hybrid approach combining Backward BFS for pruning and Forward DFS for path construction. **The recommended default** (fastest measured at 2–3 intermediate layers).
+A hybrid approach combining Backward BFS for pruning and Forward DFS for path construction. **Reference complete enumerator** (fastest measured at 2–3 intermediate layers; StrongestFirst is the pipeline default).
 
 *   **Mechanism**:
     *   **Phase 1 (Backward Reachability)**: Computes sets R_k containing all nodes that can reach a target in exactly k steps.
@@ -119,7 +125,7 @@ A hybrid approach combining Backward BFS for pruning and Forward DFS for path co
 *   **Pros**: **Lowest memory footprint**. Aggressively prunes dead ends before the main search.
 *   **Cons**: Requires two passes over the graph; degenerates on very deep (5+) queries.
 
-### 3. Memoized DFS (forward) — the recommended default
+### 3. Memoized DFS (forward) — reference complete enumerator
 **Parameter:** `pathfinding='MemoizedDFS'`
 **Method:** `FastGraph.find_paths_memoized_dfs` (direction='forward')
 
@@ -163,7 +169,8 @@ The same memoized DFS started from the targets on the reversed graph.
 
 | Algorithm | Parameter | Underlying Method | Best For | Time (worst) | Memory (worst) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Memoized DFS (fwd)** | `MemoizedDFS` | `find_paths_memoized_dfs` | **Default; all depths** | O(L·E + P·L) | O(L·E) |
+| **StrongestFirst** | `StrongestFirst` | `find_paths_strongest_first` | **The pipeline default** | O(L·E + explored·log H + P·L) | O(L·V + H·L) |
+| **Memoized DFS (fwd)** | `MemoizedDFS` | `find_paths_memoized_dfs` | **Complete runs (API); all depths** | O(L·E + P·L) | O(L·E) |
 | **Memoized DFS (bwd)** | `DFS` | `find_paths_memoized_dfs` (backward) | **Deep paths, few targets** | O(L·E + P·L) | O(L·E) |
 | **Meet-in-the-middle** | `MeetInMiddle` | `find_paths_meet_in_the_middle` | Shallow; safe mid-ground | O(b^{L/2}·L + P·L) | O(b^{L/2}·L) |
 | **Backward DP** | `DP` | `find_paths_backward_dp` | Robust, no reverse copy | O(L·E + P·L) | O(L·V) |

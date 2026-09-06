@@ -75,7 +75,7 @@ PYTHONNOUSERSITE=1 PYTHONPATH=src:vispath-subproject/src:. conda run -n drocat-4
 
 - Compose by passing each step's output artifact into the next (e.g. a
   `FindNeuronConnection`/comparison CSV into `VisualizePath(path_file=...)`).
-- Keep `showfig=False` and bound graph size (`edgeN_limit`,
+- Keep `showfig=False` and bound the run (`edgeN_limit`, `max_paths_bodyid`,
   `graph_edge_limit_bodyid`) until the output is validated.
 - When combining across datasets, keep type mapping/labels consistent
   (`use_auto_type_mapping` / `ComparisonParameters.auto_type_mapping` /

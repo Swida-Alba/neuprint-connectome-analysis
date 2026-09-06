@@ -36,15 +36,17 @@ budget — both numbers are reported). Without a budget bite the emitted
 set is identical to the complete enumerators, and the run reports its
 <strong>natural tau</strong> — the weakest emitted path's bottleneck
 ("every threshold up to this value yields this identical set").</p>
-<p>Two lossless prunes (hop-budget edge pruning + dead-end node pruning)
-shrink the cone before enumeration. A lossy <strong>Edge
-Budget</strong> (<code>graph_edge_limit_bodyid</code>, default 1M, 0 =
-off) caps the cone itself: when the lossless-pruned cone still exceeds
-the budget, every edge below <code>w0 = (N-th strongest edge weight) +
-1</code> is dropped — exactly equivalent to raising the threshold, kept
-edges stay strictly below the budget, and the applied floor is reported
-as <code>edge_weight_floor</code> (effective cutoff = max(tau, w0)).
-Shortest mode is never floored.</p>
+<p>Two lossless prunes (hop-budget edge pruning, iterated to a fixpoint,
++ dead-end node pruning) shrink the cone before enumeration. A lossy
+<strong>Edge Budget</strong> (<code>graph_edge_limit_bodyid</code>,
+default 1M, 0 = off) caps the cone itself: when the lossless-pruned cone
+still exceeds the budget, the <b>budget-fit search</b> floors it at the
+weakest weight tier whose closed cone fits the cap (<code>t*</code>) —
+exactly equivalent to raising the threshold to <code>t*</code>, the
+applied floor is reported as <code>edge_weight_floor</code> (effective
+cutoff = max(tau, t*)), and the residual slack plus probe trace are
+recorded. When even the full closed cone fits the cap, no floor is
+applied. Shortest mode is never floored.</p>
 <hr/>
 <h2>What "pathfinding" means here</h2>
   <p>
@@ -188,11 +190,11 @@ Shortest mode is never floored.</p>
   <table>
     <tr><th>Knob</th><th>Bounds</th><th>Reported as</th></tr>
     <tr><td><b>Min Synapse Count</b> (asked threshold)</td><td>the discovery cone, a priori</td><td>the folder <code>minsyn_{t}</code></td></tr>
-    <tr><td><b>Edge Budget</b> (<code>graph_edge_limit_bodyid</code>, default 1M)</td><td>the lossless-pruned cone, lossy: floor at w0 = (N-th strongest edge) + 1</td><td><code>edge_weight_floor</code> / <code>edge_budget_landing</code> in the run attributes + a lossy-floor note</td></tr>
+    <tr><td><b>Edge Budget</b> (<code>graph_edge_limit_bodyid</code>, default 1M)</td><td>the lossless-pruned cone, lossy: budget-fit floor at the weakest tier t* whose closed cone fits the cap</td><td><code>edge_weight_floor</code> / <code>edge_budget_landing</code> + residual slack in the run attributes + a lossy-floor note</td></tr>
     <tr><td><b>Max Paths (BodyId)</b> (<code>max_paths_bodyid</code>, 0 = auto → 1M)</td><td>the output path list: keeps all intact paths with bottleneck ≥ tau</td><td><code>tau</code> + <code>paths_complete</code> in the run notes and exports</td></tr>
   </table>
   <p class="small">They compose exactly: effective cutoff =
-  <b>max(tau_budget, w0)</b>, and the run equals a complete run at that
+  <b>max(tau_budget, t*)</b>, and the run equals a complete run at that
   threshold. A complete run reports its natural tau (weakest emitted
   bottleneck) — every threshold up to that value yields the identical
   set.</p>

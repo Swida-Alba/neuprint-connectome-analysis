@@ -641,8 +641,112 @@ def _match_path_edges_to_layers(edges_in_paths, conn_layers):
 
 def prune_layers_hop_budget(conn_layers, sources, targets, bound,
                             pre_col='bodyId_pre', post_col='bodyId_post',
-                            vprint=None, warn_notes=None, label='bodyId'):
-    """Lossless hop-budget pruning of the discovery layer tables.
+                            vprint=None, warn_notes=None, label='bodyId',
+                            max_passes=4):
+    """Lossless hop-budget pruning of the discovery layer tables, iterated
+    to a fixpoint.
+
+    Each pass drops every edge (u, v) that cannot lie on ANY simple
+    source->target path within ``bound`` edges: BFS hop distances distS(.)
+    from the sources and distT(.) to the targets over the current tables,
+    then keep row (u, v) iff distS(u) + 1 + distT(v) <= bound (see
+    ``_hop_budget_pass_once`` for the exactness argument). Passes repeat on
+    the already-pruned tables until a pass drops nothing or ``max_passes``
+    is reached. Iteration is still lossless — every admissible path
+    survives every pass — and distances recomputed on the pruned graph can
+    only grow, so each pass can only surface more dead edges whose routes
+    died with earlier drops: the "lossless, not complete" gap narrows
+    monotonically.
+
+    Unlike ``_trim_edges_with_path_integrity`` (a strength-based trim with
+    a lossy budget), this pass is applied at EVERY depth and in both path
+    modes; no admissible path is removed, so threshold-monotonicity and
+    downstream replay semantics are unaffected.
+
+    Returns (pruned_tables, stats). Inputs are never mutated — the cached
+    FindAllPath graph entries stay shareable across thresholds. ``stats``
+    reports rows_before/rows_dropped/nodes/strongest_retained plus
+    ``passes`` (the number of passes actually run; 1 reproduces the
+    historical single-pass behavior, which fit_edge_budget probes use).
+    """
+    stats = {'rows_before': 0, 'rows_dropped': 0, 'nodes': 0,
+             'strongest_retained': None, 'passes': 0}
+    tables = [
+        c for c in (conn_layers or [])
+        if not (c.is_empty() if hasattr(c, 'is_empty') else c.empty)
+    ]
+    if not tables or bound is None or bound < 1:
+        return conn_layers, stats
+    stats['rows_before'] = sum(
+        t.height if hasattr(t, 'height') else len(t) for t in tables)
+
+    current = tables
+    dropped_total = 0
+    anchored = True
+    for _ in range(max(1, int(max_passes))):
+        current, pstats = _hop_budget_pass_once(
+            current, sources, targets, bound,
+            pre_col=pre_col, post_col=post_col, label=label)
+        stats['passes'] += 1
+        dropped_total += pstats['rows_dropped']
+        if pstats['nodes'] and not stats['nodes']:
+            stats['nodes'] = pstats['nodes']
+        if pstats['strongest_retained'] is not None:
+            stats['strongest_retained'] = pstats['strongest_retained']
+        anchored = pstats['anchored']
+        if pstats['rows_dropped'] == 0 or not anchored:
+            break
+    stats['rows_dropped'] = dropped_total
+    if not anchored and stats['passes'] == 1:
+        # No BFS anchor in the tables at all (e.g. a target id that never
+        # appears): keep the caller's frames untouched, matching the
+        # historical single-pass behavior.
+        return conn_layers, stats
+
+    if dropped_total and vprint is not None:
+        passes_txt = (f' in {stats["passes"]} passes'
+                      if stats['passes'] > 1 else '')
+        if stats['strongest_retained'] is not None:
+            vprint(
+                f'  Hop-budget pruning (lossless): removed {dropped_total:,} of '
+                f'{stats["rows_before"]:,} {label} edges that cannot lie on any '
+                f'source->target path within {bound} edges{passes_txt} — strongest '
+                f'retained path bottleneck: {stats["strongest_retained"]:g} synapses; '
+                f'the strongest (top) paths are unchanged.',
+                level='full',
+            )
+            if warn_notes is not None:
+                warn_notes.append(
+                    f'- [hop-budget pruning, lossless] {dropped_total:,} of '
+                    f'{stats["rows_before"]:,} {label} discovery edges cannot lie '
+                    f'on any source->target path within {bound} edges{passes_txt} '
+                    f'and were removed before pathfinding. No admissible path was '
+                    f'lost; the strongest retained path bottleneck is '
+                    f'{stats["strongest_retained"]:g} synapses — the top paths and '
+                    f'their order are unchanged.'
+                )
+        else:
+            vprint(
+                f'  Hop-budget pruning (lossless): removed {dropped_total:,} of '
+                f'{stats["rows_before"]:,} {label} edges that cannot lie on any '
+                f'source->target path within {bound} edges{passes_txt}.',
+                level='full',
+            )
+            if warn_notes is not None:
+                warn_notes.append(
+                    f'- [hop-budget pruning, lossless] {dropped_total:,} of '
+                    f'{stats["rows_before"]:,} {label} discovery edges cannot lie '
+                    f'on any source->target path within {bound} edges{passes_txt} '
+                    f'and were removed before pathfinding. No admissible path was '
+                    f'lost.'
+                )
+    return current, stats
+
+
+def _hop_budget_pass_once(conn_layers, sources, targets, bound,
+                          pre_col='bodyId_pre', post_col='bodyId_post',
+                          label='bodyId'):
+    """One lossless hop-budget pass (see ``prune_layers_hop_budget``).
 
     Drops every edge (u, v) that cannot lie on ANY simple source->target
     path within ``bound`` edges, BEFORE the pathfinding graph is built:
@@ -658,14 +762,11 @@ def prune_layers_hop_budget(conn_layers, sources, targets, bound,
     few edges that no SIMPLE path uses — pruning is lossless, not
     complete.)
 
-    Unlike ``_trim_edges_with_path_integrity`` (a strength-based trim with
-    a lossy budget), this pass is applied at EVERY depth and in both path
-    modes; no admissible path is removed, so threshold-monotonicity and
-    downstream replay semantics are unaffected.
-
-    Returns (pruned_tables, stats). Inputs are never mutated — the cached
-    FindAllPath graph entries stay shareable across thresholds. ``stats``
-    reports rows_before/rows_dropped/nodes for logging.
+    Returns (pruned_tables, anchored, stats). Inputs are never mutated —
+    the cached FindAllPath graph entries stay shareable across thresholds.
+    ``stats`` reports rows_before/rows_dropped/nodes/strongest_retained;
+    ``anchored`` is False when no source/target id appears in the tables
+    (the caller keeps its frames untouched in that case).
     """
     from collections import deque
 
@@ -676,9 +777,9 @@ def prune_layers_hop_budget(conn_layers, sources, targets, bound,
         if not (c.is_empty() if hasattr(c, 'is_empty') else c.empty)
     ]
     stats = {'rows_before': 0, 'rows_dropped': 0, 'nodes': 0,
-             'strongest_retained': None}
+             'strongest_retained': None, 'anchored': False}
     if not tables or bound is None or bound < 1:
-        return conn_layers, stats
+        return tables, stats
 
     # Pass 1: intern node strings -> int32 codes and build the union
     # adjacency in one sweep (same memory-conscious scheme as
@@ -748,7 +849,8 @@ def prune_layers_hop_budget(conn_layers, sources, targets, bound,
     if not src_codes or not tgt_codes:
         # Nothing to anchor the BFS on: keep the tables untouched rather
         # than pruning the whole graph by accident.
-        return conn_layers, stats
+        return tables, stats
+    stats['anchored'] = True
     dist_s = bfs(src_codes, adj)
     dist_t = bfs(tgt_codes, radj)
 
@@ -780,63 +882,29 @@ def prune_layers_hop_budget(conn_layers, sources, targets, bound,
     # top paths are untouched by the pass. Computed unconditionally so the
     # stats contract is stable.
     strongest_retained = None
-    if True:
-        import heapq
-        INF = float('inf')
-        best = {c: INF for c in src_codes}
-        heap = [(-INF, c) for c in src_codes]
-        heapq.heapify(heap)
-        settled = set()
-        while heap:
-            neg_b, u = heapq.heappop(heap)
-            b = -neg_b
-            if u in settled:
-                continue
-            settled.add(u)
-            for v, w in adj_w.get(u, {}).items():
-                nb = min(b, w)
-                if nb > best.get(v, -INF):
-                    best[v] = nb
-                    heapq.heappush(heap, (-nb, v))
-        cand = [best[c] for c in tgt_codes if c in best]
-        if cand:
-            strongest_retained = max(cand)
+    import heapq
+    INF = float('inf')
+    best = {c: INF for c in src_codes}
+    heap = [(-INF, c) for c in src_codes]
+    heapq.heapify(heap)
+    settled = set()
+    while heap:
+        neg_b, u = heapq.heappop(heap)
+        b = -neg_b
+        if u in settled:
+            continue
+        settled.add(u)
+        for v, w in adj_w.get(u, {}).items():
+            nb = min(b, w)
+            if nb > best.get(v, -INF):
+                best[v] = nb
+                heapq.heappush(heap, (-nb, v))
+    cand = [best[c] for c in tgt_codes if c in best]
+    if cand:
+        strongest_retained = max(cand)
     stats['strongest_retained'] = strongest_retained
 
-    if dropped_total and vprint is not None:
-        if strongest_retained is not None:
-            vprint(
-                f'  Hop-budget pruning (lossless): removed {dropped_total:,} of '
-                f'{stats["rows_before"]:,} {label} edges that cannot lie on any '
-                f'source->target path within {bound} edges — strongest '
-                f'retained path bottleneck: {strongest_retained:g} synapses; '
-                f'the strongest (top) paths are unchanged.',
-                level='full',
-            )
-            if warn_notes is not None:
-                warn_notes.append(
-                    f'- [hop-budget pruning, lossless] {dropped_total:,} of '
-                    f'{stats["rows_before"]:,} {label} discovery edges cannot lie '
-                    f'on any source->target path within {bound} edges and were '
-                    f'removed before pathfinding. No admissible path was lost; '
-                    f'the strongest retained path bottleneck is '
-                    f'{strongest_retained:g} synapses — the top paths and '
-                    f'their order are unchanged.'
-                )
-        else:
-            vprint(
-                f'  Hop-budget pruning (lossless): removed {dropped_total:,} of '
-                f'{stats["rows_before"]:,} {label} edges that cannot lie on any '
-                f'source->target path within {bound} edges.',
-                level='full',
-            )
-            if warn_notes is not None:
-                warn_notes.append(
-                    f'- [hop-budget pruning, lossless] {dropped_total:,} of '
-                    f'{stats["rows_before"]:,} {label} discovery edges cannot lie '
-                    f'on any source->target path within {bound} edges and were '
-                    f'removed before pathfinding. No admissible path was lost.'
-                )
+    stats['rows_dropped'] = dropped_total
     return pruned_tables, stats
 
 
@@ -934,6 +1002,7 @@ def apply_edge_budget_floor(conn_layers, budget, sources, targets, bound,
         floored_tables, sources, targets, bound,
         pre_col=pre_col, post_col=post_col,
         vprint=None, warn_notes=None,
+        max_passes=1,
     )
     stats['prune_dropped'] = prune_stats.get('rows_dropped', 0)
     stats['strongest_retained'] = prune_stats.get('strongest_retained')
@@ -975,6 +1044,222 @@ def apply_edge_budget_floor(conn_layers, budget, sources, targets, bound,
             f'bottleneck < {w0:g} do not exist in the output. Raise the '
             'Edge Budget to keep weaker tiers.')
     return floored_tables, stats
+
+
+def fit_edge_budget(conn_layers, budget, sources, targets, bound,
+                    pre_col='bodyId_pre', post_col='bodyId_post',
+                    vprint=None, warn_notes=None, max_probes=8):
+    """Budget-fit search (§7.4): the weakest weight tier whose lossless-
+    closed cone fits ``budget``.
+
+    Refines the one-shot Fix D landing (``apply_edge_budget_floor``): that
+    landing floors at ``w0 = w1 + 1`` — excluding the boundary-tie mass —
+    and discards whatever slack the closure leaves unused, which on real
+    connectomes can be most of the cap. The fit search instead probes weight
+    tiers downward from the one-shot landing (gallop, then bisect between
+    the last fitting and first overshooting tier) and floors at the weakest
+    tier whose single-pass-closed cone still has <= ``budget`` rows. Every
+    probe is a pure threshold raise, so the floored run is exactly a
+    complete run at ``min_synapse_num = t*``; the cap is honored whenever
+    any tier fits, and zero-count probes count as fits (a weaker tier can
+    revive the cone).
+
+    Returns (tables, stats). ``tables`` are the floored layer tables of the
+    winning tier (the caller's frames unchanged unless a floor was applied).
+    ``stats`` carries ``applied``/``floor`` (= t*)/``landing`` (the first
+    overshooting tier weight — the budget boundary)/``edges_before``/
+    ``edges_after`` (kept rows)/``dropped``/``strongest_retained`` plus the
+    fit-specific ``floor_skipped`` (the full closed cone already fits the
+    cap), ``budget_fully_used``, ``probes``, ``truncated``,
+    ``residual_slack``, ``search_seconds`` and ``probe_trace``
+    [(weight, closed rows, seconds)].
+    """
+    import time as _time
+    import numpy as np
+
+    stats = {'applied': False, 'edges_before': 0, 'landing': None,
+             'floor': None, 'edges_after': 0, 'dropped': 0,
+             'strongest_retained': None, 'floor_skipped': False,
+             'budget_fully_used': False, 'probes': 0, 'truncated': False,
+             'residual_slack': None, 'search_seconds': 0.0, 'probe_trace': []}
+    t_search = _time.perf_counter()
+
+    tables = [c for c in (conn_layers or [])
+              if not (c.is_empty() if hasattr(c, 'is_empty') else c.empty)]
+    if not tables or not budget or int(budget) < 1:
+        return conn_layers, stats
+    budget = int(budget)
+
+    weight_arrays = []
+    total = 0
+    for table in tables:
+        w = (table['weight'].to_list() if hasattr(table, 'iter_rows')
+             else table['weight'].tolist())
+        weight_arrays.append(np.asarray(w, dtype=np.float64))
+        total += len(w)
+    stats['edges_before'] = total
+    if total <= budget:
+        stats['floor_skipped'] = True
+        stats['status'] = 'no_floor_needed'
+        stats['search_seconds'] = _time.perf_counter() - t_search
+        if vprint is not None:
+            vprint(
+                f'  Edge budget (budget-fit): the lossless-pruned cone '
+                f'({total:,} rows) already fits the cap {budget:,} — '
+                f'no floor applied.',
+                level='always')
+        return conn_layers, stats
+
+    all_weights = np.concatenate(weight_arrays)
+
+    def probe(weight):
+        p0 = _time.perf_counter()
+        masked = [t.filter(pl.col('weight') >= weight)
+                  if hasattr(t, 'iter_rows')
+                  else t[t['weight'] >= weight] for t in tables]
+        closed, _pstats = prune_layers_hop_budget(
+            masked, sources, targets, bound,
+            pre_col=pre_col, post_col=post_col, max_passes=1)
+        closed_rows = sum(c.height if hasattr(c, 'height') else len(c)
+                          for c in closed)
+        stats['probes'] += 1
+        stats['probe_trace'].append(
+            (weight, closed_rows, _time.perf_counter() - p0))
+        return closed, closed_rows, _pstats.get('strongest_retained')
+
+    # One-shot landing (quickselect), canonicalized to the strongest tier
+    # weight it admits — E(t_raw) == E(landing_w), so probes are tier weights.
+    kth = total - budget
+    w1 = float(np.partition(all_weights, kth)[kth])
+    t_raw = w1 + 1.0
+    distinct = sorted({float(x) for x in all_weights.tolist()}, reverse=True)
+    landing_w = next((w for w in sorted(distinct) if w >= t_raw), None)
+
+    best_t, best_closed, best_rows = None, None, 0
+    lo_idx = None
+    if landing_w is not None:
+        best_t = landing_w
+        best_closed, best_rows, best_strongest = probe(landing_w)
+        stats['strongest_retained'] = best_strongest
+        lo_idx = distinct.index(landing_w)
+        start = lo_idx + 1
+    else:
+        start = 0
+    hi_idx = None
+    i, step = start, 1
+    while i < len(distinct) and stats['probes'] < max_probes:
+        closed, rows, strongest = probe(distinct[i])
+        if rows <= budget:            # empty counts fit: revival possible
+            best_t, best_closed, best_rows = distinct[i], closed, rows
+            stats['strongest_retained'] = strongest
+            lo_idx = i
+            i += step
+            step *= 2
+        else:
+            hi_idx = i
+            break
+    if hi_idx is None and i >= len(distinct) and lo_idx is not None \
+            and lo_idx < len(distinct) - 1:
+        hi_idx = len(distinct)        # virtual boundary: the tail is unseen
+    while hi_idx is not None and lo_idx is not None and hi_idx - lo_idx > 1 \
+            and stats['probes'] < max_probes:
+        mid = (lo_idx + hi_idx) // 2
+        closed, rows, strongest = probe(distinct[mid])
+        if rows <= budget:
+            best_t, best_closed, best_rows = distinct[mid], closed, rows
+            stats['strongest_retained'] = strongest
+            lo_idx = mid
+        else:
+            hi_idx = mid
+    stats['truncated'] = (
+        (hi_idx is not None and lo_idx is not None and hi_idx - lo_idx > 1)
+        or (hi_idx is None and lo_idx is not None
+            and lo_idx < len(distinct) - 1))
+    stats['budget_fully_used'] = hi_idx is not None
+    stats['search_seconds'] = _time.perf_counter() - t_search
+
+    if lo_idx is not None and lo_idx == len(distinct) - 1 and best_rows > 0:
+        # The bottom tier fits: the whole lossless-closed cone fits the cap.
+        stats['floor_skipped'] = True
+        stats['status'] = 'no_floor_needed'
+        if vprint is not None:
+            vprint(
+                f'  Edge budget (budget-fit): even the full lossless-closed '
+                f'cone ({total:,} rows) fits the cap {budget:,} — no floor '
+                f'applied ({stats["probes"]} probes, '
+                f'{stats["search_seconds"]:.1f}s).',
+                level='always')
+        if warn_notes is not None:
+            warn_notes.append(
+                '- [edge budget, budget-fit] no floor applied: the full '
+                'lossless-closed cone '
+                f'({stats["edges_before"]:,} edges) fits the cap '
+                f'({budget:,}).')
+        return best_closed, stats
+
+    if not best_closed or best_rows == 0:
+        stats['status'] = 'declined'
+        stats['search_seconds'] = _time.perf_counter() - t_search
+        if vprint is not None:
+            vprint(
+                f'  Edge budget (budget-fit): no non-empty floor fits the '
+                f'cap {budget:,} — floor not applied; the full cone was '
+                f'kept.',
+                level='always')
+        if warn_notes is not None:
+            warn_notes.append(
+                '- [edge budget, budget-fit] NOT applied: no weight tier '
+                f'yields a non-empty closed cone within the cap '
+                f'({budget:,}). The full cone was kept '
+                f'({stats["edges_before"]:,} edges).')
+        return conn_layers, stats
+
+    if hi_idx is not None:
+        stats['landing'] = distinct[hi_idx]
+    stats['floor'] = best_t
+    stats['edges_after'] = best_rows
+    stats['dropped'] = total - best_rows
+    stats['residual_slack'] = budget - best_rows
+    stats['applied'] = True
+    stats['status'] = 'floored'
+
+    if vprint is not None:
+        vprint(
+            f'  Edge budget (budget-fit): pruned cone exceeded {budget:,} '
+            f'edges ({total:,}). Floored at t* = {best_t:g} after '
+            f'{stats["probes"]} probes ({stats["search_seconds"]:.1f}s) — '
+            f'{stats["dropped"]:,} edges dropped ({total:,} -> '
+            f'{best_rows:,}; residual slack {stats["residual_slack"]:,}'
+            + (f'; next tier {stats["landing"]:g} would exceed the cap'
+               if stats['landing'] is not None else '')
+            + (', SEARCH TRUNCATED at the probe budget'
+               if stats['truncated'] else '')
+            + f'). Equivalent to a complete run at min synapse = {best_t:g}; '
+            f'paths with bottleneck < {best_t:g} do not exist in this '
+            f'output.',
+            level='always')
+    if warn_notes is not None:
+        strongest_txt = (
+            f' Strongest retained path bottleneck: '
+            f'{stats["strongest_retained"]:g} synapses.'
+            if stats['strongest_retained'] is not None else '')
+        warn_notes.append(
+            '- [edge budget, budget-fit] the lossless-pruned cone exceeded '
+            f'the edge budget ({stats["edges_before"]:,} edges > '
+            f'{budget:,}). Floor applied: t* = {best_t:g} after '
+            f'{stats["probes"]} probes — {stats["dropped"]:,} edges dropped '
+            f'({stats["edges_before"]:,} -> {stats["edges_after"]:,}; '
+            f'residual slack {stats["residual_slack"]:,}).'
+            + (f' The next weaker tier ({stats["landing"]:g}) would exceed '
+               'the cap — the budget is fully used.'
+               if stats['budget_fully_used'] else '')
+            + (' NOTE: the search was truncated at the probe budget; a '
+               'weaker tier might still fit.'
+               if stats['truncated'] else '')
+            + f'{strongest_txt} This run is exactly a complete run at '
+            f'min synapse = {best_t:g}: paths with bottleneck < {best_t:g} '
+            'do not exist in the output.')
+    return best_closed, stats
 
 
 def clear_findallpath_cache(dataset: str = None):
@@ -2594,22 +2879,28 @@ class FindNeuronConnection:
     - 'DP': Backward Reachability (DP) - robust, low memory, no reverse copy
     - 'Bidirectional': Bidirectional BFS - shortest paths first, but stores
       full layer trees (highest memory)
+    - 'Backtracking': iterative-deepening backward DFS - lowest memory,
+      most re-computation (extreme memory constraints)
+
+    The selector only matters for UNBOUNDED complete runs (script/API):
+    Fix C routes any positive ``max_paths_bodyid`` through StrongestFirst
+    regardless of this setting.
     '''
 
     graph_edge_limit_bodyid: Optional[int] = None
     '''
-    Pan-graph edge limit for the bodyId-level graph: only the strongest
-    `graph_edge_limit_bodyid` USABLE edges (by synapse weight, after the
-    reachability filter and adaptive dead-end refill) are kept before
-    pathfinding, so the path count stays manageable (the number of simple
-    paths grows combinatorially with depth, branching^depth).
+    Edge Budget for the bodyId-level discovery cone (Fix D, refined by the
+    budget-fit search): in 'all' mode, when the lossless-pruned cone still
+    exceeds `graph_edge_limit_bodyid` edges, the budget-fit search finds the
+    WEAKEST weight tier whose lossless-closed cone fits the cap and floors
+    the cone there — a pure threshold raise, exactly equivalent to a
+    complete run at ``min_synapse_num = t*``. The applied floor is reported
+    as ``edge_weight_floor`` / ``edge_budget_landing`` together with the
+    residual slack and probe trace. When even the full closed cone fits the
+    cap, no floor is applied (``floor_skipped``).
 
-    None = per-mode default: FindAllPath applies 1,000,000 (only for deep
-    searches, ``max_interlayer >= 3``); FindShortestPath applies 0 (no
-    trimming — shortest enumeration is polynomial, and trimming can
-    inflate reported distances). 0/None = complete graph (no limit); when
-    edges are trimmed a warning is printed telling the user how to restore
-    the full network.
+    0/None = off (complete cone). 'all' mode only — FindShortestPath is
+    never floored (trimming can inflate hop distances).
     '''
 
     max_paths_bodyid: Optional[int] = None
@@ -2619,13 +2910,16 @@ class FindNeuronConnection:
     With ``pathfinding='StrongestFirst'`` (the default) this is the
     STRONGEST-FIRST budget: enumeration emits intact paths in descending
     bottleneck order and stops at the budget, draining ties, so the result
-    is exactly "all intact paths with bottleneck >= the reported tau".
-    None (default) = 1,000,000 in 'all' mode; 0 = unlimited (falls back to
-    the complete MemoizedDFS enumerator).
-    With the legacy enumerators this remains the opt-in safety cap: when
-    set, enumeration stops at the cap in enumeration order (arbitrary —
-    the path set is TRUNCATED and undercounts alternatives) and a loud
-    warning plus a note in the run summary explain it.
+    is exactly "all intact paths with bottleneck >= the reported tau"
+    (tau-equivalent to a complete run at ``min_synapse_num = tau``).
+    StrongestFirst never runs unbounded: None/0 = auto -> internal
+    1,000,000 budget; a positive value is that budget. The same semantics
+    bound FindShortestPath's min-hop enumeration (same auto budget, same
+    tau report).
+
+    Fix C: a positive budget routes ANY algorithm selection through
+    StrongestFirst. Only ``pathfinding=<legacy>`` together with no budget
+    (None/0) runs the unbounded complete enumerators (script/API only).
     '''
 
     capture_replay: bool = False
@@ -11455,11 +11749,11 @@ class FindNeuronConnection:
         frames), so threshold reuse stays safe.
 
         Fix C (2026-09-04): the old top-N bodyId edge trim is retired.
-        Fix D (2026-09-05): ``graph_edge_limit_bodyid`` is repurposed as
-        the EDGE BUDGET — in 'all' mode a lossy weight floor
-        (``apply_edge_budget_floor``, w0 = w1 + 1) caps the cone when it
-        still exceeds the budget after the lossless prunes; the
-        StrongestFirst path budget (``max_paths_bodyid``) bounds the
+        Fix D (2026-09-05, refined by the budget-fit search):
+        ``graph_edge_limit_bodyid`` is the EDGE BUDGET — in 'all' mode
+        ``fit_edge_budget`` finds the weakest weight tier whose closed cone
+        fits the budget and floors the cone there (a pure threshold raise);
+        the StrongestFirst path budget (``max_paths_bodyid``) bounds the
         OUTPUT and reports τ. Shortest mode is never floored.
 
         The pruned non-empty layer tables are returned so the caller can
@@ -11482,13 +11776,13 @@ class FindNeuronConnection:
                 'edges_removed': prune_stats.get('rows_dropped'),
                 'bound_edges': self.max_interlayer + 1,
             }
-        # Fix D (Edge Budget): a LOSSY weight floor caps the enumeration
+        # Fix D (Edge Budget): a lossy weight floor caps the enumeration
         # cone when it still exceeds the budget after the lossless
-        # prunes. w0 = (N-th strongest edge weight) + 1 guarantees the
-        # kept-edge count < N and is reported honestly. 'all' mode only —
-        # shortest mode is never floored (Fix C scope).
+        # prunes. The budget-fit search floors at the weakest tier whose
+        # closed cone fits the cap ('all' mode only — shortest mode is
+        # never floored, Fix C scope) and reports the boundary honestly.
         if path_mode == 'all' and self.graph_edge_limit_bodyid:
-            conn_layers, floor_stats = apply_edge_budget_floor(
+            conn_layers, floor_stats = fit_edge_budget(
                 conn_layers, self.graph_edge_limit_bodyid,
                 sources, targets, self.max_interlayer + 1,
                 vprint=self._vprint, warn_notes=self._warn_notes,
@@ -11498,14 +11792,27 @@ class FindNeuronConnection:
                 self.edge_budget_landing = floor_stats.get('landing')
                 self.graph_pruning_record = {
                     'lossless': False,
-                    'stage': 'edge_budget_floor',
+                    'stage': 'edge_budget_fit',
                     'edge_budget': self.graph_edge_limit_bodyid,
-                    'landing_weight': floor_stats.get('landing'),
                     'floor_weight': floor_stats.get('floor'),
+                    'next_tier_weight': floor_stats.get('landing'),
                     'edges_before': floor_stats.get('edges_before'),
                     'edges_after': floor_stats.get('edges_after'),
-                    'second_lossless_pass_dropped': floor_stats.get(
-                        'prune_dropped'),
+                    'residual_slack': floor_stats.get('residual_slack'),
+                    'budget_fully_used': floor_stats.get(
+                        'budget_fully_used'),
+                    'probes': floor_stats.get('probes'),
+                    'truncated': floor_stats.get('truncated'),
+                    'search_seconds': floor_stats.get('search_seconds'),
+                    'probe_trace': floor_stats.get('probe_trace'),
+                }
+            elif floor_stats.get('floor_skipped'):
+                self.graph_pruning_record = {
+                    'lossless': True,
+                    'stage': 'edge_budget_fit',
+                    'floor_skipped': True,
+                    'edge_budget': self.graph_edge_limit_bodyid,
+                    'edges_before': floor_stats.get('edges_before'),
                 }
         return [
             c for c in conn_layers
@@ -13440,10 +13747,11 @@ class FindNeuronConnection:
 
         Phases: 1) layer-by-layer connection discovery (cache-aware,
         shortest mode uses target-rooted incoming discovery), 2) target
-        identification, 3) path enumeration ('all': selectable algorithm
-        within max_interlayer; 'shortest': all per-pair minimum-hop
-        paths), then enrichment, type-path derivation, saving and
-        visualization — identical for both modes.
+        identification, 3) path enumeration ('all': StrongestFirst —
+        built-in; legacy complete enumerators remain script-selectable —
+        within max_interlayer; 'shortest': per-pair minimum-hop paths
+        under the StrongestFirst budget), then enrichment, type-path
+        derivation, saving and visualization — identical for both modes.
         '''
         import polars as pl
         
@@ -13780,8 +14088,12 @@ class FindNeuronConnection:
             if self.verbose_mode == 'simple':
                 self._vprint(f'\nPhase 1: Fetching all network layers...', level='simple')
             elif self.verbose_mode == 'full':
-                self._vprint(f'\n=== PHASE 1: Fetching network layers '
-                             f'(0 to {self.max_interlayer + 1}; stops early when all targets are discovered) ===', level='full')
+                if path_mode == 'shortest':
+                    self._vprint(f'\n=== PHASE 1: Fetching network layers '
+                                 f'(0 to {self.max_interlayer + 1}; stops early when all targets are discovered) ===', level='full')
+                else:
+                    self._vprint(f'\n=== PHASE 1: Fetching network layers '
+                                 f"(0 to {self.max_interlayer + 1}; full depth — no target early-stop in 'all' mode) ===", level='full')
                 if forward_only:
                     self._vprint('Mode: Layer-by-layer querying (query each neuron once - RECOMMENDED)', level='full')
                     self._vprint('Note: Still fetches ALL connections including recurrent/reciprocal ones', level='full')
@@ -13807,6 +14119,11 @@ class FindNeuronConnection:
             # Number of layer tables to fetch: max_interlayer is an exact
             # bound in both modes (0 = direct connections only).
             fetch_bound = self.max_interlayer + 1
+            # Comprehensive re-querying (forward_only=False) re-fetches the
+            # same (pre, post) pair at every layer; track seen pairs so the
+            # duplicates can be dropped before the graph build (add_edge
+            # would otherwise SUM them and multiply the pair's weight).
+            seen_pairs = None
             
             layer_idx = start_layer
             # Discovery completeness: a run that stops because all targets
@@ -13846,6 +14163,31 @@ class FindNeuronConnection:
                 # alive at once and OOM'ed 32 GB machines on
                 # multi-million-row layers.
                 conn_pl = self._as_polars_conn_frame(conn_df)
+
+                if not forward_only and not conn_pl.is_empty():
+                    # §4.1: drop (pre, post) pairs already fetched at an
+                    # earlier layer — the re-fetched rows are artifacts of
+                    # re-querying, and add_edge would SUM them, multiplying
+                    # the pair's synapse count by the number of layers it
+                    # survives in.
+                    if seen_pairs is not None and seen_pairs.height:
+                        before_dedup = conn_pl.height
+                        conn_pl = conn_pl.join(
+                            seen_pairs,
+                            on=['bodyId_pre', 'bodyId_post'],
+                            how='anti',
+                        )
+                        if conn_pl.height < before_dedup:
+                            self._warn_notes.append(
+                                '- [comprehensive re-query] '
+                                f'{before_dedup - conn_pl.height:,} duplicate '
+                                '(pre, post) rows dropped before the graph '
+                                'build — re-querying would otherwise '
+                                'double-count their weights.')
+                    new_pairs = conn_pl.select('bodyId_pre', 'bodyId_post')
+                    seen_pairs = (new_pairs if seen_pairs is None
+                                  else pl.concat([seen_pairs,
+                                                  new_pairs]).unique())
 
                 if not conn_pl.is_empty():
                     # Add conn_layer column
@@ -14076,13 +14418,11 @@ class FindNeuronConnection:
             _time_mod.time() - _phase_t0, 3)
         _phase_t0 = _time_mod.time()
         self._vprint('Building connection graph...', level='full', end=' ')
-        # Pan-graph edge limit on the per-pair edge TABLE (path integrity:
-        # reachability filter + adaptive dead-end refill; bounds the
-        # combinatorial path count; source-outgoing / target-incoming edges
-        # reserved first, not counted toward the limit). In 'all' mode
-        # applied ONLY for deep searches (max_interlayer >= 3); shallow
-        # searches keep the complete graph. In 'shortest' mode applied only
-        # when explicitly enabled (graph_edge_limit_bodyid > 0).
+        # Fix D (Edge Budget): the discovery cone is losslessly pruned, then
+        # — 'all' mode only — fitted under graph_edge_limit_bodyid by the
+        # budget-fit search (weakest weight tier whose closed cone fits the
+        # cap; reported as edge_weight_floor). Shortest mode is never
+        # floored. See _graph_edge_frames / fit_edge_budget.
         # Slim build: pathfinding reads weights via adj only, and the
         # per-edge attr dicts cost ~350 bytes/edge on million-edge graphs.
         # When no pan-graph edge limit applies, the layers are fed straight
@@ -14234,17 +14574,30 @@ class FindNeuronConnection:
         path_gen = None
         
         if path_mode == 'shortest':
+            # §7.2: StrongestFirst budget on min-hop paths. The budget
+            # resolution mirrors 'all' mode (None/0 -> auto 1M); the Edge
+            # Budget floor never applies here (Fix C/D scope).
+            sf_budget_short = (self.max_paths_bodyid
+                               if self.max_paths_bodyid else 0)
+            if sf_budget_short <= 0:
+                sf_budget_short = 1000000
+            self.trim_policy = 'shortest_strongest_first_path_budget'
+            strongest_first_stats = {}
             if self.verbose_mode == 'simple':
-                self._vprint(f'Finding shortest paths...', level='simple')
+                self._vprint(f'Finding shortest paths (budget '
+                             f'{sf_budget_short:,})...', level='simple')
             elif self.verbose_mode == 'full':
-                self._vprint(f'Using target-rooted shortest-path enumeration '
-                             f'(backward BFS + source-aware guided DFS, capped at '
-                             f'{self.max_interlayer + 1} edges)...', level='full')
+                self._vprint(f'Using target-rooted StrongestFirst enumeration '
+                             f'(per-target shortest-path DAG, best-first on the '
+                             f'path bottleneck, budget {sf_budget_short:,}, '
+                             f'capped at {self.max_interlayer + 1} edges)...',
+                             level='full')
 
-            path_gen = G.find_paths_shortest_backward(
+            path_gen = G.find_paths_shortest_strongest_first(
                 targets_found, source_ID,
                 self.max_interlayer + 1,
-                verbose=(self.verbose_mode in ['simple', 'full']),
+                budget=sf_budget_short,
+                stats=strongest_first_stats,
                 target_cutoffs=getattr(
                     self, '_shortest_target_hop_limits', {}
                 ),

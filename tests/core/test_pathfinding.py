@@ -722,16 +722,17 @@ def test_edge_budget_floor_applies_only_when_cone_exceeds_budget():
             [df.clone() for df in layers], ["S"], ["T"], path_mode="all")
         rows = sum(f.height for f in out)
         if expect_floor:
-            # 6 rows > budget 4: N-th strongest = 2 -> w0 = 3; kept
-            # {10, 9, 8}, then the second lossless pass drops the stranded
-            # S->B (its route to T died with B->T).
-            assert rows == 2, rows
-            assert fc.edge_weight_floor == 3.0
-            assert fc.edge_budget_landing == 2.0
+            # 6 rows > budget 4: the budget-fit search floors at the weakest
+            # tier whose closed cone fits — t* = 2 keeps all four live rows
+            # {10, 9, 8, 2} (the one-shot landing would have kept 2). The
+            # next weaker tier (w=1) would exceed the cap.
+            assert rows == 4, rows
+            assert fc.edge_weight_floor == 2.0
+            assert fc.edge_budget_landing == 1.0
             assert any("edge budget" in n for n in fc._warn_notes)
             weights = sorted(
                 w for f in out for w in f["weight"].to_list())
-            assert all(w >= 3 for w in weights)
+            assert all(w >= 2 for w in weights)
         else:
             # cone within the budget: untouched, no floor record
             assert rows == 6, rows

@@ -45,7 +45,8 @@ fc = FindNeuronConnection(
     output_dir="/absolute/output/paths",
     min_synapse_num=3,
     max_interlayer=2,
-    pathfinding="Bidirectional",  # DP, MemoizedDFS, DFS are alternatives
+    pathfinding="StrongestFirst",  # built-in default; DP/MemoizedDFS/DFS = unbounded complete runs (API)
+    max_paths_bodyid=0,            # auto -> internal 1,000,000 path budget (tau reported when it bites)
     filter_by="bodyId",
     skip_bodyId=True,              # faster type-level first pass
     keyword_in_path_to_remove=["None"],

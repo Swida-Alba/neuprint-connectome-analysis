@@ -20,8 +20,9 @@ fc = FindNeuronConnection(
     min_traversal_probability=0.0,
     max_interlayer=2,
     filter_by="bodyId",                 # or "type"
-    pathfinding="Bidirectional",        # DP, MemoizedDFS, DFS
-    graph_edge_limit_bodyid=0,
+    pathfinding="StrongestFirst",       # built-in default; DP/MemoizedDFS/DFS = unbounded complete runs (API)
+    max_paths_bodyid=0,                 # auto -> internal 1,000,000 path budget (tau reported when it bites)
+    graph_edge_limit_bodyid=0,          # Edge Budget off; set ~1_000_000 to cap the discovery cone
     visualize_before_reconstruct=False,
     search_columns="auto",              # "auto" | "type" | "instance" | "bodyId"
     network_layout="distributed",       # spring, circular, hierarchical
