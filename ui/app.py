@@ -27,6 +27,7 @@ from nicegui import ui, app
 app.add_static_files("/docs", PROJECT_ROOT / "docs")
 
 from ui.config import APP_TITLE, APP_VERSION, APP_PORT, APP_HOST
+from ui.components.banner import create_banner_stack
 
 
 class _TimerTeardownNoiseFilter(logging.Filter):
@@ -2295,6 +2296,80 @@ html, body {
 .drocat-data-viewer-table .drocat-neuron-map-value {
     text-align: left;
 }
+
+/* ---------- Persistent in-page banners (download info etc.) ----------
+   The banner stack (ui/components/banner.py) replaces the old Quasar
+   "Read" notifications: one unified banner size, orange surfaces per
+   theme, a corner × to dismiss, and older banners folded behind a
+   count row when several are alive at once. z-index sits above
+   Quasar's dialogs/menus (6000) and below tooltips (9000). */
+.drocat-banner-stack {
+    position: fixed;
+    left: 50%;
+    transform: translateX(-50%);
+    bottom: 18px;
+    width: min(690px, calc(100vw - 32px));
+    z-index: 6500;
+    pointer-events: none;
+}
+.drocat-banner-stack-body { display: flex; flex-direction: column; gap: 8px; }
+.drocat-banner-stack .drocat-banner,
+.drocat-banner-stack .drocat-banner-fold { pointer-events: auto; }
+.drocat-banner {
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    min-height: 42px;
+    padding: 10px 34px 10px 12px;
+    background: #ffe3c2;
+    color: #000;
+    border: 1px solid #f0b269;
+    border-radius: var(--drocat-radius-sm);
+    box-shadow: var(--drocat-shadow);
+    font-size: 13px;
+    line-height: 1.45;
+}
+.drocat-banner .drocat-banner-icon { color: #b45f06; font-size: 18px; margin-top: 1px; }
+.drocat-banner .drocat-banner-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.drocat-banner .drocat-banner-close { position: absolute; top: 3px; right: 3px; }
+.drocat-banner .drocat-banner-close .q-icon { color: rgba(0, 0, 0, .55); font-size: 16px; }
+body.body--dark .drocat-banner {
+    background: #7c3e0a;
+    color: #ececec;
+    border-color: #a2611f;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, .45);
+}
+body.body--dark .drocat-banner .drocat-banner-icon { color: #f0b269; }
+body.body--dark .drocat-banner .drocat-banner-close .q-icon { color: rgba(236, 236, 236, .75); }
+.drocat-banner-fold {
+    display: flex;
+    align-items: center;
+    padding: 6px 12px;
+    border-radius: 8px;
+    background: #ffe9d4;
+    border: 1px dashed #f0b269;
+    color: #7a4310;
+    font-size: 12px;
+    cursor: pointer;
+    user-select: none;
+}
+.drocat-banner-fold:hover { background: #ffe0bd; }
+.drocat-banner-fold .drocat-banner-fold-icon { font-size: 16px; color: #7a4310; }
+.drocat-banner-fold .drocat-banner-fold-label { font-size: 12px; }
+body.body--dark .drocat-banner-fold {
+    background: #5d2f08;
+    border-color: #8a4a16;
+    color: #f0d9c4;
+}
+body.body--dark .drocat-banner-fold .drocat-banner-fold-icon { color: #f0d9c4; }
+.drocat-banner-folded-list { max-height: 40vh; overflow-y: auto; }
+/* Block variant for embedded notices (results-card run summary): same
+   palette and typography as the stack banners, full card width. */
+.drocat-banner-static {
+    display: block;
+    padding: 10px 12px;
+}
 """
 
 def _neuprint_token_configured() -> bool:
@@ -2341,6 +2416,11 @@ def main_page():
     # dark/light. The persisted preference is restored here so the first
     # paint already uses it.
     dark = ui.dark_mode(value=_saved_dark_mode())
+
+    # Persistent in-page banner stack (download info and similar notices;
+    # replaces the old Quasar "Read" notifications). Fixed overlay, so its
+    # DOM position is irrelevant — created early so every tab can use it.
+    create_banner_stack()
 
     THEME_OPTIONS = [
         ("System", "brightness_auto", None),

@@ -226,13 +226,11 @@ class OutputPanel:
 
             # Persistent run notice (F6): a banner parked above the log —
             # the effective-threshold summary survives log streams and
-            # file refreshes until the next run overwrites it.
+            # file refreshes until the next run overwrites it. Shares the
+            # banner palette/typography (ui/app.py `.drocat-banner`);
+            # drocat-banner-static turns the stack banner into a block.
             self.notice_label = ui.label("").classes(
-                "w-full text-caption"
-            ).style(
-                "background: #fff8e1; border: 1px solid #ffd54f; "
-                "border-radius: 6px; padding: 6px 10px; "
-                "white-space: pre-wrap; color: #5d4037;"
+                "w-full drocat-banner drocat-banner-static"
             ).set_visibility(False)
 
             # Keep the tracker in the original progress-row position, directly

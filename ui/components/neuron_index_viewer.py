@@ -14,6 +14,7 @@ from nicegui import ui
 
 from ..config import PROJECT_ROOT
 from utils.naming_utils import dataset_abbrev
+from .banner import push_banner
 from ..neuron_index import (
     NO_DERIVATION_TEXT,
     build_matches_csv,
@@ -1911,15 +1912,13 @@ def _render_index(
 
         def _deliver_mapping_visualization(html_text: str, name: str,
                                            label: str) -> None:
-            """Browser download + persistent Read banner.  The copy lands
+            """Browser download + persistent banner.  The copy lands
             in the browser's default downloads folder; nothing is saved
             server-side."""
             ui.download.content(html_text, name, "text/html")
-            ui.notify(
+            push_banner(
                 f"{label} saved as {name} — check your browser's default "
-                "downloads folder. Informational only, please double check.",
-                type="info", multi_line=True, close_button='Read',
-                timeout=0)
+                "downloads folder. Informational only, please double check.")
 
         def _view_mapping_visualization(kind: str, variant: str,
                                         entry) -> None:

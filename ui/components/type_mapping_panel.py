@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, List
 
 from nicegui import ui
 
+from .banner import push_banner
 from .common import neuron_list_input
 
 logger = logging.getLogger(__name__)
@@ -92,10 +93,9 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
 
     def _deliver(html: str, name: str) -> None:
         ui.download.content(html, name, "text/html")
-        ui.notify(
+        push_banner(
             f"{name} — check your browser's default downloads folder. "
-            "Informational only, please double check.",
-            type="info", multi_line=True, close_button="Read", timeout=0)
+            "Informational only, please double check.")
 
     def _deliver_flows(src: str, tgt: str, flows, pools,
                        kind: str, variant: str, stamp: str) -> None:
@@ -132,10 +132,9 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
             return
         name = f"bridges_{src.replace(':', '_')}_{tgt.replace(':', '_')}_{stamp}.csv"
         ui.download.content(text, name, "text/csv")
-        ui.notify(
+        push_banner(
             f"{name} — check your browser's default downloads folder. "
-            "Informational only, please double check.",
-            type="info", multi_line=True, close_button="Read", timeout=0)
+            "Informational only, please double check.")
 
     def _pair_card(src: str, tgt: str, flows, pools: dict) -> None:
         from comparison.cross_dataset_type_mapper import bridge_linker_text
@@ -299,10 +298,9 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
             return
         name = f"bridges_all_pairs_{stamp}.csv"
         ui.download.content("\n".join(parts), name, "text/csv")
-        ui.notify(
+        push_banner(
             f"{name} — check your browser's default downloads folder. "
-            "Informational only, please double check.",
-            type="info", multi_line=True, close_button="Read", timeout=0)
+            "Informational only, please double check.")
 
     def _pool_pair(flows, src, tgt, indexes, pools):
         """Pool bodyIds per mapped pair via the preferred chain (§12)."""

@@ -25,6 +25,7 @@ from ..config import (
     has_user_default,
     is_valid_synapse_size,
 )
+from ..components.banner import push_banner
 from ..components.common import (
     combo_input, dataset_selector, multi_select_input, number_input, select_input,
     checkbox_input, dir_input, read_upload_event, section_header, param_grid, tool_page,
@@ -1207,8 +1208,7 @@ def create_skeleton_tab():
         # table downloads once; only pre-site markers are drawn).
         warning = banc_synapse_warning(dataset.value, view)
         if warning:
-            ui.notify(warning, type="warning", timeout=0, close_button="OK",
-                      multi_line=True)
+            push_banner(warning, icon="warning")
 
         constructor_params = {
             "dataset": dataset.value,
