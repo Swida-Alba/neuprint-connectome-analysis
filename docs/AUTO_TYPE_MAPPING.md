@@ -46,6 +46,8 @@ renames between releases:
   `datasets/flywire_FAFB_v783/flywire_FAFB_v783_allneurons_neuron_df.csv`
 - BANC v626: `Alternative Cell Type(s)` in
   `datasets/banc_v626/banc_v626_allneurons_neuron_df.csv`
+- BANC v888: `Alternative Cell Type(s)` in
+  `datasets/banc_v888/banc_v888_allneurons_neuron_df.csv`
 
 When a male-cns `flywireType` value is **no longer a primary `type`** in the
 target dataset but appears in that column, the mapping resolves to the
@@ -155,6 +157,54 @@ columns, and the licensed edges) is regenerated with:
 python scripts/render_source_map_network.py
 # → outputs/type_mapping/source_map_network.html
 ```
+
+#### The bridge-rule algebra, connectors, and preference order
+
+The derivation walk is governed by a closed algebra — the full
+implementation reference lives in
+`docs/technical/AUTO_TYPE_MAPPING_IMPLEMENTATION.md`. The rules:
+
+- **Direct bridge forms** — the pair linkers above plus same-name
+  identity everywhere.
+- **Connectors** (`ROUTE_MIDS`): a derivation chain visits at most ONE
+  intermediate namespace, and only a licensed one — male-cns connects
+  {hemibrain, manc} ↔ {FAFB, BANC} (and the two neuprint datasets
+  through itself); FAFB connects male-cns ↔ BANC; **BANC is never a
+  connector** (never between male-cns and FAFB). Every other pair is
+  direct-only.
+- **Bidirectional, no flips** — the reverse travel direction reverses
+  the hop order (the SAME bridge, not a flip); a two-linker chain
+  cannot reorder its linkers.
+- **Evidence first, same-name LAST** — a same-name pair derives through
+  its metadata bridge when one exists: male-cns `DN1a` rows'
+  `flywireType` cell naming `DN1a` verifies FAFB `DN1a → DN1a` as
+  `flywireType 'DN1a'` instead of the bare "same name — no metadata
+  verification" echo. The same-name chain is the LAST choice, shown
+  only when no evidence edge connects the pair.
+- **Registry-less pairs stop at the arrival** — the post-arrival
+  annotation continuation is a two-linker registry-standard privilege
+  (male-cns↔FAFB etc.); BANC pairs cannot wander their annotation
+  classes after landing.
+- **Untyped labels** (`Unknown`, empty, bare numbers) never become
+  bridge nodes or targets.
+
+#### Per-release namespaces (version control)
+
+BANC v626 and BANC v888 are separate mapping namespaces, each resolving
+against its OWN neuron tables — a `banc_v888` selection can never land
+v626 names or pool v626 bodyIds. `male-cns:v0.9` keeps its own (empty)
+namespace instead of silently borrowing the v1.0 crosswalk. No
+BANC↔BANC cross-release mapping exists.
+
+#### One shared backend (viewer ⇄ panel parity)
+
+The 'See available neurons' mapped view and the cross-dataset tab's
+Type Mapping panel resolve every type through the same
+`mapped_type_targets()` backend (stored/alias resolution ∪
+derivation-bridge ends) and count each mapped target's neurons ONCE —
+both surfaces report identical target sets and unique neuron counts
+(e.g. `circadian_clock`: 21 FAFB types / 242 neurons → 40 male-cns
+targets / 219 unique neurons on both).
 
 ### 3. User Warnings and Double-Check Recommendation
 

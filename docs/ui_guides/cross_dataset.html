@@ -93,6 +93,51 @@
       edges, reciprocal graphs.</li>
   </ul>
 
+  <h2>The Type Mapping panel</h2>
+  <p>The <b>Type Mapping</b> button (enabled when &ge; 2 selected datasets
+    have cached neuron indexes) previews the auto type mapping the run
+    will use — informational only, please double check.</p>
+  <ul>
+    <li><b>Search</b>: one query per chip (exact / starts with / contains /
+      ends with / regex), with dataset-aware type suggestions. A chip that
+      names a taxonomy value (e.g. FAFB <code>cell_type</code>
+      <code>circadian_clock</code>) expands to that label's member types.</li>
+    <li><b>Summary table</b> (per dataset): Matched types, Neurons, Mapped
+      pairs, Mapped types, <b>Mapped neurons</b> (each target's neurons
+      counted ONCE — no per-flow double counting), Unmapped (orphans stay
+      visible).</li>
+    <li><b>Pair cards</b> (<code>src → tgt · N mapped pairs</code>): Type,
+      Mapped to, Neurons (<code>source → foreign</code>), Map used (the
+      derivation linkers, e.g. <code>flywireType 'LMTe01' +
+      additional_type(s) 'LMTe01'</code>), and <b>Pool coverage</b>
+      (<code>covered &lt;target pool&gt; of &lt;target type total&gt;</code>
+      — the merged granularity/coverage column, filled even when one
+      side's bodyId pool is empty).</li>
+    <li><b>Same-name pairs</b>: a pair sharing its name derives through its
+      metadata bridge when one exists (e.g.
+      <code>flywireType 'DN1a'</code> — the male-cns crosswalk cell
+      verifies it); the bare "same name — no metadata verification"
+      warning appears only when no evidence connects the pair.</li>
+    <li><b>Exports</b>: Sankey (type-level / linker), Network (type-level /
+      linker paths), Bridges CSV (one <code>pool_coverage</code> column;
+      the full mapping is never silently dropped — a
+      <code>+N more flows</code> notice points at the CSV when the drawn
+      cap trims).</li>
+    <li><b>Legends</b>: the artifact header carries one chip per entry in
+      the <code>CODE: full name (count)</code> format — datasets (with
+      node counts) and the bridge linker columns (color-coded:
+      <code>flywireType</code> male-cns crosswalk, <code>additional_type(s)</code>
+      FAFB cells, <code>Alternative Cell Type(s)</code> BANC cells,
+      <code>hemibrainType</code>/<code>mancType</code> crosswalks). The
+      linker network lays out ONE column per linker (e.g.
+      <code>MCNS type → flywireType → additional_type(s) → FAFB type</code>
+      = four columns).</li>
+  </ul>
+  <p>Full semantics: <code>docs/AUTO_TYPE_MAPPING.md</code>; implementation
+    reference:
+    <code>docs/technical/AUTO_TYPE_MAPPING_IMPLEMENTATION.md</code>.</p>
+
+
   <h2>Output</h2>
   <p>One timestamped folder per run, e.g.
     <code>cross-dataset_aMe12_to_PPL101_MFB_v626B_v888_20260815_142812/</code>
