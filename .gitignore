@@ -31,9 +31,9 @@ neuron_indexes/*
 !neuron_indexes/flywire_FAFB_v783/
 !neuron_indexes/flywire_FAFB_v783/neuron_index.parquet
 !neuron_indexes/flywire_FAFB_v783/neuron_index_search.parquet
-!neuron_indexes/flywire_BANC_v888/
-!neuron_indexes/flywire_BANC_v888/neuron_index.parquet
-!neuron_indexes/flywire_BANC_v888/neuron_index_search.parquet
+!neuron_indexes/banc_v888/
+!neuron_indexes/banc_v888/neuron_index.parquet
+!neuron_indexes/banc_v888/neuron_index_search.parquet
 
 # Raw ROI-sensitive segmentation downloads, generated visualizations, and
 # the local reproducibility plan. Kept on disk only, never committed.
@@ -64,6 +64,7 @@ _plan/
 *.bak
 *~
 TODO_*.md
+.tmp_splice/
 
 # tokens
 cave_token.txt

@@ -194,7 +194,11 @@ class TestUISharedChain:
 
 class TestRealDataPulls:
     @pytest.fixture(scope="class")
-    def client(self, registered_token):
+    @classmethod
+    def client(cls, registered_token):
+        # classmethod form: class-scoped instance-method fixtures are
+        # deprecated (PytestRemovedIn10Warning) — the fixture only returns
+        # a shared Client, so nothing needs instance attributes.
         from neuprint import Client
         return Client(NEUPRINT_SERVER, dataset="male-cns:v0.9",
                       token=registered_token)
