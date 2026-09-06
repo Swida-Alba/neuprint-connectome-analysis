@@ -14,7 +14,7 @@ from comparison.mapping_visualization import (
 
 MCNS = 'male-cns:v1.0'
 FAFB = 'flywire_FAFB_v783'
-BANC = 'flywire_BANC_v626'
+BANC = 'banc_v626'
 
 
 def _flow(s, st, t, tt, sc, fc, origin='type', linkers=True):

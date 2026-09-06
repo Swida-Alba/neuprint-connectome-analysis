@@ -1,0 +1,343 @@
+"""General bridge-rule tests (user's 2026-09-06 algebra).
+
+Rules under test:
+
+  HEMI --hT-- MCNS;  MANC --mT-- MCNS
+  MCNS --fT--aT-- FAFB | --fT-- | --aT--
+  MCNS --(fT)--ACT-- BANC | --ACT-- | --(fT)--
+  FAFB --aT--ACT-- BANC | --aT-- | --ACT--
+  + same-name identity everywhere.
+
+  Connectors: MCNS connects {HEMI, MANC} <-> {FAFB, BANC} (and the two
+  neuprint datasets through itself); FAFB connects MCNS <-> BANC; BANC is
+  NEVER a connector between MCNS and FAFB.  All bridges are bidirectional
+  (the reverse travel direction reverses the hop order — the SAME bridge,
+  not a flip) and a two-linker chain cannot flip its linker order.
+
+Walk-level tests run on a hermetic bare mapper (internal tables injected
+directly); real-data acceptance tests skip when the local datasets are
+absent.  Probe: local_data/bridge_rules_probe.py.
+"""
+
+from pathlib import Path
+
+import pytest
+
+from comparison.cross_dataset_type_mapper import CrossDatasetTypeMapper
+
+FAFB = 'flywire_FAFB_v783'
+BANC = 'banc_v626'
+MCNS = 'male-cns:v1.0'
+HEMI = 'hemibrain:v1.2.1'
+MANC = 'manc:v1.0'
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+MCNS_TABLE = (REPO_ROOT / 'datasets' / 'male-cns_v1_0'
+              / 'male-cns_v1_0_allneurons_neuron_df.csv')
+
+CHAIN_KEYS = ('dataset', 'column', 'value')
+
+
+def chain_key(chain):
+    return tuple(tuple(hop[k] for k in CHAIN_KEYS) for hop in chain)
+
+
+def _bare_mapper():
+    m = CrossDatasetTypeMapper.__new__(CrossDatasetTypeMapper)
+    m.verbose = False
+    m._loaded = True
+    m._dataset_types = {}
+    m._flywire_primaries = {}
+    m._flywire_alt_to_primary = {}
+    m._flywire_annotation_primaries = {}
+    m._flywire_primary_to_alts = {}
+    m._type_mappings = {}
+    m._reverse_mappings = {}
+    m._conflicts = []
+    m._n_to_1_types = {}
+    m._bridge_provenance = {}
+    m._unsupported_dataset_warnings = set()
+    m._alias_n_to_1_cache = None
+    m._crosswalk_parts_cache = {}
+    m._crosswalk_reverse_cache = {}
+    return m
+
+
+def _seed_flywire(m, fafb_primaries=(), banc_primaries=(),
+                  fafb_ann=None, banc_ann=None):
+    m._flywire_primaries[FAFB] = set(fafb_primaries)
+    m._flywire_primaries[BANC] = set(banc_primaries)
+    for key, ann in ((FAFB, fafb_ann or {}), (BANC, banc_ann or {})):
+        annotation = {v: set(ps) for v, ps in ann.items()}
+        m._flywire_annotation_primaries[key] = annotation
+        filtered = {}
+        for value, primaries in annotation.items():
+            if value in m._flywire_primaries[key]:
+                continue
+            for primary in primaries:
+                filtered.setdefault(value, set()).add(primary)
+        m._flywire_alt_to_primary[key] = filtered
+        inverse = {}
+        for value, primaries in annotation.items():
+            for primary in primaries:
+                inverse.setdefault(primary, set()).add(value)
+        m._flywire_primary_to_alts[key] = inverse
+
+
+def routes(chains):
+    out = []
+    for chain in chains:
+        route = []
+        for hop in chain:
+            if not route or route[-1] != hop['dataset']:
+                route.append(hop['dataset'])
+        out.append(tuple(route))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Reverse crosswalk legs: every crosswalk pair is bidirectional
+# ---------------------------------------------------------------------------
+
+def test_reverse_crosswalk_leg_connects_renamed_hemi_pair():
+    """HEMI --hT-- MCNS reversed: a renamed hemibrain type hops back to
+    the male-cns primary whose hemibrainType cell names it."""
+    m = _bare_mapper()
+    m._dataset_types = {
+        MCNS: {'M1': {'b1'}, 'ALIN4': {'b1'}},
+        HEMI: {'lLN7': {'b1'}},
+    }
+    m._crosswalk_reverse_cache = {'hemibrainType': {'lLN7': {'ALIN4'}}}
+    chains = m.get_type_bridges('lLN7', HEMI, MCNS)
+    expected = (
+        (HEMI, 'type', 'lLN7'),
+        (MCNS, 'hemibrainType', 'ALIN4'),
+    )
+    assert expected in [chain_key(c) for c in chains]
+    # and no chain leaves the pair's two namespaces
+    assert all(set(r) <= {HEMI, MCNS} for r in routes(chains))
+
+
+def test_reverse_flywire_crosswalk_leg_fafb_to_mcns():
+    """MCNS --fT-- FAFB reversed: a FAFB name inside a male-cns flywireType
+    cell hops back to the male-cns primaries (renamed pair, no same-name)."""
+    m = _bare_mapper()
+    _seed_flywire(m, fafb_primaries={'T1'})
+    m._dataset_types = {MCNS: {'M1': {'b1'}}, FAFB: {'T1': {'b1'}}}
+    m._crosswalk_reverse_cache = {'flywireType': {'T1': {'M1'}}}
+    chains = m.get_type_bridges('T1', FAFB, MCNS)
+    expected = (
+        (FAFB, 'type', 'T1'),
+        (MCNS, 'flywireType', 'M1'),
+    )
+    assert expected in [chain_key(c) for c in chains]
+
+
+# ---------------------------------------------------------------------------
+# Connector licensing
+# ---------------------------------------------------------------------------
+
+def test_banc_is_never_a_connector_for_mcns_fafb():
+    """MCNS -- ... -- FAFB must not detour through BANC even when a BANC
+    same-name type annotates the FAFB target."""
+    m = _bare_mapper()
+    _seed_flywire(
+        m,
+        fafb_primaries={'T1'},
+        banc_primaries={'X', 'P1'},
+        banc_ann={'X': {'P1'}},      # BANC rows typed X annotate P1
+    )
+    m._dataset_types = {
+        MCNS: {'X': {'b1'}},         # same-name X in MCNS and BANC
+        FAFB: {'T1': {'b1'}},
+        BANC: {'X': {'b1'}, 'P1': {'b1'}},
+    }
+    chains = m.get_type_bridges('X', MCNS, FAFB)
+    for chain in chains:
+        for hop in chain[1:]:
+            assert hop['dataset'] != BANC, chain
+            assert hop['column'] != 'Alternative Cell Type(s)', chain
+
+
+def test_fafb_connects_mcns_and_banc():
+    """MCNS --fT-- FAFB --ACT-- BANC: the licensed FAFB-connector route."""
+    m = _bare_mapper()
+    _seed_flywire(
+        m,
+        fafb_primaries={'T1'},
+        banc_primaries={'P1'},
+        banc_ann={'T1': {'P1'}},
+    )
+    m._dataset_types = {
+        MCNS: {'M1': {'b1'}},
+        FAFB: {'T1': {'b1'}},
+        BANC: {'P1': {'b1'}},
+    }
+    m._crosswalk_parts_cache = {('flywireType', 'M1'): ['T1']}
+    chains = m.get_type_bridges('M1', MCNS, BANC)
+    assert routes(chains), 'the FAFB connector route must exist'
+    assert (MCNS, FAFB, BANC) in routes(chains)
+
+
+def test_hemi_reaches_banc_only_through_mcns():
+    """HEMI -> BANC: MCNS is the connector; every route stays inside
+    {HEMI, MCNS, BANC} and at least one route uses MCNS."""
+    m = _bare_mapper()
+    _seed_flywire(
+        m,
+        banc_primaries={'P1'},
+        banc_ann={'M1': {'P1'}},
+    )
+    m._dataset_types = {
+        MCNS: {'M1': {'b1'}},
+        HEMI: {'H1': {'b1'}},
+        BANC: {'P1': {'b1'}},
+    }
+    m._crosswalk_reverse_cache = {'hemibrainType': {'H1': {'M1'}}}
+    chains = m.get_type_bridges('H1', HEMI, BANC)
+    assert chains
+    assert all(set(r) <= {HEMI, MCNS, BANC} for r in routes(chains))
+    assert (HEMI, MCNS, BANC) in routes(chains)
+
+
+def test_fafb_banc_pair_has_no_mcns_detour():
+    """FAFB <-> BANC is direct-only: MCNS is not a licensed connector for
+    the flywire pair, so same-name echoes through MCNS are not offered."""
+    m = _bare_mapper()
+    _seed_flywire(
+        m,
+        fafb_primaries={'T1'},
+        banc_primaries={'P1', 'T2'},
+        fafb_ann={'V1': {'T1'}},
+        banc_ann={'V1': {'P1'}},
+    )
+    m._dataset_types = {
+        MCNS: {'V1': {'b1'}},        # the token echoes as an MCNS type
+        FAFB: {'T1': {'b1'}},
+        BANC: {'P1': {'b1'}, 'T2': {'b1'}},
+    }
+    chains = m.get_type_bridges('T1', FAFB, BANC)
+    assert all(set(r) <= {FAFB, BANC} for r in routes(chains))
+
+
+# ---------------------------------------------------------------------------
+# Order and untyped rules
+# ---------------------------------------------------------------------------
+
+def test_two_linker_composed_chain_hop_order_is_fixed():
+    """FAFB --aT--ACT-- BANC forward: aT hop precedes the ACT legs; the
+    reverse direction reverses the hop order (same bridge, not a flip)."""
+    m = _bare_mapper()
+    _seed_flywire(
+        m,
+        fafb_primaries={'T1'},
+        banc_primaries={'P1'},
+        fafb_ann={'V1': {'T1'}},
+        banc_ann={'V1': {'P1'}},
+    )
+    m._dataset_types = {
+        FAFB: {'T1': {'b1'}},
+        BANC: {'P1': {'b1'}},
+    }
+    forward = m.get_type_bridges('T1', FAFB, BANC)
+    expected = (
+        (FAFB, 'type', 'T1'),
+        (FAFB, 'additional_type(s)', 'V1'),
+        (BANC, 'Alternative Cell Type(s)', 'V1'),
+        (BANC, 'Alternative Cell Type(s)', 'P1'),
+    )
+    assert expected in [chain_key(c) for c in forward]
+    reverse = m.get_type_bridges('P1', BANC, FAFB)
+    expected_rev = (
+        (BANC, 'type', 'P1'),
+        (BANC, 'Alternative Cell Type(s)', 'V1'),
+        (FAFB, 'additional_type(s)', 'V1'),
+        (FAFB, 'additional_type(s)', 'T1'),
+    )
+    assert expected_rev in [chain_key(c) for c in reverse]
+
+
+def test_untyped_names_never_become_bridge_targets():
+    """The BANC 'Unknown' convention hub must not appear as a chain end."""
+    m = _bare_mapper()
+    _seed_flywire(
+        m,
+        fafb_primaries={'T1'},
+        banc_primaries={'Unknown', '123', 'P1'},
+        fafb_ann={'V1': {'T1'}},
+        banc_ann={'V1': {'Unknown', '123', 'P1'}},
+    )
+    m._dataset_types = {
+        FAFB: {'T1': {'b1'}},
+        BANC: {'Unknown': {'b1'}, '123': {'b1'}, 'P1': {'b1'}},
+    }
+    chains = m.get_type_bridges('T1', FAFB, BANC)
+    assert chains
+    for chain in chains:
+        assert not CrossDatasetTypeMapper._is_untyped_value(
+            chain[-1]['value']), chain
+
+
+def test_annotation_reverse_evidence_is_mcns_side_only():
+    """MCNS --aT-- FAFB / MCNS --ACT-- BANC are male-cns-side forms: a
+    hemibrain type named in FAFB annotation cells reaches FAFB only via
+    the MCNS connector (hT leg), never by a direct annotation hop."""
+    m = _bare_mapper()
+    _seed_flywire(
+        m,
+        fafb_primaries={'T1'},
+        fafb_ann={'H1': {'T1'}},
+    )
+    m._dataset_types = {
+        MCNS: {'M1': {'b1'}},
+        HEMI: {'H1': {'b1'}},
+        FAFB: {'T1': {'b1'}},
+    }
+    chains = m.get_type_bridges('H1', HEMI, FAFB)
+    for chain in chains:
+        if len(chain) > 2:
+            # any multi-hop chain must pass through MCNS
+            assert (HEMI, MCNS, FAFB) in routes([chain]), chain
+
+
+# ---------------------------------------------------------------------------
+# Real-data acceptance (skip when the local datasets are absent)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(
+    not MCNS_TABLE.exists(),
+    reason='real male-cns v1.0 neuron table not available locally')
+class TestRealBridgeRules:
+    """Real-data acceptance for the general bridge rules."""
+
+    @pytest.fixture(scope='class')
+    def mapper(self):
+        m = CrossDatasetTypeMapper(verbose=False,
+                                   workspace_path=str(REPO_ROOT))
+        assert m.load() is True
+        return m
+
+    def test_renamed_hemi_reaches_mcns(self, mapper):
+        chains = mapper.get_type_bridges('lLN7', HEMI, MCNS)
+        assert chains, 'renamed HEMI type must hop back via hT'
+        assert all(c[-1]['dataset'] == MCNS for c in chains)
+        assert any(
+            any(h['column'] == 'hemibrainType' for h in c[1:])
+            for c in chains)
+
+    def test_hemi_banc_routes_stay_licensed(self, mapper):
+        chains = mapper.get_type_bridges('lLN7', HEMI, BANC)
+        assert chains
+        for chain in chains:
+            for hop in chain[1:]:
+                assert hop['dataset'] in (HEMI, MCNS, BANC), chain
+        assert any(
+            (HEMI, MCNS, BANC) in routes([c]) for c in chains)
+
+    def test_no_untyped_chain_targets(self, mapper):
+        for t in ('MDN', 'CL125', 'APDN3', 'DN1pA', 'lLN7', 'ADNM1 MN'):
+            for src, tgt in ((MCNS, BANC), (BANC, MCNS), (FAFB, BANC),
+                             (BANC, FAFB), (MCNS, HEMI), (HEMI, MCNS)):
+                for chain in mapper.get_type_bridges(t, src, tgt):
+                    assert not CrossDatasetTypeMapper._is_untyped_value(
+                        chain[-1]['value']), (t, src, tgt, chain)

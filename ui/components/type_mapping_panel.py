@@ -36,7 +36,7 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
 
     state: Dict[str, Any] = {"pair_flows": {}, "pools": {}, "meta": {},
                              "composed": None, "datasets": [],
-                             "summary": []}
+                             "summary": [], "orphans": {}}
 
     def _ready() -> bool:
         datasets = list(get_datasets() or [])
@@ -106,14 +106,17 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
         )
         foreign = tgt.replace(":", "_")
         name = f"mapping_{kind}_{variant}_{foreign}_{stamp}.html"
+        orphans = (state.get("orphans") or {}).get((src, tgt))
         if kind == "sankey":
             html = render_mapping_sankey_html(flows, pools=pools,
-                                              variant=variant)
+                                              variant=variant,
+                                              orphans=orphans)
         elif variant == "linker":
             html = render_bridge_linker_html(
                 flows, source_dataset=src, target_dataset=tgt, pools=pools)
         else:
-            html = render_mapping_network_html(flows, pools=pools)
+            html = render_mapping_network_html(flows, pools=pools,
+                                               orphans=orphans)
         if not html:
             ui.notify("Nothing to visualize.", type="info")
             return
@@ -224,9 +227,33 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                          "field": "neurons", "align": "left"},
                         {"name": "pairs", "label": "Mapped pairs",
                          "field": "pairs", "align": "left"},
+                        {"name": "mapped_types", "label": "Mapped types",
+                         "field": "mapped_types", "align": "left"},
+                        {"name": "mapped_neurons",
+                         "label": "Mapped neurons (per pair)",
+                         "field": "mapped_neurons", "align": "left"},
+                        {"name": "unmapped", "label": "Unmapped (orphans)",
+                         "field": "unmapped", "align": "left"},
                     ],
                     rows=summary,
                 ).classes("w-full")
+            else:
+                ui.label("No mappings found for the search across the "
+                         "selected datasets.").classes(
+                    "text-caption drocat-muted")
+            orphan_all = state.get("orphans") or {}
+            if orphan_all:
+                with ui.expansion(
+                        f"Orphan types — no mapped counterpart "
+                        f"({sum(len(v) for v in orphan_all.values())})",
+                        icon="link_off").classes("w-full"):
+                    for (src, tgt), entries in sorted(orphan_all.items()):
+                        names = ", ".join(
+                            f"{e['type']} ({e['count']})"
+                            for e in entries)
+                        ui.label(
+                            f"{src} → {tgt}: {names}").classes(
+                            "text-caption drocat-muted")
             for (src, tgt), flows in sorted(
                     pair_flows.items(),
                     key=lambda kv: (-len(kv[1]), kv[0])):
@@ -440,7 +467,32 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
         # One canonical entry per unordered pair (§12 mirror dedupe).
         pair_flows = dedupe_mirrored_pairs(pair_flows, origins.keys())
 
-        # Per-dataset summary strip: matched types, neurons, mapped pairs.
+        # W3 orphans: queried/expanded types with NO mapped counterpart
+        # in a specific target dataset stay visible — one orphan entry
+        # per (origin, target) with the type's own neuron count.
+        orphans: Dict[tuple, List[Dict[str, Any]]] = {}
+        for origin in sorted(origins):
+            o_types = origins[origin]
+            flowed_sources = {
+                f.get("source_type")
+                for (s, _t), fl in pair_flows.items() if s == origin
+                for f in fl
+            }
+            for target in datasets:
+                if target == origin:
+                    continue
+                missing = [t for t in o_types if t not in flowed_sources]
+                if not missing:
+                    continue
+                counts = count_types_in_index(indexes[origin], missing)
+                orphans[(origin, target)] = [
+                    {"dataset": origin, "type": t,
+                     "count": counts.get(t, 0), "target": target}
+                    for t in missing]
+
+        # Per-dataset summary strip (fig 2): matched types, neurons,
+        # mapped pairs, mapped types, mapped neurons, unmapped — all
+        # derived from the SAME resolution (H2-4).
         summary = []
         for ds in datasets:
             matched = origins.get(ds, [])
@@ -448,8 +500,26 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                 indexes[ds], matched).values()) if matched else 0)
             pairs = sum(len(fl) for (s, t), fl in pair_flows.items()
                         if s == ds or t == ds)
-            summary.append({"dataset": ds, "types": len(matched),
-                            "neurons": neurons, "pairs": pairs})
+            recv_types = {f.get("foreign_type") or ""
+                          for (s, t), fl in pair_flows.items()
+                          if t == ds for f in fl}
+            recv_neurons = sum(int(f.get("foreign_count") or 0)
+                               for (s, t), fl in pair_flows.items()
+                               if t == ds for f in fl)
+            issued_types = {f.get("foreign_type") or ""
+                            for (s, t), fl in pair_flows.items()
+                            if s == ds for f in fl}
+            unmapped = sum(len(v) for (s, _t), v in orphans.items()
+                           if s == ds)
+            summary.append({
+                "dataset": ds,
+                "types": len(matched),
+                "neurons": neurons,
+                "pairs": pairs,
+                "mapped_types": len(recv_types | issued_types),
+                "mapped_neurons": recv_neurons,
+                "unmapped": unmapped,
+            })
 
         html, meta = render_composed_mapping_html(
             pair_flows, node_cap=COMPOSED_NODE_CAP)
@@ -457,7 +527,7 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
         meta["notes"] = notes + list(meta.get("notes", []))
         return {"pair_flows": pair_flows, "pools": pools, "meta": meta,
                 "composed": html, "datasets": datasets,
-                "summary": summary}
+                "summary": summary, "orphans": orphans}
 
     def _apply(outcome: Dict[str, Any]) -> None:
         """Apply the search outcome and render results (event loop)."""

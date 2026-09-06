@@ -38,7 +38,7 @@ from comparison.cross_dataset_type_mapper import (
 
 MCNS = 'male-cns:v1.0'
 FAFB = 'flywire_FAFB_v783'
-BANC = 'flywire_BANC_v626'
+BANC = 'banc_v626'
 HB = 'hemibrain:v1.2.1'
 MANC = 'manc:v1.0'
 
@@ -46,7 +46,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 TABLES = {
     MCNS: REPO_ROOT / 'datasets' / 'male-cns_v1_0' / 'male-cns_v1_0_allneurons_neuron_df.csv',
     FAFB: REPO_ROOT / 'datasets' / 'flywire_FAFB_v783' / 'flywire_FAFB_v783_allneurons_neuron_df.csv',
-    BANC: REPO_ROOT / 'datasets' / 'flywire_BANC_v626' / 'flywire_BANC_v626_allneurons_neuron_df.csv',
+    BANC: REPO_ROOT / 'datasets' / 'banc_v626' / 'banc_v626_allneurons_neuron_df.csv',
     MANC: REPO_ROOT / 'datasets' / 'manc_v1_0' / 'manc_v1_0_allneurons_neuron_df.csv',
     HB: REPO_ROOT / 'datasets' / 'hemibrain_v1_2_1' / 'hemibrain_v1_2_1_allneurons_neuron_df.csv',
 }
@@ -163,7 +163,9 @@ def test_chains_obey_the_source_map(mapper, source, target):
             assert end['dataset'] == target_key, (where, chain)
             assert end['value'] in _namespace_names(mapper, target_key), (
                 where, chain)
-            # every non-type hop is map-licensed (landing namespace)
+            # every non-type hop is map-licensed (landing namespace);
+            # a crosswalk hop landing on the crosswalk home itself is the
+            # licensed REVERSE leg (§bridge rules bidirectionality)
             for hop in chain[1:]:
                 column = hop['column']
                 if column == 'type':
@@ -172,7 +174,9 @@ def test_chains_obey_the_source_map(mapper, source, target):
                     targets
                     for (home, col), targets in BRIDGE_SOURCE_MAP.items()
                     if col == column and home != '*'
-                    and hop['dataset'] in targets
+                    and (hop['dataset'] in targets
+                         or (column in CROSSWALK_COLUMNS
+                             and hop['dataset'] == MCNS))
                 ]
                 assert licensed, (where, hop)
                 if column in CROSSWALK_COLUMNS:
@@ -228,9 +232,13 @@ def test_mdn_mcns_banc_routes_only_through_flywire(mapper):
 
 
 def test_dnp50_banc_annotation_routing_intact(mapper):
-    """DNp50 → BANC MDN routes through the FAFB additional_type(s)
-    evidence and the BANC Alternative Cell Type(s) cells — both keep
-    working under the source map."""
+    """DNp50 → BANC MDN keeps resolving under the source map.
+
+    The FAFB additional_type(s) evidence hop is load-bearing.  The BANC
+    Alternative Cell Type(s) hop is data-dependent: the bucket-curated
+    release carries 'MDN' (no DNp50 alias) in that column for MDN cells,
+    so the same-name identity closes the route instead of an alt rename.
+    """
     chains = mapper.get_type_bridges('DNp50', MCNS, BANC)
     ends = {chain[-1]['value'] for chain in chains}
     assert 'MDN' in ends
@@ -238,10 +246,10 @@ def test_dnp50_banc_annotation_routing_intact(mapper):
         any(h['column'] == 'additional_type(s)' and h['dataset'] == FAFB
             for h in chain[1:])
         for chain in chains)
-    assert any(
-        any(h['column'] == 'Alternative Cell Type(s)'
-            for h in chain[1:])
-        for chain in chains)
+    # The BANC alt bridge stays licensed in the source map even when the
+    # curated data no longer carries a rename for this pair.
+    from comparison.cross_dataset_type_mapper import BRIDGE_SOURCE_MAP
+    assert BRIDGE_SOURCE_MAP[(BANC, 'Alternative Cell Type(s)')] == {BANC}
 
 
 def test_cl125_apdn3_standard_chain_survives(mapper):

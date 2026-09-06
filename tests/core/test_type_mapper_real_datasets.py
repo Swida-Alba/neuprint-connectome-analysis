@@ -37,13 +37,13 @@ from ui.neuron_index import (
 
 MCNS = 'male-cns:v1.0'
 FW = 'flywire_FAFB_v783'
-BANC = 'flywire_BANC_v626'
+BANC = 'banc_v626'
 HB = 'hemibrain:v1.2.1'
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MCNS_CSV = REPO_ROOT / 'datasets' / 'male-cns_v1_0' / 'male-cns_v1_0_allneurons_neuron_df.csv'
 FAFB_CSV = REPO_ROOT / 'datasets' / 'flywire_FAFB_v783' / 'flywire_FAFB_v783_allneurons_neuron_df.csv'
-BANC_CSV = REPO_ROOT / 'datasets' / 'flywire_BANC_v626' / 'flywire_BANC_v626_allneurons_neuron_df.csv'
+BANC_CSV = REPO_ROOT / 'datasets' / 'banc_v626' / 'banc_v626_allneurons_neuron_df.csv'
 
 pytestmark = pytest.mark.skipif(
     not (MCNS_CSV.exists() and FAFB_CSV.exists()),
@@ -241,9 +241,11 @@ def test_fafb_and_banc_namespaces_resolve_independently(mapper):
     # FAFB renamed MDN -> DNp50; BANC still uses MDN as its primary type.
     assert mapper.get_mapped_type('MDN', MCNS, FW) == 'DNp50'
     assert mapper.get_mapped_type('MDN', MCNS, BANC) == 'MDN'
-    # ...and the reverse: BANC renamed DNge036 -> DNfl042 while FAFB keeps it.
+    # ...and the reverse: FAFB keeps DNge036; the bucket-curated BANC
+    # typing also uses DNge036 as its primary now (DNfl042 survives as an
+    # alt alias on the same cells).
     assert mapper.get_mapped_type('DNge036', MCNS, FW) == 'DNge036'
-    assert mapper.get_mapped_type('DNge036', MCNS, BANC) == 'DNfl042'
+    assert mapper.get_mapped_type('DNge036', MCNS, BANC) == 'DNge036'
     # The namespaces stay connected through the shared male-cns crosswalk.
     assert mapper.get_mapped_type('DNp50', FW, BANC) == 'MDN'
     assert mapper.get_mapped_type('MDN', BANC, FW) == 'DNp50'
@@ -409,10 +411,12 @@ def test_get_alias_candidates_namespace_independence_real(mapper):
     assert renamed['aggregates'] is None  # unique reverse (only male-cns MDN)
     assert _candidate(res, BANC, 'MDN')['kind'] == 'same name'
 
-    # BANC renamed DNge036 -> DNfl042 while FAFB keeps it natively.
+    # Bucket-curated BANC typing uses DNge036 as its primary now
+    # (DNfl042 is an alt alias on the same cells), so the query resolves
+    # as a same name in every namespace.
     res_d = mapper.get_alias_candidates('DNge036', [MCNS, FW, BANC])
     assert _candidate(res_d, FW, 'DNge036')['kind'] == 'same name'
-    assert _candidate(res_d, BANC, 'DNfl042')['kind'] == 'renamed'
+    assert _candidate(res_d, BANC, 'DNge036')['kind'] == 'same name'
 
 
 def test_get_alias_candidates_vs_splits_real(mapper):
@@ -552,9 +556,11 @@ def test_standardize_bridge_real_anchors(mapper):
 def test_banc_type_names_route_through_annotations(mapper):
     """BANC type names map into male-cns through FAFB/BANC annotations.
 
-    DNp50 is a BANC v626 primary whose male-cns counterpart is MDN (a
-    rename): the chains must route through the additional Type(S)
-    annotations, and the ambiguity (several chains) is reported.
+    DNp50 routes into male-cns MDN through the FAFB additional Type(S)
+    annotation (via='DNp50').  Under the bucket-curated BANC table the
+    second, BANC-Alternative-Cell-Type(s) chain from the Codex table is
+    gone (its curated alt no longer carries the DNp50 alias), so the
+    route is a single chain.
     """
     chains = mapper.get_type_bridges('DNp50', BANC, MCNS)
     assert chains, 'DNp50 (BANC) must route into male-cns'
@@ -563,18 +569,10 @@ def test_banc_type_names_route_through_annotations(mapper):
         assert chain[0]['dataset'] == BANC and chain[0]['column'] == 'type'
         assert chain[-1]['dataset'] == MCNS
         assert chain[-1]['column'] == 'type'
-    # at least one chain routes through an annotation linker naming MDN
+    # the surviving chain routes through an annotation linker naming MDN
     assert any(
         any(hop['column'] in ('additional_type(s)', 'Alternative Cell Type(s)')
             and hop.get('via') == 'DNp50' for hop in chain)
-        for chain in chains)
-    # DNp50 has no male-cns same-name (it is a rename), so EVERY chain must
-    # carry an annotation linker — the ambiguity is the chain count.
-    assert len(chains) >= 2
-    assert all(
-        any(hop['column'] in ('additional_type(s)',
-                              'Alternative Cell Type(s)')
-            for hop in chain)
         for chain in chains)
 
 
@@ -631,14 +629,15 @@ def test_bridge_linker_text_values_and_hub_note(mapper):
 
     chains = mapper.get_type_bridges('CL125', MCNS, FW)
     info = bridge_linker_text(chains, MCNS, FW, 'APDN3')
-    # the FAFB APDN3 rows carry 'CL125' directly, so the deduplicated
-    # linker text is: direct annotation evidence first, then the
-    # two-linker crosswalk standard
+    # With direction-symmetric registry scoping, the MCNS~FAFB bridges
+    # stay two-namespace: the deduplicated linker text is the crosswalk
+    # standard (LMTe01) followed by the direct annotation evidence
+    # (CL125).
     assert info['text'] == (
-        "additional_type(s) 'CL125' + flywireType 'LMTe01' "
-        "+ additional_type(s) 'LMTe01'")
+        "flywireType 'LMTe01' + additional_type(s) 'LMTe01' "
+        "+ additional_type(s) 'CL125'")
     assert [e['value'] for e in info['entries']] == [
-        'CL125', 'LMTe01', 'LMTe01']
+        'LMTe01', 'LMTe01', 'CL125']
     assert not any(e['indirect'] for e in info['entries'])
 
     # the CL125 -> LTe71 (BANC) "hub chain" was pure transitivity noise
@@ -692,8 +691,10 @@ def test_mapping_sankey_vispath_backend(mapper):
     rows = build_mapping_sankey_paths(flows, pools=pools)
     # pooled ribbons: each drawn chain contributes its pooled count per
     # hop — 4-bodyId bridges (CL125, SLP249) and 2-bodyId bridges
-    # (SLP250, PLP080); two derivation chains per flow survive (hops
-    # aggregate into 20)
+    # (SLP250, PLP080).  With direction-symmetric registry scoping the
+    # composed BANC-landing twins are gone from MCNS~FAFB bridges: each
+    # flow renders its two legitimate chains (the direct annotation row
+    # and the 3-band crosswalk row), restoring the baseline 20 ribbons.
     assert sorted(w for _names, ws in rows for w in ws) == (
         [2] * 10 + [4] * 10)
     # fan-in regression: ribbons are the PAIR's pooled granularity
@@ -946,14 +947,14 @@ def test_dataset_abbreviations_and_version_suffixes():
     from utils.naming_utils import dataset_abbrev, make_unique_dataset_labels
 
     assert dataset_abbrev('flywire_FAFB_v783') == 'FAFB'
-    assert dataset_abbrev('flywire_BANC_v888') == 'BANC'
-    assert dataset_abbrev('flywire_BANC_v626') == 'BANC'
+    assert dataset_abbrev('banc_v888') == 'BANC'
+    assert dataset_abbrev('banc_v626') == 'BANC'
     assert dataset_abbrev('male-cns:v1.0') == 'MCNS'
     assert dataset_abbrev('flywire') == 'FAFB'  # never the FLYW fallback
 
     labels = make_unique_dataset_labels([
         'male-cns:v1.0', 'male-cns:v0.9',
-        'flywire_BANC_v888', 'flywire_BANC_v626',
+        'banc_v888', 'banc_v626',
         'flywire_FAFB_v783'])
     # BOTH colliding labels get versions — a bare MCNS would stay ambiguous
     assert labels == ['MCNS_v1_0', 'MCNS_v0_9', 'BANC_v888', 'BANC_v626',

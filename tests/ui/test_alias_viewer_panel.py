@@ -208,15 +208,15 @@ def test_mapped_type_view_button_warning_and_exit(viewer_client):
         if type(element).__name__ == 'Button' and 'Show mapped types here' in text:
             ordered.append('BUTTON ' + text)
         elif type(element).__name__ == 'Badge' and any(
-                ds in text for ds in ('flywire_', 'manc', 'hemibrain')):
+                ds in text for ds in ('flywire_', 'banc_', 'manc', 'hemibrain')):
             ordered.append('BADGE ' + text)
     assert len(ordered) == 6, ordered
     for i in range(3):
         assert ordered[2 * i].startswith('BADGE '), ordered
         assert ordered[2 * i + 1].startswith('BUTTON '), ordered
     assert 'flywire_FAFB_v783' in ordered[0]
-    assert 'flywire_BANC_v888' in ordered[2]
-    assert 'flywire_BANC_v626' in ordered[4]
+    assert 'banc_v888' in ordered[2]
+    assert 'banc_v626' in ordered[4]
 
     # enter the mapped view from the first dataset block (FAFB: it is the
     # first cached dataset with native matches in the scan order)

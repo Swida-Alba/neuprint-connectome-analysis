@@ -22,7 +22,7 @@ from comparison.label_mapper import LabelMapper
 
 MCNS = 'male-cns:v1.0'
 FW = 'flywire_FAFB_v783'
-BANC = 'flywire_BANC_v626'
+BANC = 'banc_v626'
 HB = 'hemibrain:v1.2.1'
 MANC = 'manc:v1.0'
 
@@ -107,7 +107,7 @@ def rename_mapper(tmp_path):
         neuron_df_path=str(mcns_csv),
         flywire_neuron_df_paths={
             'flywire_FAFB_v783': str(fafb_csv),
-            'flywire_BANC_v626': str(banc_csv),
+            'banc_v626': str(banc_csv),
         },
         verbose=False,
     )
@@ -274,7 +274,7 @@ def alias_mapper(tmp_path):
         neuron_df_path=str(mcns_csv),
         flywire_neuron_df_paths={
             'flywire_FAFB_v783': str(fafb_csv),
-            'flywire_BANC_v626': None,
+            'banc_v626': None,
         },
         verbose=False,
     )
@@ -447,8 +447,8 @@ def test_normalize_dataset_name(mapper):
     norm = mapper._normalize_dataset_name
     assert norm('male_cns') == 'male-cns:v1.0'
     assert norm('male-cns:v0.9') == 'male-cns:v0.9'  # release preserved
-    assert norm('banc') == 'flywire_BANC_v626'
-    assert norm('flywire_BANC_v888') == 'flywire_BANC_v888'
+    assert norm('banc') == 'banc_v626'
+    assert norm('banc_v888') == 'banc_v888'
     assert norm('fafb') == 'flywire_FAFB_v783'
     assert norm('flywire') == 'flywire_FAFB_v783'
     assert norm('hemibrain') == 'hemibrain:v1.2.1'
@@ -465,8 +465,8 @@ def test_get_type_mapping_key(mapper):
     assert key('flywire_FAFB_v783') == 'flywire_FAFB_v783'
     # BANC keeps its own namespace: it resolves renames through its own
     # "Alternative Cell Type(s)" column, so names can differ from FAFB.
-    assert key('flywire_BANC_v626') == 'flywire_BANC_v626'
-    assert key('flywire_BANC_v888') == 'flywire_BANC_v626'
+    assert key('banc_v626') == 'banc_v626'
+    assert key('banc_v888') == 'banc_v626'
     assert key('hemibrain:v1.2.1') == 'hemibrain:v1.2.1'
 
 
@@ -600,7 +600,7 @@ def test_dataset_full_names(mapper):
     assert mapper.get_dataset_full_name(FW) == 'FlyWire FAFB v783'
     # unsupported release -> family + version
     assert mapper.get_dataset_full_name('male-cns:v0.9') == 'male-cns v0.9'
-    assert mapper.get_dataset_full_name('banc') == 'FlyWire BANC v626'
+    assert mapper.get_dataset_full_name('banc') == 'BANC v626'
     assert mapper.get_dataset_full_name('manc:v9.9') == 'MANC v9.9'
     assert mapper.get_dataset_full_name('weird_ds') == 'weird_ds'
 
@@ -675,7 +675,10 @@ def test_export_mapping(tmp_path, mapper):
     out3 = tmp_path / 'subset.csv'
     mapper.export_mapping(str(out3), datasets=[MCNS, FW])
     df3 = pd.read_csv(out3)
-    assert list(df3.columns) == [MCNS, FW]
+    # Additive provenance column: dataset columns keep their positions,
+    # mapping_origin records how each row was derived (crosswalk vs the
+    # same-name / annotation-bridge overlay).
+    assert list(df3.columns) == [MCNS, FW, 'mapping_origin']
 
     out4 = tmp_path / 'all.csv'
     mapper.export_mapping(str(out4), only_different=False)

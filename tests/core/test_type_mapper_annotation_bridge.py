@@ -1,0 +1,510 @@
+"""Annotation-bridge tests for the cross-dataset type mapper.
+
+Covers the designed FAFB <-> BANC bridge (plan
+``_plan/plan-type-mapper-additional-type-bridge.md``):
+
+* the cross-namespace annotation-value landing hop in the derivation
+  walk (FAFB type -> FAFB additional_type(s) -> BANC Alternative Cell
+  Type(s) -> BANC type), including the namespace-aware annotation-
+  chaining guard and the landing/ping-pong linker rules;
+* the production overlay: same-name identity + annotation-bridge
+  candidates (1-to-1 -> mapping, 1-to-N -> conflict with provenance),
+  crosswalk precedence, and untyped-sentinel exclusion;
+* the mapping exports: ``mapping_origin`` column, bridge rows without a
+  male-cns anchor, and release-key resolution in the conflicts export.
+
+Walk-level tests run on a hermetic bare mapper (internal tables injected
+directly); real-data acceptance tests skip when the local datasets are
+absent.
+"""
+
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+from comparison.cross_dataset_type_mapper import (
+    CrossDatasetTypeMapper,
+    TypeMappingConflict,
+    bridge_is_valid,
+    standardize_bridge,
+)
+
+FAFB = 'flywire_FAFB_v783'
+BANC = 'banc_v626'
+MCNS = 'male-cns:v1.0'
+FAFB_RELEASE = 'flywire_FAFB_v783'
+BANC_RELEASE = 'banc_v888'
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+MCNS_TABLE = (REPO_ROOT / 'datasets' / 'male-cns_v1_0'
+              / 'male-cns_v1_0_allneurons_neuron_df.csv')
+
+CHAIN_KEYS = ('dataset', 'column', 'value')
+
+
+def chain_key(chain):
+    return tuple(
+        tuple(hop[k] for k in CHAIN_KEYS) for hop in chain)
+
+
+# ---------------------------------------------------------------------------
+# Hermetic bare mapper: internal tables injected, no files touched
+# ---------------------------------------------------------------------------
+
+def _bare_mapper():
+    m = CrossDatasetTypeMapper.__new__(CrossDatasetTypeMapper)
+    m.verbose = False
+    m._loaded = True
+    m._dataset_types = {}
+    m._flywire_primaries = {}
+    m._flywire_alt_to_primary = {}
+    m._flywire_annotation_primaries = {}
+    m._flywire_primary_to_alts = {}
+    m._type_mappings = {}
+    m._reverse_mappings = {}
+    m._conflicts = []
+    m._n_to_1_types = {}
+    m._bridge_provenance = {}
+    m._unsupported_dataset_warnings = set()
+    m._alias_n_to_1_cache = None
+    m._crosswalk_parts_cache = None
+    return m
+
+
+def _seed_pair(m, *, fafb_primaries, banc_primaries,
+               fafb_ann=None, banc_ann=None):
+    """Seed a synthetic FAFB/BANC namespace pair.
+
+    ``*_ann`` maps annotation value -> {primaries listing it}; the
+    filtered alt table and the primary->alts inverse are derived from it
+    exactly like ``_load_flywire_type_tables`` does.
+    """
+    m._flywire_primaries[FAFB] = set(fafb_primaries)
+    m._flywire_primaries[BANC] = set(banc_primaries)
+    for key, ann in ((FAFB, fafb_ann or {}), (BANC, banc_ann or {})):
+        annotation = {v: set(ps) for v, ps in ann.items()}
+        m._flywire_annotation_primaries[key] = annotation
+        filtered = {}
+        for value, primaries in annotation.items():
+            if value in m._flywire_primaries[key]:
+                continue  # a primary keeps its own identity
+            for primary in primaries:
+                filtered.setdefault(value, set()).add(primary)
+        m._flywire_alt_to_primary[key] = filtered
+        inverse = {}
+        for value, primaries in annotation.items():
+            for primary in primaries:
+                inverse.setdefault(primary, set()).add(value)
+        m._flywire_primary_to_alts[key] = inverse
+    m._type_mappings = {
+        'male-cns:v1.0': {},
+        FAFB: {},
+        BANC: {},
+        'hemibrain:v1.2.1': {},
+        'manc:v1.0': {},
+        'manc:v1.2.1': {},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Walk layer: the composed cross-namespace annotation bridge
+# ---------------------------------------------------------------------------
+
+def test_composed_annotation_bridge_chain_is_derivable():
+    """The designed 4-node chain: FAFB type -> FAFB additional_type(s)
+    token -> BANC Alternative Cell Type(s) token -> BANC type.  The
+    token is NOT a BANC primary, so only the cross-namespace landing hop
+    completes the route."""
+    m = _bare_mapper()
+    _seed_pair(
+        m,
+        fafb_primaries={'T1'},
+        banc_primaries={'P1', 'P2'},
+        fafb_ann={'V1': {'T1'}},
+        banc_ann={'V1': {'P1'}},
+    )
+    chains = m.get_type_bridges('T1', FAFB, BANC)
+    expected = (
+        (FAFB, 'type', 'T1'),
+        (FAFB, 'additional_type(s)', 'V1'),
+        (BANC, 'Alternative Cell Type(s)', 'V1'),
+        (BANC, 'Alternative Cell Type(s)', 'P1'),
+    )
+    assert expected in [chain_key(c) for c in chains]
+    composed = [c for c in chains if chain_key(c) == expected][0]
+    # The landing + arrival legs share the token: the standardized
+    # linkers must dedupe to one linker per annotation column, and the
+    # raw consecutive hops differ in value (token -> primary).
+    linkers = [l for l in standardize_bridge(composed, FAFB, BANC)
+               if l['kind'] == 'linker']
+    assert [(l['column'], l['value']) for l in linkers] == [
+        ('additional_type(s)', 'V1'), ('Alternative Cell Type(s)', 'V1')]
+    assert bridge_is_valid(composed, FAFB, BANC)
+
+
+def test_landing_hop_skipped_when_token_is_a_primary():
+    """When the token IS a primary in the other namespace, only the
+    same-name identity hop connects it — no duplicate annotation-landing
+    edge with a fabricated column label."""
+    m = _bare_mapper()
+    _seed_pair(
+        m,
+        fafb_primaries={'T1'},
+        banc_primaries={'V1'},
+        fafb_ann={'V1': {'T1'}},
+    )
+    neighbors = m._name_neighbors(FAFB, 'V1')
+    assert (BANC, 'V1', 'type', 'V1') in neighbors
+    assert not any(
+        nns == BANC and column == 'Alternative Cell Type(s)'
+        for nns, _name, column, _via in neighbors)
+
+
+def test_raw_pingpong_chain_still_rejected():
+    """The genuine self-loop class (the same annotation hop twice on one
+    dataset) stays invalid after the linker dedupe."""
+    chain = [
+        {'dataset': FAFB, 'column': 'type', 'value': 'T1'},
+        {'dataset': FAFB, 'column': 'additional_type(s)', 'value': 'V1'},
+        {'dataset': FAFB, 'column': 'additional_type(s)', 'value': 'V1',
+         'via': 'V1'},
+    ]
+    assert not bridge_is_valid(chain, FAFB, BANC)
+
+
+def test_reverse_bridge_banc_to_fafb():
+    """Symmetry: a BANC primary's Alternative Cell Type(s) value that is
+    a FAFB annotation token routes to the FAFB primaries annotated with
+    it."""
+    m = _bare_mapper()
+    _seed_pair(
+        m,
+        fafb_primaries={'T1'},
+        banc_primaries={'P1'},
+        fafb_ann={'V1': {'T1'}},
+        banc_ann={'V1': {'P1'}},
+    )
+    chains = m.get_type_bridges('P1', BANC, FAFB)
+    expected = (
+        (BANC, 'type', 'P1'),
+        (BANC, 'Alternative Cell Type(s)', 'V1'),
+        (FAFB, 'additional_type(s)', 'V1'),
+        (FAFB, 'additional_type(s)', 'T1'),
+    )
+    assert expected in [chain_key(c) for c in chains]
+
+
+# ---------------------------------------------------------------------------
+# Production overlay: same-name identity + annotation-bridge candidates
+# ---------------------------------------------------------------------------
+
+def test_overlay_same_name_identity_maps_shared_primaries():
+    m = _bare_mapper()
+    _seed_pair(
+        m,
+        fafb_primaries={'APDN3'},
+        banc_primaries={'APDN3', 'CB1'},
+    )
+    m._apply_annotation_bridge_overlay()
+    assert (m._type_mappings[FAFB]['APDN3'][BANC] == 'APDN3')
+    assert (m._type_mappings[BANC]['APDN3'][FAFB] == 'APDN3')
+    assert m._bridge_provenance[(FAFB, 'APDN3', BANC)]['kind'] == 'same name'
+
+
+def test_overlay_annotation_bridge_one_to_one_maps():
+    m = _bare_mapper()
+    _seed_pair(
+        m,
+        fafb_primaries={'T1'},
+        banc_primaries={'P1'},
+        fafb_ann={'V1': {'T1'}},
+        banc_ann={'V1': {'P1'}},
+    )
+    m._apply_annotation_bridge_overlay()
+    assert m._type_mappings[FAFB]['T1'][BANC] == 'P1'
+    prov = m._bridge_provenance[(FAFB, 'T1', BANC)]
+    assert prov['kind'] == 'annotation bridge'
+    assert prov['target'] == 'P1'
+    assert prov['via'] == ['V1']
+
+
+def test_overlay_multi_candidate_becomes_conflict_not_guess():
+    m = _bare_mapper()
+    _seed_pair(
+        m,
+        fafb_primaries={'T1'},
+        banc_primaries={'P1', 'P2', 'P3'},
+        fafb_ann={'V1': {'T1'}},
+        banc_ann={'V1': {'P1', 'P2', 'P3'}},
+    )
+    m._apply_annotation_bridge_overlay()
+    assert 'T1' not in m._type_mappings[FAFB]
+    conflicts = [c for c in m._conflicts
+                 if c.source_type == 'T1' and c.source_dataset == FAFB]
+    assert len(conflicts) == 1
+    assert conflicts[0].target_types == {'P1', 'P2', 'P3'}
+    assert conflicts[0].relationship == '1-to-N'
+    assert conflicts[0].origin == 'annotation bridge'
+    assert m._bridge_provenance[(FAFB, 'T1', BANC)]['target'] is None
+
+
+def test_overlay_crosswalk_resolution_wins():
+    m = _bare_mapper()
+    _seed_pair(
+        m,
+        fafb_primaries={'T1'},
+        banc_primaries={'P1'},
+        fafb_ann={'V1': {'T1'}},
+        banc_ann={'V1': {'P1'}},
+    )
+    # The crosswalk already resolved this pair: the overlay adds nothing.
+    m._type_mappings[FAFB]['T1'] = {BANC: 'P1'}
+    m._apply_annotation_bridge_overlay()
+    assert (FAFB, 'T1', BANC) not in m._bridge_provenance
+
+
+def test_overlay_does_not_duplicate_existing_conflicts():
+    m = _bare_mapper()
+    _seed_pair(
+        m,
+        fafb_primaries={'T1'},
+        banc_primaries={'P1', 'P2'},
+        fafb_ann={'V1': {'T1'}},
+        banc_ann={'V1': {'P1', 'P2'}},
+    )
+    m._conflicts.append(TypeMappingConflict(
+        source_dataset=FAFB, target_dataset=BANC, source_type='T1',
+        target_types={'P1', 'P2'}, relationship='1-to-N',
+    ))
+    m._apply_annotation_bridge_overlay()
+    matches = [c for c in m._conflicts
+               if c.source_type == 'T1' and c.source_dataset == FAFB]
+    assert len(matches) == 1  # the crosswalk one; provenance still recorded
+    assert m._bridge_provenance[(FAFB, 'T1', BANC)]['target'] is None
+
+
+def test_overlay_excludes_untyped_sentinels():
+    m = _bare_mapper()
+    _seed_pair(
+        m,
+        fafb_primaries={'T1'},
+        banc_primaries={'Unknown', '123', 'P1'},
+        fafb_ann={'V1': {'T1'}},
+        banc_ann={'V1': {'Unknown', '123', 'P1'}},
+    )
+    m._apply_annotation_bridge_overlay()
+    # Unknown/numeric primaries are excluded as candidates; P1 remains
+    # the sole candidate and becomes the mapping.
+    assert m._type_mappings[FAFB]['T1'][BANC] == 'P1'
+    all_targets = [
+        t for c in m._conflicts for t in c.target_types]
+    assert 'Unknown' not in all_targets
+    assert '123' not in all_targets
+
+
+def test_overlay_untyped_token_never_evidences():
+    m = _bare_mapper()
+    _seed_pair(
+        m,
+        fafb_primaries={'T1'},
+        banc_primaries={'P1'},
+        fafb_ann={'Unknown': {'T1'}},   # a useless annotation token
+        banc_ann={'Unknown': {'P1'}},
+    )
+    m._apply_annotation_bridge_overlay()
+    assert 'T1' not in m._type_mappings[FAFB]
+    assert not m._conflicts
+
+
+def test_overlay_flows_through_get_mapped_type():
+    m = _bare_mapper()
+    _seed_pair(
+        m,
+        fafb_primaries={'APDN3', 'T1'},
+        banc_primaries={'APDN3', 'P1'},
+        fafb_ann={'V1': {'T1'}},
+        banc_ann={'V1': {'P1'}},
+    )
+    m._apply_annotation_bridge_overlay()
+    m._build_reverse_lookup()
+    # Same-name identity (the probe's APDN3 case) and the annotation
+    # bridge both resolve through the release name 'banc_v888'.
+    assert m.get_mapped_type('APDN3', FAFB_RELEASE, BANC_RELEASE) == 'APDN3'
+    assert m.get_mapped_type('T1', FAFB_RELEASE, BANC_RELEASE) == 'P1'
+
+
+# ---------------------------------------------------------------------------
+# Exports
+# ---------------------------------------------------------------------------
+
+def test_export_mapping_bridge_rows_and_origin_column(tmp_path):
+    m = _bare_mapper()
+    _seed_pair(
+        m,
+        fafb_primaries={'T1'},
+        banc_primaries={'P1'},
+        fafb_ann={'V1': {'T1'}},
+        banc_ann={'V1': {'P1'}},
+    )
+    m._apply_annotation_bridge_overlay()
+    out = tmp_path / 'mapping.csv'
+    m.export_mapping(str(out), datasets=[FAFB_RELEASE, BANC_RELEASE])
+    df = pd.read_csv(out)
+    assert list(df.columns) == [FAFB_RELEASE, BANC_RELEASE, 'mapping_origin']
+    row = df[(df[FAFB_RELEASE] == 'T1') & (df[BANC_RELEASE] == 'P1')]
+    assert len(row) == 1
+    assert 'annotation bridge' in row['mapping_origin'].iloc[0]
+    assert 'V1' in row['mapping_origin'].iloc[0]
+
+
+def test_export_mapping_same_name_row_respects_only_different(tmp_path):
+    m = _bare_mapper()
+    _seed_pair(
+        m,
+        fafb_primaries={'APDN3'},
+        banc_primaries={'APDN3'},
+    )
+    m._apply_annotation_bridge_overlay()
+    out = tmp_path / 'diff.csv'
+    m.export_mapping(str(out), datasets=[FAFB_RELEASE, BANC_RELEASE],
+                     only_different=True)
+    df = pd.read_csv(out)
+    assert df.empty  # identical-name rows are not "different" mappings
+    out2 = tmp_path / 'all.csv'
+    m.export_mapping(str(out2), datasets=[FAFB_RELEASE, BANC_RELEASE],
+                     only_different=False)
+    df2 = pd.read_csv(out2)
+    assert (df2[FAFB_RELEASE] == 'APDN3').any()
+    assert 'same name' in df2['mapping_origin'].iloc[0]
+
+
+def test_export_mapping_anchor_row_prevents_duplicate(tmp_path):
+    m = _bare_mapper()
+    _seed_pair(
+        m,
+        fafb_primaries={'T1'},
+        banc_primaries={'P1'},
+        fafb_ann={'V1': {'T1'}},
+        banc_ann={'V1': {'P1'}},
+    )
+    m._apply_annotation_bridge_overlay()
+    # An mcns anchor row already carries both endpoints: the overlay must
+    # not append a duplicate row.
+    m._type_mappings[MCNS]['M1'] = {
+        FAFB: 'T1', BANC: 'P1', 'hemibrain:v1.2.1': 'H1',
+    }
+    out = tmp_path / 'mapping.csv'
+    m.export_mapping(str(out), datasets=[MCNS, FAFB_RELEASE, BANC_RELEASE])
+    df = pd.read_csv(out)
+    assert len(df) == 1
+    assert df['mapping_origin'].iloc[0] == 'crosswalk'
+    assert df[MCNS].iloc[0] == 'M1'
+
+
+def test_export_conflicts_resolves_release_keys(tmp_path):
+    m = _bare_mapper()
+    _seed_pair(
+        m,
+        fafb_primaries={'T1'},
+        banc_primaries={'P1', 'P2'},
+        fafb_ann={'V1': {'T1'}},
+        banc_ann={'V1': {'P1', 'P2'}},
+    )
+    m._apply_annotation_bridge_overlay()
+    out = tmp_path / 'conflicts.csv'
+    # The run selected the RELEASE name banc_v888; the conflict is keyed
+    # by the MAPPING namespace banc_v626 — it must survive the scope
+    # filter and carry its origin.
+    m.export_conflicts(str(out), datasets=[FAFB_RELEASE, BANC_RELEASE])
+    df = pd.read_csv(out)
+    assert len(df) == 1
+    assert df['source_dataset'].iloc[0] == FAFB
+    assert df['target_dataset'].iloc[0] == BANC
+    assert df['origin'].iloc[0] == 'annotation bridge'
+
+
+# ---------------------------------------------------------------------------
+# Real-data acceptance (skip when the local datasets are absent)
+# ---------------------------------------------------------------------------
+
+pytestmark_real = pytest.mark.skipif(
+    not MCNS_TABLE.exists(),
+    reason='real male-cns v1.0 neuron table not available locally')
+
+
+@pytest.fixture(scope='module')
+def real_mapper():
+    if not MCNS_TABLE.exists():
+        pytest.skip('real datasets not available')
+    m = CrossDatasetTypeMapper(verbose=False, workspace_path=str(REPO_ROOT))
+    assert m.load() is True
+    return m
+
+
+@pytest.mark.skipif(
+    not MCNS_TABLE.exists(),
+    reason='real male-cns v1.0 neuron table not available locally')
+class TestRealDataAcceptance:
+    """The circadian-gap acceptance set (probe:
+    local_data/type_mapping_bridge_probe.py)."""
+
+    def test_apdn3_same_name_resolves_production(self, real_mapper):
+        assert real_mapper.get_mapped_type(
+            'APDN3', FAFB_RELEASE, BANC_RELEASE) == 'APDN3'
+
+    def test_slnv_still_resolves_via_crosswalk(self, real_mapper):
+        assert real_mapper.get_mapped_type(
+            's-LNv', FAFB_RELEASE, BANC_RELEASE) == 's-LNv_b'
+
+    def test_scpdn3a_yields_annotation_candidates(self, real_mapper):
+        # Derivation view: the composed bridge chains exist for the
+        # shared annotation tokens (CB1770 is a BANC primary).
+        chains = real_mapper.get_type_bridges(
+            's-CPDN3A', FAFB_RELEASE, BANC_RELEASE)
+        ends = {c[-1]['value'] for c in chains}
+        assert {'CB1770', 'CB1791', 'SMP229'} <= ends
+        # Production view: no crosswalk route exists, so the
+        # multi-candidate annotation evidence becomes a 1-to-N conflict.
+        assert real_mapper.get_mapped_type(
+            's-CPDN3A', FAFB_RELEASE, BANC_RELEASE) is None
+        conflict = next(
+            (c for c in real_mapper._conflicts
+             if c.source_type == 's-CPDN3A'
+             and c.source_dataset == FAFB
+             and c.target_dataset == BANC), None)
+        assert conflict is not None
+        assert {'CB1770', 'CB1791', 'SMP229'} <= conflict.target_types
+        assert conflict.origin == 'annotation bridge'
+
+    def test_no_untyped_conflict_targets(self, real_mapper):
+        # Scope to overlay-origin conflicts: legacy crosswalk conflicts
+        # legitimately carry the BANC convention's 'Unknown' type label.
+        for c in real_mapper._conflicts:
+            if c.origin != 'annotation bridge':
+                continue
+            for t in c.target_types:
+                assert not CrossDatasetTypeMapper._is_untyped_value(t), (
+                    c.source_type, t)
+
+
+def test_scoped_pair_bridges_stay_two_namespace():
+    """Direction-symmetric registry scoping (user directive): a FAFB ->
+    male-cns bridge must not detour through BANC — neither namespace hops
+    nor Alternative Cell Type(s) columns. The composed annotation chains
+    belong to the FAFB <-> BANC pair only."""
+    from comparison.cross_dataset_type_mapper import get_type_mapper
+
+    if not MCNS_TABLE.exists():
+        pytest.skip("real datasets not available")
+    m = get_type_mapper()
+    for t in ("APDN3", "s-LNv", "l-LNv", "DN1pA", "CL125", "MDN"):
+        for chain in m.get_type_bridges(t, FAFB, "male-cns:v1.0"):
+            for hop in chain[1:]:
+                assert hop["dataset"] != BANC, (t, chain)
+                assert hop["column"] != "Alternative Cell Type(s)", (t, chain)
+    # the same holds for the reverse direction (symmetric scoping)
+    for t in ("APDN3", "s-LNv", "DN1pA"):
+        for chain in m.get_type_bridges(t, "male-cns:v1.0", FAFB):
+            for hop in chain[1:]:
+                assert hop["dataset"] != BANC, (t, chain)

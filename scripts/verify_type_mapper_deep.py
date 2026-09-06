@@ -324,8 +324,8 @@ def main():
     print("\n== CSV inspection ==")
     index_by_ds = {
         ds: load_cached_neuron_index(ds)
-        for ds in (MCNS, FAFB, HEMI, MANC, "flywire_BANC_v888",
-                   "flywire_BANC_v626")
+        for ds in (MCNS, FAFB, HEMI, MANC, "banc_v888",
+                   "banc_v626")
     }
     for query in ("circadian_clock", "APDN3", "DN1pB", "l-LNv"):
         csv_text = build_matches_csv(MCNS, query)

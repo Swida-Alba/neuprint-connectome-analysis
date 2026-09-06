@@ -127,9 +127,15 @@ def format_bridge(bridge: List[Dict[str, str]]) -> str:
         if is_last and hop.get("via") and hop["column"] != "type":
             # annotation edge: the CELL entry is the via (the old name
             # listed on the reached type's rows); append the reached
-            # type identity as the endpoint hop.
+            # type identity as the endpoint hop.  When the composed
+            # annotation landing already emitted the identical band
+            # (the W1 landing hop carries the same token in the same
+            # namespace+column), skip the duplicate entry — the endpoint
+            # identity still closes the chain.
             entry = hop.get("via") or hop["value"]
-            parts.append(f"{entry}[{abbr}·{hop['column']}]")
+            entry_band = f"{entry}[{abbr}·{hop['column']}]"
+            if not parts or parts[-1] != entry_band:
+                parts.append(entry_band)
             parts.append(f"{hop['value']}[{abbr}·type]")
             continue
         if (is_last and index > 0
@@ -417,7 +423,8 @@ def _pool_title_suffix(count: int) -> str:
 
 def build_mapping_network_graph(flows, *,
                                 pools: Optional[Dict[tuple,
-                                                     Dict[str, Any]]] = None
+                                                     Dict[str, Any]]] = None,
+                                orphans: Optional[List[Dict[str, Any]]] = None
                                 ) -> "nx.DiGraph":
     """Layered left-to-right type-mapping network, bridges hidden.
 
@@ -434,6 +441,12 @@ def build_mapping_network_graph(flows, *,
     coverage-edge weight is the foreign count, summing to the entry
     label's total.  With ``pools``, node hovers also carry the pooled
     bodyId count of the type on its side.
+
+    ``orphans`` (W3) are queried types with NO mapped counterpart in a
+    target dataset: ``{'dataset', 'type', 'count', 'target'}``.  Each is
+    added as an ISOLATED node (no edges) titled with the missing-target
+    note, so an unmapped type stays visible instead of silently
+    disappearing.
     """
     src_pool_ids, tgt_pool_ids = _endpoint_pool_counts(pools)
     graph = nx.DiGraph()
@@ -504,6 +517,28 @@ def build_mapping_network_graph(flows, *,
                                bridge_texts=[],
                                target_dataset=flow.get("target_dataset", ""))
 
+    # W3 orphans: queried types with no mapped counterpart in a target
+    # dataset stay VISIBLE as isolated nodes (degree 0) with the
+    # missing-target note on their hover — never silently dropped.
+    for orphan in (orphans or []):
+        ds = str(orphan.get("dataset", ""))
+        otype = str(orphan.get("type", ""))
+        target = str(orphan.get("target", ""))
+        if not ds or not otype:
+            continue
+        node = f"{otype}|{ds}"
+        count = int(orphan.get("count") or 0)
+        target_code = dataset_abbrev(target) or target
+        if node in graph:
+            graph.nodes[node]["orphan"] = True
+            graph.nodes[node]["title"] = (
+                f"{otype} — no mapped counterpart in "
+                f"{target_code} ({count:,} neurons)")
+        else:
+            graph.add_node(node, label=otype, orphan=True, neurons=count,
+                           title=(f"{otype} — no mapped counterpart in "
+                                  f"{target_code} ({count:,} neurons)"))
+
     # Entry hover titles name what they cover (coverage, not derivation).
     for entry_id, cover in entry_cover.items():
         graph.nodes[entry_id]["title"] = (
@@ -517,18 +552,21 @@ def build_mapping_network_graph(flows, *,
 def render_mapping_network_html(flows, *,
                                 title: str = "Auto type mapping bridges",
                                 pools: Optional[Dict[tuple,
-                                                     Dict[str, Any]]] = None
+                                                     Dict[str, Any]]] = None,
+                                orphans: Optional[List[Dict[str, Any]]] = None
                                 ) -> Optional[str]:
     """Render the type-level mapping network to an HTML string.
 
     Uses the vispath machinery with the dagre layout (types left,
     foreign types middle, query entries right, nodes draggable).
     ``pools`` adds the pooled bodyId counts to the node hovers.
+    ``orphans`` adds isolated unmapped-type nodes (W3).
     Nothing is written to the repository — the temp render file lives
     in the system temp dir.  Returns the HTML text, or None when
     vispath is unavailable.
     """
-    graph = build_mapping_network_graph(flows, pools=pools)
+    graph = build_mapping_network_graph(flows, pools=pools,
+                                        orphans=orphans)
     if not graph.nodes:
         return None
 
@@ -981,7 +1019,9 @@ def write_bridge_linker_html(flows, output_path: str, *,
 def build_mapping_sankey_paths(flows, *, pools: Optional[Dict[tuple,
                                Dict[str, Any]]] = None,
                                variant: str = "linker",
-                               max_flows: int = 500) -> List[tuple]:
+                               max_flows: int = 500,
+                               orphans: Optional[List[Dict[str, Any]]] = None
+                               ) -> List[tuple]:
     """Path rows for the vispath-backend mapping Sankey.
 
     Returns ``[(node_names, hop_weights), ...]`` — one row per rendered
@@ -994,6 +1034,10 @@ def build_mapping_sankey_paths(flows, *, pools: Optional[Dict[tuple,
     result) is supplied, else the flow's neuron counts.  Flows are
     capped at ``max_flows`` (the vispath default ``edgeN_limit`` of
     500); the full mapping lives in the CSV export.
+
+    ``orphans`` (W3) are unmapped queried types — each renders as a
+    single-node row (its own neuron count as the stub weight) with the
+    missing-target note, so the Sankey shows what did NOT map.
     """
     from comparison.cross_dataset_type_mapper import standardize_bridge
 
@@ -1051,13 +1095,30 @@ def build_mapping_sankey_paths(flows, *, pools: Optional[Dict[tuple,
             if key not in seen_paths:
                 seen_paths.add(key)
                 rows.append((names, weights))
+
+    # W3 orphans: single-node rows so unmapped types stay visible in the
+    # Sankey (the stub weight is the orphan's own neuron count).
+    for orphan in (orphans or []):
+        ds = str(orphan.get("dataset", ""))
+        otype = str(orphan.get("type", ""))
+        target = str(orphan.get("target", ""))
+        if not ds or not otype:
+            continue
+        name = (f"{otype} · {dataset_abbrev(ds)} — no counterpart in "
+                f"{dataset_abbrev(target) or target}")
+        key = (name,)
+        if key not in seen_paths:
+            seen_paths.add(key)
+            rows.append(([name], [max(1, int(orphan.get("count") or 1))]))
     return rows
 
 
 def render_mapping_sankey_html(flows, *, pools: Optional[Dict[tuple,
                                Dict[str, Any]]] = None,
                                variant: str = "linker",
-                               max_flows: int = 500) -> Optional[str]:
+                               max_flows: int = 500,
+                               orphans: Optional[List[Dict[str, Any]]] = None
+                               ) -> Optional[str]:
     """Layered mapping Sankey through the vispath backend.
 
     Uses ``create_sankey`` — the generation that embeds the shared
@@ -1068,11 +1129,13 @@ def render_mapping_sankey_html(flows, *, pools: Optional[Dict[tuple,
     is read back as an HTML string (nothing is written to the
     repository).  When the flow cap trims flows, the artifact carries a
     floating "+N more flows" notice pointing at the CSV export (the
-    full mapping is never silently dropped).  Returns None when vispath
+    full mapping is never silently dropped).  ``orphans`` (W3) render
+    as single-node stub rows.  Returns None when vispath
     is unavailable or there is nothing to draw.
     """
     rows = build_mapping_sankey_paths(
-        flows, pools=pools, variant=variant, max_flows=max_flows)
+        flows, pools=pools, variant=variant, max_flows=max_flows,
+        orphans=orphans)
     if not rows:
         return None
     VisualizePath = _import_vispath()

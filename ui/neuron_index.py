@@ -3051,6 +3051,24 @@ def resolve_type_matches(queries, mode: str, datasets,
     origins: Dict[str, List[str]] = {ds: [] for ds in datasets}
     fallback_chips: List[str] = []
     notes: List[str] = []
+
+    def _label_matches_mode(label: str, chip: str, mode: str) -> bool:
+        """Apply the panel's filter mode to one taxonomy label."""
+        lab = label.casefold()
+        chip_l = chip.casefold()
+        if mode == "exact":
+            return lab == chip_l
+        if mode == "startswith":
+            return lab.startswith(chip_l)
+        if mode == "endswith":
+            return lab.endswith(chip_l)
+        if mode == "regex":
+            try:
+                return re.search(chip, label, flags=re.IGNORECASE) is not None
+            except re.error:
+                return False
+        return chip_l in lab  # contains
+
     for chip in [str(q).strip() for q in (queries or []) if str(q).strip()]:
         expr = _type_match_expression(chip, mode)
         matched_any = False
@@ -3072,6 +3090,40 @@ def resolve_type_matches(queries, mode: str, datasets,
                 if names:
                     matched_any = True
                     origins[ds].extend(names)
+        if not matched_any:
+            # Taxonomy-scope resolution (H2-1): a chip that names a
+            # taxonomy VALUE (e.g. FAFB cell_type 'circadian_clock')
+            # expands to the member types of the pooled rows — the same
+            # label columns the staged native sweep searches, resolved
+            # DIRECTLY so the mapping runs from the member types (H2-4:
+            # one resolution feeding every downstream count).
+            for ds in datasets:
+                index = indexes.get(ds) or load_cached_neuron_index(ds)
+                if index is None:
+                    continue
+                labels, _trunc = _native_label_matches(
+                    index, chip, 10 ** 9, 10 ** 9)
+                member: Dict[str, int] = {}
+                label_column = ""
+                label_written = ""
+                for m in labels:
+                    label = str(m.get("label", ""))
+                    if not _label_matches_mode(label, chip, mode):
+                        continue
+                    label_column = m.get("column", label_column)
+                    label_written = label
+                    for t in m.get("types", []):
+                        name = str(t.get("name", ""))
+                        if name:
+                            member[name] = int(t.get("count", 0))
+                if member:
+                    matched_any = True
+                    origins[ds].extend(sorted(member))
+                    notes.append(
+                        f"'{chip}' resolved via taxonomy column "
+                        f"'{label_column}' in {ds} (label "
+                        f"'{label_written}'): {len(member)} types, "
+                        f"{sum(member.values())} neurons")
         if not matched_any:
             fallback_chips.append(chip)
             notes.append(

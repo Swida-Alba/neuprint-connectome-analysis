@@ -21,12 +21,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 MCNS = 'male-cns:v1.0'
 FW = 'flywire_FAFB_v783'
-BANC = 'flywire_BANC_v626'
+BANC = 'banc_v626'
 
 REQUIRED_INDEXES = [
     REPO_ROOT / 'neuron_indexes' / dataset_to_folder / 'neuron_index.parquet'
     for dataset_to_folder in (
-        'male-cns_v1_0', 'flywire_FAFB_v783', 'flywire_BANC_v626',
+        'male-cns_v1_0', 'flywire_FAFB_v783', 'banc_v626',
     )
 ]
 
@@ -98,7 +98,9 @@ def test_search_apdn3_in_malecns_offers_group_members():
     assert native['kind'] == 'same name'
     assert native['count'] == 12
     banc = _entry(matches, BANC)
-    assert _candidate(banc, 'APDN3')['count'] == 8
+    # The bucket's curated typing renamed two of the old APDN3 bodies
+    # (CL085_a / CL083), so the native count dropped from 8 to 7.
+    assert _candidate(banc, 'APDN3')['count'] == 7
 
 
 def test_search_mdn_across_namespaces():
@@ -188,7 +190,7 @@ def test_native_expansion_finds_dn3_relatives_in_other_datasets():
     assert counts == sorted(counts, reverse=True)
 
     banc = by_ds[BANC]
-    assert {c['name']: c['count'] for c in banc['types']}['APDN3'] == 8
+    assert {c['name']: c['count'] for c in banc['types']}['APDN3'] == 7
 
     # datasets with nothing related are reported as absent (not in the list)
     assert MCNS not in by_ds          # selected dataset is not scanned
@@ -230,11 +232,11 @@ def test_native_expansion_taxonomy_labels_map_covered_types():
     neuron = banc_labels['circadian_neuron']
     assert neuron['column'] == 'Class'
     # covered types carry their mapping relation when one exists ...
-    kinds = {t.get('mapped', {}).get('kind') for t in neuron['types']}
+    kinds = {(t.get('mapped') or {}).get('kind') for t in neuron['types']}
     assert {'renamed', 'same name', 'one of N'} <= kinds
     # ... and BANC v888 covers an unmapped type, still shown so the user is
     # led to inspect it in the other dataset.
-    v888 = {e['dataset']: e for e in native}['flywire_BANC_v888']
+    v888 = {e['dataset']: e for e in native}['banc_v888']
     v888_labels = {l['label']: l for l in v888['labels']}
     assert any(
         t.get('mapped') is None for t in v888_labels['circadian_neuron']['types']
@@ -309,7 +311,7 @@ def test_build_matches_csv_exports_uncapped_entries():
         if r['dataset'] == BANC and r['entry_kind'] == 'type'
         and r['name'] == 'APDN3'
     ]
-    assert banc_apdn3 and banc_apdn3[0]['neuron_count'] == '8'
+    assert banc_apdn3 and banc_apdn3[0]['neuron_count'] == '7'
 
 
 def test_enrich_attaches_mapped_type_names_per_block():
