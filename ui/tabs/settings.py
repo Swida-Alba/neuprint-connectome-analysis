@@ -443,18 +443,22 @@ def create_settings_tab():
                     from src.utils.flywire_readiness import (
                         flywire_manual_skeleton_instruction,
                     )
-                    from src.flywire_ids import is_flywire_dataset
+                    from src.flywire_ids import is_banc_dataset, is_flywire_dataset
                 except ImportError:
                     from utils.flywire_readiness import (
                         flywire_manual_skeleton_instruction,
                     )
-                    from flywire_ids import is_flywire_dataset
-                if is_flywire_dataset(dataset):
+                    from flywire_ids import is_banc_dataset, is_flywire_dataset
+                if is_flywire_dataset(dataset) and not is_banc_dataset(dataset):
                     message = flywire_manual_skeleton_instruction(dataset)
                     skeleton_status.text = "Manual download required (FlyWire)"
                     skeleton_result.text = f"❌ {message}"
                     ui.notify(message, type="warning")
                     return
+                if is_banc_dataset(dataset):
+                    skeleton_status.text = (
+                        "Fetching BANC skeletons from the public release "
+                        "bucket...")
                 ok = skeleton_puller.start(
                     dataset,
                     max_workers=int(parallel_input.value or 1),
@@ -941,26 +945,16 @@ def create_settings_tab():
                 </div>
                 """)
 
-            with ui.expansion("FlyWire BANC v888 / v626 · strict local preparation", icon="download").classes("w-full"):
+            with ui.expansion("BANC v888 / v626 · automatic public-bucket preparation", icon="download").classes("w-full"):
                 ui.html("""
                 <div style="color:var(--drocat-navy)" class="text-sm">
-                    <p style="color:var(--drocat-warn)"><b>BANC is local-file only in this toolkit.</b> A CAVE token does not enable BANC API fetching; use the matching local dataset folder and raw files below.</p>
+                    <p><b>BANC metadata + connections now download automatically</b> from the public BANC release bucket (no token, no manual download): just select <code>banc_v888</code> or <code>banc_v626</code> in a tool and run it. Skeletons for 3D visualization fetch on demand from the same bucket.</p>
 
-                    <p class="mt-3 font-bold" style="color:var(--drocat-cobalt)">1. Choose one exact dataset identifier</p>
-                    <p>Use either <code>flywire_BANC_v888</code> or <code>flywire_BANC_v626</code>. Never mix files from one version into the other version's folder.</p>
+                    <p class="mt-3 font-bold" style="color:var(--drocat-cobalt)">Choose one exact dataset identifier</p>
+                    <p>Use either <code>banc_v888</code> or <code>banc_v626</code>. Never mix files from one version into the other version's folder. Legacy <code>flywire_BANC_*</code> spellings keep working.</p>
 
-                    <p class="mt-3 font-bold" style="color:var(--drocat-cobalt)">2. Create the input folder and copy the raw files</p>
-                    <p>For the selected identifier, create <code>datasets/&lt;dataset&gt;/downloads/</code> and keep these exact Codex filenames:</p>
-                    <ul class="list-disc ml-4">
-                        <li><code>neurons.csv.gz</code></li>
-                        <li><code>connections_princeton.csv.gz</code></li>
-                    </ul>
-                    <p>Do not save a manually renamed <code>*_allneurons_neuron_df.csv</code> in the root; that is a generated output, not an input.</p>
-
-                    <p class="mt-3 font-bold" style="color:var(--drocat-cobalt)">3. Convert the files</p>
-                    <pre style="white-space:pre-wrap"><code>python src/BANC_file_converter.py                 # v626 default
-python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter import ensure_banc_data; d='flywire_BANC_v888'; ensure_banc_data(d, 'datasets/' + d)"</code></pre>
-                    <p>Alternatively, select the matching BANC identifier in a tool and run it; preparation is invoked automatically.</p>
+                    <p class="mt-3 font-bold" style="color:var(--drocat-cobalt)">Everything is automatic</p>
+                    <p>Selecting a BANC dataset in any tool triggers the one-time download and conversion — no manual downloads, no CAVE token. Skeletons fetch on demand from the same bucket during 3D visualization.</p>
 
                     <p class="mt-3 font-bold" style="color:var(--drocat-cobalt)">4. Verify before running analysis</p>
                     <p>The selected dataset root should contain <code>&lt;dataset&gt;_allneurons_neuron_df.parquet</code> (and CSV) and <code>&lt;dataset&gt;_merged_connections.parquet</code>. Click <b>Refresh</b> above and look for <b>✓ local</b>.</p>

@@ -44,6 +44,35 @@ _DATASET_VERSION_SUFFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Legacy BANC identifiers carried the ``flywire_`` prefix while BANC was
+# handled as a FlyWire release.  BANC is now analyzed from its own public
+# release data (not through FlyWire), so the canonical names drop the
+# prefix; the legacy spellings stay accepted as aliases everywhere a
+# dataset name enters the app.
+_BANC_LEGACY_NAME_RE = re.compile(
+    r"^(?:flywire[_-]?)?banc(?:[_-](v\d+(?:[._]\d+)*))?$",
+    re.IGNORECASE,
+)
+
+
+def canonical_dataset_name(dataset) -> str:
+    """Return the canonical dataset identifier for *dataset*.
+
+    Legacy ``flywire_BANC_v626``-style names map to ``banc_v626`` /``banc_v888``
+    (per release).  Bare ``flywire_BANC`` / ``banc`` pin to the historical
+    default BANC release ``banc_v626`` — the same pin the cross-dataset type
+    mapper applies — so the unversioned alias can never straddle the two
+    BANC releases (v626 and v888 are distinct datasets with distinct id
+    spaces).  Every other identifier — including NeuPrint colon forms and
+    the FAFB release — passes through unchanged.
+    """
+    text = str(dataset or "").strip()
+    match = _BANC_LEGACY_NAME_RE.match(text)
+    if match:
+        version = match.group(1)
+        return f"banc_{version.lower()}" if version else "banc_v626"
+    return text
+
 
 def dataset_version(dataset) -> str | None:
     """Return a normalized version token from a dataset identifier.

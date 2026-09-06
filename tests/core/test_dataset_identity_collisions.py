@@ -41,32 +41,32 @@ def test_cross_dataset_mapper_preserves_explicit_release_tokens(tmp_path):
     )
 
     assert mapper._normalize_dataset_name("male-cns:v0.9") == "male-cns:v0.9"
-    assert mapper._normalize_dataset_name("flywire_BANC_v888") == "flywire_BANC_v888"
+    assert mapper._normalize_dataset_name("banc_v888") == "banc_v888"
     # Releases remain distinct dataset identities, but Male-CNS releases
     # share the Male-CNS type namespace, FAFB releases share the FAFB
     # namespace, and BANC releases share the BANC namespace.
     assert mapper._get_type_mapping_key("male-cns:v0.9") == "male-cns:v1.0"
-    assert mapper._get_type_mapping_key("flywire_BANC_v888") == "flywire_BANC_v626"
+    assert mapper._get_type_mapping_key("banc_v888") == "banc_v626"
     assert mapper.get_mapped_type(
         "MeVPLo2", "male-cns:v0.9", "flywire_FAFB_v783"
     ) == "MTe07"
     assert mapper.get_mapped_type(
-        "MeVPLo2", "male-cns:v0.9", "flywire_BANC_v888"
+        "MeVPLo2", "male-cns:v0.9", "banc_v888"
     ) == "MTe07"
     assert mapper.get_mapped_type(
-        "MTe07", "flywire_BANC_v888", "male-cns:v0.9"
+        "MTe07", "banc_v888", "male-cns:v0.9"
     ) == "MeVPLo2"
-    assert mapper.get_canonical_type("MTe07", "flywire_BANC_v888") == "MeVPLo2"
+    assert mapper.get_canonical_type("MTe07", "banc_v888") == "MeVPLo2"
     assert mapper._unsupported_dataset_warnings == set()
 
     resolved = mapper.resolve_type_across_datasets(
         "MeVPLo2",
-        ["male-cns:v0.9", "flywire_BANC_v888"],
+        ["male-cns:v0.9", "banc_v888"],
         source_dataset="male-cns:v0.9",
     )
     assert resolved == {
         "male-cns:v0.9": "MeVPLo2",
-        "flywire_BANC_v888": "MTe07",
+        "banc_v888": "MTe07",
     }
 
 
@@ -80,8 +80,8 @@ def test_mapper_legends_keep_both_colliding_releases():
         "M_v0_9": "male-cns v0.9",
     }
     assert mapper.get_all_dataset_short_codes(
-        ["flywire_BANC_v626", "flywire_BANC_v888"]
+        ["banc_v626", "banc_v888"]
     ) == {
-        "B_v626": "FlyWire BANC v626",
-        "B_v888": "FlyWire BANC v888",
+        "B_v626": "BANC v626",
+        "B_v888": "BANC v888",
     }

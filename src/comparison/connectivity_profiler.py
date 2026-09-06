@@ -38,6 +38,11 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+try:
+    from ..utils.naming_utils import canonical_dataset_name
+except ImportError:  # pragma: no cover - direct package imports
+    from utils.naming_utils import canonical_dataset_name
+
 
 # ============================================================================
 # Connectivity Status Classification
@@ -1490,12 +1495,12 @@ class ConnectivityProfiler:
     
     def _get_cache_parquet_path(self, dataset: str) -> Path:
         """Get path to parquet cache file for a dataset."""
-        safe_dataset = dataset.replace(':', '_').replace('.', '_')
+        safe_dataset = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
         return self.cache_dir / safe_dataset / 'connectivity_profiles.parquet'
     
     def _get_profile_batch_dir(self, dataset: str) -> Path:
         """Get path to batch directory for per-profile files (interruption-safe)."""
-        safe_dataset = dataset.replace(':', '_').replace('.', '_')
+        safe_dataset = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
         return self.cache_dir / safe_dataset / '_profile_batch_files'
     
     def _save_profile_to_batch_file(self, profile: ConnectivityProfile):
@@ -2379,7 +2384,7 @@ class ConnectivityProfiler:
         
         if is_local:
             # Check for local connection files
-            safe_name = dataset.replace(':', '_').replace('.', '_')
+            safe_name = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
             src_dir = Path(__file__).parent.parent
             project_root = src_dir.parent
             datasets_folder = project_root / 'datasets'
@@ -2457,7 +2462,7 @@ class ConnectivityProfiler:
                 available = self.ensure_data_available(dataset, raise_on_missing=False)
                 
                 if is_local:
-                    safe_name = dataset.replace(':', '_').replace('.', '_')
+                    safe_name = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
                     src_dir = Path(__file__).parent.parent
                     project_root = src_dir.parent
                     dataset_path = project_root / 'datasets' / safe_name
@@ -2772,7 +2777,7 @@ class ConnectivityProfiler:
         global _PROFILER_CONN_CACHE, _PROFILER_CONN_CACHE_LOCK, _PROFILER_CACHE_LOGGED
         
         # Build cache key
-        safe_name = dataset.replace(':', '_').replace('.', '_')
+        safe_name = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
         
         # Quick check without lock (for already cached data in profiler cache)
         if safe_name in _PROFILER_CONN_CACHE and 'conn_df' in _PROFILER_CONN_CACHE[safe_name]:
@@ -3018,7 +3023,7 @@ class ConnectivityProfiler:
             return pd.DataFrame(), pd.DataFrame()
         
         min_syn = self.config.min_synapse_threshold
-        safe_name = dataset.replace(':', '_').replace('.', '_')
+        safe_name = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
         
         # Get pre-built indexes for O(1) lookup
         cache_entry = _PROFILER_CONN_CACHE.get(safe_name, {})
@@ -3224,7 +3229,7 @@ class ConnectivityProfiler:
             return {}
         
         # Get pre-built indexes for O(1) lookup per bodyId
-        safe_name = dataset.replace(':', '_').replace('.', '_')
+        safe_name = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
         cache_entry = _PROFILER_CONN_CACHE.get(safe_name, {})
         bodyid_pre_index = cache_entry.get('bodyid_pre_index', {})
         bodyid_post_index = cache_entry.get('bodyid_post_index', {})
@@ -4038,7 +4043,7 @@ class ConnectivityProfiler:
         src_dir = Path(__file__).parent.parent
         project_root = src_dir.parent
         datasets_folder = project_root / 'datasets'
-        safe_name = dataset.replace(':', '_').replace('.', '_')
+        safe_name = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
         dataset_path = datasets_folder / safe_name
 
         neurons_files = [
@@ -4128,7 +4133,7 @@ class ConnectivityProfiler:
             src_dir = Path(__file__).parent.parent
             project_root = src_dir.parent
             datasets_folder = project_root / 'datasets'
-            safe_name = dataset.replace(':', '_').replace('.', '_')
+            safe_name = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
             dataset_path = datasets_folder / safe_name
             
             neurons_files = [
@@ -4201,7 +4206,7 @@ class ConnectivityProfiler:
             src_dir = Path(__file__).parent.parent
             project_root = src_dir.parent
             datasets_folder = project_root / 'datasets'
-            safe_name = dataset.replace(':', '_').replace('.', '_')
+            safe_name = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
             dataset_path = datasets_folder / safe_name
             
             neurons_files = [
@@ -4293,7 +4298,7 @@ class ConnectivityProfiler:
             src_dir = Path(__file__).parent.parent
             project_root = src_dir.parent
             datasets_folder = project_root / 'datasets'
-            safe_name = dataset.replace(':', '_').replace('.', '_')
+            safe_name = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
             dataset_path = datasets_folder / safe_name
             
             neurons_files = [
@@ -4701,7 +4706,7 @@ class ConnectivityProfiler:
         # Clear disk cache
         if self.config.use_cache:
             if dataset:
-                safe_dataset = dataset.replace(':', '_').replace('.', '_')
+                safe_dataset = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
                 dataset_cache_dir = self.cache_dir / safe_dataset
                 if dataset_cache_dir.exists():
                     import shutil
@@ -4745,7 +4750,7 @@ class ConnectivityProfiler:
     def _get_local_dataset_types(self, dataset: str) -> Optional[List[str]]:
         """Get types from local dataset files."""
         # Sanitize dataset name
-        safe_name = dataset.replace(':', '_').replace('.', '_')
+        safe_name = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
         
         # Find dataset folder
         src_dir = Path(__file__).parent.parent

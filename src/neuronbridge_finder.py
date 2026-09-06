@@ -59,6 +59,11 @@ if _REPO_ROOT not in sys.path:
 import bokeh.palettes
 import numpy as np
 import pandas as pd
+
+try:
+    from .utils.naming_utils import canonical_dataset_name
+except ImportError:  # pragma: no cover - src laid bare on sys.path
+    from utils.naming_utils import canonical_dataset_name
 try:
     from .flywire_ids import (
         is_flywire_dataset,
@@ -192,9 +197,9 @@ LIBRARY_TO_DATASET = {
     'FlyWire_FAFB': 'flywire_FAFB_v783',
     'FlyWire_FAFB_v783': 'flywire_FAFB_v783',
     'FlyWire_FAFB_v783_realign': 'flywire_FAFB_v783',
-    'FlyWire_BANC': 'flywire_BANC_v626',
-    'FlyWire_BANC_v626': 'flywire_BANC_v626',
-    'FlyWire_BANC_v888': 'flywire_BANC_v888',
+    'FlyWire_BANC': 'banc_v626',
+    'FlyWire_BANC_v626': 'banc_v626',
+    'FlyWire_BANC_v888': 'banc_v888',
     'FlyEM_Optic_Lobe': 'optic-lobe_v1_1',
 }
 
@@ -216,9 +221,9 @@ LIBRARY_TO_DATASET_NAME = {
     'FlyWire_FAFB': 'flywire_FAFB_v783',
     'FlyWire_FAFB_v783': 'flywire_FAFB_v783',
     'FlyWire_FAFB_v783_realign': 'flywire_FAFB_v783',
-    'FlyWire_BANC': 'flywire_BANC_v626',
-    'FlyWire_BANC_v626': 'flywire_BANC_v626',
-    'FlyWire_BANC_v888': 'flywire_BANC_v888',
+    'FlyWire_BANC': 'banc_v626',
+    'FlyWire_BANC_v626': 'banc_v626',
+    'FlyWire_BANC_v888': 'banc_v888',
     'FlyEM_Optic_Lobe': 'optic-lobe:v1.1',
 }
 
@@ -236,8 +241,8 @@ DATASET_ABBREVIATIONS = {
     'manc_v1_2_1': 'MANC',
     'manc:v1.2.1': 'MANC',
     'flywire_FAFB_v783': 'FAFB',
-    'flywire_BANC_v626': 'BANC',
-    'flywire_BANC_v888': 'BANC',
+    'banc_v626': 'BANC',
+    'banc_v888': 'BANC',
     'optic-lobe_v1_1': 'OLOB',
     'optic-lobe:v1.1': 'OLOB',
 }
@@ -3849,7 +3854,7 @@ class NeuronBridgeFinder:
         
         for dataset in datasets:
             # Convert dataset name to folder format
-            dataset_folder = dataset.replace(':', '_').replace('.', '_')
+            dataset_folder = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
             
             # Check if already loaded in cache
             if dataset_folder in self._neuron_dfs:
@@ -5483,7 +5488,7 @@ class NeuronBridgeFinder:
                 if dataset_folder:
                     datasets_to_search.append(dataset_folder)
                 else:
-                    datasets_to_search.append(ds.replace(':', '_').replace('.', '_'))
+                    datasets_to_search.append(canonical_dataset_name(ds).replace(':', '_').replace('.', '_'))
             # Remove duplicates while preserving order
             datasets_to_search = list(dict.fromkeys(datasets_to_search))
         else:
@@ -5572,7 +5577,7 @@ class NeuronBridgeFinder:
                 return LIBRARY_TO_DATASET.get(lib)
         # Try folder names directly
         for lib, folder in LIBRARY_TO_DATASET.items():
-            if folder.lower() == dataset_name.lower().replace(':', '_').replace('.', '_'):
+            if folder.lower() == canonical_dataset_name(dataset_name.lower()).replace(':', '_').replace('.', '_'):
                 return folder
         return None
     
@@ -6213,7 +6218,7 @@ class NeuronBridgeFinder:
         # Group by dataset
         for dataset, ds_df in neurons_df.groupby('dataset'):
             # Normalize dataset name for filename (replace : with _)
-            ds_filename = dataset.replace(':', '_').replace('.', '_')
+            ds_filename = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
             
             # Save dataset-specific neurons file
             ds_neurons_file = os.path.join(output_path, f'{line_name}_{ds_filename}_neurons.csv')
@@ -6328,7 +6333,7 @@ class NeuronBridgeFinder:
                 
                 for dataset in datasets:
                     ds_group = group[group['dataset'] == dataset]
-                    ds_filename = dataset.replace(':', '_').replace('.', '_')
+                    ds_filename = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
                     
                     if len(ds_group) > 0:
                         # Use the first (or only) matching row
@@ -6375,7 +6380,7 @@ class NeuronBridgeFinder:
                 'hemibrain_v1_2_1',
                 'manc_v1_0',
                 'manc_v1_2_1',
-                'flywire_BANC_v626',
+                'banc_v626',
             ]
             
             # Get available datasets in the data
@@ -6548,7 +6553,7 @@ class NeuronBridgeFinder:
             
             if dataset_folder is None:
                 # Try direct conversion if mapping fails
-                dataset_folder = dataset.replace(':', '_').replace('.', '_').replace('-', '_')
+                dataset_folder = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_').replace('-', '_')
             
             # Use _load_neuron_df_for_dataset which handles loading and pulling if needed
             neuron_df = self._load_neuron_df_for_dataset(dataset_folder)
@@ -7154,7 +7159,7 @@ class NeuronBridgeFinder:
             
             # Verify bodyIds exist in local dataset before attempting visualization
             # This prevents the "No neurons matching" error from NeuPrint
-            dataset_folder = dataset.replace(':', '_').replace('.', '_')
+            dataset_folder = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
             local_neuron_df = self._load_neuron_df_for_dataset(dataset_folder)
             
             if local_neuron_df is None or local_neuron_df.empty:

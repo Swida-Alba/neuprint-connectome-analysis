@@ -1,30 +1,22 @@
 {
   "datasets": {
-    "flywire_BANC_v888": {
-      "dataset": "flywire_BANC_v888",
-      "folder": "flywire_BANC_v888",
-      "index_bytes": 2715333,
-      "rows": 158262,
-      "search_bytes": 3931169,
-      "source": "flywire_BANC_v888_allneurons_neuron_df.csv"
+    "banc_v626": {
+      "dataset": "banc_v626",
+      "folder": "banc_v626",
+      "index_bytes": 14797752,
+      "rows": 185165,
+      "search_bytes": 5830724,
+      "source": "banc_v626_allneurons_neuron_df.csv"
     },
-    "flywire_FAFB_v783": {
-      "dataset": "flywire_FAFB_v783",
-      "folder": "flywire_FAFB_v783",
-      "index_bytes": 6297139,
-      "rows": 139255,
-      "search_bytes": 3681830,
-      "source": "flywire_FAFB_v783_allneurons_neuron_df.csv"
-    },
-    "male-cns:v1.0": {
-      "dataset": "male-cns:v1.0",
-      "folder": "male-cns_v1_0",
-      "index_bytes": 8530319,
-      "rows": 176422,
-      "search_bytes": 3833987,
-      "source": "male-cns_v1_0_allneurons_neuron_df.csv"
+    "banc_v888": {
+      "dataset": "banc_v888",
+      "folder": "banc_v888",
+      "index_bytes": 16212656,
+      "rows": 188508,
+      "search_bytes": 6057124,
+      "source": "banc_v888_allneurons_neuron_df.csv"
     }
   },
-  "generated_utc": "2026-08-16T05:44:54Z",
+  "generated_utc": "2026-09-05T17:30:45Z",
   "index_dir": "neuron_indexes"
 }

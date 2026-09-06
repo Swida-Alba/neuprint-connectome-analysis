@@ -16,6 +16,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+try:
+    from .utils.naming_utils import canonical_dataset_name
+except ImportError:  # pragma: no cover - src laid bare on sys.path
+    from utils.naming_utils import canonical_dataset_name
+
 
 JS_SAFE_INTEGER = 2**53 - 1
 SIGNED_INT64_MAX = 2**63 - 1
@@ -40,6 +45,13 @@ def is_banc_dataset(dataset: object) -> bool:
     return "banc" in str(dataset or "").strip().lower()
 
 
+def is_fafb_dataset(dataset: object) -> bool:
+    """Return whether *dataset* identifies the FlyWire FAFB release."""
+
+    normalized = str(dataset or "").strip().lower()
+    return "fafb" in normalized and not is_banc_dataset(normalized)
+
+
 def is_flywire_dataset(dataset: object) -> bool:
     """Return whether *dataset* belongs to the FlyWire family.
 
@@ -52,9 +64,14 @@ def is_flywire_dataset(dataset: object) -> bool:
 
 
 def dataset_folder(dataset: object) -> str:
-    """Map a dataset identifier to the repository folder convention."""
+    """Map a dataset identifier to the repository folder convention.
 
-    return str(dataset or "").replace(":", "_").replace(".", "_")
+    Legacy BANC identifiers canonicalize first, so ``banc_v888``
+    resolves to the same folder as ``banc_v888`` in ``datasets/`` and
+    ``cache/``.
+    """
+
+    return canonical_dataset_name(dataset).replace(":", "_").replace(".", "_")
 
 
 def resolve_flywire_dataset_dir(

@@ -11,6 +11,11 @@ import pandas as pd
 from typing import Dict, List, Union, Optional, Any, Tuple
 from collections import defaultdict
 
+try:
+    from ..utils.naming_utils import canonical_dataset_name
+except ImportError:  # pragma: no cover - direct package imports
+    from utils.naming_utils import canonical_dataset_name
+
 
 class LabelMapper:
     """
@@ -693,7 +698,7 @@ class LabelMapper:
     
     def _sanitize_dataset_name(self, dataset: str) -> str:
         """Convert dataset name to column-safe format."""
-        return dataset.replace(':', '_').replace('.', '_').replace('-', '_')
+        return canonical_dataset_name(dataset).replace(':', '_').replace('.', '_').replace('-', '_')
     
     def _unsanitize_dataset_name(self, column: str) -> str:
         """

@@ -12,6 +12,11 @@ import pandas as pd
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 
+try:
+    from ..utils.naming_utils import canonical_dataset_name
+except ImportError:  # pragma: no cover - direct package imports
+    from utils.naming_utils import canonical_dataset_name
+
 
 class DataLoader:
     """
@@ -317,7 +322,7 @@ class DataLoader:
     
     def _sanitize_name(self, name: str) -> str:
         """Convert name to filesystem-safe format."""
-        return name.replace(':', '_').replace('.', '_').replace('-', '_')
+        return canonical_dataset_name(name).replace(':', '_').replace('.', '_').replace('-', '_')
     
     def list_available_datasets(self) -> List[str]:
         """

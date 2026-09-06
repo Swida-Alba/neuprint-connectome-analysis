@@ -13,28 +13,27 @@ import os
 from pathlib import Path
 from typing import Callable, Optional
 
+try:
+    from .naming_utils import canonical_dataset_name
+except ImportError:  # pragma: no cover - src laid bare on sys.path
+    from utils.naming_utils import canonical_dataset_name
+
+# Re-exported so callers can keep importing the family predicates from this
+# module (the canonical definitions live in flywire_ids).
+try:
+    from ..flywire_ids import is_banc_dataset, is_fafb_dataset
+except ImportError:  # pragma: no cover - src laid bare on sys.path
+    from flywire_ids import is_banc_dataset, is_fafb_dataset
+
 
 class FlyWireSkeletonAccessError(RuntimeError):
     """Raised when a FlyWire morphology workflow cannot obtain skeletons."""
 
 
-def is_banc_dataset(dataset: object) -> bool:
-    """Return whether *dataset* identifies a BANC release."""
-
-    return "banc" in str(dataset or "").strip().lower()
-
-
-def is_fafb_dataset(dataset: object) -> bool:
-    """Return whether *dataset* identifies the FlyWire FAFB release."""
-
-    normalized = str(dataset or "").strip().lower()
-    return "fafb" in normalized and not is_banc_dataset(normalized)
-
-
 def dataset_folder(dataset: object) -> str:
     """Map a dataset identifier to the repository folder convention."""
 
-    return str(dataset or "").replace(":", "_").replace(".", "_")
+    return canonical_dataset_name(dataset).replace(":", "_").replace(".", "_")
 
 
 def flywire_manual_skeleton_instruction(
@@ -57,11 +56,15 @@ def flywire_manual_skeleton_instruction(
         root = Path(__file__).resolve().parents[2]
         dataset_dir = root / "datasets" / folder
     download_dir = Path(dataset_dir) / "downloads"
-    bundle = (
-        "the BANC download from"
-        if key == "banc"
-        else "the FAFB skeleton bundle (sk_lod1_783_healed.zip) from"
-    )
+    if key == "banc":
+        return (
+            f"Download All Skeletons is not needed for BANC ('{dataset_name}'):\n"
+            "  skeletons fetch on demand from the public BANC release bucket "
+            "(banc_public_data.fetch_banc_swc)\n"
+            f"  and cache locally under cache/{folder}/skeletons/"
+            "raw_skeletons/ during visualization."
+        )
+    bundle = "the FAFB skeleton bundle (sk_lod1_783_healed.zip) from"
     return (
         f"Download All Skeletons is disabled for FlyWire datasets "
         f"('{dataset_name}'); skeletons must be downloaded manually:\n"
@@ -115,6 +118,11 @@ def print_download_instructions(
     print(f"  3. Run the one-time converter:")
     print(f"     python src/{converter}.py")
     print()
+    if key == "banc":
+        print("  Preferred: skip the manual download entirely — DROCAT")
+        print("  fetches BANC metadata + connections from the public release")
+        print("  bucket automatically (banc_public_data.prepare_dataset_tables).")
+        print()
     if key == "fafb":
         print("  Optional FAFB extras (names/coordinates/neurons/cell_stats/")
         print("  consolidated_cell_types .csv.gz, synapse table, sk_lod1_783_healed.zip)")
@@ -223,21 +231,33 @@ def local_fafb_skeleton_source(
     return None
 
 
+def _banc_public_source(root: Path, folder: str) -> str:
+    """BANC skeletons always come from the public release bucket."""
+    cache_dir = root / "cache" / folder / "skeletons"
+    suffix = " (cached)" if _first_existing([cache_dir]) else ""
+    return f"banc_public_gcs{suffix}"
+
+
 def flywire_skeleton_readiness(
     dataset: object,
     project_root: Optional[str | Path] = None,
 ) -> dict:
     """Return non-secret readiness information for a morphology workflow."""
-
     root = Path(project_root) if project_root is not None else Path(__file__).resolve().parents[2]
-    local_source = (
-        local_fafb_skeleton_source(dataset, root)
-        if is_fafb_dataset(dataset)
-        else None
-    )
-    cave_configured = bool(_configured_cave_token(root))
     banc = is_banc_dataset(dataset)
     fafb = is_fafb_dataset(dataset)
+    if banc:
+        # BANC skeletons fetch on demand from the public release bucket —
+        # no local bundle and no CAVE token is ever required.
+        local_source = _banc_public_source(root, dataset_folder(dataset))
+    elif fafb:
+        local_source = local_fafb_skeleton_source(dataset, root)
+    else:
+        local_source = None
+    cave_configured = bool(_configured_cave_token(root))
+    # BANC is always ready (public bucket); FAFB needs local data or a
+    # token; NeuPrint datasets need neither.
+    ready = (not fafb) or local_source is not None or cave_configured
     return {
         "dataset": str(dataset or ""),
         "is_banc": banc,
@@ -245,7 +265,7 @@ def flywire_skeleton_readiness(
         "local_skeletons": local_source is not None,
         "local_source": str(local_source) if local_source is not None else None,
         "cave_token": cave_configured,
-        "ready": not banc and (not fafb or local_source is not None or cave_configured),
+        "ready": ready,
     }
 
 
@@ -268,20 +288,13 @@ def require_flywire_skeleton_access(
 
     dataset_name = status["dataset"]
     if status["is_banc"]:
-        message = (
-            f"Skeleton workflow blocked for {dataset_name}: BANC skeletons are "
-            "not available from FlyWire Codex. A CAVE token does not enable "
-            "BANC skeleton access."
-        )
-        log(f"[DROCAT][dataset-guard] BLOCKED: {message}")
         log(
-            "Use a non-BANC dataset for 3D skeleton visualization or "
-            "morphological similarity. BANC remains available for supported "
-            "local connectivity/path analyses; prepare its tables once via "
-            "https://codex.flywire.ai/api/download?dataset=banc + "
-            "python src/BANC_file_converter.py."
+            f"[DROCAT][dataset-guard] BANC skeleton access ready: skeletons "
+            f"fetch on demand from the public release bucket "
+            f"(banc_public_gcs) and cache locally as .swc.zst. No CAVE "
+            "token is involved."
         )
-        raise FlyWireSkeletonAccessError(message)
+        return status
 
     if status["local_skeletons"]:
         source = status["local_source"] or "local FAFB skeleton cache"

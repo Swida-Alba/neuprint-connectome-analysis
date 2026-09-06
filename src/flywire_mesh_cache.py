@@ -27,6 +27,11 @@ try:
 except ImportError:
     from flywire_ids import normalize_flywire_body_id
 
+try:
+    from .utils.naming_utils import canonical_dataset_name
+except ImportError:  # pragma: no cover - src laid bare on sys.path
+    from utils.naming_utils import canonical_dataset_name
+
 
 FLYWIRE_MESH_CACHE_SIMPLIFICATION = 0.95
 FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION = 0.8
@@ -45,7 +50,7 @@ FAFB_FINE_CLUSTER_VOXEL_FACTOR = 0.30
 
 
 def _dataset_folder(dataset: str) -> str:
-    return str(dataset).replace(":", "_").replace(".", "_")
+    return canonical_dataset_name(str(dataset)).replace(":", "_").replace(".", "_")
 
 
 def flywire_mesh_cache_key(

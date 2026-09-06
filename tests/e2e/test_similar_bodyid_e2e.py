@@ -89,12 +89,25 @@ def test_bodyid_query_ranks_same_type(dataset, tmp_path_factory):
         # freshly rebuilt dataset may not have enough typed types yet.
         pytest.skip(f"{dataset} vector cache has only {len(bids)} typed "
                     "types with enough members; needs more coverage")
+    # F3 guard: every sampled id must be resolvable in the loaded table —
+    # a lazily rebuilt/absent cache can drift between the sample and the
+    # query (dtype or refresh drift), which would crash the type lookup.
+    # The int64 cast is required: the table stores int64-range flywire ids
+    # as float64, so the raw `==` comparison silently never matches.
+    table = np.asarray(data["bodyIds"]).astype(np.int64)
+    types_by_bid = {int(b): t for b, t in zip(table.tolist(), data["types"])}
+    resolvable = [b for b in bids if int(b) in types_by_bid]
+    if len(resolvable) < len(bids):
+        pytest.skip(f"{dataset}: only {len(resolvable)}/{len(bids)} sampled "
+                    "bodyIds resolvable in the loaded vector-cache table "
+                    "(stale or absent local data)")
+    bids = resolvable
 
     out = tmp_path_factory.mktemp(f"similar-morphology_{dataset}".replace(":", "_"))
     presence = quality = 0
     failures = []
     for bid in bids:
-        t = data["types"][int(np.where(data["bodyIds"] == bid)[0][0])]
+        t = types_by_bid[int(bid)]
         comparer = morph.MorphologyComparer(
             query=bid, dataset=dataset, level="bodyid", method="vector_v2",
             candidate_source="cache",

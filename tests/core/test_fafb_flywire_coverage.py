@@ -92,7 +92,7 @@ class TestPrepareFlywireData:
                                                        str(conn))
 
     def test_banc_missing_raises(self, tmp_path):
-        data = tmp_path / 'flywire_BANC_v888'
+        data = tmp_path / 'banc_v888'
         data.mkdir()
         with pytest.raises(FileNotFoundError, match="BANC"):
             fau.prepare_flywire_data(str(data))
@@ -148,7 +148,7 @@ class TestSkeletonPaths:
         assert fau.get_fafb_skeleton_zip(str(data)) is None
         assert 'Warning' in capsys.readouterr().out
 
-        banc = tmp_path / 'flywire_BANC_v888'
+        banc = tmp_path / 'banc_v888'
         banc.mkdir()
         assert fau.get_fafb_skeleton_zip(str(banc)) is None
 
@@ -982,10 +982,10 @@ class TestFlyWireIds:
         assert list(df['bodyId']) == ['7', '5']
 
     def test_dataset_helpers(self):
-        assert fid.is_banc_dataset('flywire_BANC_v888')
+        assert fid.is_banc_dataset('banc_v888')
         assert not fid.is_banc_dataset('flywire_FAFB_v783')
         assert fid.is_flywire_dataset('flywire_FAFB_v783')
-        assert fid.is_flywire_dataset('flywire_BANC_v888')
+        assert fid.is_flywire_dataset('banc_v888')
         assert not fid.is_flywire_dataset('hemibrain')
         assert fid.dataset_folder('a:b.c') == 'a_b_c'
         assert fid.resolve_flywire_dataset_dir('/nonexistent/root',

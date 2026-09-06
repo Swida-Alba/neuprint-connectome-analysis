@@ -45,7 +45,7 @@ class TestPrintDownloadInstructions:
         assert "python src/BANC_file_converter.py" not in text
 
     def test_banc_instructions_use_banc_url_and_converter(self, tmp_path, capsys):
-        text = self._capture("flywire_BANC_v626", tmp_path, capsys)
+        text = self._capture("banc_v626", tmp_path, capsys)
         assert "https://codex.flywire.ai/api/download?dataset=banc" in text
         assert "neurons.csv.gz" in text
         assert "connections_princeton.csv.gz" in text
@@ -59,8 +59,8 @@ class TestPrintDownloadInstructions:
     def test_dataset_folder_inside_instructions_matches_dataset(self, tmp_path, capsys):
         """The printed downloads folder carries the exact dataset identifier,
         never a generic path."""
-        text = self._capture("flywire_BANC_v888", tmp_path, capsys)
-        assert str(tmp_path / "datasets" / "flywire_BANC_v888" / "downloads") in text
+        text = self._capture("banc_v888", tmp_path, capsys)
+        assert str(tmp_path / "datasets" / "banc_v888" / "downloads") in text
         assert "flywire_FAFB_v783" not in text
 
     def test_instructions_work_without_explicit_dataset_dir(self, capsys):
@@ -74,18 +74,20 @@ class TestPrintDownloadInstructions:
 # Guards for FlyWire skeleton-backed workflows
 # =============================================================================
 
-def test_banc_is_always_blocked_and_does_not_expose_token(tmp_path):
+def test_banc_is_always_ready_via_public_bucket(tmp_path):
+    """BANC skeletons fetch from the public bucket: never blocked, and the
+    readiness payload never depends on a CAVE token."""
     log = []
 
-    with pytest.raises(FlyWireSkeletonAccessError, match="BANC skeletons"):
-        require_flywire_skeleton_access(
-            "flywire_BANC_v626", project_root=tmp_path, log=log.append
-        )
+    status = require_flywire_skeleton_access(
+        "banc_v626", project_root=tmp_path, log=log.append
+    )
 
     text = "\n".join(log)
-    assert "BLOCKED" in text
-    assert "CAVE token does not enable BANC" in text
-    assert "BANC remains available" in text
+    assert status["ready"] is True
+    assert status["is_banc"] is True
+    assert "banc_public_gcs" in text
+    assert status["local_source"].startswith("banc_public_gcs")
 
 
 def test_fafb_without_local_source_or_cave_token_is_blocked_with_instructions(
@@ -220,28 +222,40 @@ def test_fafb_cave_token_is_an_online_fallback(tmp_path, monkeypatch):
 def test_morphology_query_guard_runs_at_script_entry(tmp_path, capsys):
     comparer = MorphologyComparer(
         query=1,
-        dataset="flywire_BANC_v626",
+        dataset="banc_v626",
         project_root=str(tmp_path),
         verbose=True,
     )
 
-    with pytest.raises(FlyWireSkeletonAccessError):
+    with pytest.raises(FlyWireSkeletonAccessError, match="deferred"):
         comparer.find_similar()
 
-    assert "[DROCAT][dataset-guard] BLOCKED" in capsys.readouterr().out
 
+def test_skeleton_visualizer_banc_preparation_runs(tmp_path, capsys, monkeypatch):
+    """BANC construction proceeds to one-time dataset preparation.
 
-def test_skeleton_visualizer_guard_runs_before_banc_preparation(tmp_path, capsys):
-    with pytest.raises(FlyWireSkeletonAccessError):
+    The public-bucket fetch is stubbed offline so preparation fails
+    deterministically: construction must exit with the bucket-first
+    guidance instead of falling through to the FAFB converter.
+    """
+    import banc_public_data
+
+    monkeypatch.setattr(
+        banc_public_data, "download_meta_feather", lambda *a, **k: None)
+    monkeypatch.setattr(
+        banc_public_data, "download_connections_product", lambda *a, **k: None)
+
+    with pytest.raises(SystemExit):
         VisualizeSkeleton(
-            dataset="flywire_BANC_v626",
+            dataset="banc_v626",
             neuron_layers=["1"],
             script_path=str(tmp_path),
             verbose=True,
         )
 
     text = capsys.readouterr().out
-    assert "BANC skeletons are not available" in text
+    assert "public BANC release bucket" in text
+    assert "data preparation failed" in text
 
 
 def test_fafb_plot_guard_runs_before_skeleton_query(tmp_path, monkeypatch, capsys):

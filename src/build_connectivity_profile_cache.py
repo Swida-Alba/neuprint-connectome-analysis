@@ -37,6 +37,11 @@ import time
 import argparse
 from pathlib import Path
 
+try:
+    from .utils.naming_utils import canonical_dataset_name
+except ImportError:  # pragma: no cover - src laid bare on sys.path
+    from utils.naming_utils import canonical_dataset_name
+
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -159,7 +164,7 @@ def show_stats(dataset: str) -> None:
     import numpy as np
     
     # Normalize dataset name
-    safe_name = dataset.replace(':', '_').replace('.', '_')
+    safe_name = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
     
     # Get paths
     src_dir = Path(__file__).parent

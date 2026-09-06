@@ -19,7 +19,11 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .config import PROJECT_ROOT
-from .dataset_service import dataset_to_folder, is_flywire_dataset
+from .dataset_service import (
+    dataset_to_folder,
+    is_banc_dataset,
+    is_flywire_dataset,
+)
 
 
 ROI_MODE_PRIMARY = "primary"
@@ -48,8 +52,9 @@ def _candidate_folders(dataset: str) -> list[str]:
     dataset_text = str(dataset or "").strip()
     folders: list[str] = []
     # FlyWire/FAFB ROI meshes are sourced from male-cns.  Prefer v0.9 because
-    # it is the established transformed-mesh cache, then try v1.0.
-    if is_flywire_dataset(dataset_text):
+    # it is the established transformed-mesh cache, then try v1.0.  BANC has
+    # its own public region_outlines catalog instead.
+    if is_flywire_dataset(dataset_text) and not is_banc_dataset(dataset_text):
         folders.extend(("male-cns_v0_9", "male-cns_v1_0"))
     if dataset_text:
         folder = dataset_to_folder(dataset_text)

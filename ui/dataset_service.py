@@ -21,6 +21,12 @@ try:
 except ImportError:  # src not on sys.path; fall back to first-found tokens
     _shared_token_manager = None
 
+try:
+    from src.utils.naming_utils import canonical_dataset_name
+except ImportError:  # src not on sys.path; legacy BANC names stay as-is
+    def canonical_dataset_name(value):
+        return str(value or "").strip()
+
 
 @dataclass
 class DatasetInfo:
@@ -41,8 +47,11 @@ class DatasetInfo:
 # e.g. 'hemibrain_v1_2_1' <-> 'hemibrain:v1.2.1'
 def folder_to_dataset(folder_name: str) -> str:
     """Convert a folder name to a dataset identifier."""
-    # FlyWire datasets keep their names as-is
-    if "flywire" in folder_name.lower():
+    # FlyWire datasets and the BANC releases keep their names as-is.
+    # (A BANC carve-out is required: the generic NeuPrint rule below would
+    # otherwise turn the folder 'banc_v626' into the identifier 'banc:v626'.)
+    normalized = str(folder_name or "").strip().lower()
+    if "flywire" in normalized or normalized.startswith("banc"):
         return folder_name
     # NeuPrint: first _ becomes :, remaining _ become .
     # e.g. hemibrain_v1_2_1 -> hemibrain:v1.2.1
@@ -57,23 +66,27 @@ def folder_to_dataset(folder_name: str) -> str:
 
 def dataset_to_folder(dataset: str) -> str:
     """Convert a dataset identifier to a folder name."""
-    # FlyWire datasets keep their names as-is
-    if "flywire" in dataset.lower():
+    # FlyWire datasets and the BANC releases keep their names as-is
+    normalized = str(dataset or "").strip().lower()
+    if "flywire" in normalized or normalized.startswith("banc"):
         return dataset
     # NeuPrint: : becomes _, . becomes _
     return dataset.replace(":", "_").replace(".", "_")
 
 
 def is_flywire_dataset(dataset: str) -> bool:
-    """Return whether *dataset* is a FlyWire identifier.
+    """Return whether *dataset* is a FlyWire-family local-table identifier.
 
-    The NeuPrint server metadata lists a hidden dataset named ``banc:v888``
-    that is not queryable through the API (BANC is served via FlyWire/
-    Codex).  Do not classify that identifier as the local FlyWire BANC
-    release merely because it contains the word ``banc``.
+    Covers FAFB and the BANC releases (legacy ``flywire_BANC_*`` spellings
+    canonicalize to ``banc_*``).  The NeuPrint server metadata lists a hidden
+    dataset named ``banc:v888`` that is not queryable through the API; the
+    colon form never matches the canonical underscore names here, so it is
+    correctly excluded.
     """
-    normalized = dataset.strip().lower()
-    return normalized.startswith("flywire_") or "fafb" in normalized
+    normalized = canonical_dataset_name(str(dataset or "").strip()).lower()
+    return (normalized.startswith("flywire_")
+            or normalized.startswith("banc_")
+            or "fafb" in normalized)
 
 
 def is_banc_dataset(dataset: str) -> bool:
@@ -112,15 +125,15 @@ class DatasetService:
     # These require local files + CAVE token for API access
     FLYWIRE_DATASETS = [
         "flywire_FAFB_v783",
-        "flywire_BANC_v888",
-        "flywire_BANC_v626",
+        "banc_v888",
+        "banc_v626",
     ]
 
     # Codex display info (fetched from codex.flywire.ai rendered page)
     CODEX_DATASETS = {
         "flywire_FAFB_v783": {"display": "FAFB v783 (CB)", "desc": "Female Adult Fly Brain", "neurons": 139255},
-        "flywire_BANC_v888": {"display": "BANC v888 (CNS)", "desc": "Brain and Nerve Cord", "neurons": 158262},
-        "flywire_BANC_v626": {"display": "BANC v626 (CNS)", "desc": "Brain and Nerve Cord (older)", "neurons": 115151},
+        "banc_v888": {"display": "BANC v888 (CNS)", "desc": "Brain and Nerve Cord", "neurons": 158262},
+        "banc_v626": {"display": "BANC v626 (CNS)", "desc": "Brain and Nerve Cord (older)", "neurons": 115151},
     }
 
     NEUPRINT_SERVER = "https://neuprint.janelia.org"
@@ -519,7 +532,7 @@ class DatasetService:
                 import re
                 patterns = [
                     (r'FAFB\s+v(\d+)', 'flywire_FAFB_v{}', 'FAFB v{} (CB)', 'Female Adult Fly Brain'),
-                    (r'BANC\s+v(\d+)', 'flywire_BANC_v{}', 'BANC v{} (CNS)', 'Brain and Nerve Cord'),
+                    (r'BANC\s+v(\d+)', 'banc_v{}', 'BANC v{} (CNS)', 'Brain and Nerve Cord'),
                 ]
                 found = {}
                 for pattern, key_fmt, display_fmt, desc in patterns:

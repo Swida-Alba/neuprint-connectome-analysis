@@ -501,6 +501,19 @@ class TestVisualizationOptions:
         assert default_skeleton_tab_simplification('x', 'fine') == 0.95
         assert default_skeleton_tab_simplification('x', None) == 0.90
 
+    def test_skeleton_tab_defaults_banc_uses_full_res_default(self):
+        # The BANC slider default stays the standard FAFB-style 90%: it only
+        # ever drives full-resolution sources, while L2 tubes skip decimation
+        # structurally in the BANC render processor. A resolution-dependent
+        # 0.0 default would leave full-res-only neurons (they exist, e.g.
+        # one l-LNv) undecimated in the default L2 render mode.
+        assert default_skeleton_tab_simplification(
+            'banc_v888', 'fast') == 0.90
+        assert default_skeleton_tab_simplification(
+            'banc_v626', 'fine') == 0.95
+        assert default_skeleton_tab_simplification(
+            'flywire_BANC_v888', 'fast') == 0.90
+
     def test_analysis_defaults(self):
         assert default_analysis_skeleton_mesh_simplification('x', 'fine') == 0.95
         assert default_analysis_skeleton_mesh_simplification('x', 'fast') == 0.90

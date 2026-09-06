@@ -29,7 +29,7 @@ NEUPRINT_EXPECTED = {
     "fib19:v1.0",
     "mushroombody",
 }
-FLYWIRE_EXPECTED = {"flywire_FAFB_v783", "flywire_BANC_v888", "flywire_BANC_v626"}
+FLYWIRE_EXPECTED = {"flywire_FAFB_v783", "banc_v888", "banc_v626"}
 
 
 class _PermissiveTokenManager:
@@ -58,7 +58,7 @@ class TestDatasetLists:
         assert "banc:v888" not in NEUPRINT_DATASETS
         assert "banc:v888" not in DATASETS
         assert "banc:v888" not in DatasetService.NEUPRINT_CANDIDATES
-        assert "flywire_BANC_v888" in DATASETS
+        assert "banc_v888" in DATASETS
 
     def test_defaults_contain_core_parameters(self):
         for key in ("min_synapse_num", "min_ratio", "min_traversal_probability",

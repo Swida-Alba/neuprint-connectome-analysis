@@ -16,6 +16,11 @@ Note: Source/target neurons and max_interlayer are now defined in ComparisonPara
 from dataclasses import dataclass
 from typing import Optional, Any
 
+try:
+    from ..utils.naming_utils import canonical_dataset_name
+except ImportError:  # pragma: no cover - direct package imports
+    from utils.naming_utils import canonical_dataset_name
+
 
 @dataclass
 class DatasetConfig:
@@ -68,7 +73,7 @@ class DatasetConfig:
         Returns:
             Sanitized name (e.g., 'hemibrain_v1_2_1')
         """
-        return dataset.replace(':', '_').replace('.', '_').replace('-', '_')
+        return canonical_dataset_name(dataset).replace(':', '_').replace('.', '_').replace('-', '_')
     
     @property
     def safe_name(self) -> str:

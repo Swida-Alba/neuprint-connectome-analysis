@@ -63,8 +63,8 @@ ROOT = Path("/tmp/drocat_lite_e2e")
 
 DATASET_MCNS = "male-cns:v1.0"
 DATASET_FAFB = "flywire_FAFB_v783"
-DATASET_BANC626 = "flywire_BANC_v626"
-DATASET_BANC888 = "flywire_BANC_v888"
+DATASET_BANC626 = "banc_v626"
+DATASET_BANC888 = "banc_v888"
 
 
 def reset_output_root() -> None:

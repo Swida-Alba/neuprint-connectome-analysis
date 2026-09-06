@@ -94,7 +94,7 @@ def main() -> int:
     labels = make_unique_dataset_labels(datasets)
     expect = {
         'male-cns:v1.0': 'MCNS_v1_0', 'male-cns:v0.9': 'MCNS_v0_9',
-        'flywire_BANC_v888': 'BANC_v888', 'flywire_BANC_v626': 'BANC_v626',
+        'banc_v888': 'BANC_v888', 'banc_v626': 'BANC_v626',
         'flywire_FAFB_v783': 'FAFB', 'hemibrain:v1.2.1': 'HEMI',
         'manc:v1.2.3': 'MANC',
     }
@@ -225,7 +225,7 @@ def main() -> int:
         "male-cns:v1.0", "DN1pA", uncapped=True)
     enrich_native_type_matches(native, "male-cns:v1.0")
     banc_entries = [e for e in native
-                    if str(e.get("dataset", "")).startswith("flywire_BANC")]
+                    if str(e.get("dataset", "")).startswith(("banc_", "flywire_BANC"))]
     if not banc_entries:
         fail("no BANC entries for the DN1pA query")
     else:
@@ -240,7 +240,7 @@ def main() -> int:
             ("network", render_mapping_network_html(flows)),
             ("linker_paths", render_bridge_linker_html(
                 flows, source_dataset="male-cns:v1.0",
-                target_dataset="flywire_BANC_v888")),
+                target_dataset="banc_v888")),
             ("source_map", render_source_map_network_html()),
         ]:
             if not html:

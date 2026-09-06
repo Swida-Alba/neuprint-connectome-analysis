@@ -49,17 +49,17 @@ def test_banc_dataset_resolution_does_not_fallback_to_fafb(tmp_path):
     fafb_dir = tmp_path / "datasets" / "flywire_FAFB_v783"
     fafb_dir.mkdir(parents=True)
 
-    assert resolve_flywire_dataset_dir(tmp_path, "flywire_BANC_v626") is None
+    assert resolve_flywire_dataset_dir(tmp_path, "banc_v626") is None
     assert resolve_flywire_dataset_dir(tmp_path, "flywire_FAFB_v783") == fafb_dir
 
 
 def test_flywire_prepared_tables_are_read_without_raw_fafb_fallback(tmp_path):
     import fafb_utils
 
-    banc_dir = tmp_path / "flywire_BANC_v626"
+    banc_dir = tmp_path / "banc_v626"
     banc_dir.mkdir()
-    neuron_path = banc_dir / "flywire_BANC_v626_allneurons_neuron_df.parquet"
-    connection_path = banc_dir / "flywire_BANC_v626_merged_connections.parquet"
+    neuron_path = banc_dir / "banc_v626_allneurons_neuron_df.parquet"
+    connection_path = banc_dir / "banc_v626_merged_connections.parquet"
     pd.DataFrame({"bodyId": [LARGE_ID], "type": ["T"]}).to_parquet(
         neuron_path, index=False
     )
@@ -78,7 +78,7 @@ def test_flywire_prepared_tables_are_read_without_raw_fafb_fallback(tmp_path):
 def test_missing_banc_tables_raise_instead_of_using_fafb_raw_names(tmp_path):
     import fafb_utils
 
-    banc_dir = tmp_path / "flywire_BANC_v626"
+    banc_dir = tmp_path / "banc_v626"
     (banc_dir / "downloads").mkdir(parents=True)
 
     with pytest.raises(FileNotFoundError, match="Prepared BANC tables"):
@@ -88,7 +88,7 @@ def test_missing_banc_tables_raise_instead_of_using_fafb_raw_names(tmp_path):
 def test_morphology_type_map_reads_flywire_ids_as_strings(tmp_path):
     import morphology
 
-    dataset = "flywire_BANC_v626"
+    dataset = "banc_v626"
     table_dir = tmp_path / "datasets" / dataset
     table_dir.mkdir(parents=True)
     pd.DataFrame({
@@ -152,14 +152,14 @@ def test_visualization_synapse_lookup_does_not_cross_fallback_to_fafb(tmp_path):
 
     datasets = tmp_path / "datasets"
     fafb_dir = datasets / "flywire_FAFB_v783"
-    banc_dir = datasets / "flywire_BANC_v626"
+    banc_dir = datasets / "banc_v626"
     fafb_dir.mkdir(parents=True)
     banc_dir.mkdir(parents=True)
     (fafb_dir / "flywire_FAFB_v783_synapse_table.parquet").touch()
 
     visualizer = object.__new__(VisualizeSkeleton)
     visualizer.script_path = str(tmp_path)
-    visualizer.dataset = "flywire_BANC_v626"
+    visualizer.dataset = "banc_v626"
 
     assert visualizer._get_synapse_table_path() is None
 
@@ -168,17 +168,17 @@ def test_neuronbridge_reads_exact_flywire_parquet_table(tmp_path):
     from neuronbridge_finder import NeuronBridgeFinder
 
     datasets = tmp_path / "datasets"
-    banc_dir = datasets / "flywire_BANC_v626"
+    banc_dir = datasets / "banc_v626"
     banc_dir.mkdir(parents=True)
     pd.DataFrame({"bodyId": [LARGE_ID], "type": ["T"]}).to_parquet(
-        banc_dir / "flywire_BANC_v626_allneurons_neuron_df.parquet",
+        banc_dir / "banc_v626_allneurons_neuron_df.parquet",
         index=False,
     )
 
     finder = NeuronBridgeFinder(
         datasets_path=str(datasets), use_cache=False, verbose=False
     )
-    frame = finder._load_neuron_df_for_dataset("flywire_BANC_v626")
+    frame = finder._load_neuron_df_for_dataset("banc_v626")
 
     assert frame is not None
     assert frame["bodyId"].tolist() == [LARGE_ID]

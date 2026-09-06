@@ -38,6 +38,11 @@ import warnings
 import pandas as pd
 
 try:
+    from .utils.naming_utils import canonical_dataset_name
+except ImportError:  # pragma: no cover - src laid bare on sys.path
+    from utils.naming_utils import canonical_dataset_name
+
+try:
     import zstandard as zstd
 except ImportError:  # pragma: no cover - installation is covered by requirements
     zstd = None
@@ -80,7 +85,7 @@ class CAVEDataFetcher:
     """Fetch neuron data from CAVE/CloudVolume API for FlyWire datasets."""
     
     dataset: str = 'flywire_FAFB_v783'
-    """Dataset name (flywire_FAFB_v783 or flywire_BANC_v626)"""
+    """Dataset name (flywire_FAFB_v783 or banc_v626)"""
     
     cave_token: str = None
     """CAVE authentication token. If None, reads from config.json"""
@@ -111,7 +116,14 @@ class CAVEDataFetcher:
     
     FLYWIRE_BANC_CONFIG = {
         'datastack': 'brain_and_nerve_cord',
-        'cloudvolume_url': None,  # BANC requires special access
+        # Public precomputed neuron-mesh layer (nanometre coordinates, no
+        # auth).  CAVE materialization queries stay token-gated and unused:
+        # BANC tables are local and skeletons come from the public bucket
+        # (see banc_public_data).
+        'cloudvolume_url': (
+            'precomputed://https://storage.googleapis.com/'
+            'lee-lab_brain-and-nerve-cord-fly-connectome/neuron_meshes'
+        ),
         'synapse_table': 'synapses',
     }
     
@@ -208,7 +220,7 @@ class CAVEDataFetcher:
         upper = dataset_name.upper()
         if 'BANC' not in upper and ('FAFB' in upper or 'v783' in dataset_name):
             return 'flywire_FAFB_v783'
-        return dataset_name.replace(':', '_').replace('.', '_')
+        return canonical_dataset_name(dataset_name).replace(':', '_').replace('.', '_')
     
     @property
     def cloudvolume(self):
@@ -223,7 +235,10 @@ class CAVEDataFetcher:
                 self._cv = CloudVolume(
                     config['cloudvolume_url'],
                     use_https=True,
-                    secrets={'token': self.cave_token}
+                    # Public precomputed layers (BANC) need no token; only
+                    # attach secrets when a token is actually configured.
+                    **({'secrets': {'token': self.cave_token}}
+                       if self.cave_token else {}),
                 )
                 if self.verbose:
                     print(f"✓ Connected to CloudVolume: {config['cloudvolume_url'][:50]}...")

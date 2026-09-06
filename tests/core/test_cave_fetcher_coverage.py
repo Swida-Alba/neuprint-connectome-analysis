@@ -205,7 +205,7 @@ class TestConstruction:
         assert f._load_token('CAVE_TOKEN') is None
 
     def test_get_config_variants(self, tmp_path):
-        banc = make_fetcher(tmp_path, dataset='flywire_BANC_v626')
+        banc = make_fetcher(tmp_path, dataset='banc_v626')
         assert banc._get_config() is cdf.CAVEDataFetcher.FLYWIRE_BANC_CONFIG
         fafb = make_fetcher(tmp_path)
         assert fafb._get_config() is cdf.CAVEDataFetcher.FLYWIRE_FAFB_CONFIG
@@ -263,13 +263,25 @@ class TestLazyClients:
         assert created['secrets'] == {'token': 'test-token'}
         assert 'CloudVolume' in capsys.readouterr().out
 
-    def test_cloudvolume_unavailable_for_banc(self, tmp_path, monkeypatch):
+    def test_cloudvolume_configured_for_banc(self, tmp_path, monkeypatch):
+        # The BANC mesh layer is a public precomputed product now: the
+        # config carries a real URL instead of the old None placeholder.
+        captured = {}
+
+        def fake_cv(url, **kwargs):
+            captured['url'] = url
+            captured['kwargs'] = kwargs
+            return object()
+
         mod = types.ModuleType('cloudvolume')
-        mod.CloudVolume = lambda *a, **k: None
+        mod.CloudVolume = fake_cv
         monkeypatch.setitem(sys.modules, 'cloudvolume', mod)
-        f = make_fetcher(tmp_path, dataset='flywire_BANC_v626')
-        with pytest.raises(ValueError, match="CloudVolume not available"):
-            _ = f.cloudvolume
+        f = make_fetcher(tmp_path, dataset='banc_v626')
+        _ = f.cloudvolume
+        assert captured['url'].startswith('precomputed://https://')
+        # A configured token is attached only when present; the public
+        # layer itself needs none (no secrets key when cave_token is None).
+        assert captured['kwargs'].get('use_https') is True
 
     def test_cloudvolume_import_error(self, tmp_path, monkeypatch):
         monkeypatch.setitem(sys.modules, 'cloudvolume', None)

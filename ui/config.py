@@ -18,6 +18,12 @@ TOKEN_FILE = PROJECT_ROOT / "config_local.json"
 LOCAL_CONFIG_FILE = PROJECT_ROOT / "ui" / "local_config.json"
 TAB_OUTPUT_DIRS_KEY = "tab_output_dirs"
 
+try:
+    from src.utils.naming_utils import canonical_dataset_name
+except ImportError:  # src not importable; legacy names stay as-is
+    def canonical_dataset_name(value):
+        return str(value or "").strip()
+
 
 def load_local_config() -> dict:
     """Load the user-editable local UI configuration (output dir, etc.)."""
@@ -256,6 +262,10 @@ def _coerce_user_default(key: str, value):
             return value.strip()
         return None
     options = spec.get("options") or []
+    if kind == "select" and options is DATASETS:
+        # Legacy BANC spellings canonicalize so saved defaults survive the
+        # flywire_BANC_* -> banc_* rename.
+        value = canonical_dataset_name(str(value).strip())
     return value if value in options else None
 
 
@@ -317,8 +327,8 @@ DATASETS = [
     "fib19:v1.0",
     "mushroombody",
     "flywire_FAFB_v783",
-    "flywire_BANC_v888",
-    "flywire_BANC_v626",
+    "banc_v888",
+    "banc_v626",
 ]
 
 # NeuPrint server datasets (can be fetched dynamically via /api/dbmeta/datasets)
@@ -340,8 +350,8 @@ NEUPRINT_DATASETS = [
 # when a workflow explicitly fetches data or skeletons through the CAVE API)
 FLYWIRE_DATASETS = [
     "flywire_FAFB_v783",
-    "flywire_BANC_v888",
-    "flywire_BANC_v626",
+    "banc_v888",
+    "banc_v626",
 ]
 
 # Default parameter values
@@ -354,7 +364,14 @@ DEFAULTS = {
     "filter_by": "bodyId",
     "search_columns": "auto",
     "output_format": "csv",
-    "pathfinding": "MemoizedDFS",
+    "pathfinding": "StrongestFirst",
+    # Fix A: 0 = auto (StrongestFirst uses its internal 1M budget;
+    # complete enumerators run unbounded). Explicit >0 = that budget.
+    "max_paths_bodyid": 0,
+    # Fix D (Edge Budget): after lossless pruning, cones exceeding this
+    # many bodyId edges are floored just above the N-th strongest edge's
+    # weight (w0 = w1 + 1). 0 = off.
+    "graph_edge_limit_bodyid": 1000000,
     "network_layout": "distributed",
     "use_cache": True,
     "cache_only": False,
@@ -365,6 +382,13 @@ DEFAULTS = {
     "cache_synapses": True,
     "auto_type_mapping": True,
     "skip_bodyId": True,
+    # Feature F: enumerate once at the lowest threshold, materialize the
+    # rest from the bottleneck-annotated path set ('all' path mode only).
+    "replay_paths": True,
+    # Untyped-neuron drop: edges touching untyped neurons (Unknown /
+    # bodyId-fallback labels) are removed from cross-dataset results;
+    # dropped rows are exported and counted in user_warning_notes.
+    "drop_untyped": True,
     "showfig_analysis": False,
     # Exported per-run user guide (_UserGuide_please_read_me.<ext>)
     "run_guide_format": "html",
@@ -408,9 +432,11 @@ DEFAULTS = {
 }
 
 # Pathfinding algorithms (names match the FastGraph implementations:
+# StrongestFirst = budgeted best-first on path bottleneck (emits intact
+# paths strongest-first; see find_paths_strongest_first),
 # MemoizedDFS = memoized DFS forward, DFS = memoized DFS backward,
 # MeetInMiddle = meet-in-the-middle)
-PATHFINDING_ALGORITHMS = ["Bidirectional", "DP", "MemoizedDFS", "MeetInMiddle", "DFS"]
+PATHFINDING_ALGORITHMS = ["StrongestFirst", "Bidirectional", "DP", "MemoizedDFS", "MeetInMiddle", "DFS"]
 
 # Columns searched when resolving source/target neuron names
 SEARCH_COLUMNS = ["auto", "type", "instance", "bodyId"]
@@ -550,24 +576,10 @@ DEFAULT_SETTING_SPECS = {
                 "(pathfinding, network, skeleton tab, comparison, "
                 "similar search).",
     },
-    "min_ratio": {
-        "label": "Min Connection Ratio",
-        "group": "thresholds",
-        "kind": "float",
-        "min": 0.0,
-        "max": 1.0,
-        "step": 0.01,
-        "hint": "Minimum weight/post ratio (0 = include all).",
-    },
-    "min_traversal_probability": {
-        "label": "Min Traversal Probability",
-        "group": "thresholds",
-        "kind": "float",
-        "min": 0.0,
-        "max": 1.0,
-        "step": 0.01,
-        "hint": "Minimum traversal probability (0 = include all).",
-    },
+    # F9: Min Connection Ratio / Min Traversal Probability are READOUT
+    # columns now (weight / all-post incoming weight; ratio/0.3 capped) —
+    # the Settings entrances were removed with the tab entrances. The
+    # DEFAULTS keys survive for payload/back-compat.
     "edgeN_limit": {
         "label": "Visualization Edge Limit",
         "group": "thresholds",
@@ -615,7 +627,20 @@ DEFAULT_SETTING_SPECS = {
         "label": "Skip BodyId-Level Export",
         "group": "pathfinding_output",
         "kind": "bool",
-        "hint": "Exclude bodyId-level results/tables; keep type-level output.",
+        "hint": "Exclude bodyId-level results/tables; keep type-level output. "
+                "Default on: type-level analysis (incl. cross-dataset type "
+                "mapping) needs no bodyId exports, which can run to multiple "
+                "GB per run (bodyId connMatrix CSVs, raw path lists).",
+    },
+    "replay_paths": {
+        "label": "Replay Paths (single enumeration)",
+        "group": "pathfinding_output",
+        "kind": "bool",
+        "hint": "Path mode 'all': enumerate ONCE at the lowest threshold and "
+                "materialize every higher threshold from the bottleneck-"
+                "annotated path set — identical outputs, no re-enumeration. "
+                "Shortest mode is never replayed (min-hop sets are not "
+                "nested across thresholds).",
     },
     "output_format": {
         "label": "Output Format",
@@ -640,12 +665,30 @@ DEFAULT_SETTING_SPECS = {
         "options": NETWORK_LAYOUTS,
         "hint": "Layout algorithm for the HTML network visualization.",
     },
-    "pathfinding": {
-        "label": "Pathfinding Algorithm",
+    "max_paths_bodyid": {
+        "label": "Max Paths (BodyId)",
         "group": "pathfinding_output",
-        "kind": "select",
-        "options": PATHFINDING_ALGORITHMS,
-        "hint": "Default algorithm for Complete Paths and Cross-Dataset runs.",
+        "kind": "int",
+        "min": 0,
+        "max": 100000000,
+        "step": 1000,
+        "hint": "Path budget for StrongestFirst enumeration (bodyId level): "
+                "when the search exceeds it, ALL paths above the achieved "
+                "strength cutoff (tau) are kept and tau is reported. "
+                "0 = auto (StrongestFirst: 1M budget).",
+    },
+    "graph_edge_limit_bodyid": {
+        "label": "Edge Budget",
+        "group": "pathfinding_output",
+        "kind": "int",
+        "min": 0,
+        "max": 100000000,
+        "step": 100000,
+        "hint": "After the lossless prunes, discovery cones exceeding this "
+                "many bodyId edges are floored just above the N-th strongest "
+                "edge's weight (w0 = w1 + 1) — exactly equivalent to raising "
+                "the threshold; the applied floor is reported as "
+                "edge_weight_floor. 0 = off.",
     },
     "showfig_analysis": {
         "label": "Show Figure (Analysis Tabs)",

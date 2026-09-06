@@ -163,11 +163,12 @@ class TestFlywireManualSkeletonInstruction:
 
     def test_banc_instruction_with_explicit_dir(self, tmp_path):
         text = fwr.flywire_manual_skeleton_instruction(
-            "flywire_BANC_v626", dataset_dir=tmp_path / "ds")
-        assert "the BANC download from" in text
-        assert "python src/BANC_file_converter.py" in text
-        assert "https://codex.flywire.ai/api/download?dataset=banc" in text
-        assert str(tmp_path / "ds" / "downloads") in text
+            "banc_v626", dataset_dir=tmp_path / "ds")
+        # BANC skeletons need no manual download: they fetch on demand from
+        # the public release bucket.
+        assert "not needed" in text
+        assert "banc_public_data.fetch_banc_swc" in text
+        assert "banc_v626" in text
 
 
 class TestCaveTokenFromConfigBranches:
@@ -283,7 +284,7 @@ class TestReadinessGuardOtherBranches:
         assert fwr.dataset_folder(None) == ""
 
     def test_is_fafb_rejects_banc_names(self):
-        assert fwr.is_fafb_dataset("flywire_BANC_v626") is False
+        assert fwr.is_fafb_dataset("banc_v626") is False
         assert fwr.is_fafb_dataset("flywire_FAFB_v783") is True
         assert fwr.is_banc_dataset(None) is False
 

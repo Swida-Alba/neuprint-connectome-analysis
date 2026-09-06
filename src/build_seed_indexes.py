@@ -44,7 +44,7 @@ from neuron_index_builder import (  # noqa: E402
 SEED_DATASETS = (
     "male-cns:v1.0",
     "flywire_FAFB_v783",
-    "flywire_BANC_v888",
+    "banc_v888",
 )
 
 MANIFEST_FILENAME = "manifest.json"

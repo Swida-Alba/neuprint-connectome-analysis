@@ -308,7 +308,13 @@ def refresh_dataset_selector_statuses(service=None) -> int:
 
 def _dataset_label_parts(ds: str, service) -> List[str]:
     """Build the option label parts with source + local status tags."""
-    src_tag = "[FW]" if ds.startswith("flywire_") else "[NP]"
+    normalized = (ds or "").strip().lower()
+    if normalized.startswith("banc"):
+        src_tag = "[BANC]"
+    elif normalized.startswith("flywire_"):
+        src_tag = "[FW]"
+    else:
+        src_tag = "[NP]"
     info = service._cache.get(ds)
     # The filesystem is authoritative for local state.  DatasetInfo can be a
     # persisted or server-backed snapshot, so trusting its old local flags
@@ -442,7 +448,7 @@ def dataset_multi_selector(
         "Select one or more datasets. One dataset with multiple thresholds is "
         "also supported; "
         "multiple datasets enable cross-dataset comparison. Shows [NP]=NeuPrint, "
-        "[FW]=FlyWire, ✓ local / ☁ server status."
+        "[FW]=FlyWire, [BANC]=public BANC bucket, ✓ local / ☁ server status."
     ),
     show_local_status: bool = True,
 ) -> ui.select:

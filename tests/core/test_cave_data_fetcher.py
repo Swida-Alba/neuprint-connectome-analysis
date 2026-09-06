@@ -87,18 +87,18 @@ def test_fafb_mesh_fetch_disables_unsupported_draco_deduplication(
 
 def test_banc_cache_namespace_keeps_requested_release(tmp_path):
     fetcher = cdf.CAVEDataFetcher(
-        dataset="flywire_BANC_v888",
+        dataset="banc_v888",
         cave_token="test-token",
         project_root=str(tmp_path),
         verbose=False,
     )
 
     assert Path(fetcher.get_cache_path()).as_posix().endswith(
-        "cache/flywire_BANC_v888/API_cache"
+        "cache/banc_v888/API_cache"
     )
     assert Path(
         fetcher._get_skeleton_cache_path("72057594037927937")).as_posix().endswith(
-        "cache/flywire_BANC_v888/skeletons/raw_skeletons/"
+        "cache/banc_v888/skeletons/raw_skeletons/"
         "72057594037927937.swc.zst"
     )
 

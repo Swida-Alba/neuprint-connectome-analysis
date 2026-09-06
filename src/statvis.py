@@ -32,6 +32,11 @@ from neuprint import Client, fetch_neurons
 from tqdm import tqdm
 
 try:
+    from .utils.naming_utils import canonical_dataset_name
+except ImportError:  # pragma: no cover - src laid bare on sys.path
+    from utils.naming_utils import canonical_dataset_name
+
+try:
     from .flywire_ids import (
         is_flywire_dataset,
         normalize_flywire_body_id,
@@ -40,6 +45,8 @@ try:
     )
 except ImportError:
     from flywire_ids import (
+        is_banc_dataset,
+        is_fafb_dataset,
         is_flywire_dataset,
         normalize_flywire_body_id,
         normalize_flywire_id_columns,
@@ -401,7 +408,7 @@ def _resolve_single_neuron(
 
 def _get_dataset_path_body(dataset: str) -> tuple[str, str, str]:
     """Return normalized dataset name, dataset directory, and file prefix."""
-    dataset_normalized = dataset.replace(':', '_').replace('.', '_')
+    dataset_normalized = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
     project_root = os.path.dirname(os.path.dirname(__file__))
     dataset_dir = os.path.join(project_root, "datasets", dataset_normalized)
 
@@ -499,7 +506,7 @@ def _get_neuron_df(dataset: str = 'male-cns:v0.9', verbose: bool = False) -> pd.
         FileNotFoundError: If dataset files are not found locally
     """
     # Normalize dataset name
-    dataset_normalized = dataset.replace(':', '_').replace('.', '_')
+    dataset_normalized = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
     
     # Special handling for the complete FlyWire family (FAFB and BANC).
     if is_flywire_dataset(dataset):
@@ -594,7 +601,7 @@ def get_types(
     """
     # Load neuron DataFrame
     ndf = _get_neuron_df(dataset, verbose=verbose)
-    dataset_normalized = dataset.replace(':', '_').replace('.', '_')
+    dataset_normalized = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
     
     # Check if query is dict-based filter
     if isinstance(query, dict):
@@ -713,7 +720,7 @@ def get_bodyIds(
     """
     # Load neuron DataFrame
     ndf = _get_neuron_df(dataset, verbose=verbose)
-    dataset_normalized = dataset.replace(':', '_').replace('.', '_')
+    dataset_normalized = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
     
     # Check if query is dict-based filter
     if isinstance(query, dict):
@@ -830,7 +837,7 @@ def get_instances(
     """
     # Load neuron DataFrame
     ndf = _get_neuron_df(dataset, verbose=verbose)
-    dataset_normalized = dataset.replace(':', '_').replace('.', '_')
+    dataset_normalized = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
     
     # Check if instance column exists
     if 'instance' not in ndf.columns:
@@ -1339,8 +1346,10 @@ def _build_dataset_metadata(dataset, neuron_df, roi_count_df, client=None):
 
     total = len(neuron_df)
     if 'type' in neuron_df.columns:
-        type_vals = neuron_df['type']
-        typed = int(type_vals.notna().sum() - (type_vals == '').sum())
+        # 'Unknown' is the untyped placeholder (NeuPrint/BANC convention):
+        # counting it as typed reported a misleading 100% coverage.
+        type_vals = neuron_df['type'].astype('string').str.strip().fillna('')
+        typed = int(((type_vals != '') & (type_vals != 'Unknown')).sum())
     else:
         typed = 0
 
@@ -1477,7 +1486,7 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch
     # requires login to hemibrain dataset
     if save_path is None:
         # Go up from src/ to project root, then into datasets/
-        dataset_normalized = dataset.replace(':', '_').replace('.', '_')
+        dataset_normalized = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
         project_root = os.path.dirname(os.path.dirname(__file__))
         dataset_dir = os.path.join(project_root, "datasets", dataset_normalized)
         
@@ -6082,7 +6091,7 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
     use_local = False
     ndf_complete = None
     if dataset and script_path:
-        dataset_clean = dataset.replace(':', '_').replace('.', '_')
+        dataset_clean = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
         dataset_path = (
             _flywire_neuron_table_path(dataset, script_path)
             if is_flywire_dataset(dataset) else
@@ -6864,7 +6873,7 @@ def Vis3S(data_df,**kwargs):
     
     # Load skeletons if needed
     if op.toPlot == 'skeleton':
-        if 'fafb' in str(op.dataset).lower() or 'flywire' in str(op.dataset).lower():
+        if is_flywire_dataset(str(op.dataset)) and not is_banc_dataset(str(op.dataset)):
             import fafb_utils
             import zipfile
             import io
@@ -7475,7 +7484,7 @@ def build_bodyid_label_map(label_mapper, dataset: str, neuron_df: pl.DataFrame) 
     
     # Helper to normalize dataset name for lookups
     def sanitize(name: str) -> str:
-        return name.replace(':', '_').replace('.', '_').replace('-', '_')
+        return canonical_dataset_name(name).replace(':', '_').replace('.', '_').replace('-', '_')
     
     dataset_sanitized = sanitize(dataset)
     
@@ -7857,7 +7866,7 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
     use_local = False
     ndf_complete = None
     if dataset and script_path:
-        dataset_clean = dataset.replace(':', '_').replace('.', '_')
+        dataset_clean = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
         dataset_path = (
             _flywire_neuron_table_path(dataset, script_path)
             if is_flywire_dataset(dataset) else
