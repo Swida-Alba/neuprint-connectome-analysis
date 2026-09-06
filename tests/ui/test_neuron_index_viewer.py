@@ -1949,3 +1949,28 @@ def test_mapped_csv_extras_dedupe_and_via_note():
     assert extras[1]['bridge-flywireType'] == ''
     assert extras[2]['foreign_type(s)'] == ''
     assert extras[2]['bridge-flywireType'] == ''
+
+
+def test_mapped_csv_extras_same_name_marker_makes_no_column():
+    """A provenance entry whose only origin is the 'same name' marker must
+    not create a phantom always-empty ``bridge-type`` column — the
+    column-enumeration loop applies the same kind filter as the cell-fill
+    loop (§9.3)."""
+    from ui.neuron_index import mapped_csv_extras
+
+    provenance = {
+        'DN1a': [
+            {'foreign_type': 'DN1a', 'matched': "type · 'DN1a'",
+             'origins': [
+                 {'column': 'type', 'value': 'DN1a',
+                  'home': 'flywire_FAFB_v783', 'kind': 'same_name',
+                  'indirect': False, 'text': 'same name'},
+             ]},
+        ],
+    }
+    rows = [{'type': 'DN1a', 'bodyId': 1}]
+    fieldnames, extras = mapped_csv_extras(
+        rows, provenance, 'flywire_FAFB_v783')
+    assert fieldnames == [
+        'foreign_dataset', 'foreign_type(s)', 'matched column(s)']
+    assert extras[0]['foreign_type(s)'] == 'DN1a'

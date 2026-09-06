@@ -2616,6 +2616,8 @@ def mapped_csv_extras(rows, provenance, foreign_dataset: str) -> tuple:
     for entries in (provenance or {}).values():
         for entry in entries or []:
             for origin in entry.get("origins") or []:
+                if origin.get("kind") not in (None, "linker"):
+                    continue  # 'same name' markers carry no bridge column
                 column = str(origin.get("column", ""))
                 if column and column not in seen_columns:
                     seen_columns.add(column)

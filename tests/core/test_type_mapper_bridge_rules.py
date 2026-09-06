@@ -220,6 +220,49 @@ def test_fafb_banc_pair_has_no_mcns_detour():
     assert all(set(r) <= {FAFB, BANC} for r in routes(chains))
 
 
+def test_hemi_fafb_derives_through_two_crosswalk_linkers():
+    """HEMI --hT-- MCNS --fT-- FAFB: the pair's MAXIMIZED linker chain.
+
+    The composed route is the only linker derivation this licensed
+    connector pair has (all its chains' linkers are these two), so the
+    standardization must carry BOTH linker columns and every derived
+    surface (preferred chain, bridge_linker_text -> the CSV
+    ``bridge-<column>`` fields) must show them (§9.3)."""
+    from comparison.cross_dataset_type_mapper import (
+        bridge_linker_text,
+        preferred_bridge_chain,
+        standardize_bridge,
+    )
+
+    m = _bare_mapper()
+    _seed_flywire(m, fafb_primaries={'F1'})
+    m._dataset_types = {
+        MCNS: {'M1': {'b1'}},
+        HEMI: {'H1': {'b1'}},
+        FAFB: {'F1': {'b1'}},
+    }
+    m._crosswalk_reverse_cache = {'hemibrainType': {'H1': {'M1'}}}
+    m._crosswalk_parts_cache = {('flywireType', 'M1'): ['F1']}
+
+    chains = m.get_type_bridges('H1', HEMI, FAFB)
+    expected = (
+        (HEMI, 'type', 'H1'),
+        (MCNS, 'hemibrainType', 'M1'),
+        (FAFB, 'flywireType', 'F1'),
+    )
+    assert expected in [chain_key(c) for c in chains]
+    assert routes(chains) == [(HEMI, MCNS, FAFB)]
+
+    best = preferred_bridge_chain(chains, HEMI, FAFB)
+    linkers = standardize_bridge(best, HEMI, FAFB)
+    assert [(l['column'], l['value']) for l in linkers] == [
+        ('hemibrainType', 'M1'), ('flywireType', 'F1')]
+
+    info = bridge_linker_text(chains, HEMI, FAFB, 'F1')
+    assert {e['column'] for e in info['entries']} == {
+        'hemibrainType', 'flywireType'}
+
+
 # ---------------------------------------------------------------------------
 # Order and untyped rules
 # ---------------------------------------------------------------------------

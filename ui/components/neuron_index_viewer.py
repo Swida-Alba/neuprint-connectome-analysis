@@ -1486,9 +1486,11 @@ def _render_index(
             import csv
             import io
 
-            # Mapped view: append the mapping provenance columns (§9.3) —
+            # Mapped view: PREPEND the mapping provenance columns (§9.3) —
             # the foreign dataset/types, the matched column, and one
-            # bridge-<column> cell per standardized linker column.
+            # bridge-<column> cell per standardized linker column — so the
+            # foreign/bridge columns lead the CSV, ahead of this dataset's
+            # metadata columns.
             extra_fieldnames: List[str] = []
             extras: List[Dict[str, str]] = []
             if mapped_view.get("active"):
@@ -1496,9 +1498,10 @@ def _render_index(
                     result.rows, mapped_view.get("provenance", {}),
                     mapped_view.get("foreign_dataset", ""))
             buffer = io.StringIO()
-            fieldnames = ([
-                column for column in columns if column in result.rows[0]
-            ] + extra_fieldnames)
+            fieldnames = (
+                extra_fieldnames
+                + [column for column in columns if column in result.rows[0]]
+            )
             writer = csv.DictWriter(
                 buffer, fieldnames=fieldnames, extrasaction="ignore"
             )
