@@ -103,7 +103,8 @@ def create_morphology_tab():
                 morph_best_dataset_warning = ui.label(
                     "⚠️ Morphological similarity works best with the "
                     "male-cns:v1.0 dataset; results on other datasets may be "
-                    "less reliable."
+                    "less reliable, since male-cns:v1.0 includes ROI data "
+                    "that is used for efficient candidate screening."
                 ).classes("text-caption text-amber-8").set_visibility(False)
 
             with ui.card().classes("w-full drocat-card").props(
