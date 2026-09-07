@@ -1453,6 +1453,34 @@ class FindNeuronConnection:
             if note not in self._warn_notes:
                 self._warn_notes.append(note)
 
+    def _record_cache_fallback_notes(self, role, search_infos):
+        """Report analysis queries that had to fall back to the dataframe scan.
+
+        The parquet sidecar is the fast search surface; a rejection means the
+        neuron index no longer matches the dataset metadata (typically a new
+        or reordered searchable column).  The shared resolver stays silent and
+        ships the reason in ``search_info``; this runs it through the standard
+        channels — one console line and user_warning_notes.txt — once per
+        unique reason per role.
+        """
+        for info in search_infos or []:
+            reason = str((info or {}).get("cache_fallback_reason") or "").strip()
+            if not reason:
+                continue
+            note = (
+                f'- [search fallback] {role} queries fell back to the slow '
+                f'dataframe scan ({reason}). Rebuilding the neuron index '
+                f'restores the fast sidecar search.'
+            )
+            if note in self._warn_notes:
+                continue
+            self._warn_notes.append(note)
+            self._vprint(
+                f'\033[33m⚠️  {note[2:]} Rebuild the index from the dataset '
+                f'panel to restore the fast sidecar search.\033[0m',
+                level='both',
+            )
+
     def _extract_nodes_from_path_graph(self, conn_inpath: pd.DataFrame) -> List[str]:
         """Extract unique bodyIds from path graph edges."""
         if conn_inpath is None:
@@ -10509,6 +10537,7 @@ class FindNeuronConnection:
             self.target_criteria = self.source_criteria
             self._record_search_priority_warnings("source", source_search_infos)
             self._record_search_priority_warnings("target", source_search_infos)
+            self._record_cache_fallback_notes("source", source_search_infos)
         else:
             self.source_df, _, source_fname_auto, self.source_criteria = sv.getNeurons(
                 self.sourceNeurons, 
@@ -10530,6 +10559,8 @@ class FindNeuronConnection:
             )
             self._record_search_priority_warnings("source", source_search_infos)
             self._record_search_priority_warnings("target", target_search_infos)
+            self._record_cache_fallback_notes("source", source_search_infos)
+            self._record_cache_fallback_notes("target", target_search_infos)
 
         # getNeurons uses the same query for matching and for a convenient
         # auto-name.  Re-derive that name from the untouched user query so a

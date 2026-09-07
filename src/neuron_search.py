@@ -57,7 +57,30 @@ class CachedNeuronSearch:
 
     @property
     def body_id_keys(self) -> frozenset[str]:
-        return frozenset(_body_id_key(value) for value in self.body_ids)
+        cached = getattr(self, "_body_id_keys_cache", None)
+        if cached is None:
+            cached = frozenset(_body_id_key(value) for value in self.body_ids)
+            # Frozen dataclass: stash the memo outside the declared fields so
+            # equality/repr stay tied to the loaded projection, not the cache.
+            object.__setattr__(self, "_body_id_keys_cache", cached)
+        return cached
+
+    @property
+    def priority_column_order(self) -> List[str]:
+        """Searchable columns in their stable build-time priority order.
+
+        ``unique()`` returns an arbitrary order, and rank ties inside
+        ``viewer_search_columns`` fall back to source order, so column order
+        derived from ``unique()`` flips between calls — which made the
+        coverage check reject a perfectly valid sidecar at random.  The
+        build-time ``search_priority`` recorded in the sidecar is the stable
+        order every comparison must use.
+        """
+        cached = getattr(self, "_priority_column_order", None)
+        if cached is None:
+            cached = _stable_sidecar_column_order(self.search_frame)
+            object.__setattr__(self, "_priority_column_order", cached)
+        return cached
 
 
 @dataclass(frozen=True)
@@ -305,6 +328,85 @@ def _dataframe_search_columns(frame: Any) -> List[Tuple[str, str]]:
         if column not in {source for _, source in pairs}:
             pairs.append((column, column))
     return pairs
+
+
+@dataclass
+class FrameBodyIdIndex:
+    """Normalized bodyId lookups for one metadata frame, built once.
+
+    The per-query resolvers otherwise re-normalize the whole bodyId column
+    several times (set equality, key mapping, row lookup).  This index does
+    that work a single time per frame object and is reused by every query.
+    """
+
+    column: str
+    values: List[Any]
+    keys: frozenset
+    row_by_key: Dict[str, int]
+
+    def row_for(self, key: str) -> Optional[int]:
+        return self.row_by_key.get(key)
+
+    def value_for(self, key: str) -> Optional[Any]:
+        row = self.row_by_key.get(key)
+        return self.values[row] if row is not None else None
+
+
+_FRAME_INDEX_CACHE: Optional[Dict[int, Tuple[Any, Tuple[Any, ...], FrameBodyIdIndex]]] = None
+
+
+def frame_body_id_index(frame: Any) -> Optional[FrameBodyIdIndex]:
+    """Return the cached bodyId index for *frame*, building it at most once.
+
+    The cache is keyed by object id and holds a weak reference to the frame,
+    so a reloaded table simply rebuilds while repeated queries reuse the
+    index.  Frames that cannot be weak-referenced still get an index; it is
+    just not memoized.
+    """
+    global _FRAME_INDEX_CACHE
+    names = [str(column) for column in getattr(frame, "columns", [])]
+    actual_body = body_id_column(names)
+    if actual_body is None:
+        return None
+    guard = (len(frame), actual_body)
+    frame_id = id(frame)
+    if _FRAME_INDEX_CACHE is None:
+        _FRAME_INDEX_CACHE = {}
+    cached = _FRAME_INDEX_CACHE.get(frame_id)
+    if cached is not None:
+        if cached[0]() is frame and cached[1] == guard:
+            return cached[2]
+        # Dead slot (frame garbage-collected and its id possibly reused).
+        _FRAME_INDEX_CACHE.pop(frame_id, None)
+
+    values = _frame_column_values(frame, actual_body)
+    keys: set = set()
+    row_by_key: Dict[str, int] = {}
+    for row, value in enumerate(values):
+        key = _body_id_key(value)
+        if not key or key in row_by_key:
+            continue
+        keys.add(key)
+        row_by_key[key] = row
+    index = FrameBodyIdIndex(
+        column=actual_body,
+        values=values,
+        keys=frozenset(keys),
+        row_by_key=row_by_key,
+    )
+    try:
+        import weakref
+
+        _FRAME_INDEX_CACHE[frame_id] = (weakref.ref(frame), guard, index)
+        if len(_FRAME_INDEX_CACHE) > 8:
+            for dead in [
+                slot for slot, entry in _FRAME_INDEX_CACHE.items()
+                if entry[0]() is None
+            ]:
+                _FRAME_INDEX_CACHE.pop(dead, None)
+    except TypeError:
+        pass
+    return index
 
 
 def structured_search_columns(frame: Any) -> List[str]:
@@ -597,24 +699,26 @@ def resolve_dataframe_query(
     else:
         columns = list(available)
 
-    values_by_column = {
-        canonical: [
-            _display_value(value, body_id=canonical == "bodyId")
-            for value in _frame_column_values(frame, actual)
-        ]
-        for canonical, actual in pairs
-    }
-    def find_rows(column: str, predicate) -> List[int]:
-        return [
-            index for index, value in enumerate(values_by_column.get(column, []))
-            if value and predicate(value)
-        ]
+    numeric = _is_numeric_query(query)
+    wildcard = isinstance(query, str) and (".*" in query or "*" in query)
+    prefix = _prefix_literal(query_text) if wildcard else None
+    numeric_wildcard = wildcard and _numeric_pattern(query_text)
+
+    if numeric and scope in {"auto", "bodyid"}:
+        columns = ["bodyId"] if "bodyId" in actual_by_canonical else []
+    elif numeric_wildcard and scope == "auto":
+        columns = ["bodyId"] if "bodyId" in actual_by_canonical else []
+
+    body_index = (
+        frame_body_id_index(frame)
+        if "bodyId" in actual_by_canonical else None
+    )
 
     def finish(rows: List[int], column: Optional[str], mode: str):
-        body_column = actual_by_canonical.get("bodyId")
         raw_body_ids = (
-            _frame_column_values(frame, body_column)
-            if body_column is not None else []
+            body_index.values if body_index is not None else
+            _frame_column_values(frame, actual_by_canonical["bodyId"])
+            if "bodyId" in actual_by_canonical else []
         )
         output: List[Any] = []
         seen = set()
@@ -633,15 +737,28 @@ def resolve_dataframe_query(
             info["match_mode"] = mode
         return output, info
 
-    numeric = _is_numeric_query(query)
-    wildcard = isinstance(query, str) and (".*" in query or "*" in query)
-    prefix = _prefix_literal(query_text) if wildcard else None
-    numeric_wildcard = wildcard and _numeric_pattern(query_text)
+    if numeric and not wildcard and scope in {"auto", "bodyid"}:
+        # Bare numeric queries are bodyId-only.  The prebuilt frame index
+        # answers them without normalizing every searchable column first.
+        row = body_index.row_for(query_text) if body_index is not None else None
+        return finish([row] if row is not None else [], "bodyId", "exact")
 
-    if numeric and scope in {"auto", "bodyid"}:
-        columns = ["bodyId"] if "bodyId" in actual_by_canonical else []
-    elif numeric_wildcard and scope == "auto":
-        columns = ["bodyId"] if "bodyId" in actual_by_canonical else []
+    values_by_column = {
+        canonical: [
+            _display_value(value, body_id=canonical == "bodyId")
+            for value in (
+                body_index.values
+                if canonical == "bodyId" and body_index is not None
+                else _frame_column_values(frame, actual)
+            )
+        ]
+        for canonical, actual in pairs
+    }
+    def find_rows(column: str, predicate) -> List[int]:
+        return [
+            index for index, value in enumerate(values_by_column.get(column, []))
+            if value and predicate(value)
+        ]
 
     if prefix is not None:
         for column in columns:
@@ -662,18 +779,13 @@ def resolve_dataframe_query(
         return finish([], None, "exact")
 
     if numeric and not wildcard:
-        if scope not in {"auto", "bodyid"}:
-            for column in columns:
-                rows = find_rows(column, lambda value: value == query_text)
-                if rows:
-                    return finish(rows, column, "exact")
-            return finish([], None, "exact")
-        rows = find_rows(
-            "bodyId",
-            lambda value: bool(re.fullmatch(r"\d+", value))
-            and value == query_text,
-        )
-        return finish(rows, "bodyId", "exact")
+        # Automatic/bodyId scopes already returned through the frame index
+        # above; explicit non-bodyId scopes keep the per-column scan.
+        for column in columns:
+            rows = find_rows(column, lambda value: value == query_text)
+            if rows:
+                return finish(rows, column, "exact")
+        return finish([], None, "exact")
 
     try:
         compiled = re.compile(_legacy_regex_pattern(query_text))
@@ -686,17 +798,37 @@ def resolve_dataframe_query(
     return finish([], None, "regex")
 
 
-def _scope_columns(search_frame, search_columns: str) -> List[str]:
-    available = set(search_frame["search_column"].unique().to_list())
+def _stable_sidecar_column_order(search_frame) -> List[str]:
+    """Sidecar column names ordered by their build-time ``search_priority``."""
+    import polars as pl
+
+    return (
+        search_frame.group_by("search_column")
+        .agg(pl.col("search_priority").min())
+        .sort("search_priority")
+        .get_column("search_column")
+        .to_list()
+    )
+
+
+def _scope_columns(cache, search_columns: str) -> List[str]:
+    """Resolve the searchable columns for *scope* in stable priority order.
+
+    Accepts a :class:`CachedNeuronSearch` or, for backward compatibility, a
+    bare sidecar frame.
+    """
+    if hasattr(cache, "priority_column_order"):
+        order = cache.priority_column_order
+    else:
+        order = _stable_sidecar_column_order(cache)
+    available = set(order)
     scope = str(search_columns or "auto").strip().casefold()
     if scope == "bodyid":
         wanted = ["bodyId"]
     elif scope in {"type", "instance"}:
         wanted = [scope]
     else:
-        wanted = viewer_search_columns(
-            search_frame["search_column"].unique().to_list()
-        )
+        wanted = viewer_search_columns(order)
     return [column for column in wanted if column in available]
 
 
@@ -715,9 +847,7 @@ def _cache_covers_frame(cache: CachedNeuronSearch, frame: Any) -> bool:
         expected = [
             canonical for canonical, _ in _dataframe_search_columns(frame)
         ]
-        cached = ordered_search_columns(
-            cache.search_frame["search_column"].unique().to_list()
-        )
+        cached = ordered_search_columns(cache.priority_column_order)
     except Exception:
         return False
     return cached == expected
@@ -906,7 +1036,7 @@ def resolve_neuron_query(
     scope = str(search_columns or "auto").strip().casefold()
     if scope not in {"auto", "type", "instance", "bodyid"}:
         scope = "auto"
-    all_columns = _scope_columns(cache.search_frame, scope)
+    all_columns = _scope_columns(cache, scope)
     if not all_columns:
         return ([], info)
 
@@ -998,6 +1128,109 @@ def resolve_neuron_query(
     return _result(cache, query, cache.search_frame.head(0), None)
 
 
+_VALIDATION_CACHE: Dict[Tuple[int, int], Tuple[Any, Any, Tuple[bool, Optional[str]]]] = {}
+
+
+def _cache_validation_for_frame(
+    cache: CachedNeuronSearch,
+    frame: Any,
+    frame_index: FrameBodyIdIndex,
+) -> Tuple[bool, Optional[str]]:
+    """Memoize whether *cache* may answer queries for *frame*.
+
+    Returns ``(validated, rejection_reason)``.  The verdict is identity-
+    stable for a given (cache, frame) pair — both objects are process-local
+    singletons per dataset — so the expensive bodyId-set equality runs once
+    instead of once per query.  On rejection the reason is memoized with it
+    so callers can report the fallback without recomputing it per query.
+    """
+    key = (id(cache), id(frame))
+    cached = _VALIDATION_CACHE.get(key)
+    if cached is not None:
+        cache_ref, frame_ref, result = cached
+        if cache_ref() is cache and frame_ref() is frame:
+            return result
+        _VALIDATION_CACHE.pop(key, None)
+    if frame_index.keys == cache.body_id_keys and _cache_covers_frame(
+        cache, frame
+    ):
+        result: Tuple[bool, Optional[str]] = (True, None)
+    else:
+        result = (False, _cache_rejection_reason(cache, frame, frame_index))
+    try:
+        import weakref
+
+        _VALIDATION_CACHE[key] = (weakref.ref(cache), weakref.ref(frame), result)
+        if len(_VALIDATION_CACHE) > 32:
+            for dead in [
+                slot for slot, entry in _VALIDATION_CACHE.items()
+                if entry[0]() is None or entry[1]() is None
+            ]:
+                _VALIDATION_CACHE.pop(dead, None)
+    except TypeError:
+        pass
+    return result
+
+
+def _cache_rejection_reason(
+    cache: CachedNeuronSearch,
+    frame: Any,
+    frame_index: FrameBodyIdIndex,
+) -> Optional[str]:
+    """Return why the sidecar cannot answer queries for *frame*, if known."""
+    if frame_index.keys != cache.body_id_keys:
+        detail = []
+        frame_only = sorted(frame_index.keys - cache.body_id_keys)[:3]
+        index_only = sorted(cache.body_id_keys - frame_index.keys)[:3]
+        if frame_only:
+            detail.append(f"frame-only bodyIds {frame_only}")
+        if index_only:
+            detail.append(f"index-only bodyIds {index_only}")
+        detail.append(
+            f"frame has {len(frame_index.keys):,} bodyIds, "
+            f"index has {len(cache.body_id_keys):,}"
+        )
+        return "bodyId set mismatch (" + "; ".join(detail) + ")"
+    expected = [canonical for canonical, _ in _dataframe_search_columns(frame)]
+    cached = ordered_search_columns(cache.priority_column_order)
+    if cached != expected:
+        missing = [column for column in expected if column not in cached]
+        if missing:
+            return f"sidecar lacks searchable column(s) {missing}"
+        return (
+            f"searchable column order mismatch: sidecar {cached} != "
+            f"frame {expected}"
+        )
+    return None
+
+
+def _report_cache_fallback(
+    cache: CachedNeuronSearch,
+    frame: Any,
+    frame_index: FrameBodyIdIndex,
+    verbose: bool,
+) -> None:
+    """Explain, at most once per reason, why the sidecar was rejected.
+
+    The dataframe scan is the correctness fallback but also the slow path; a
+    silent downgrade turns every later query into a full-table scan with
+    nothing in the log saying why.
+    """
+    if not verbose:
+        return
+    reason = _cache_rejection_reason(cache, frame, frame_index)
+    if not reason:
+        return
+    key = (str(cache.index_path), reason)
+    if key in _FALLBACK_DIAGNOSTICS_EMITTED:
+        return
+    _FALLBACK_DIAGNOSTICS_EMITTED.add(key)
+    print(
+        f'\033[33mℹ️  neuron search sidecar unused for "{cache.dataset}": '
+        f'{reason}. Falling back to the dataframe scan (slower).\033[0m'
+    )
+
+
 def resolve_cached_or_dataframe_query(
     cache: Optional[CachedNeuronSearch],
     frame: Any,
@@ -1012,42 +1245,78 @@ def resolve_cached_or_dataframe_query(
     set; otherwise the exact same resolver runs against the caller's frame.
     This boundary is shared by pathfinding, morphology, skeleton rendering,
     and NeuronBridge so a stale or partial cache cannot change semantics.
+
+    Both the per-frame bodyId index and the cache validation are memoized,
+    so repeated queries no longer re-normalize the whole bodyId column per
+    query, and bare numeric (bodyId-only) queries resolve in O(1).  When the
+    sidecar was rejected, ``info["cache_fallback_reason"]`` explains why so
+    the run layer can report the (slow) dataframe fallback once per run —
+    this module intentionally prints nothing.
     """
-    actual_body = body_id_column(
-        [str(column) for column in getattr(frame, "columns", [])]
+    scope = str(search_columns or "auto").strip().casefold()
+    if scope not in {"auto", "type", "instance", "bodyid"}:
+        scope = "auto"
+    wildcard = isinstance(query, str) and (".*" in query or "*" in query)
+    numeric_exact = (
+        bool(_normalized_query(query))
+        and not wildcard
+        and scope in {"auto", "bodyid"}
+        and _is_numeric_query(query)
     )
-    if cache is not None and actual_body is not None:
-        source_values = _frame_column_values(frame, actual_body)
-        source_keys = {
-            _body_id_key(value) for value in source_values
-            if _body_id_key(value)
+
+    frame_index = frame_body_id_index(frame)
+
+    validated = False
+    fallback_reason: Optional[str] = None
+    if cache is not None and frame_index is not None:
+        validated, fallback_reason = _cache_validation_for_frame(
+            cache, frame, frame_index
+        )
+
+    if frame_index is not None and numeric_exact:
+        # Bare numeric queries are bodyId-only on both search surfaces, and
+        # a validated index holds exactly those bodyIds: answer in O(1).
+        value = frame_index.value_for(_normalized_query(query))
+        info = {
+            "search_term": str(query),
+            "matched_column": "bodyId" if value is not None else None,
+            "match_count": 1 if value is not None else 0,
+            "cache": validated,
         }
-        if source_keys == set(cache.body_id_keys) and _cache_covers_frame(
-            cache, frame
-        ):
-            cached_result = resolve_neuron_query(
-                cache,
-                query,
-                search_columns=search_columns,
-            )
-            if cached_result is not None:
-                cached_ids, info = cached_result
-                source_by_key = {
-                    _body_id_key(value): value for value in source_values
-                }
-                resolved = [
-                    source_by_key[_body_id_key(value)]
-                    for value in cached_ids
-                    if _body_id_key(value) in source_by_key
-                ]
-                if not cached_ids or resolved:
-                    info["match_count"] = len(resolved)
-                    return resolved, info
-    return resolve_dataframe_query(
+        if value is not None and not validated:
+            # The dataframe scan stamps its mode; the sidecar surface does not.
+            info["match_mode"] = "exact"
+        if fallback_reason:
+            info["cache_fallback_reason"] = fallback_reason
+        return ([value] if value is not None else []), info
+
+    if validated:
+        cached_result = resolve_neuron_query(
+            cache,
+            query,
+            search_columns=search_columns,
+        )
+        if cached_result is not None:
+            cached_ids, info = cached_result
+            resolved = [
+                value
+                for value in (
+                    frame_index.value_for(_body_id_key(entry))
+                    for entry in cached_ids
+                )
+                if value is not None
+            ]
+            if not cached_ids or resolved:
+                info["match_count"] = len(resolved)
+                return resolved, info
+    resolved_ids, info = resolve_dataframe_query(
         frame,
         query,
         search_columns=search_columns,
     )
+    if fallback_reason:
+        info["cache_fallback_reason"] = fallback_reason
+    return resolved_ids, info
 
 
 __all__ = [

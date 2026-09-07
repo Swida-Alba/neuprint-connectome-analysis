@@ -4,6 +4,7 @@ import re
 import sys
 import json
 import threading
+from collections import OrderedDict
 from copy import copy
 from types import SimpleNamespace
 import warnings
@@ -368,6 +369,98 @@ def _get_cached_neuron_search(dataset: str):
     return get_cached_neuron_search(dataset)
 
 
+_TOKEN_RESOLUTION_CACHE_LIMIT = 20000
+_TOKEN_RESOLUTION_CACHE: OrderedDict = OrderedDict()
+
+
+def _token_cache_key(required_neuron, frame, dataset, search_columns):
+    return (str(dataset), str(required_neuron), str(search_columns or 'auto'))
+
+
+def _lookup_token_resolution(required_neuron, frame, dataset, search_columns):
+    """Return a prior resolution of the same token against the same frame.
+
+    A run resolves the same chip list twice (source and target passes) and
+    often repeats tokens across steps; each resolution otherwise re-scans the
+    whole metadata frame.  Entries hold a weak reference to the frame so a
+    reloaded table can never inherit stale results.
+    """
+    import weakref
+    key = _token_cache_key(required_neuron, frame, dataset, search_columns)
+    entry = _TOKEN_RESOLUTION_CACHE.get(key)
+    if entry is None:
+        return None
+    frame_ref, frame_len, body_ids, info = entry
+    if frame_ref() is not frame or frame_len != len(frame):
+        _TOKEN_RESOLUTION_CACHE.pop(key, None)
+        return None
+    _TOKEN_RESOLUTION_CACHE.move_to_end(key)
+    return list(body_ids), dict(info)
+
+
+def _store_token_resolution(required_neuron, frame, dataset, search_columns, body_ids, search_info):
+    import weakref
+    try:
+        frame_ref = weakref.ref(frame)
+    except TypeError:
+        return
+    key = _token_cache_key(required_neuron, frame, dataset, search_columns)
+    _TOKEN_RESOLUTION_CACHE[key] = (
+        frame_ref, len(frame), list(body_ids), dict(search_info or {})
+    )
+    while len(_TOKEN_RESOLUTION_CACHE) > _TOKEN_RESOLUTION_CACHE_LIMIT:
+        _TOKEN_RESOLUTION_CACHE.popitem(last=False)
+
+
+_QUERY_PRINT_CAP = 10
+
+
+class _ResolutionSummary:
+    """Aggregate per-chip resolution outcomes for one getNeurons query.
+
+    Beyond a handful of chips one print per chip is noise (a 219-chip run
+    printed 219 near-identical lines); once the query exceeds
+    ``_QUERY_PRINT_CAP`` entries the loop stays silent and this summary
+    carries the totals instead: chips in, neurons out, and any chip that
+    matched nothing.
+    """
+
+    def __init__(self, total_chips: int):
+        self.total_chips = total_chips
+        self.cached_hits = 0
+        self.dataframe_hits = 0
+        self.missed_chips = []
+        self.body_id_keys = set()
+
+    def add(self, chip, body_ids, search_info=None):
+        if body_ids:
+            if (search_info or {}).get('cache'):
+                self.cached_hits += 1
+            else:
+                self.dataframe_hits += 1
+            self.body_id_keys.update(str(body_id) for body_id in body_ids)
+        else:
+            self.missed_chips.append(str(chip))
+
+    def report(self):
+        print(
+            f'✓ Resolved {self.total_chips} queries → '
+            f'{len(self.body_id_keys)} neurons '
+            f'(cached search: {self.cached_hits}; '
+            f'dataframe search: {self.dataframe_hits})'
+        )
+        if self.missed_chips:
+            shown = ', '.join(self.missed_chips[:5])
+            extra = (
+                f' +{len(self.missed_chips) - 5} more'
+                if len(self.missed_chips) > 5 else ''
+            )
+            print(
+                f'\033[33m⚠️  {len(self.missed_chips)} of {self.total_chips} '
+                f'queries matched no neurons: {shown}{extra}\033[0m'
+            )
+
+
 def _resolve_single_neuron(
     required_neuron,
     ndf_alltypes,
@@ -384,12 +477,22 @@ def _resolve_single_neuron(
         from src.neuron_search import resolve_cached_or_dataframe_query
     except ImportError:  # pragma: no cover - ``src/`` on sys.path imports
         from neuron_search import resolve_cached_or_dataframe_query
-    body_ids, search_info = resolve_cached_or_dataframe_query(
-        cached_search,
-        ndf_alltypes,
-        required_neuron,
-        search_columns=search_columns,
+    cached = _lookup_token_resolution(
+        required_neuron, ndf_alltypes, dataset, search_columns
     )
+    if cached is not None:
+        body_ids, search_info = cached
+    else:
+        body_ids, search_info = resolve_cached_or_dataframe_query(
+            cached_search,
+            ndf_alltypes,
+            required_neuron,
+            search_columns=search_columns,
+        )
+        _store_token_resolution(
+            required_neuron, ndf_alltypes, dataset, search_columns,
+            body_ids, search_info,
+        )
     if search_info_sink is not None:
         search_info_sink.append(dict(search_info or {}))
     if verbose:
@@ -1921,7 +2024,12 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                 # bodyId -> type -> instance -> useful type/taxonomy fields.
                 bodyId_alltypes = full_neuron_df['bodyId'].astype(str).tolist()
                 cached_search = _get_cached_neuron_search(dataset)
-                
+
+                fafb_summary = (
+                    _ResolutionSummary(len(flat_list))
+                    if verbose and len(flat_list) > _QUERY_PRINT_CAP
+                    else None
+                )
                 for item in flat_list:
                     item_bodyIds, search_info = _resolve_single_neuron(
                         item,
@@ -1929,14 +2037,18 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                         bodyId_alltypes,
                         dataset=dataset,
                         cached_search=cached_search,
-                        verbose=verbose,
+                        verbose=verbose and fafb_summary is None,
                         search_columns=search_columns,
                         search_info_sink=search_info_sink,
                     )
+                    if fafb_summary is not None:
+                        fafb_summary.add(item, item_bodyIds, search_info)
                     if item_bodyIds:
                         # Get matching rows
                         item_df = full_neuron_df[full_neuron_df['bodyId'].astype(str).isin([str(b) for b in item_bodyIds])].copy()
                         selected_dfs.append(item_df)
+                if fafb_summary is not None:
+                    fafb_summary.report()
                 
                 if selected_dfs:
                     filtered_df = pd.concat(selected_dfs).drop_duplicates(subset=['bodyId'])
@@ -2020,25 +2132,39 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
             bodyId_list = []
             group_names = []
             group_custom_idx = 0
-            
+
+            # Same print cap as the flat list: count every item across all
+            # groups and switch to the totals summary past the threshold.
+            total_nested_items = sum(
+                len(item) if isinstance(item, list) else 1
+                for item in requiredNeurons
+            )
+            summary = (
+                _ResolutionSummary(total_nested_items)
+                if verbose and total_nested_items > _QUERY_PRINT_CAP
+                else None
+            )
+
             for i, requiredNeuron in enumerate(requiredNeurons):
                 if isinstance(requiredNeuron, list):
                     # Nested list - create custom group
                     group_bodyIds = []
                     group_items = []
-                    
+
                     for item in requiredNeuron:
                         group_items.append(str(item).replace('.*', ''))
-                        item_bodyIds, _ = _resolve_single_neuron(
+                        item_bodyIds, item_info = _resolve_single_neuron(
                             item,
                             ndf_alltypes,
                             bodyId_alltypes,
                             dataset=dataset,
                             cached_search=cached_search,
-                            verbose=verbose,
+                            verbose=verbose and summary is None,
                             search_columns=search_columns,
                             search_info_sink=search_info_sink,
                         )
+                        if summary is not None:
+                            summary.add(item, item_bodyIds, item_info)
                         group_bodyIds.extend(item_bodyIds)
                     
                     # Generate group name
@@ -2058,18 +2184,23 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                     print(f'Custom group "{group_name}": {len(group_bodyIds)} neurons from {len(requiredNeuron)} items')
                 else:
                     # Regular item
-                    item_bodyIds, _ = _resolve_single_neuron(
+                    item_bodyIds, item_info = _resolve_single_neuron(
                         requiredNeuron,
                         ndf_alltypes,
                         bodyId_alltypes,
                         dataset=dataset,
                         cached_search=cached_search,
-                        verbose=verbose,
+                        verbose=verbose and summary is None,
                         search_columns=search_columns,
                         search_info_sink=search_info_sink,
                     )
+                    if summary is not None:
+                        summary.add(requiredNeuron, item_bodyIds, item_info)
                     bodyId_list.extend(item_bodyIds)
                     group_names.append(str(requiredNeuron).replace('.*', ''))
+
+            if summary is not None:
+                summary.report()
             
             # Create auto_name from group names
             if len(group_names) == 1:
@@ -2094,7 +2225,10 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
             # Add custom_group column by matching original type or creating merged type
             neuron_df['custom_group'] = neuron_df['type']  # Default to original type
             
-            # Reassign custom groups for nested list items
+            # Reassign custom groups for nested list items. This pass only
+            # re-resolves the same items to map group names onto bodyIds, so
+            # it never prints — the resolution outcome was already reported
+            # (per chip under the cap, or by the summary above).
             group_custom_idx = 0
             for i, requiredNeuron in enumerate(requiredNeurons):
                 if isinstance(requiredNeuron, list):
@@ -2107,7 +2241,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                             bodyId_alltypes,
                             dataset=dataset,
                             cached_search=cached_search,
-                            verbose=verbose,
+                            verbose=False,
                             search_columns=search_columns,
                             search_info_sink=search_info_sink,
                         )
@@ -2134,24 +2268,35 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
         else:
             # Original logic for flat list
             bodyId_list = []
+            # Beyond the print cap one summary line replaces the per-chip
+            # prints (219 chips used to print 219 "Found 1 neurons" lines).
+            summary = (
+                _ResolutionSummary(len(requiredNeurons))
+                if verbose and len(requiredNeurons) > _QUERY_PRINT_CAP
+                else None
+            )
             for i, requiredNeuron in enumerate(requiredNeurons):
-                if i == 0: 
+                if i == 0:
                     auto_name = str(requiredNeuron).replace('.*','')
                 elif i == 1:
                     auto_name += '_etc'
-                
-                item_bodyIds, _ = _resolve_single_neuron(
+
+                item_bodyIds, item_info = _resolve_single_neuron(
                     requiredNeuron,
                     ndf_alltypes,
                     bodyId_alltypes,
                     dataset=dataset,
                     cached_search=cached_search,
-                    verbose=verbose,
+                    verbose=verbose and summary is None,
                     search_columns=search_columns,
                     search_info_sink=search_info_sink,
                 )
+                if summary is not None:
+                    summary.add(requiredNeuron, item_bodyIds, item_info)
                 bodyId_list.extend(item_bodyIds)
-            
+            if summary is not None:
+                summary.report()
+
             # Ensure bodyId_list type matches DataFrame's bodyId column type for .isin() to work
             if bodyId_list and len(ndf_alltypes) > 0:
                 sample_df_bid = ndf_alltypes['bodyId'].iloc[0]
@@ -2159,7 +2304,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                     bodyId_list = [int(b) if isinstance(b, str) and str(b).isdigit() else b for b in bodyId_list]
                 else:
                     bodyId_list = [str(b) for b in bodyId_list]
-            
+
             neuron_df = ndf_alltypes[ndf_alltypes['bodyId'].isin(bodyId_list)]
             roi_count_df = rdf_alltypes[rdf_alltypes['bodyId'].isin(bodyId_list)]
     
@@ -7899,8 +8044,9 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
 
         if dataset_path is not None and os.path.exists(dataset_path):
             use_local = True
-            is_fafb = is_flywire_dataset(dataset)
-            ndf_complete = _load_local_neuron_df_cached(dataset_path, is_fafb)
+            is_flywire_family = is_flywire_dataset(dataset)
+            ndf_complete = _load_local_neuron_df_cached(dataset_path,
+                                                        is_flywire_family)
     
     # Step 3: Build complete bodyId → std_label map from label_mapper
     bodyid_label_map = {}
