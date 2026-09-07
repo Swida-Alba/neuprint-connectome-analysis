@@ -8128,12 +8128,13 @@ class MorphologyComparer:
         ``neurons`` supplies transient in-memory raw skeletons (profile-first
         fetches) so they are not re-fetched; anything missing is resolved
         through the shared raw cache and batched online fetch (raw skeletons
-        are always persisted as compressed SWC). For
-        FlyWire datasets the raw sources follow the shared pipeline in
-        ``load_flywire_skeletons_batch`` (raw cache / healed bundle ->
-        per-run extrusion check with CAVE replacement -> token-gated CAVE
-        skeletonization); the loader owns FlyWire persistence, so no
-        re-persist happens here."""
+        are always persisted as compressed SWC). FAFB resolves its misses
+        through the shared FAFB pipeline in ``load_flywire_skeletons_batch``
+        (raw cache / healed bundle -> per-run extrusion check with CAVE
+        replacement -> token-gated CAVE skeletonization) and the loader owns
+        FAFB persistence; BANC and NeuPrint datasets fetch their misses
+        through ``fetch_skeletons_on_demand_batch`` (BANC resolves each body
+        through its public SWC chain)."""
         out: Dict[int, Optional[navis.core.dotprop.Dotprops]] = {}
         local_neurons: Dict[int, object] = {
             int(bid): neuron for bid, neuron in (neurons or {}).items()
@@ -8147,9 +8148,11 @@ class MorphologyComparer:
 
         # Keep raw vector rows and raw skeleton persistence in the same cache
         # transaction. This makes an NBLAST-first run useful to a later
-        # vector-mode or visualization run. FlyWire is excluded: the shared
-        # loader already persists at the stored level, and a second write at
-        # a different simplification level would churn the same files.
+        # vector-mode or visualization run. FlyWire-family datasets are
+        # excluded: FAFB's shared loader persists at the stored level (a
+        # second write at a different simplification level would churn the
+        # same files), and BANC's batch fetch persists its own level-0 raw
+        # entries inside fetch_banc_swc.
         def _cache_raw_neurons(mapping: Dict[int, object]) -> None:
             if self._is_flywire():
                 return
@@ -8169,10 +8172,13 @@ class MorphologyComparer:
             if cached is not None:
                 local_neurons[bid] = cached
 
-        # FlyWire skeletons: resolve every non-transient id through the
-        # FAFB pipeline once for the whole batch (the extrusion check is
-        # cached, so repeated batches reuse earlier results).
-        if self._is_flywire():
+        # FAFB skeletons: resolve every non-transient id through the FAFB
+        # pipeline once for the whole batch (the extrusion check is
+        # cached, so repeated batches reuse earlier results). BANC must
+        # NOT take this branch — it has no CAVE token, so the pipeline's
+        # fallback would return nothing for it — and follows the NeuPrint
+        # batch fetch below instead (mirrors the v2 missing-fetch gate).
+        if is_fafb_dataset(self.dataset):
             fetched = self._load_fafb_skeletons(
                 [int(b) for b in body_ids if int(b) not in local_neurons]
             )

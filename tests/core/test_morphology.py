@@ -2283,6 +2283,112 @@ class TestFlyWireNblast:
         assert 42 in loaded and 43 in loaded
 
 
+class TestNblastDotpropsRouting:
+    """The NBLAST dotprops fetch dispatch must match the v2 missing-fetch
+    gate: only FAFB resolves through the healed-bundle loader; BANC follows
+    the NeuPrint batch fetch (its public SWC chain), never the token-gated
+    CAVE pipeline whose fallback returns nothing for a BANC dataset."""
+
+    @staticmethod
+    def _comparer(dataset, tmp_path):
+        return morph.MorphologyComparer(
+            query=42, dataset=dataset, method="nblast",
+            project_root=str(tmp_path), verbose=False)
+
+    @staticmethod
+    def _patch_raw_cache(monkeypatch, tmp_path, dataset):
+        """Pin the raw-cache instance so persistence can be observed."""
+        raw_cache = morph.find_similar_raw_cache(
+            dataset, project_root=str(tmp_path), n_workers=1, verbose=False)
+        persist_calls = []
+        real_persist = raw_cache.persist_skeletons
+
+        def spy_persist(mapping):
+            persist_calls.append(sorted(int(b) for b in mapping))
+            return real_persist(mapping)
+
+        monkeypatch.setattr(raw_cache, "persist_skeletons", spy_persist)
+        monkeypatch.setattr(morph, "find_similar_raw_cache",
+                            lambda *a, **k: raw_cache)
+        return persist_calls
+
+    def test_dotprops_banc_routes_to_batch_fetcher(self, tmp_path,
+                                                   monkeypatch):
+        c = self._comparer("banc_v888", tmp_path)
+        persist_calls = self._patch_raw_cache(monkeypatch, tmp_path,
+                                              "banc_v888")
+        fetch_calls = []
+
+        def fake_fetch(dataset, body_ids, **kwargs):
+            fetch_calls.append((dataset, list(body_ids)))
+            return {44: line_neuron(length=20)}
+
+        monkeypatch.setattr(morph, "fetch_skeletons_on_demand_batch",
+                            fake_fetch)
+
+        def no_fafb_loader(body_ids, check_extrusions=None):
+            raise AssertionError("FAFB pipeline must not serve BANC dotprops")
+
+        monkeypatch.setattr(c, "_load_fafb_skeletons", no_fafb_loader)
+        dps = c._dotprops_for_ids([44])
+        assert fetch_calls == [("banc_v888", [44])]
+        assert dps[c._body_id(44)] is not None
+        # the batch fetch owns persistence for BANC (fetch_banc_swc caches
+        # its own level-0 raw entry); the manual re-persist must not churn
+        # the same files behind it
+        assert persist_calls == []
+
+    def test_dotprops_fafb_keeps_fafb_pipeline(self, tmp_path, monkeypatch):
+        c = self._comparer("flywire_FAFB_v783", tmp_path)
+        self._patch_raw_cache(monkeypatch, tmp_path, "flywire_FAFB_v783")
+        loader_calls = []
+
+        def fake_loader(body_ids, check_extrusions=None):
+            loader_calls.append(list(body_ids))
+            return {}
+
+        monkeypatch.setattr(c, "_load_fafb_skeletons", fake_loader)
+
+        def no_generic_fetch(*a, **k):
+            raise AssertionError(
+                "generic batch fetcher must not serve FAFB dotprops")
+
+        monkeypatch.setattr(morph, "fetch_skeletons_on_demand_batch",
+                            no_generic_fetch)
+        dps = c._dotprops_for_ids([42, 43])
+        assert loader_calls == [[42, 43]]
+        assert dps[c._body_id(42)] is None and dps[c._body_id(43)] is None
+
+    def test_dotprops_neuprint_keeps_batch_fetcher(self, tmp_path,
+                                                   monkeypatch):
+        c = self._comparer("np:v1", tmp_path)
+        self._patch_raw_cache(monkeypatch, tmp_path, "np:v1")
+        fetch_calls = []
+
+        def fake_fetch(dataset, body_ids, **kwargs):
+            fetch_calls.append((dataset, list(body_ids)))
+            return {}
+
+        monkeypatch.setattr(morph, "fetch_skeletons_on_demand_batch",
+                            fake_fetch)
+
+        def no_fafb_loader(body_ids, check_extrusions=None):
+            raise AssertionError(
+                "FAFB loader must not serve NeuPrint dotprops")
+
+        monkeypatch.setattr(c, "_load_fafb_skeletons", no_fafb_loader)
+        c._dotprops_for_ids([42, 43])
+        assert fetch_calls == [("np:v1", [42, 43])]
+
+    def test_banc_find_similar_guard_intact(self, tmp_path):
+        """The BANC deferral guard must survive the routing fix: this change
+        is plumbing correctness, not the product decision to enable BANC
+        similarity."""
+        c = self._comparer("banc_v888", tmp_path)
+        with pytest.raises(morph.FlyWireSkeletonAccessError):
+            c.find_similar()
+
+
 class TestTypeReevaluationFetch:
     """The V2 expansion pass fetches per dataset family: FAFB loads through
     the healed-bundle loader (the generic batch fetcher is mesh-native and

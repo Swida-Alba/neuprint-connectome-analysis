@@ -363,7 +363,7 @@ def similar_morphology_specs() -> list:
         "query": "aMe12",
         "dataset": DATASET_FAFB,
         "level": "auto",
-        "method": "vector",
+        "method": "vector_v2",
         "metric": "cosine",
         "candidate_cap": 100,
         "candidate_source": "auto",
