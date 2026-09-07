@@ -266,6 +266,10 @@ def _coerce_user_default(key: str, value):
         # Legacy BANC spellings canonicalize so saved defaults survive the
         # flywire_BANC_* -> banc_* rename.
         value = canonical_dataset_name(str(value).strip())
+    if key == "brain_mesh":
+        # Legacy 'template'/'whole' selections map onto the renamed
+        # native/fafb options so saved defaults survive the rename.
+        value = normalize_brain_mesh_choice(value)
     return value if value in options else None
 
 
@@ -407,7 +411,7 @@ DEFAULTS = {
     "export_views": True,
     "legend_mode": "tree",
     "background": "white",
-    "brain_mesh": "template",
+    "brain_mesh": "native",
     "synapse_size": "1",
     "uniform_synapse_size": False,
     # Similarity / homolog search toggles
@@ -487,8 +491,27 @@ PRE_POST_SHAPES = ["solid (spheres + cones)", "scatter (circles + diamonds)"]
 # Layer editor modes (Skeleton tab), shown as segmented buttons.
 LAYER_EDITOR_MODES = ["Standard", "Advanced", "File upload"]
 
-# Brain mesh options
-BRAIN_MESH_OPTIONS = ["template", "whole", "none"]
+# Brain mesh options: 'native' renders in the dataset's own template space;
+# 'BANC' / 'FAFB' / 'male-cns' move the whole scene into that template's
+# coordinates and draw its outline.
+BRAIN_MESH_OPTIONS = ["native", "BANC", "FAFB", "male-cns", "none"]
+
+# Selections persisted by older builds ('template'/'whole', and the
+# un-capitalized 'banc'/'fafb'/'mcns' spellings) fold onto the renamed
+# options.
+_BRAIN_MESH_LEGACY = {
+    "template": "native",
+    "whole": "FAFB",
+    "fafb": "FAFB",
+    "banc": "BANC",
+    "mcns": "male-cns",
+}
+
+
+def normalize_brain_mesh_choice(value) -> str:
+    """Normalize a stored/entered brain-mesh choice to a current option."""
+    v = str(value or "").strip().lower()
+    return _BRAIN_MESH_LEGACY.get(v, v)
 
 # Synapse size presets (screen-space pixels, 1-12, default 3); the UI combo
 # box additionally accepts any typed integer in that range.
@@ -765,7 +788,10 @@ DEFAULT_SETTING_SPECS = {
         "group": "skeleton_render",
         "kind": "select",
         "options": BRAIN_MESH_OPTIONS,
-        "hint": "'template': brain outline. 'whole': full surface. 'none'.",
+        "hint": "Template for the scene: 'native' uses the dataset's own "
+                "outline and coordinates; 'BANC'/'FAFB'/'male-cns' move the "
+                "whole scene (neurons included) into that template's "
+                "coordinates with its outline. 'none' hides the outline.",
     },
     "synapse_size": {
         "label": "Synapse Size",

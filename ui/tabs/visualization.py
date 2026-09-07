@@ -460,7 +460,11 @@ def create_skeleton_tab():
                     )
                     brain_mesh = select_input(
                         "Brain Mesh", BRAIN_MESH_OPTIONS, get_user_default("brain_mesh"),
-                        hint="'template': brain outline. 'whole': full brain surface. 'none': no mesh.",
+                        hint="'native': this dataset's template outline "
+                             "and coordinates. 'BANC'/'FAFB'/'male-cns': "
+                             "move the whole scene (neurons included) into "
+                             "that template's coordinates with its "
+                             "outline. 'none': no mesh.",
                     )
                     # BANC tube-radius normalization: appearance knobs that
                     # only surface when a BANC dataset is selected (the

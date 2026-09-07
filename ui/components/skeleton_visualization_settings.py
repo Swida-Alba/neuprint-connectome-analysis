@@ -234,8 +234,11 @@ def skeleton_visualization_settings(
                 BRAIN_MESH_OPTIONS,
                 brain_mesh_default,
                 hint=(
-                    "'template': dataset-aligned template brain. 'whole': full "
-                    "standard surface. 'none': no brain mesh."
+                    "Template for the scene: 'native' uses the dataset's "
+                    "own outline and coordinates; 'BANC'/'FAFB'/'male-cns' "
+                    "move the whole scene (neurons included) into that "
+                    "template's coordinates with its outline. 'none' hides "
+                    "the outline."
                 ),
             )
             fields["vnc_mesh"] = checkbox_input(

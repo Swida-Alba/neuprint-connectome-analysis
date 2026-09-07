@@ -1498,6 +1498,29 @@ def dataset_native_space(dataset: str) -> str:
     )
 
 
+BRAIN_MESH_SELECTIONS = ('native', 'BANC', 'FAFB', 'male-cns', 'none')
+# Settings saved by older builds used 'template' (now 'native'), 'whole'
+# (now the 'FAFB' outline; the JRC2018F scene-transform mode was retired
+# with the rename), and the un-capitalized 'banc'/'fafb'/'mcns' spellings.
+_BRAIN_MESH_LEGACY = {
+    'template': 'native',
+    'whole': 'FAFB',
+    'fafb': 'FAFB',
+    'banc': 'BANC',
+    'mcns': 'male-cns',
+}
+
+
+def normalize_brain_mesh(value) -> str:
+    """Normalize a brain-mesh selection to the current option tokens.
+
+    Case-insensitive; accepts legacy 'template'/'whole'/'mcns' values from
+    saved settings; unknown values pass through for validation to reject.
+    """
+    v = str(value or '').strip().lower()
+    return _BRAIN_MESH_LEGACY.get(v, v)
+
+
 def dataset_render_space(dataset: str) -> str:
     """Template-mode render space of a dataset's visualization scene.
 
@@ -1540,7 +1563,12 @@ def dataset_view_cameras(dataset: str, brain_mesh=None, distance: float = 2.5,
     - Default: X left-right, Y dorsal-ventral, Z anterior-posterior.
     - MANC: anterior at +Z (front/back flipped relative to the default).
     - BANC: AP = Y with anterior at -Y, dorsal at +Z, +X = fly's left.
-    - hemibrain (brain_mesh='template'): rotated into its Y-front frame.
+    - hemibrain (brain_mesh='native'): rotated into its Y-front frame.
+
+    An explicit brain-mesh selection ('BANC'/'FAFB'/'male-cns') moves the
+    whole scene into that template's space, so the camera family follows
+    the SELECTION, not the dataset: e.g. a BANC scene with
+    brain_mesh='FAFB' renders in FLYWIRE axes (default table).
 
     ``distance`` scales the eye position (the video export varies it);
     ``lowercase`` yields the 'front'-style keys used by the PNG exports.
@@ -1554,7 +1582,40 @@ def dataset_view_cameras(dataset: str, brain_mesh=None, distance: float = 2.5,
         )
 
     d = str(dataset or '').lower()
-    if 'banc' in d:
+
+    # An explicit brain-mesh selection moves the whole scene into the
+    # selected template's space, so the camera family follows the
+    # SELECTION, not the dataset (e.g. a BANC scene with brain_mesh='FAFB'
+    # renders in FLYWIRE axes and uses the default table). The override is
+    # restricted to the mutually-bridgable families (FAFB/BANC/male-CNS);
+    # elsewhere (_scene_render_target) unreachable selections fall back to
+    # the native scene, and the cameras must follow that fallback.
+    _BRIDGEABLE = ('flywire', 'fafb', 'banc', 'male-cns', 'malecns', 'optic')
+    selection_space = {'BANC': 'banc', 'FAFB': 'default',
+                       'male-cns': 'default'}.get(brain_mesh)
+    selection_applies = (selection_space is not None
+                         and any(k in d for k in _BRIDGEABLE))
+
+    if selection_applies and selection_space == 'banc':
+        table = {
+            'Front': _cam((0, -1, 0), (0, 0, 1)),
+            'Back': _cam((0, 1, 0), (0, 0, 1)),
+            'Top': _cam((0, 0, 1), (0, -1, 0)),
+            'Bottom': _cam((0, 0, -1), (0, -1, 0)),
+            'Left': _cam((1, 0, 0), (0, 0, 1)),
+            'Right': _cam((-1, 0, 0), (0, 0, 1)),
+        }
+    elif selection_applies:
+        # FAFB / male-cns selections: FLYWIRE / JRCFIB2022M axes (default).
+        table = {
+            'Front': _cam((0, 0, -1), (0, -1, 0)),
+            'Back': _cam((0, 0, 1), (0, -1, 0)),
+            'Top': _cam((0, -1, 0), (0, 0, 1)),
+            'Bottom': _cam((0, 1, 0), (0, 0, -1)),
+            'Left': _cam((-1, 0, 0), (0, -1, 0)),
+            'Right': _cam((1, 0, 0), (0, -1, 0)),
+        }
+    elif 'banc' in d:
         table = {
             'Front': _cam((0, -1, 0), (0, 0, 1)),
             'Back': _cam((0, 1, 0), (0, 0, 1)),
@@ -1572,7 +1633,10 @@ def dataset_view_cameras(dataset: str, brain_mesh=None, distance: float = 2.5,
             'Left': _cam((-1, 0, 0), (0, -1, 0)),
             'Right': _cam((1, 0, 0), (0, -1, 0)),
         }
-    elif 'hemibrain' in d and brain_mesh == 'template':
+    elif 'hemibrain' in d and (brain_mesh == 'native'
+                               or selection_space is not None):
+        # Native (or a selection that fell back to native): the Y-front
+        # rotated frame of the hemibrain template.
         table = {
             'Front': _cam((0, 1, 0), (0, 0, -1)),
             'Back': _cam((0, -1, 0), (0, 0, -1)),
@@ -1967,13 +2031,16 @@ class VisualizeSkeleton:
 
     custom_neurons: list = None
     '''
-    Pre-built neurons rendered as extra layers, already in this dataset's
+    Pre-built neurons rendered as extra layers, already in the scene's
     coordinate space. List of (layer_name, neurons) tuples where neurons is a
     navis TreeNeuron / NeuronList / list of TreeNeurons. These layers bypass
     dataset-bound fetching and coordinate transforms entirely (rendered
     as-is), so callers must transform them into the scene space first —
-    see ``transform_neurons_to_space``. Used for cross-dataset overlays such
-    as the homolog visualizer's ``query_transformed_{neuron name}`` layer.
+    see ``transform_neurons_to_space``. The scene space is the dataset's
+    render space, or the selected template's space when brain_mesh is an
+    explicit 'BANC'/'FAFB'/'male-cns' selection. Used for cross-dataset
+    overlays such as the homolog visualizer's
+    ``query_transformed_{neuron name}`` layer.
     '''
 
     search_columns: str = 'auto'
@@ -2573,7 +2640,9 @@ class VisualizeSkeleton:
 
     FAFB_template_correction: bool = True
     '''
-    Whether to apply tilt correction for FAFB/FlyWire datasets when using 'template' brain mesh.
+    Whether to apply tilt correction whenever the FAFB (FLYWIRE) brain mesh
+    is in use: native FAFB scenes, and any scene moved into FLYWIRE
+    coordinates via brain_mesh='FAFB'.
     
     The FAFB/FlyWire template mesh has a slight tilt relative to the standard view axes.
     When True (default), a rotation correction is applied to align the brain:
@@ -2744,23 +2813,30 @@ class VisualizeSkeleton:
 
     brain_mesh: str = 'none'
     '''
-    Brain/VNC mesh visualization options (dataset-specific):\n
+    Template outline selection for the 3D scene:\n
     - 'none': Only plot meshes specified in mesh_roi parameter\n
-    - 'template': Plot the dataset's native template mesh (EM resolution)\n
+    - 'native': The scene dataset's own template outline (renamed from the\n
+      former 'template'):\n
       • hemibrain → JRCFIB2018F (affine transform only, fast)\n
       • optic-lobe → JRCFIB2022M (affine transform only, fast)\n
       • manc → MANC (male adult nerve cord VNC, affine transform only, fast)\n
-      • male-cns → JRCFIB2022M (full male CNS: brain + VNC, affine transform only, fast)\n
+      • male-cns → JRCFIB2022M (brain portion; VNC via vnc_mesh, fast)\n
       • flywire/FAFB → FLYWIRE (native FAFB coordinates, NO transform needed)\n
-    - 'whole': Plot standard whole-brain/VNC envelope mesh\n
-      • hemibrain → JRC2018F (REQUIRES H5 transforms ~13GB download)\n
-      • optic-lobe → JRCFIB2022M (affine transform only, fast)\n
-      • manc → MANC VNC envelope (affine transform only, fast)\n
-      • male-cns → JRCFIB2022M CNS envelope (affine transform only, fast)\n
-      • flywire/FAFB → JRC2018F (REQUIRES H5 transforms, standard female brain)\n
+      • banc → BANC public region outline (brain portion; VNC via vnc_mesh)\n
+    - 'FAFB': render the whole scene (neurons, synapses, and the outline)
+      in FLYWIRE/FAFB coordinates with the FAFB brain outline (renamed from
+      the former 'whole', which targeted JRC2018F and required ~13GB H5
+      downloads - that mode was retired)
+    - 'BANC': render the whole scene in BANC coordinates with the BANC
+      template outline (brain + VNC); e.g. FAFB neurons are bridged
+      FLYWIRE -> JRCFIB2022M -> BANC
+    - 'male-cns': render the whole scene in JRCFIB2022M coordinates with
+      the male-CNS template outline (brain + VNC)
     \n
-    ⚡ Performance Tip: Use 'template' for fast visualization with native coordinates.\n
-    Only hemibrain and FAFB with brain_mesh='whole' require H5 transform downloads.\n
+    Cross-template selections move neurons, synapses, ROIs, and the outline
+    INTO the selected template's space; they must be reachable within two
+    bridging hops (else the scene stays native with a warning). 'native'
+    and 'none' keep the dataset's own render space.
     \n
     See https://github.com/navis-org/navis-flybrains
     '''
@@ -2802,7 +2878,7 @@ class VisualizeSkeleton:
     - male-cns → JRCFIB2022M.mesh_vnc (VNC portion of male CNS)\n
     - manc → MANC template (native VNC mesh)\n
     For other datasets (hemibrain, optic-lobe, flywire), this option is ignored.\n
-    Note: For MANC with brain_mesh='template', the VNC is already shown\n
+    Note: For MANC with brain_mesh='native', the VNC is already shown\n
     (MANC template IS the VNC, so it ignores vnc_mesh value). 
     Use brain_mesh='none' to hide brain and VNC mesh.\n
     Default: False\n
@@ -6231,15 +6307,10 @@ class VisualizeSkeleton:
                 # To follow user request "set vnc_mesh=True by default":
                 self.vnc_mesh = True
         
-        # Check for elastix dependency if MANC 'whole' mode is requested
-        if 'manc' in self.dataset.lower() and self.brain_mesh == 'whole':
-            import shutil
-            if shutil.which('elastix') is None:
-                print('⚠️  Elastix not found: Cannot transform MANC to Male-CNS space.')
-                print('   automatically changing brain_mesh from "whole" to "template".')
-                print('   Tip: Install elastix or use male-cns dataset for full CNS context.')
-                self.brain_mesh = 'template'
-        
+        # (The former MANC 'whole' elastix auto-downgrade is gone with the
+        # JRC2018F/JRCFIB2022M scene-transform mode: brain_mesh selections
+        # are now outline overlays and never move the scene's skeletons.)
+
         # === INPUT VALIDATION ===
         # Validate all input parameters before processing
         self._validate_inputs()
@@ -6487,8 +6558,13 @@ class VisualizeSkeleton:
         if self._resolved_skeleton_radius_style() not in ['fafb', 'source', 'constant']:
             raise ValueError(
                 'skeleton_radius_style must be "auto", "fafb", "source", or "constant"')
-        if self.brain_mesh not in ['none', 'whole', 'template']:
-            raise ValueError('brain_mesh must be "none", "template", or "whole"')
+        # Normalize legacy selections ('template'/'whole') before any
+        # consumer reads the token; unknown values still fail below.
+        self.brain_mesh = normalize_brain_mesh(self.brain_mesh)
+        if self.brain_mesh not in BRAIN_MESH_SELECTIONS:
+            raise ValueError(
+                'brain_mesh must be one of '
+                f'{", ".join(BRAIN_MESH_SELECTIONS)}')
         if self.backend not in ['plotly', 'k3d']:
             raise ValueError('backend must be "plotly" or "k3d"')
         
@@ -10983,7 +11059,7 @@ class VisualizeSkeleton:
             # Use _needs_skeleton_transform() which checks for skip_transform flag (FAFB uses native coords)
             needs_transform = self._needs_skeleton_transform()
             template_info = None
-            if self.brain_mesh in ['whole', 'template']:
+            if self.brain_mesh != 'none':
                 template_info = self._get_template_info()
 
             # Overlay layers (custom_neurons) are already in this scene's
@@ -11245,8 +11321,15 @@ class VisualizeSkeleton:
 
             # FAFB processing is pipeline-driven from the resolved per-body
             # sources (see _process_fafb_layer for the per-pipeline rules).
+            # Custom overlay layers are skipped: their neurons are already
+            # in the scene's space and must render as-is — processing them
+            # here would node-reduce/mesh them AND poison the per-run
+            # render-mesh cache with scene-space meshes keyed by bodyIds
+            # that native layers may share (-> double transforms).
             fafb_already_simplified = False
-            if is_banc:
+            if is_custom_layer:
+                neuron_vols = navis.NeuronList(custom_layer_neurons)
+            elif is_banc:
                 neuron_vols, fafb_already_simplified = (
                     self._process_banc_layer(
                         neuron_vols,
@@ -11512,7 +11595,7 @@ class VisualizeSkeleton:
             
             # Apply FAFB tilt correction if using template mode
             # This corrects the left-right tilt in the FLYWIRE template mesh
-            if is_fafb and self.brain_mesh == 'template' and neuron_vols is not None:
+            if self._fafb_tilt_applies() and neuron_vols is not None:
                 # Per-neuron correction reports through the shared layer bar;
                 # a whole-list navis.xform would spawn navis' own "Xforming"
                 # bar that prints on alternate rows instead of refreshing this one.
@@ -11530,10 +11613,7 @@ class VisualizeSkeleton:
             if self.mirror_on_contralateral:
                 try:
                     template = None
-                    if self.brain_mesh == 'whole':
-                        template_info = self._get_template_info()
-                        template = template_info['target']
-                    elif self.brain_mesh == 'template':
+                    if self.brain_mesh == 'native':
                          if 'hemibrain' in self.dataset or 'optic-lobe' in self.dataset:
                              template = 'JRCFIB2018F'
                          elif 'male-cns' in self.dataset:
@@ -12430,7 +12510,7 @@ class VisualizeSkeleton:
                 # Apply FAFB tilt correction if using template mode
                 # This corrects the left-right tilt in the FLYWIRE template mesh
                 is_fafb = is_flywire_dataset(self.dataset) and not is_banc_dataset(self.dataset)
-                if is_fafb and self.brain_mesh == 'template':
+                if self._fafb_tilt_applies():
                     xyz_df = self._apply_fafb_tilt_correction(xyz_df)
                 
                 # Retrieve colors
@@ -12566,7 +12646,7 @@ class VisualizeSkeleton:
                 # Apply FAFB tilt correction if using template mode
                 # This corrects the left-right tilt in the FLYWIRE template mesh
                 is_fafb = is_flywire_dataset(self.dataset)
-                if is_fafb and self.brain_mesh == 'template':
+                if self._fafb_tilt_applies():
                     pre_coords = self._apply_fafb_tilt_correction(pre_coords)
                     post_coords = self._apply_fafb_tilt_correction(post_coords)
                 
@@ -13304,7 +13384,7 @@ class VisualizeSkeleton:
             with self._suppress_output():
                 coords = navis.xform_brain(coords, source=template_info['source'], target=template_info['target'])
         is_fafb = is_flywire_dataset(self.dataset)
-        if is_fafb and self.brain_mesh == 'template':
+        if self._fafb_tilt_applies():
             coords = self._apply_fafb_tilt_correction(coords)
         return site_df.assign(x=coords['x'], y=coords['y'], z=coords['z'])
 
@@ -14960,12 +15040,27 @@ class VisualizeSkeleton:
         
         # Fetch from NeuPrint API
         if fetch_online:
-            # BANC: the public region_outlines layer lists every named
-            # region (plus the aggregate outlines) — no NeuPrint involved.
+            # BANC has no named ROI product of its own — the public
+            # region_outlines layer only carries the four aggregate
+            # outlines.  Offer the male-cns ROI set instead (mirroring
+            # FAFB): those meshes are fetched from NeuPrint and bridged
+            # into BANC space at render time.  The four native BANC
+            # aggregates stay in the list and load without any transform.
             if is_banc_dataset(self.dataset):
                 import json as _json
-                region_map = self._get_banc_region_map()
-                roi_list = sorted(region_map)
+                roi_list = []
+                for mc_folder in ('male-cns_v0_9', 'male-cns_v1_0'):
+                    mc_file = os.path.join(self.script_path, 'cache',
+                                           mc_folder, 'available_rois.json')
+                    if os.path.exists(mc_file):
+                        try:
+                            with open(mc_file, 'r') as f:
+                                roi_list = sorted(_json.load(f))
+                            break
+                        except Exception:
+                            continue
+                roi_list = sorted(
+                    set(roi_list) | set(self._get_banc_region_map()))
                 if roi_list:
                     try:
                         os.makedirs(cache_dir, exist_ok=True)
@@ -15099,139 +15194,26 @@ class VisualizeSkeleton:
             return []
     
     def _check_transform_requirements_early(self):
-        """Check transform requirements at startup and advise user on options.
-        
-        This method checks if the current dataset and brain_mesh settings require
-        coordinate transforms, and if so, verifies transform availability and
-        advises the user on transformation-free alternatives.
-        
-        For hemibrain or FAFB with brain_mesh='whole', H5 transforms are required. 
-        The user will be prompted to either:
-        1. Download transforms (~13GB, enables JRC2018F whole brain view)
-        2. Use brain_mesh='template' for transformation-free native view
-        3. Use brain_mesh='none' for no brain mesh
-        
-        For all other datasets, native templates are used without transforms.
+        """Advise on transform requirements before rendering.
+
+        Brain-mesh selections are outline overlays: only the dataset's own
+        native -> render-space skeleton transform (offline, built into
+        flybrains) is ever applied, so no interactive H5-download prompt is
+        needed anymore. The former JRC2018F scene-transform mode
+        (brain_mesh='whole', ~13GB of H5 transforms) was retired together
+        with the 'native'/'BANC'/'FAFB'/'male-cns' selection rename.
         """
-        dataset_lower = self.dataset.lower()
-        
-        # Check if transforms are needed
-        needs_transform = self._dataset_needs_transform()
-        
-        if not needs_transform:
-            # Dataset uses native template - no transforms needed
-            if self.brain_mesh in ['template', 'whole']:
-                template_info = self._get_template_info()
-                if template_info.get('skip_transform', False):
-                    self._vprint(f'✓ Using native {template_info["mesh_name"]} - no coordinate transforms needed', level='full')
-            return
-        
-        # Only hemibrain and FAFB with brain_mesh='whole' require H5 transforms
-        is_hemibrain = 'hemibrain' in dataset_lower
-        is_fafb = is_flywire_dataset(dataset_lower)
-        
-        if not (is_hemibrain or is_fafb):
-            return
-            
-        # brain_mesh='whole' needs transform check
         if self.brain_mesh == 'none':
             return
-            
-        # Check if transforms are available
-        import flybrains
-        import navis
-        
         template_info = self._get_template_info()
-        source = template_info['source']
-        target = template_info['target']
-        
-        # Try to find the transform path
-        transforms_available = False
-        try:
-            path = navis.transforms.registry.find_bridging_path(source, target)
-            transforms_available = True
-        except (ValueError, KeyError):
-            pass
-        
-        if transforms_available:
-            if self.brain_mesh == 'whole':
-                self._vprint(f'✓ Transforms available for {source} → {target}', level='full')
+        if template_info.get('skip_transform', False):
+            self._vprint(f'✓ Using native {template_info["mesh_name"]} - no coordinate transforms needed', level='full')
             return
-            
-        # Transforms not available - prompt user
-        YELLOW = '\\033[93m'
-        CYAN = '\\033[96m'
-        GREEN = '\\033[92m'
-        RED = '\\033[91m'
-        RESET = '\\033[0m'
-        
-        dataset_name = 'FlyWire/FAFB' if is_fafb else 'Hemibrain'
-        native_template = 'FLYWIRE' if is_fafb else 'JRCFIB2018F'
-        
-        print(f'\\n{YELLOW}{"="*70}')
-        print(f'⚠️  Coordinate Transform Required for {dataset_name}')
-        print(f'{"="*70}{RESET}')
-        print()
-        print(f'Your settings: dataset={self.dataset}, brain_mesh={self.brain_mesh}')
-        print()
-        print(f'The {dataset_name} dataset requires coordinate transforms for brain_mesh="whole":')
-        print(f'  • Transform path: {source} → {target}')
-        print(f'  • Requires downloading ~{CYAN}13 GB{RESET} of transform files')
-        print(f'  • Transformation adds processing time to visualization')
-        print()
-        print(f'{GREEN}💡 Transformation-Free Alternatives:{RESET}')
-        print()
-        print(f'  Option 1: Use brain_mesh="template" (recommended)')
-        print(f'            → Uses native {native_template} template mesh')
-        print(f'            → No transforms needed, fast visualization')
-        print()
-        print(f'  Option 2: Use brain_mesh="none"')
-        print(f'            → No brain mesh, only neurons and synapses')
-        print()
-        print(f'  Option 3: Use a different dataset')
-        if is_fafb:
-            print(f'            → male-cns: Native JRCFIB2022M template (male CNS)')
-            print(f'            → hemibrain: Native JRCFIB2018F template')
-        else:
-            print(f'            → FlyWire/FAFB: Native FLYWIRE template (female brain)')
-            print(f'            → male-cns: Native JRCFIB2022M template (male CNS)')
-        print(f'            → These datasets have no transform requirements with brain_mesh="template"')
-        print()
-        print(f'{"="*70}')
-        
-        # Prompt user for choice
-        print(f'\\nHow would you like to proceed?')
-        print(f'  [1] Download transforms (~13GB) and continue with brain_mesh="whole"')
-        print(f'  [2] Use brain_mesh="template" instead (no download, fast)')
-        print(f'  [3] Use brain_mesh="none" (no brain mesh)')
-        print(f'  [q] Quit')
-        print()
-        
-        try:
-            choice = input('Enter choice [1/2/3/q] (default: 2): ').strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            choice = '2'
-        
-        if choice == '' or choice == '2':
-            print(f'\\n{GREEN}✓ Using brain_mesh="template" (transformation-free){RESET}')
-            self.brain_mesh = 'template'
-        elif choice == '3':
-            print(f'\\n{GREEN}✓ Using brain_mesh="none"{RESET}')
-            self.brain_mesh = 'none'
-        elif choice == '1':
-            # Try to download transforms
-            if self._check_and_download_transforms():
-                print(f'\\n{GREEN}✓ Transforms downloaded successfully{RESET}')
-            else:
-                print(f'\\n{YELLOW}⚠️ Transform download failed or cancelled, using brain_mesh="template"{RESET}')
-                self.brain_mesh = 'template'
-        elif choice == 'q':
-            print(f'\\n{RED}Exiting...{RESET}')
-            sys.exit(0)
-        else:
-            print(f'\\n{YELLOW}⚠️ Invalid choice, using brain_mesh="template"{RESET}')
-            self.brain_mesh = 'template'
-    
+        self._vprint(
+            f'ℹ️ Skeletons will be transformed '
+            f'{template_info["source"]} → {template_info["target"]} '
+            '(offline affine transform).', level='full')
+
     def _dataset_needs_transform(self):
         """Check if current dataset needs H5 transforms that require file downloads.
         
@@ -15256,24 +15238,36 @@ class VisualizeSkeleton:
         No transforms at all:
         - FlyWire/FAFB with brain_mesh='template': Native FLYWIRE template (identity transform)
         """
-        dataset_lower = self.dataset.lower()
-        
-        # Hemibrain with brain_mesh='whole' requires H5 transforms
-        # because it needs to go from JRCFIB2018Fraw to JRC2018F (involves H5transform)
-        if 'hemibrain' in dataset_lower and self.brain_mesh == 'whole':
-            return True
-        
-        # FlyWire/FAFB with brain_mesh='whole' requires H5 transforms
-        # because it needs to go from FAFB to JRC2018F (involves H5transform)
-        if (is_flywire_dataset(dataset_lower)) and self.brain_mesh == 'whole':
-            return True
-        
-        # All other cases use only affine transforms or no transforms:
-        # - hemibrain with template: Affine only
-        # - FlyWire/FAFB with template: No transform (native FLYWIRE)
-        # - male-cns, manc, optic-lobe: Affine only
+        # The JRC2018F scene-transform mode (brain_mesh='whole', the only
+        # consumer of H5 transform downloads) was retired with the
+        # native/banc/fafb/mcns outline rename: every remaining path uses
+        # built-in affine transforms or no transform at all.
         return False
     
+    def _fafb_tilt_applies(self) -> bool:
+        """Whether the scene uses the FAFB (FLYWIRE) template presentation.
+
+        True whenever the FAFB brain mesh is in use: a native FAFB scene,
+        or any scene moved into FLYWIRE coordinates via an explicit
+        brain_mesh='FAFB' selection. The FLYWIRE template mesh carries a
+        left-right tilt in its own coordinate frame, so EVERYTHING rendered
+        in that frame (mesh, skeletons, synapses) gets the same correction
+        for a level presentation — registration between elements is
+        unaffected (one global rotation).
+        """
+        if not getattr(self, 'FAFB_template_correction', True):
+            return False
+        if self.brain_mesh == 'FAFB':
+            # The explicit selection moves the scene into FLYWIRE
+            # coordinates — except on datasets that cannot reach FLYWIRE
+            # (_scene_render_target kept the native scene there), where
+            # there is no FAFB frame to level.
+            d = str(self.dataset or '').lower()
+            return not any(k in d for k in ('manc', 'hemibrain'))
+        return self.brain_mesh == 'native' and (
+            is_flywire_dataset(self.dataset)
+            and not is_banc_dataset(self.dataset))
+
     def _get_fafb_tilt_correction_matrix(self):
         """Get the affine transformation matrix to correct FAFB/FLYWIRE left-right tilt.
         
@@ -15297,8 +15291,7 @@ class VisualizeSkeleton:
         import numpy as np
         
         # Check if correction is needed
-        is_fafb = is_flywire_dataset(self.dataset) and not is_banc_dataset(self.dataset)
-        if not is_fafb or self.brain_mesh != 'template':
+        if not self._fafb_tilt_applies():
             return np.eye(4)  # Return identity - no correction needed
         
         import math
@@ -15382,8 +15375,7 @@ class VisualizeSkeleton:
         import numpy as np
         
         # Check if correction is needed
-        is_fafb = is_flywire_dataset(self.dataset) and not is_banc_dataset(self.dataset)
-        if not is_fafb or self.brain_mesh != 'template' or not self.FAFB_template_correction:
+        if not self._fafb_tilt_applies():
             return obj  # No correction needed
         
         rotation_matrix = self._get_fafb_tilt_correction_matrix()
@@ -15478,11 +15470,23 @@ class VisualizeSkeleton:
             return clean
         return self._get_mesh_file_path(mesh_dir, roi_name)
 
+    def _get_banc_mesh_dir(self) -> str:
+        """BANC region-mesh cache directory, independent of the scene.
+
+        Cross-template outlines ('banc' selection on a non-BANC scene)
+        must find the cached BANC products, so they always resolve under
+        the banc_v888 cache folder instead of the scene dataset's folder.
+        """
+        banc_dir = os.path.join(self.script_path, 'cache', 'banc_v888',
+                                'meshes')
+        os.makedirs(banc_dir, exist_ok=True)
+        return banc_dir
+
     def _load_banc_region_mesh_json(self, roi_name):
         """Load a cached BANC region mesh json as navis.Volume, or None."""
         import json as _json
 
-        mesh_dir = self._get_dataset_mesh_dir()
+        mesh_dir = self._get_banc_mesh_dir()
         mesh_file = self._banc_mesh_file_path(mesh_dir, roi_name)
         if not os.path.exists(mesh_file):
             return None
@@ -15505,7 +15509,7 @@ class VisualizeSkeleton:
         import json as _json
 
         try:
-            mesh_dir = self._get_dataset_mesh_dir()
+            mesh_dir = self._get_banc_mesh_dir()
             os.makedirs(mesh_dir, exist_ok=True)
             mesh_file = self._banc_mesh_file_path(mesh_dir, roi_name)
             payload = {
@@ -15716,133 +15720,117 @@ class VisualizeSkeleton:
             return None, None
 
     def _get_template_info(self):
-        """Get template brain/VNC information for current dataset.
-        
+        """Native template + skeleton transform path for the scene dataset.
+
+        This dict drives SKELETON/SYNAPSE placement: 'source' -> 'target'
+        is the dataset's native -> render-space transform (identity with
+        ``skip_transform`` for FAFB and BANC in native mode). An explicit
+        brain-mesh selection ('BANC'/'FAFB'/'male-cns') MOVES the scene:
+        'target' becomes the selected template's space so neurons,
+        synapses, ROIs, and the outline all render there (see
+        ``_scene_render_target``; unreachable selections fall back to the
+        native target).
+
         Handles transform paths for all NeuPrint datasets:
         - Brain datasets: hemibrain, optic-lobe
         - VNC datasets: manc (various versions)
         - Brain+VNC datasets: male-cns
-        
+
         Returns
         -------
         dict
             Dictionary with 'source', 'target', 'template_obj', and 'mesh_name' keys
-            
+
         Notes
         -----
         Transform paths by dataset:
         - hemibrain: JRCFIB2018Fraw → JRCFIB2018F → JRCFIB2018Fum → JRC2018F
-        - optic-lobe: JRCFIB2018Fraw → JRCFIB2018F → JRCFIB2018Fum → JRC2018F (same as hemibrain)
+        - optic-lobe: JRCFIB2022Mraw → JRCFIB2022M
         - manc: MANCraw → MANC (VNC only, no brain transform)
         - male-cns: JRCFIB2022Mraw → JRCFIB2022M (brain + VNC)
-        
+        - banc: BANC (native, no transform)
+        - flywire/FAFB: FLYWIRE (native, no transform)
+
         Note: optic-lobe uses the same coordinate system as hemibrain because it's
         a focused reconstruction of the optic lobe region within the hemibrain volume.
         """
         dataset_lower = self.dataset.lower()
         import flybrains
-        
+
         # Brain datasets
         if 'hemibrain' in dataset_lower:
+            source = 'JRCFIB2018Fraw'
             return {
-                'source': 'JRCFIB2018Fraw',
-                'target': 'JRC2018F' if self.brain_mesh == 'whole' else 'JRCFIB2018F',
-                'template_obj': flybrains.JRC2018F if self.brain_mesh == 'whole' else flybrains.JRCFIB2018F,
-                'mesh_name': 'JRC2018F (whole brain)' if self.brain_mesh == 'whole' else 'JRCFIB2018F (hemibrain)'
+                'source': source,
+                'target': self._scene_render_target(source, 'JRCFIB2018F'),
+                'template_obj': flybrains.JRCFIB2018F,
+                'mesh_name': 'JRCFIB2018F (hemibrain)'
             }
         elif 'optic' in dataset_lower:
             # Optic-lobe dataset is part of the Male CNS (JRCFIB2022M) volume
             # It is NOT part of the hemibrain (JRCFIB2018F) volume
             # Stored in JRCFIB2022Mraw coordinates
+            source = 'JRCFIB2022Mraw'
             return {
-                'source': 'JRCFIB2022Mraw',
-                'target': 'JRCFIB2022M',  # Male CNS template
+                'source': source,
+                'target': self._scene_render_target(source, 'JRCFIB2022M'),
                 'template_obj': flybrains.JRCFIB2022M,
                 'mesh_name': 'JRCFIB2022M (Male CNS)'
             }
-        
+
         # VNC datasets
         elif 'manc' in dataset_lower:
-            # MANC (Male Adult Nerve Cord)
-            if self.brain_mesh == 'whole':
-                # Transform to Male CNS (brain + VNC) space
-                return {
-                    'source': 'MANC',
-                    'target': 'JRCFIB2022M',
-                    'template_obj': flybrains.JRCFIB2022M,
-                    'mesh_name': 'JRCFIB2022M (male CNS: brain + VNC)'
-                }
-            else:
-                # Use native MANC template (VNC only)
-                return {
-                    'source': 'MANC',
-                    'target': 'MANC',
-                    'template_obj': flybrains.MANC,
-                    'mesh_name': 'MANC (VNC envelope)'
-                }
-        
+            # MANC (Male Adult Nerve Cord) - native VNC envelope
+            source = 'MANC'
+            return {
+                'source': source,
+                'target': self._scene_render_target(source, 'MANC'),
+                'template_obj': flybrains.MANC,
+                'mesh_name': 'MANC (VNC envelope)'
+            }
+
         # Brain + VNC datasets
         elif 'male-cns' in dataset_lower or 'malecns' in dataset_lower:
             # Male CNS (JRCFIB2022M) - Brain + VNC
-            # 'whole' shows full CNS envelope (brain + VNC)
+            source = 'JRCFIB2022Mraw'
             return {
-                'source': 'JRCFIB2022Mraw',
-                'target': 'JRCFIB2022M',
+                'source': source,
+                'target': self._scene_render_target(source, 'JRCFIB2022M'),
                 'template_obj': flybrains.JRCFIB2022M,
                 'mesh_name': 'JRCFIB2022M (male CNS: brain + VNC)'
             }
-        
+
         # BANC datasets: native BANC space.  The template outline comes from
         # the public region_outlines layer (cached like ROI meshes), which
         # shares the nanometre coordinate frame of the public SWCs — no
         # transform is ever applied.
         elif 'banc' in dataset_lower:
-            if self.brain_mesh == 'whole':
-                self._vprint(
-                    '⚠️  brain_mesh="whole" (JRC2018F) is not available for '
-                    'BANC yet; using the native BANC outline instead.',
-                    level='simple')
-            # Template mode shows the brain-only portion (cut at render
-            # time); 'whole' keeps the full-CNS outline fallback.
+            # The brain-only portion is cut at render time (see
+            # plot_mesh); the VNC portion follows the vnc_mesh toggle.
+            source = 'BANC'
+            target = self._scene_render_target(source, 'BANC')
             return {
-                'source': 'BANC',
-                'target': 'BANC',
+                'source': source,
+                'target': target,
                 'template_obj': self._get_banc_template_volume(),
-                'mesh_name': ('BANC (brain)'
-                              if self.brain_mesh == 'template'
-                              else 'BANC (CNS outline)'),
-                'skip_transform': True,
+                'mesh_name': 'BANC (brain)',
+                'skip_transform': target == 'BANC',
             }
 
-        # FlyWire / FAFB datasets
-        # For 'template': No transform needed - use native FLYWIRE coordinates
-        # For 'whole': Transform to JRC2018F (standard female brain template)
+        # FlyWire / FAFB datasets — native FLYWIRE coordinates unless an
+        # explicit selection moves the scene.
         elif is_flywire_dataset(dataset_lower):
-            if self.brain_mesh == 'whole':
-                # Transform to JRC2018F standard whole-brain template
-                # This requires H5 transforms (~580MB download)
-                return {
-                    'source': 'FAFB',  # FAFB native coordinates
-                    'target': 'JRC2018F',  # Standard female brain template
-                    'template_obj': flybrains.JRC2018F,
-                    'mesh_name': 'JRC2018F (standard whole brain)',
-                    'skip_transform': False  # Need to transform skeletons/synapses
-                }
-            else:
-                # 'template' mode: Use native FLYWIRE coordinates (no transform)
-                # FLYWIRE and FAFB14 share the same bounding box and are effectively the same space
-                # for visualization purposes. Using native coordinates avoids:
-                # 1. Downloading ~580MB transform file (JRC2018F_FAFB.h5)
-                # 2. Slow transformation of all skeleton vertices and synapse coordinates
-                # 3. Potential coordinate precision loss from warping
-                return {
-                    'source': 'FLYWIRE',  # Native space - no transform
-                    'target': 'FLYWIRE',  # Same as source - identity transform
-                    'template_obj': flybrains.FLYWIRE,
-                    'mesh_name': 'FLYWIRE (native FAFB coordinates)',
-                    'skip_transform': True  # Flag to skip skeleton/synapse transforms
-                }
-        
+            source = 'FLYWIRE'
+            target = self._scene_render_target(source, 'FLYWIRE')
+            return {
+                'source': source,
+                'target': target,
+                'template_obj': flybrains.FLYWIRE,
+                'mesh_name': 'FLYWIRE (native FAFB coordinates)',
+                # Flag to skip skeleton/synapse transforms (identity only)
+                'skip_transform': target == 'FLYWIRE',
+            }
+
         # Fallback to hemibrain for unknown datasets
         else:
             self._vprint(f'⚠️  Unknown dataset "{self.dataset}", defaulting to hemibrain template')
@@ -15853,6 +15841,158 @@ class VisualizeSkeleton:
                 'mesh_name': 'JRCFIB2018F (hemibrain)'
             }
     
+    # Explicit brain-mesh selections target the selected template's space:
+    # the whole scene (neurons, synapses, ROIs, and the outline) renders
+    # there, not just the outline.
+    _BRAIN_MESH_SCENE_TARGET = {
+        'BANC': 'BANC',
+        'FAFB': 'FLYWIRE',
+        'male-cns': 'JRCFIB2022M',
+    }
+
+    def _scene_render_target(self, source, native_target):
+        """Effective scene target for the current brain-mesh selection.
+
+        Explicit selections ('BANC'/'FAFB'/'male-cns') move the whole scene
+        into the selected template's space, so they must be reachable from
+        the dataset's native space within two bridging hops — longer chains
+        route through elastix registrations too lossy for a full scene.
+        Unreachable or too-indirect selections warn and fall back to the
+        dataset's native render target.
+        """
+        selection = self._BRAIN_MESH_SCENE_TARGET.get(self.brain_mesh)
+        if selection is None or selection == native_target:
+            return native_target
+        try:
+            import flybrains
+            flybrains.register_transforms()
+            from navis.transforms import registry as _registry
+            path, _seq = _registry.shortest_bridging_seq(source, selection)
+            if len(path) > 3:
+                raise ValueError(
+                    f'{len(path) - 1} transforms needed — too indirect')
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            self._vprint(
+                f'  ⚠️  brain_mesh="{self.brain_mesh}" is not reachable '
+                f'from {source} ({exc}); keeping the native '
+                f'{native_target} scene instead.', level='simple')
+            return native_target
+        return selection
+
+    def _get_outline_template_info(self):
+        """Outline spec for explicit cross-template brain-mesh selections.
+
+        Returns ``None`` for 'native' (handled by the per-dataset legacy
+        path in ``plot_mesh``) and 'none'. Each spec describes the outline
+        in the selected template's space — which, for explicit selections,
+        IS the scene's render space (``_get_template_info`` targets it), so
+        ``plot_mesh`` draws it without any further transform.
+
+        Returns
+        -------
+        dict or None
+            {'space', 'name', 'build', 'split'} where 'build' is a
+            zero-arg callable returning the whole-CNS outline volume in
+            'space', and 'split' names the neck-segmentation rule
+            (None for brain-only templates such as FAFB).
+        """
+        if self.brain_mesh in (None, 'none', 'native'):
+            return None
+        import flybrains
+
+        if self.brain_mesh == 'FAFB':
+            return {
+                'space': 'FLYWIRE',
+                'name': 'FLYWIRE (FAFB outline)',
+                'build': lambda: flybrains.FLYWIRE.mesh,
+                'split': None,
+            }
+        if self.brain_mesh == 'BANC':
+            return {
+                'space': 'BANC',
+                'name': 'BANC',
+                'build': self._get_banc_template_volume,
+                'split': 'banc',
+            }
+        if self.brain_mesh == 'male-cns':
+            return {
+                'space': 'JRCFIB2022M',
+                'name': 'JRCFIB2022M (male CNS)',
+                'build': lambda: flybrains.JRCFIB2022M.mesh,
+                'split': 'mcns',
+            }
+        # Validation rejects anything else; defensive fallback.
+        return None
+
+    def _transform_template_mesh(self, volume, source, target):
+        """Bridge-transform a template outline volume into another space.
+
+        Returns None (with a warning) when no usable bridging path exists
+        — e.g. FLYWIRE outlines cannot reach MANC or JRC2018F spaces, so a
+        cross-template selection silently degrades to "no outline" there.
+        Paths are capped at two hops: longer chains route through elastix
+        registrations whose accuracy is too poor for an outline overlay.
+        """
+        if volume is None or source == target:
+            return volume
+        try:
+            import flybrains
+            flybrains.register_transforms()
+            from navis.transforms import registry as _registry
+            path, seq = _registry.shortest_bridging_seq(source, target)
+            if len(path) > 3:  # >2 hops: quality would mislead
+                self._vprint(
+                    f'  ⚠️  {source} → {target} outline needs '
+                    f'{len(path) - 1} transforms — too indirect for an '
+                    'overlay; skipping it.', level='simple')
+                return None
+            with self._suppress_output():
+                # navis signals unsupported transform/object combinations
+                # with a bare BaseException, so catch that here (while
+                # still letting interrupts through).
+                transformed = navis.xform(volume, transform=seq)
+            return transformed
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            self._vprint(
+                f'  ⚠️  No bridging transform {source} → {target} for the '
+                f'{self.brain_mesh} outline ({exc}); skipping it.',
+                level='simple')
+            return None
+
+    def _split_mcns_cns_volume(self, volume):
+        """Split the JRCFIB2022M whole-CNS envelope into (brain, VNC).
+
+        Mirrors ``_split_banc_cns_volume``: faces crossing the neck plane
+        (Z = 340,000 nm; brain at lower Z) are assigned by centroid so the
+        two portions meet seamlessly. Returns (brain_volume, vnc_volume).
+        """
+        if volume is None:
+            return None, None
+        MCNS_BRAIN_VNC_Z_CUTOFF = 340000
+        try:
+            import trimesh
+            verts = np.asarray(volume.vertices, dtype=float)
+            faces = np.asarray(volume.faces, dtype=np.int64)
+            centroids = verts[faces].mean(axis=1)
+            brain_mask = centroids[:, 2] < MCNS_BRAIN_VNC_Z_CUTOFF
+            vnc_mask = ~brain_mask
+            brain_tm = trimesh.Trimesh(vertices=verts,
+                                       faces=faces[brain_mask])
+            brain_tm.remove_unreferenced_vertices()
+            vnc_tm = trimesh.Trimesh(vertices=verts, faces=faces[vnc_mask])
+            vnc_tm.remove_unreferenced_vertices()
+            return (navis.Volume(brain_tm, name='JRCFIB2022M_brain'),
+                    navis.Volume(vnc_tm, name='JRCFIB2022M_vnc'))
+        except Exception as exc:
+            self._vprint(
+                f'  ⚠️ male-CNS brain/VNC segmentation failed: {exc}',
+                level='simple')
+            return None, None
+
     def _get_vnc_template_info(self):
         """Get VNC template information for current dataset.
         
@@ -16151,11 +16291,13 @@ class VisualizeSkeleton:
         Brain mesh options (dataset-aware):
         - 'none': Only plot ROI meshes specified in mesh_roi parameter
         - 'template': Plot native EM template mesh (JRCFIB2018F, MANC, or JRCFIB2022M)
-        - 'whole': Plot standard template mesh (may require transforms for some datasets)
+        - 'banc'/'fafb'/'mcns': that template's outline, bridged into the
+          scene's render space (outline only — neurons never move)
         
         Behavior with mesh_roi=[]:
         - When mesh_roi is an empty list [], no ROI meshes are plotted
-        - But brain_mesh='whole' or 'template' will still plot the brain mesh
+        - But any brain_mesh selection other than 'none' still plots the
+          template outline
         - This allows showing neurons with only the whole brain outline
         
         References:
@@ -16170,7 +16312,7 @@ class VisualizeSkeleton:
         
         # Check if we have any work to do (ROI meshes, brain mesh, or VNC mesh)
         has_roi_meshes = len(self.mesh_roi) > 0
-        has_brain_mesh = self.brain_mesh in ['template', 'whole']
+        has_brain_mesh = self.brain_mesh != 'none'
         has_vnc_mesh = self.vnc_mesh
         
         if not has_roi_meshes and not has_brain_mesh and not has_vnc_mesh:
@@ -16231,41 +16373,58 @@ class VisualizeSkeleton:
             roi_source_space = None # Track the coordinate space of the ROI
             roi_needs_transform = False  # Track if ROI needs transform after loading
             
-            # Determine if this is FlyWire/FAFB (BANC has its own ROI source)
+            # Determine if this is FlyWire/FAFB (BANC aggregates have
+            # their own native source; named ROIs come from male-cns).
             is_flywire = is_flywire_dataset(self.dataset) and not is_banc_dataset(self.dataset)
+            is_banc_scene = is_banc_dataset(self.dataset)
 
             # Try dataset-specific directory first (with case-safe filename)
             mesh_file = self._get_mesh_file_path(mesh_dir, roi)
 
-            # BANC: fetch the region outline from the public layer when not
-            # cached (segid-keyed meshes sharing the SWCs' nanometre frame).
-            if is_banc_dataset(self.dataset) and not os.path.exists(mesh_file):
+            # BANC: region outlines come from the public region_outlines
+            # layer (segid-keyed meshes sharing the SWCs' nanometre frame).
+            # They cache under the BANC mesh dir with clean plain names, so
+            # resolve them through _banc_mesh_file_path — the generic
+            # case-safe encoding used above cannot see names containing
+            # lowercase letters (e.g. BANC_neuropil).
+            if is_banc_dataset(self.dataset):
                 segid = self._get_banc_segid(roi)
                 if segid is not None:
-                    if self._get_banc_region_volume(roi, segid=segid) is not None:
-                        source_info = "BANC public region_outlines"
+                    mesh_file = self._banc_mesh_file_path(
+                        self._get_banc_mesh_dir(), roi)
+                    if not os.path.exists(mesh_file):
+                        if self._get_banc_region_volume(
+                                roi, segid=segid) is not None:
+                            source_info = "BANC public region_outlines"
+                            roi_source_space = 'BANC'
+                            roi_needs_transform = False
+                    else:
+                        source_info = "BANC public region_outlines (cache)"
                         roi_source_space = 'BANC'
                         roi_needs_transform = False
             
-            # For FAFB: Check for pre-transformed ROI mesh cache first
-            # Transformed meshes are stored in cache/{dataset}/meshes_transformed/{TARGET}/
-            # where TARGET is FLYWIRE (for template mode) or JRC2018F (for whole mode)
+            # For FAFB / BANC: check for pre-transformed ROI mesh cache
+            # first.  Transformed meshes are stored in
+            # cache/{dataset}/meshes_transformed/{TARGET}/ where TARGET is
+            # the dataset's native render space (FLYWIRE for FAFB, BANC for
+            # BANC).
             transformed_mesh_file = None
-            if is_flywire:
-                # Determine target space based on brain_mesh mode
-                target_space = 'JRC2018F' if self.brain_mesh == 'whole' else 'FLYWIRE'
+            if is_flywire or is_banc_scene:
+                # Determine target space based on dataset
+                target_space = 'FLYWIRE' if is_flywire else 'BANC'
                 transformed_cache_dir = os.path.join(self._get_cache_path('meshes_transformed'), target_space)
                 transformed_mesh_file = self._get_mesh_file_path(transformed_cache_dir, roi)
                 
                 if os.path.exists(transformed_mesh_file):
                     # Load pre-transformed mesh - no further transform needed
                     mesh_file = transformed_mesh_file
-                    source_info = f"FAFB Transformed Cache ({target_space})"
+                    source_info = f"Transformed Cache ({target_space})"
                     roi_needs_transform = False
                     self._vprint(f'  ✓ Loading "{roi}" from transformed cache ({target_space})', level='full')
             
-            # Special handling for FlyWire/FAFB - fetch from male-cns if not found
-            if is_flywire and not os.path.exists(mesh_file):
+            # Special handling for FlyWire/FAFB and BANC - fetch from
+            # male-cns if not found (neither dataset ships named ROIs)
+            if (is_flywire or is_banc_scene) and not os.path.exists(mesh_file):
                     self._vprint(f'📥 ROI mesh "{roi}" not found locally, attempting to download...', level='full')
                     mesh_found = False
                     
@@ -16289,8 +16448,9 @@ class VisualizeSkeleton:
                                     roi_source_space = 'JRCFIB2022Mraw' # Use raw coordinates for male-cns ROIs
                                     mesh_found = True
                             except Exception as e:
-                                # print(f'   (male-cns check failed: {e})')
-                                pass
+                                self._vprint(
+                                    f'   (male-cns ROI check failed: {e})',
+                                    level='full')
                     except ImportError:
                         pass
                     
@@ -16311,9 +16471,11 @@ class VisualizeSkeleton:
                     #     except Exception as e:
                     #         print(f'   Warning: Failed to fetch "{roi}" via navis: {e}')
 
-            # Standard logic for non-FlyWire or if file exists
-            # Fallback to primary_rois if not found (only for non-FlyWire or if we want to support it)
-            if not os.path.exists(mesh_file) and not is_flywire:
+            # Standard logic for non-FlyWire or if file exists.
+            # FAFB and BANC are excluded: their named ROIs come from
+            # male-cns only — a miss must not pull a hemibrain-frame mesh.
+            if (not os.path.exists(mesh_file) and not is_flywire
+                    and not is_banc_scene):
                 # Try legacy fallback path (doesn't use case-safe encoding)
                 mesh_file_fallback = os.path.join(self.script_path, 'navis_roi_meshes_json', 'primary_rois', roi + '.json')
                 if os.path.exists(mesh_file_fallback):
@@ -16376,46 +16538,64 @@ class VisualizeSkeleton:
                     self._vprint(f'✓ Loaded "{roi}" from {source_info}', level='full')
                     
                     # Transform if needed (skip if loaded from transformed cache)
-                    if self.brain_mesh in ['whole', 'template'] and "Transformed Cache" not in source_info:
+                    if self.brain_mesh != 'none' and "Transformed Cache" not in source_info:
                         template_info = self._get_template_info()
                         target = template_info['target']
-                        
-                        # For FAFB with ROIs from male-cns:
-                        # - 'template' mode: transform to FLYWIRE (native FAFB space)
-                        # - 'whole' mode: transform to JRC2018F (standard whole brain template)
-                        if is_flywire:
+
+                        # For FAFB / BANC with ROIs from male-cns: ROIs
+                        # are always placed in the dataset's native render
+                        # space (FLYWIRE / BANC) — outline selections never
+                        # retarget the scene.  Native BANC aggregates
+                        # (source BANC) skip the transform entirely.
+                        if is_flywire or is_banc_scene:
                             # ROIs from male-cns need to be transformed
                             if roi_source_space:
                                 source = roi_source_space
+                            elif is_banc_scene and (
+                                    self._get_banc_segid(roi) is not None):
+                                # Cached BANC aggregate meshes are native
+                                # products already in BANC nanometres.
+                                source = 'BANC'
                             else:
                                 # If loading from raw cache (roi_source_space is None), assume it's from male-cns
                                 source = 'JRCFIB2022Mraw'
+
+                            target = 'FLYWIRE' if is_flywire else 'BANC'
+                            # Native BANC aggregates arrive with
+                            # roi_source_space == 'BANC' == target: fall
+                            # through untransformed to the plot step.
                             
-                            # Target depends on brain_mesh mode
-                            if self.brain_mesh == 'whole':
-                                target = 'JRC2018F'  # Match skeleton/template space
+                            if source == target:
+                                # Native BANC aggregates: already in the
+                                # scene space, nothing to transform.
+                                self._vprint(f'ROI {roi} already in {target} (native aggregate)', level='full')
                             else:
-                                target = 'FLYWIRE'  # Native FAFB space for template mode
-                            
-                            self._vprint(f'Transforming ROI {roi} ({source} -> {target})...', end='', level='full')
-                            try:
-                                with self._suppress_output():
-                                    mesh = navis.xform_brain(mesh, source=source, target=target)
-                                self._vprint(' Done', level='full')
-                                
-                                # Cache the transformed mesh for future use
-                                # Use target space name for cache directory (FLYWIRE or JRC2018F)
-                                transformed_cache_dir = os.path.join(self._get_cache_path('meshes_transformed'), target)
-                                os.makedirs(transformed_cache_dir, exist_ok=True)
-                                # Use case-safe filename for transformed mesh
-                                transformed_mesh_file = os.path.join(transformed_cache_dir, self._roi_to_filename(roi))
+                                self._vprint(f'Transforming ROI {roi} ({source} -> {target})...', end='', level='full')
                                 try:
-                                    mesh.to_json(transformed_mesh_file)
-                                    self._vprint(f'  💾 Cached transformed ROI to {transformed_mesh_file}', level='full')
-                                except Exception as cache_e:
-                                    self._vprint(f'  ⚠️ Failed to cache transformed ROI: {cache_e}', level='full')
-                            except Exception as e:
-                                self._vprint(f' Failed: {e}', level='full')
+                                    with self._suppress_output():
+                                        mesh = navis.xform_brain(mesh, source=source, target=target)
+                                    if self._fafb_tilt_applies():
+                                        # FLYWIRE-frame ROIs are leveled with
+                                        # the brain mesh + neurons (same
+                                        # data-level rotation for the whole
+                                        # scene, applied before the cache
+                                        # write so cache hits inherit it).
+                                        mesh = self._apply_fafb_tilt_correction(mesh)
+                                    self._vprint(' Done', level='full')
+
+                                    # Cache the transformed mesh for future use
+                                    # Use target space name for cache directory (FLYWIRE or BANC)
+                                    transformed_cache_dir = os.path.join(self._get_cache_path('meshes_transformed'), target)
+                                    os.makedirs(transformed_cache_dir, exist_ok=True)
+                                    # Use case-safe filename for transformed mesh
+                                    transformed_mesh_file = os.path.join(transformed_cache_dir, self._roi_to_filename(roi))
+                                    try:
+                                        mesh.to_json(transformed_mesh_file)
+                                        self._vprint(f'  💾 Cached transformed ROI to {transformed_mesh_file}', level='full')
+                                    except Exception as cache_e:
+                                        self._vprint(f'  ⚠️ Failed to cache transformed ROI: {cache_e}', level='full')
+                                except Exception as e:
+                                    self._vprint(f' Failed: {e}', level='full')
                         else:
                             # Non-FAFB datasets: use standard transform
                             source = template_info['source']
@@ -16559,174 +16739,225 @@ class VisualizeSkeleton:
             # Only warn if user specified ROI meshes but none loaded
             self._vprint('⚠️  No valid ROI meshes loaded', level='full')
 
-        # Plot brain mesh (whole brain or template) regardless of ROI mesh status
-        if self.brain_mesh in ['template', 'whole']:
-            template_info = self._get_template_info()
-            mesh_display_name = template_info['mesh_name']
-            
-            # For male-cns with brain_mesh='template', always extract the
-            # brain-only portion of JRCFIB2022M so the legend reads '(brain)'.
-            # The VNC envelope is only added as a separate '(VNC)' mesh when
-            # vnc_mesh=True; without it, showing the full CNS envelope under
-            # a '(brain + VNC)' label read like a mislabeled brain mesh.
-            dataset_lower = self.dataset.lower()
-            is_male_cns = 'male-cns' in dataset_lower or 'malecns' in dataset_lower
-            # Note: 'manc' is NOT treated as male-cns here because its native template is VNC-only,
-            # so we don't need to extract a "brain" portion from it.
+        # Plot the template outline (brain mesh) regardless of ROI mesh status
+        self._outline_vnc_volume = None
+        if self.brain_mesh != 'none':
+            brain_mesh = None
+            mesh_display_name = None
+            if self.brain_mesh == 'native':
+                template_info = self._get_template_info()
+                mesh_display_name = template_info['mesh_name']
 
-            use_brain_only = is_male_cns and self.brain_mesh == 'template'
+                # For male-cns in native mode, always extract the
+                # brain-only portion of JRCFIB2022M so the legend reads
+                # '(brain)'. The VNC envelope is only added as a separate
+                # '(VNC)' mesh when vnc_mesh=True; without it, showing the
+                # full CNS envelope under a '(brain + VNC)' label read
+                # like a mislabeled brain mesh.
+                dataset_lower = self.dataset.lower()
+                is_male_cns = 'male-cns' in dataset_lower or 'malecns' in dataset_lower
+                # Note: 'manc' is NOT treated as male-cns here because its native template is VNC-only,
+                # so we don't need to extract a "brain" portion from it.
 
-            # BANC mirrors the male-cns brain-only extraction: the template
-            # outline covers brain + VNC; the neck coordinate splits them.
-            # The '(brain)' display name comes from _get_template_info.
-            use_banc_brain_only = (
-                is_banc_dataset(self.dataset) and self.brain_mesh == 'template')
+                use_brain_only = is_male_cns
 
-            if use_brain_only:
-                mesh_display_name = 'JRCFIB2022M (brain)'
-            
-            self._vprint(f'Plotting {mesh_display_name} mesh...', level='full')
-            try:
-                import flybrains
-                import trimesh
-                
-                # Select appropriate mesh
+                # BANC mirrors the male-cns brain-only extraction: the template
+                # outline covers brain + VNC; the neck coordinate splits them.
+                # The '(brain)' display name comes from _get_template_info.
+                use_banc_brain_only = is_banc_dataset(self.dataset)
+
                 if use_brain_only:
-                    # For male-cns with vnc_mesh=True, extract brain-only portion
-                    # flybrains doesn't provide mesh_brain, so we clip the mesh geometrically
-                    # Brain is in the anterior portion (lower Z values in JRCFIB2022M coordinates)
-                    # Z cutoff ~340000 separates brain from VNC based on geometry
-                    full_mesh = flybrains.JRCFIB2022M.mesh
-                    brain_z_cutoff = 340000  # Z coordinate separating brain from VNC
-                    
-                    # Get vertices in the brain region (Z < cutoff)
-                    brain_mask = full_mesh.vertices[:, 2] < brain_z_cutoff
-                    
-                    # Extract submesh by filtering faces that have all vertices in brain region
-                    brain_faces = []
-                    for face in full_mesh.faces:
-                        if all(brain_mask[v] for v in face):
-                            brain_faces.append(face)
-                    
-                    if brain_faces:
-                        # Create new mesh from brain vertices only
-                        brain_mesh_trimesh = trimesh.Trimesh(
-                            vertices=full_mesh.vertices,
-                            faces=brain_faces
-                        )
-                        # Clean up unused vertices
-                        brain_mesh_trimesh.remove_unreferenced_vertices()
-                        brain_mesh = navis.Volume(brain_mesh_trimesh, name='JRCFIB2022M_brain')
-                        self._vprint(f'   Extracted brain mesh: {len(brain_mesh_trimesh.vertices)} vertices', level='full')
+                    mesh_display_name = 'JRCFIB2022M (brain)'
+
+                self._vprint(f'Plotting {mesh_display_name} mesh...', level='full')
+                try:
+                    import flybrains
+
+                    # Select appropriate mesh
+                    if use_brain_only:
+                        # Neck segmentation (boundary faces assigned by
+                        # centroid) keeps the brain and VNC portions
+                        # seamless at the cut plane. Native mode keeps
+                        # drawing its VNC from _get_vnc_template_info, so
+                        # the split VNC stays local to this branch.
+                        brain_mesh, _ = self._split_mcns_cns_volume(
+                            flybrains.JRCFIB2022M.mesh)
+                        if brain_mesh is not None:
+                            self._vprint(
+                                f'   Extracted brain mesh: '
+                                f'{len(brain_mesh.vertices)} vertices',
+                                level='full')
+                        else:
+                            # Fallback to full mesh if extraction fails
+                            brain_mesh = flybrains.JRCFIB2022M.mesh
+                            self._vprint('   ⚠️  Brain mesh extraction failed, using full CNS mesh', level='full')
                     else:
-                        # Fallback to full mesh if extraction fails
-                        brain_mesh = full_mesh
-                        self._vprint('   ⚠️  Brain mesh extraction failed, using full CNS mesh', level='full')
-                elif is_male_cns and hasattr(flybrains.JRCFIB2022M, 'mesh_brain'):
-                    brain_mesh = flybrains.JRCFIB2022M.mesh_brain
+                        brain_mesh = template_info['template_obj'].mesh if hasattr(template_info['template_obj'], 'mesh') else template_info['template_obj']
+
+                    # BANC: brain-only portion, segmented from the whole-CNS
+                    # outline at the neck coordinate (mirrors male-cns).
+                    if use_banc_brain_only:
+                        brain_mesh, _ = self._split_banc_cns_volume(brain_mesh)
+
+                    # Apply FAFB tilt correction in native mode.
+                    # This corrects the left-right tilt in the FLYWIRE template mesh
+                    is_fafb = is_flywire_dataset(self.dataset)
+                    if is_fafb and brain_mesh is not None:
+                        brain_mesh = self._apply_fafb_tilt_correction(brain_mesh)
+                except Exception as e:
+                    self._vprint(f'⚠️  Failed to load {mesh_display_name} mesh: {e}', level='full')
+                    brain_mesh = None
+            else:
+                # Cross-template selection ('BANC' / 'FAFB' / 'male-cns'):
+                # the whole scene already renders in the selected template's
+                # space (_get_template_info targets it), so the outline is
+                # drawn in place — the bridging below is an identity no-op
+                # kept as a safety net.
+                spec = self._get_outline_template_info()
+                if spec is None:
+                    self._vprint(
+                        f'⚠️  Unknown brain mesh selection "{self.brain_mesh}"; '
+                        'skipping the outline.', level='simple')
                 else:
-                    brain_mesh = template_info['template_obj'].mesh if hasattr(template_info['template_obj'], 'mesh') else template_info['template_obj']
-
-                # BANC: brain-only portion, segmented from the whole-CNS
-                # outline at the neck coordinate (mirrors male-cns).
-                if use_banc_brain_only:
-                    brain_mesh, _ = self._split_banc_cns_volume(brain_mesh)
-
-                # Apply FAFB tilt correction if using template mode
-                # This corrects the left-right tilt in the FLYWIRE template mesh
-                is_fafb = is_flywire_dataset(self.dataset)
-                if is_fafb and self.brain_mesh == 'template':
-                    brain_mesh = self._apply_fafb_tilt_correction(brain_mesh)
-                
-                effective_brain_color = self._get_effective_mesh_color('brain')
-                if self.backend == 'plotly':
-                    with self._suppress_output():
-                        fig_brain = navis.plot3d(brain_mesh, backend='plotly')
-                    brain_traces = fig_brain.data
-                    for trace in brain_traces:
-                        trace.showlegend = True
-                        trace.name = mesh_display_name
-                        trace.hoverinfo = 'none'
-                        trace.legendrank = BRAIN_MESH_LEGEND_RANK
-                        self._apply_plotly_trace_color(trace, effective_brain_color)
-                    self.fig_3d.add_traces(brain_traces)
-                elif self.backend == 'k3d':
-                    with self._suppress_output():
-                        temp_plot = navis.plot3d(brain_mesh, backend='k3d', inline=False)
-                    for obj in temp_plot.objects:
-                        obj.name = mesh_display_name
-                        self._apply_k3d_object_color(obj, effective_brain_color)
-                        self.fig_3d += obj
-
-                self._append_exportable_mesh(
-                    brain_mesh,
-                    color=effective_brain_color,
-                    name=mesh_display_name,
-                    role='brain',
-                )
-                        
-                self._vprint(f'✓ {mesh_display_name} mesh loaded successfully', level='full')
-            except Exception as e:
-                self._vprint(f'⚠️  Failed to load {mesh_display_name} mesh: {e}', level='full')
-                if self._dataset_needs_transform() and not self._check_and_download_transforms():
-                    self._vprint('   Skipping brain/VNC mesh visualization', level='full')
-                else:
-                    # Retry after download - use template object mesh
                     try:
-                        retry_mesh = template_info['template_obj'].mesh if hasattr(template_info['template_obj'], 'mesh') else template_info['template_obj']
-                        effective_brain_color = self._get_effective_mesh_color('brain')
-                        if self.backend == 'plotly':
-                            with self._suppress_output():
-                                fig_brain = navis.plot3d(retry_mesh, backend='plotly')
-                            brain_traces = fig_brain.data
-                            for trace in brain_traces:
-                                trace.showlegend = True
-                                trace.name = mesh_display_name
-                                trace.hoverinfo = 'none'
-                                trace.legendrank = BRAIN_MESH_LEGEND_RANK
-                                self._apply_plotly_trace_color(trace, effective_brain_color)
-                            self.fig_3d.add_traces(brain_traces)
-                        elif self.backend == 'k3d':
-                            with self._suppress_output():
-                                temp_plot = navis.plot3d(retry_mesh, backend='k3d', inline=False)
-                            for obj in temp_plot.objects:
-                                obj.name = mesh_display_name
-                                self._apply_k3d_object_color(obj, effective_brain_color)
-                                self.fig_3d += obj
-                        self._append_exportable_mesh(
-                            retry_mesh,
-                            color=effective_brain_color,
-                            name=mesh_display_name,
-                            role='brain',
-                        )
-                        self._vprint(f'✓ {mesh_display_name} mesh loaded successfully after download', level='full')
-                    except Exception as retry_e:
-                        self._vprint(f'⚠️  Still failed to load {mesh_display_name} mesh: {retry_e}', level='full')
-                        self._vprint('   Skipping brain/VNC mesh visualization', level='full')
-        
+                        whole = spec['build']()
+                        self._outline_vnc_name = None
+                        if spec['split'] == 'banc':
+                            brain_mesh, self._outline_vnc_volume = (
+                                self._split_banc_cns_volume(whole))
+                            mesh_display_name = f"{spec['name']} (brain)"
+                            self._outline_vnc_name = f"{spec['name']} (VNC)"
+                        elif spec['split'] == 'mcns':
+                            brain_mesh, self._outline_vnc_volume = (
+                                self._split_mcns_cns_volume(whole))
+                            mesh_display_name = f"{spec['name']} (brain)"
+                            self._outline_vnc_name = f"{spec['name']} (VNC)"
+                        else:
+                            brain_mesh = whole
+                            mesh_display_name = spec['name']
+
+                        scene_space = self._get_template_info()['target']
+                        if brain_mesh is not None:
+                            self._vprint(
+                                f'Plotting {mesh_display_name} outline '
+                                f'({spec["space"]} → {scene_space})...',
+                                level='full')
+                            brain_mesh = self._transform_template_mesh(
+                                brain_mesh, spec['space'], scene_space)
+                        if self._outline_vnc_volume is not None:
+                            self._outline_vnc_volume = (
+                                self._transform_template_mesh(
+                                    self._outline_vnc_volume,
+                                    spec['space'], scene_space))
+                        if (brain_mesh is not None
+                                and self.brain_mesh == 'FAFB'):
+                            # The FLYWIRE outline carries the template's
+                            # left-right tilt; level it like native FAFB
+                            # scenes do (neurons in the scene get the same
+                            # rotation in the layer loop).
+                            brain_mesh = self._apply_fafb_tilt_correction(
+                                brain_mesh)
+                        if brain_mesh is None:
+                            mesh_display_name = None
+                    except Exception as e:
+                        self._vprint(
+                            f'⚠️  Failed to build the {self.brain_mesh} '
+                            f'outline: {e}', level='full')
+                        brain_mesh = None
+                        mesh_display_name = None
+
+            if brain_mesh is not None:
+                try:
+                    effective_brain_color = self._get_effective_mesh_color('brain')
+                    if self.backend == 'plotly':
+                        with self._suppress_output():
+                            fig_brain = navis.plot3d(brain_mesh, backend='plotly')
+                        brain_traces = fig_brain.data
+                        for trace in brain_traces:
+                            trace.showlegend = True
+                            trace.name = mesh_display_name
+                            trace.hoverinfo = 'none'
+                            trace.legendrank = BRAIN_MESH_LEGEND_RANK
+                            self._apply_plotly_trace_color(trace, effective_brain_color)
+                        self.fig_3d.add_traces(brain_traces)
+                    elif self.backend == 'k3d':
+                        with self._suppress_output():
+                            temp_plot = navis.plot3d(brain_mesh, backend='k3d', inline=False)
+                        for obj in temp_plot.objects:
+                            obj.name = mesh_display_name
+                            self._apply_k3d_object_color(obj, effective_brain_color)
+                            self.fig_3d += obj
+
+                    self._append_exportable_mesh(
+                        brain_mesh,
+                        color=effective_brain_color,
+                        name=mesh_display_name,
+                        role='brain',
+                    )
+
+                    self._vprint(f'✓ {mesh_display_name} mesh loaded successfully', level='full')
+                except Exception as e:
+                    self._vprint(f'⚠️  Failed to plot {mesh_display_name} mesh: {e}', level='full')
+                    self._vprint('   Skipping brain/VNC mesh visualization', level='full')
+
         # Plot VNC mesh if requested (only for manc and male-cns datasets)
         if self.vnc_mesh:
             dataset_lower = self.dataset.lower()
-            
+
             # Check if VNC is already shown by brain_mesh (for male-cns/manc datasets using JRCFIB2022M)
             is_male_cns = 'male-cns' in dataset_lower or 'malecns' in dataset_lower
             is_manc = 'manc' in dataset_lower
-            
+
             # use_brain_only logic from above (replicated here for clarity)
-            use_brain_only = is_male_cns and self.brain_mesh == 'template'
-            
-            # MANC with template mode: The "brain mesh" (template) IS the VNC mesh.
-            if is_manc and self.brain_mesh == 'template':
+            use_brain_only = is_male_cns and self.brain_mesh == 'native'
+
+            # Cross-template selections carry their own VNC portion,
+            # produced by the neck split in the brain-mesh block above.
+            if getattr(self, '_outline_vnc_volume', None) is not None:
+                vnc_display_name = getattr(
+                    self, '_outline_vnc_name', None) or 'Template (VNC)'
+                self._vprint(f'Plotting {vnc_display_name} mesh...', level='full')
+                try:
+                    vnc_mesh = self._outline_vnc_volume
+                    effective_vnc_color = self._get_effective_mesh_color('vnc')
+                    if self.backend == 'plotly':
+                        with self._suppress_output():
+                            fig_vnc = navis.plot3d(vnc_mesh, backend='plotly')
+                        vnc_traces = fig_vnc.data
+                        for trace in vnc_traces:
+                            trace.showlegend = True
+                            trace.name = vnc_display_name
+                            trace.hoverinfo = 'none'
+                            trace.legendrank = VNC_MESH_LEGEND_RANK
+                            self._apply_plotly_trace_color(trace, effective_vnc_color)
+                        self.fig_3d.add_traces(vnc_traces)
+                    elif self.backend == 'k3d':
+                        with self._suppress_output():
+                            temp_plot = navis.plot3d(vnc_mesh, backend='k3d', inline=False)
+                        for obj in temp_plot.objects:
+                            obj.name = vnc_display_name
+                            self._apply_k3d_object_color(obj, effective_vnc_color)
+                            self.fig_3d += obj
+
+                    self._append_exportable_mesh(
+                        vnc_mesh,
+                        color=effective_vnc_color,
+                        name=vnc_display_name,
+                        role='vnc',
+                    )
+                    self._vprint(f'✓ {vnc_display_name} mesh loaded successfully', level='full')
+                except Exception as e:
+                    self._vprint(f'⚠️  Failed to load {vnc_display_name} mesh: {e}', level='full')
+            elif self.brain_mesh == 'FAFB':
+                self._vprint('ℹ️  The FAFB template covers the brain only — no VNC outline', level='full')
+            # MANC with native mode: The "brain mesh" (template) IS the VNC mesh.
+            elif is_manc and self.brain_mesh == 'native':
                 self._vprint('ℹ️  VNC mesh already shown as template', level='full')
-            
-            # If using JRCFIB2022M and NOT splitting brain (e.g. brain_mesh='whole'), VNC is already included
+
+            # If using JRCFIB2022M and NOT splitting brain, VNC is already included
             elif ((is_male_cns or is_manc)
-                  and self.brain_mesh in ['template', 'whole']
+                  and self.brain_mesh == 'native'
                   and not use_brain_only):
-                self._vprint('ℹ️  VNC mesh already shown via brain_mesh', level='full')
-            elif (is_banc_dataset(self.dataset)
-                  and self.brain_mesh == 'whole'):
-                # BANC 'whole' plots the entire CNS outline, VNC included.
                 self._vprint('ℹ️  VNC mesh already shown via brain_mesh', level='full')
             else:
                 vnc_info = self._get_vnc_template_info()

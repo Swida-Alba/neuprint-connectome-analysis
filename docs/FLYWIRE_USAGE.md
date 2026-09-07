@@ -114,7 +114,7 @@ from coana import VisualizeSkeleton
 vs = VisualizeSkeleton(
     dataset='flywire_FAFB_v783',
     neuron_layers=['720575940621039145'],
-    brain_mesh='template',  # Uses FAFB template
+    brain_mesh='native',    # Uses the FAFB (FLYWIRE) template
     FAFB_template_correction=True # Default: True. Corrects the slight tilt of the FAFB template.
 )
 

@@ -2604,7 +2604,7 @@ class HomologFinder:
         self.visualization_settings = dict(visualization_settings or {})
         # Programmatic callers that do not use the UI still get the same
         # dataset-aligned template brain default as the analysis tabs.
-        self.visualization_settings.setdefault('brain_mesh', 'template')
+        self.visualization_settings.setdefault('brain_mesh', 'native')
         self.vector_prefiltering = vector_prefiltering
 
         # Loose-search knobs: candidate discovery requires at least
@@ -7934,7 +7934,7 @@ class HomologFinder:
                             {
                                 'show_fig': False,
                                 'export_views': False,
-                                'brain_mesh': 'template',
+                                'brain_mesh': 'native',
                                 'neuron_alpha': 0.2,
                                 'legend_mode': 'layer',
                                 'verbose': 'simple',
@@ -8138,7 +8138,7 @@ class HomologFinder:
                         {
                             'show_fig': False,
                             'export_views': False,
-                            'brain_mesh': 'template',
+                            'brain_mesh': 'native',
                             'neuron_alpha': 0.2,
                             'legend_mode': 'layer',
                             'verbose': 'simple',
@@ -8246,7 +8246,7 @@ class HomologFinder:
                                 {
                                     'show_fig': False,
                                     'export_views': True,
-                                    'brain_mesh': 'template',
+                                    'brain_mesh': 'native',
                                     'legend_mode': 'layer',
                                     'neuron_alpha': 0.2,
                                     'verbose': 'simple',
@@ -8294,7 +8294,7 @@ class HomologFinder:
                                 {
                                     'show_fig': False,
                                     'export_views': True,
-                                    'brain_mesh': 'template',
+                                    'brain_mesh': 'native',
                                     'legend_mode': 'single',
                                     'neuron_alpha': 0.2,
                                     'verbose': 'simple',
@@ -8553,7 +8553,7 @@ class HomologFinder:
                 vs = VisualizeSkeleton(**self._homolog_visualizer_kwargs(
                     {
                         'show_fig': False,
-                        'brain_mesh': 'template',
+                        'brain_mesh': 'native',
                         'neuron_alpha': 0.2,
                         'legend_mode': 'layer',
                         'verbose': 'simple',
@@ -8591,7 +8591,7 @@ class HomologFinder:
                 vs = VisualizeSkeleton(**self._homolog_visualizer_kwargs(
                     {
                         'show_fig': False,
-                        'brain_mesh': 'template',
+                        'brain_mesh': 'native',
                         'neuron_alpha': 0.2,
                         'legend_mode': 'layer',
                         'verbose': 'simple',
@@ -8642,7 +8642,7 @@ class HomologFinder:
                 vs = VisualizeSkeleton(**self._homolog_visualizer_kwargs(
                     {
                         'show_fig': False,
-                        'brain_mesh': 'template',
+                        'brain_mesh': 'native',
                         'neuron_alpha': 0.2,
                         'legend_mode': 'layer',
                         'verbose': 'simple',
@@ -8692,7 +8692,7 @@ class HomologFinder:
                 vs = VisualizeSkeleton(**self._homolog_visualizer_kwargs(
                     {
                         'show_fig': False,
-                        'brain_mesh': 'template',
+                        'brain_mesh': 'native',
                         'verbose': 'simple',
                     },
                     dataset=vis_target_dataset,

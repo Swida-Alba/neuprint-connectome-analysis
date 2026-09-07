@@ -243,7 +243,7 @@ class TestVerbosityHelpers:
 
     def test_add_view_selection_menu_variants(self):
         for dataset, brain_mesh in (
-                ('hemibrain:v1.2.1', 'template'),
+                ('hemibrain:v1.2.1', 'native'),
                 ('manc:v1.0', None),
                 ('male-cns:v0.9', None)):
             vis = make_vis(dataset=dataset, brain_mesh=brain_mesh, fig_3d=go.Figure())
@@ -1225,25 +1225,28 @@ class TestFigureSimplificationAndExport:
 # ---------------------------------------------------------------------------
 class TestTransformHelpers:
     def test_dataset_needs_transform(self):
+        # The JRC2018F scene-transform mode ('whole') was retired: no
+        # selection downloads H5 transforms anymore.
         assert make_vis(dataset='hemibrain:v1.2.1',
-                        brain_mesh='whole')._dataset_needs_transform() is True
-        assert make_vis(dataset='hemibrain:v1.2.1',
-                        brain_mesh='template')._dataset_needs_transform() is False
+                        brain_mesh='native')._dataset_needs_transform() is False
         assert make_vis(dataset='flywire_FAFB_v783',
-                        brain_mesh='whole')._dataset_needs_transform() is True
+                        brain_mesh='native')._dataset_needs_transform() is False
         assert make_vis(dataset='flywire_FAFB_v783',
-                        brain_mesh='template')._dataset_needs_transform() is False
+                        brain_mesh='FAFB')._dataset_needs_transform() is False
         assert make_vis(dataset='male-cns:v0.9',
-                        brain_mesh='whole')._dataset_needs_transform() is False
+                        brain_mesh='mcns')._dataset_needs_transform() is False
 
     def test_fafb_tilt_correction_matrix(self):
-        vis = make_vis(dataset='hemibrain:v1.2.1', brain_mesh='template')
+        vis = make_vis(dataset='hemibrain:v1.2.1', brain_mesh='native')
         np.testing.assert_array_equal(vis._get_fafb_tilt_correction_matrix(),
                                       np.eye(4))
-        vis = make_vis(dataset='flywire_FAFB_v783', brain_mesh='whole')
-        np.testing.assert_array_equal(vis._get_fafb_tilt_correction_matrix(),
-                                      np.eye(4))
-        vis = make_vis(dataset='flywire_FAFB_v783', brain_mesh='template')
+        # 'FAFB' renders the scene in FLYWIRE coordinates: the template
+        # tilt correction applies there too (mesh + neurons together).
+        vis = make_vis(dataset='flywire_FAFB_v783', brain_mesh='FAFB')
+        matrix = vis._get_fafb_tilt_correction_matrix()
+        assert matrix.shape == (4, 4)
+        assert not np.allclose(matrix, np.eye(4))
+        vis = make_vis(dataset='flywire_FAFB_v783', brain_mesh='native')
         matrix = vis._get_fafb_tilt_correction_matrix()
         assert matrix.shape == (4, 4)
         assert not np.allclose(matrix, np.eye(4))
@@ -1253,14 +1256,14 @@ class TestTransformHelpers:
 
     def test_apply_fafb_tilt_correction(self):
         # short-circuit paths return the object unchanged
-        vis = make_vis(dataset='hemibrain:v1.2.1', brain_mesh='template')
+        vis = make_vis(dataset='hemibrain:v1.2.1', brain_mesh='native')
         df = pd.DataFrame({'x': [1.0], 'y': [2.0], 'z': [3.0]})
         assert vis._apply_fafb_tilt_correction(df) is df
-        vis = make_vis(dataset='flywire_FAFB_v783', brain_mesh='template',
+        vis = make_vis(dataset='flywire_FAFB_v783', brain_mesh='native',
                        FAFB_template_correction=False)
         assert vis._apply_fafb_tilt_correction(df) is df
 
-        vis = make_vis(dataset='flywire_FAFB_v783', brain_mesh='template',
+        vis = make_vis(dataset='flywire_FAFB_v783', brain_mesh='native',
                        FAFB_template_correction=True)
         out = vis._apply_fafb_tilt_correction(df)
         assert out is not df
@@ -1511,7 +1514,7 @@ class TestRealConstructor:
     def test_empty_neuron_layers_mesh_only(self, tmp_path, hermetic_ctor):
         vis = VisualizeSkeleton(
             dataset='hemibrain:v1.2.1', neuron_layers='',
-            brain_mesh='template',
+            brain_mesh='native',
             **self.ctor_kwargs(tmp_path))
         assert vis.neuron_layers == []
         assert hermetic_ctor == []           # no layer fetches at all
@@ -1557,7 +1560,7 @@ class TestRealConstructor:
         # MANC auto-enables the VNC mesh unless brain_mesh='none'
         vis = VisualizeSkeleton(
             dataset='manc:v1.0', neuron_layers=['A00c'],
-            brain_mesh='template', **self.ctor_kwargs(tmp_path))
+            brain_mesh='native', **self.ctor_kwargs(tmp_path))
         assert vis.vnc_mesh is True
         vis2 = VisualizeSkeleton(
             dataset='manc:v1.0', neuron_layers=['A00c'],
@@ -1654,12 +1657,12 @@ class TestSynapseSizeHelpers:
     def test_transform_site_df_identity_and_paths(self, monkeypatch):
         site_df = pd.DataFrame({'x': [1.0], 'y': [2.0], 'z': [3.0]})
         # FlyWire template mode: no skeleton transform, tilt correction only
-        vis = make_vis(dataset='flywire_FAFB_v783', brain_mesh='template')
+        vis = make_vis(dataset='flywire_FAFB_v783', brain_mesh='native')
         out = vis._transform_site_df(site_df)
         assert list(out.columns) == ['x', 'y', 'z']
         assert out is not None
         # hemibrain: monkeypatch navis.xform_brain
-        vis2 = make_vis(dataset='hemibrain:v1.2.1', brain_mesh='template')
+        vis2 = make_vis(dataset='hemibrain:v1.2.1', brain_mesh='native')
         calls = []
 
         def fake_xform(coords, source=None, target=None, **kw):
@@ -2075,17 +2078,13 @@ class TestTemplateInfo:
     def test_get_template_info_all_datasets(self):
         import flybrains
         cases = [
-            (dict(dataset='hemibrain:v1.2.1', brain_mesh='template'),
+            (dict(dataset='hemibrain:v1.2.1', brain_mesh='native'),
              'JRCFIB2018Fraw', 'JRCFIB2018F', flybrains.JRCFIB2018F),
-            (dict(dataset='hemibrain:v1.2.1', brain_mesh='whole'),
-             'JRCFIB2018Fraw', 'JRC2018F', flybrains.JRC2018F),
-            (dict(dataset='optic-lobe:v1.1', brain_mesh='template'),
+            (dict(dataset='optic-lobe:v1.1', brain_mesh='native'),
              'JRCFIB2022Mraw', 'JRCFIB2022M', flybrains.JRCFIB2022M),
-            (dict(dataset='manc:v1.0', brain_mesh='whole'),
-             'MANC', 'JRCFIB2022M', flybrains.JRCFIB2022M),
-            (dict(dataset='manc:v1.0', brain_mesh='template'),
+            (dict(dataset='manc:v1.0', brain_mesh='native'),
              'MANC', 'MANC', flybrains.MANC),
-            (dict(dataset='male-cns:v0.9', brain_mesh='template'),
+            (dict(dataset='male-cns:v0.9', brain_mesh='native'),
              'JRCFIB2022Mraw', 'JRCFIB2022M', flybrains.JRCFIB2022M),
         ]
         for attrs, source, target, template in cases:
@@ -2095,27 +2094,28 @@ class TestTemplateInfo:
             assert info['template_obj'] is template
             assert info['mesh_name']
         flywire_native = make_vis(
-            dataset='flywire_FAFB_v783', brain_mesh='template'
+            dataset='flywire_FAFB_v783', brain_mesh='native'
         )._get_template_info()
         assert flywire_native['skip_transform'] is True
-        flywire_whole = make_vis(
-            dataset='flywire_FAFB_v783', brain_mesh='whole'
-        )._get_template_info()
-        assert flywire_whole['target'] == 'JRC2018F'
-        assert flywire_whole['skip_transform'] is False
-        fallback = make_vis(dataset='weird:v9', brain_mesh='template')
+        # Outline selections never change the skeleton transform path.
+        fafb_outline = make_vis(
+            dataset='flywire_FAFB_v783', brain_mesh='FAFB')._get_template_info()
+        assert fafb_outline['source'] == 'FLYWIRE'
+        assert fafb_outline['target'] == 'FLYWIRE'
+        assert fafb_outline['skip_transform'] is True
+        fallback = make_vis(dataset='weird:v9', brain_mesh='native')
         info = fallback._get_template_info()
         assert info['target'] == 'JRCFIB2018F'
 
     def test_needs_skeleton_transform(self):
         assert make_vis(dataset='hemibrain:v1.2.1', brain_mesh='none') \
             ._needs_skeleton_transform() is False
-        assert make_vis(dataset='hemibrain:v1.2.1', brain_mesh='template') \
+        assert make_vis(dataset='hemibrain:v1.2.1', brain_mesh='native') \
             ._needs_skeleton_transform() is True
-        assert make_vis(dataset='flywire_FAFB_v783', brain_mesh='template') \
+        assert make_vis(dataset='flywire_FAFB_v783', brain_mesh='native') \
             ._needs_skeleton_transform() is False
         # MANC native space: source == target identity
-        assert make_vis(dataset='manc:v1.0', brain_mesh='template') \
+        assert make_vis(dataset='manc:v1.0', brain_mesh='native') \
             ._needs_skeleton_transform() is False
 
     def test_get_vnc_template_info(self):
@@ -2248,7 +2248,7 @@ class TestPlotSkeletonEndToEnd:
             neuron_colors=['rgba(31, 119, 180, 1.0)'] * len(prepared),
             _neuron_colors_have_explicit_alpha=False,
             legend_mode='layer', color_mode='per_layer',
-            brain_mesh='template', script_path=str(tmp_path),
+            brain_mesh='native', script_path=str(tmp_path),
             exportable_meshes=[], synapse_mode='connectors',
             skip_synapse=True,
         )
@@ -2429,7 +2429,7 @@ class TestPlotSynapsesNeuprint:
             calls.append((source, target))
             return df
 
-        vis, _ = self._make(tmp_path, monkeypatch, brain_mesh='template')
+        vis, _ = self._make(tmp_path, monkeypatch, brain_mesh='native')
         monkeypatch.setattr(navis, 'xform_brain', identity_xform)
         assert vis.plot_synapses() == 0
         assert calls == [('JRCFIB2018Fraw', 'JRCFIB2018F')]
@@ -2615,7 +2615,7 @@ class TestFlywireConnectionFrame:
         attrs = dict(
             dataset='flywire', client_type='flywire',
             script_path=str(tmp_path), min_synapse_num=0,
-            brain_mesh='template', FAFB_template_correction=True,
+            brain_mesh='native', FAFB_template_correction=True,
         )
         attrs.update(extra)
         return make_vis(**attrs)
@@ -2756,7 +2756,7 @@ class TestPlotSynapsesFlywire:
             uniform_synapse_size=False, min_synapse_num=0,
             cache_synapses=False, script_path=str(tmp_path),
             save_folder=str(tmp_path), saveas='t', output_format='csv',
-            backend='plotly', fig_3d=go.Figure(), brain_mesh='template',
+            backend='plotly', fig_3d=go.Figure(), brain_mesh='native',
             synapse_alpha=0.6, exportable_meshes=[], client=None,
             synapse_criteria=None, server=None, version=None,
             skip_synapse=False, pre_post_scatter=False,
@@ -2915,7 +2915,7 @@ class TestPrePostSites:
             uniform_synapse_size=False, min_synapse_num=0,
             cache_synapses=False, script_path=str(tmp_path),
             save_folder=str(tmp_path), saveas='t', output_format='csv',
-            backend='plotly', fig_3d=go.Figure(), brain_mesh='template',
+            backend='plotly', fig_3d=go.Figure(), brain_mesh='native',
             synapse_alpha=0.6, exportable_meshes=[], client=None,
             synapse_criteria=None, server=None, version=None,
             skip_synapse=False, pre_post_scatter=False,
@@ -3141,7 +3141,7 @@ class TestPlotMesh:
             lambda m, source=None, target=None, **kw: m)
         vis = make_mesh_vis(tmp_path, mesh_roi=['AL(R)'],
                             mirror_on_contralateral=True,
-                            brain_mesh='template')
+                            brain_mesh='native')
         vis._get_template_info = lambda: fake_template_info()
         assert vis.plot_mesh() == 0
         # ROI trace + brain mesh trace at minimum
@@ -3160,21 +3160,23 @@ class TestPlotMesh:
         assert vis.plot_mesh() == 0
         assert len(vis.exportable_meshes) == 1  # only legacy ROI loaded
 
-    def test_flywire_whole_mode_skips_roi_but_plots_brain(self, tmp_path):
+    def test_flywire_fafb_outline_plots_flywire_mesh(self, tmp_path):
+        # 'fafb' draws the FLYWIRE outline directly (no JRC2018F scene
+        # transform, ROIs untouched).
         vis = make_mesh_vis(tmp_path, dataset='flywire', mesh_roi=['AL(R)'],
-                            brain_mesh='whole')
+                            brain_mesh='FAFB')
         vis._get_template_info = lambda: fake_template_info(
-            'JRC2018F (standard whole brain)', 'FAFB', 'JRC2018F')
+            'FLYWIRE (native FAFB coordinates)', 'FLYWIRE', 'FLYWIRE')
         assert vis.plot_mesh() == 0
-        assert vis.mesh_roi == []  # cleared by the whole-mode warning path
+        assert vis.mesh_roi == ['AL(R)']
         names = [getattr(t, 'name', '') for t in vis.fig_3d.data]
-        assert any('JRC2018F' in n for n in names)
+        assert any('FLYWIRE' in n for n in names)
 
     def test_flywire_transformed_cache_hit_with_tilt(self, tmp_path):
         write_roi_mesh_json(tmp_path, 'flywire', roi='AL(R)',
                             subdir='meshes_transformed/FLYWIRE')
         vis = make_mesh_vis(tmp_path, dataset='flywire', mesh_roi=['AL(R)'],
-                            brain_mesh='template',
+                            brain_mesh='native',
                             FAFB_template_correction=True)
         vis._get_template_info = lambda: fake_template_info(
             'FLYWIRE (native FAFB coordinates)', 'FLYWIRE', 'FLYWIRE')
@@ -3189,7 +3191,7 @@ class TestPlotMesh:
             navis, 'xform_brain',
             lambda m, source=None, target=None, **kw: m)
         vis = make_mesh_vis(tmp_path, dataset='flywire', mesh_roi=['AL(R)'],
-                            brain_mesh='template')
+                            brain_mesh='native')
         vis._get_template_info = lambda: fake_template_info(
             'FLYWIRE (native FAFB coordinates)', 'FLYWIRE', 'FLYWIRE')
         assert vis.plot_mesh() == 0
@@ -3212,7 +3214,7 @@ class TestPlotMesh:
         monkeypatch.setattr(flybrains, 'JRCFIB2022M',
                             SimpleNamespace(mesh=split))
         vis = make_mesh_vis(tmp_path, dataset='male-cns:v0.9',
-                            brain_mesh='template', vnc_mesh=True,
+                            brain_mesh='native', vnc_mesh=True,
                             brain_mesh_color='auto', vnc_mesh_color='auto',
                             background_color='rgba(0, 0, 0, 1.0)')
         vis._get_vnc_template_info = lambda: {
@@ -3236,7 +3238,7 @@ class TestPlotMesh:
         monkeypatch.setattr(flybrains, 'JRCFIB2022M',
                             SimpleNamespace(mesh=all_vnc))
         vis = make_mesh_vis(tmp_path, dataset='male-cns:v0.9',
-                            brain_mesh='template', vnc_mesh=True)
+                            brain_mesh='native', vnc_mesh=True)
         vis._get_vnc_template_info = lambda: {
             'mesh': navis.Volume(make_small_trimesh(80.0), name='vnc'),
             'mesh_name': 'JRCFIB2022M (VNC)'}
@@ -3256,7 +3258,7 @@ class TestPlotMesh:
 
     def test_manc_vnc_already_template(self, tmp_path):
         vis = make_mesh_vis(tmp_path, dataset='manc:v1.0',
-                            brain_mesh='template', vnc_mesh=True, mesh_roi=[])
+                            brain_mesh='native', vnc_mesh=True, mesh_roi=[])
         vis._get_template_info = lambda: fake_template_info(
             'MANC (VNC envelope)', 'MANC', 'MANC')
         assert vis.plot_mesh() == 0
@@ -3268,7 +3270,7 @@ class TestPlotMesh:
         assert len(vis.fig_3d.data) == 0
 
     def test_brain_mesh_failure_retry_path(self, tmp_path):
-        vis = make_mesh_vis(tmp_path, brain_mesh='template', mesh_roi=[])
+        vis = make_mesh_vis(tmp_path, brain_mesh='native', mesh_roi=[])
 
         class BadTemplate:
             @property
@@ -3403,7 +3405,7 @@ class TestSaveFigure:
         assert vis.fig_3d.layout.scene.camera.eye.z == 2.5
 
     def test_html_hemibrain_template_camera(self, tmp_path):
-        vis = make_save_vis(tmp_path, brain_mesh='template')
+        vis = make_save_vis(tmp_path, brain_mesh='native')
         vis.save_figure()
         # Normalized onto the shared camera table (2.5), matching the
         # interactive view menu; the layout used to use a one-off 2.0.
@@ -3436,7 +3438,7 @@ class TestSaveFigure:
                             dataset='manc:v1.0', saveas='m')
         vis.save_figure()
         vis2 = make_save_vis(tmp_path, interactive_html=True,
-                             brain_mesh='template', saveas='h')
+                             brain_mesh='native', saveas='h')
         vis2.save_figure()
 
     def test_show_fig_opens_browser(self, tmp_path, monkeypatch):
@@ -3850,7 +3852,7 @@ class TestValidateInputs:
         assert fragment in str(excinfo.value)
 
     def test_empty_layers_allowed_with_mesh(self):
-        vis = self._vis(neuron_layers=[], brain_mesh='template')
+        vis = self._vis(neuron_layers=[], brain_mesh='native')
         assert vis._validate_inputs() is None
         vis2 = self._vis(neuron_layers='', mesh_roi=['AL(R)'])
         assert vis2._validate_inputs() is None
@@ -4642,7 +4644,7 @@ class TestPlotIndividuals:
     @pytest.mark.parametrize('dataset,brain_mesh,axis,value', [
         ('hemibrain:v1.2.1', 'none', 'z', -2.5),
         ('manc:v1.0', 'none', 'z', 2.5),
-        ('hemibrain:v1.2.1', 'template', 'y', 2.5),
+        ('hemibrain:v1.2.1', 'native', 'y', 2.5),
     ])
     def test_view_cameras_per_dataset(self, tmp_path, monkeypatch,
                                       dataset, brain_mesh, axis, value):

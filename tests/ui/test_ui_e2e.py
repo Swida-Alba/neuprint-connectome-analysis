@@ -796,7 +796,7 @@ class TestRunner:
              "target_dataset": "male-cns:v1.0", "top_n": 100,
              "use_auto_type_mapping": True,
              "visualize_skeleton": True, "visualize_top_n": 5,
-             "visualization_settings": {"brain_mesh": "template"}},
+             "visualization_settings": {"brain_mesh": "native"}},
             "find_homologs_multi",
             {"use_fast": True},
         )
@@ -806,7 +806,7 @@ class TestRunner:
         assert "use_auto_type_mapping=True" in similar_script
         assert "visualize_skeleton=True" in similar_script
         assert "visualize_top_n=5" in similar_script
-        assert "visualization_settings={'brain_mesh': 'template'}" in similar_script
+        assert "visualization_settings={'brain_mesh': 'native'}" in similar_script
 
         comparison_script = sr._generate_script(
             "morphology_comparison",

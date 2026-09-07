@@ -29,6 +29,17 @@ SWC = """1 0 0 0 0 2 -1
 """
 
 
+class _nullcontext:
+    """Minimal context manager for hermetic tests (no contextlib import
+    churn in the assertion helpers)."""
+
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *exc):
+        return False
+
+
 def _make_visualizer(dataset='banc_v888', skeleton_mode='tube'):
     vs = object.__new__(VisualizeSkeleton)
     vs.dataset = dataset
@@ -99,7 +110,7 @@ class TestViewCameras:
         assert (dataset_view_cameras('manc:v1.2.1')['Front']['eye']
                 == dict(x=0, y=0, z=2.5))
         assert (dataset_view_cameras(
-            'hemibrain:v1.2.1', brain_mesh='template')['Front']['eye']
+            'hemibrain:v1.2.1', brain_mesh='native')['Front']['eye']
             == dict(x=0, y=2.5, z=0))
         assert (dataset_view_cameras('male-cns:v1.0')['Front']['eye']
                 == dict(x=0, y=0, z=-2.5))
@@ -108,7 +119,7 @@ class TestViewCameras:
 class TestTemplateInfo:
     def test_banc_branch_skips_transform(self):
         vs = _make_visualizer()
-        vs.brain_mesh = 'template'
+        vs.brain_mesh = 'native'
         sentinel = object()
         vs._get_banc_template_volume = lambda: sentinel
         info = vs._get_template_info()
@@ -117,17 +128,20 @@ class TestTemplateInfo:
         assert info['skip_transform'] is True
         assert info['template_obj'] is sentinel
 
-    def test_banc_whole_falls_back_to_template(self):
+    def test_fafb_selection_moves_scene_to_flywire(self):
         vs = _make_visualizer()
-        vs.brain_mesh = 'whole'
-        vs._get_banc_template_volume = lambda: object()
+        vs.brain_mesh = 'FAFB'
         info = vs._get_template_info()
-        # 'whole' (JRC2018F) is not wired for BANC: native outline instead.
-        assert info['skip_transform'] is True
+        # An explicit cross-template selection moves the whole scene into
+        # the selected template's space.
+        assert info['source'] == 'BANC'
+        assert info['target'] == 'FLYWIRE'
+        assert info.get('skip_transform') is not True
+        assert vs._needs_skeleton_transform() is True
 
     def test_transform_not_needed_for_banc(self):
         vs = _make_visualizer()
-        vs.brain_mesh = 'template'
+        vs.brain_mesh = 'native'
         vs._get_banc_template_volume = lambda: object()
         assert vs._needs_skeleton_transform() is False
 
@@ -268,6 +282,95 @@ class TestBancProcessor:
             lambda mesh, target: decimate_calls.append(target) or mesh)
         vs._process_banc_layer(navis.NeuronList([l2]), 'fast')
         assert decimate_calls == [max(100, int(5120 * 0.10))]
+
+
+class TestBancRoiFromMaleCns:
+    """BANC scenes have no named ROI product of their own: named ROIs are
+    fetched from male-cns (JRCFIB2022Mraw) and bridged into BANC space,
+    cached under meshes_transformed/BANC/ — mirroring the FAFB handling."""
+
+    def _run_plot_mesh(self, tmp_path, monkeypatch, roi='AL(R)',
+                       segid_map=None):
+        import trimesh as _tm
+        import navis.interfaces.neuprint as neu
+        from utils import token_manager
+
+        vs = _make_visualizer()
+        vs.script_path = str(tmp_path)
+        vs.brain_mesh = 'native'
+        vs.mesh_roi = [roi]
+        vs.mesh_color = '#94a3b8'
+        vs.mesh_alpha = 0.1
+        vs.background_color = 'rgba(255, 255, 255, 1.0)'
+        vs.FAFB_template_correction = True
+        vs.roi_mesh_simplification = 0  # keep the 1-face test mesh intact
+        vs.verbose = False
+        vs.backend = 'plotly'
+        import plotly.graph_objects as _go
+        vs.fig_3d = _go.Figure()
+        vs.token = 'tok'
+        vs._vprint = lambda *a, **k: None
+        vs._suppress_output = lambda: _nullcontext()
+        vs._apply_plotly_trace_color = lambda trace, color: None
+
+        # The male-cns ROI mesh sits at a JRCFIB2022Mraw-voxel-style
+        # location (Z near zero) so the bridging into BANC space moves it.
+        verts = np.array([[12000.0, 13000.0, 5000.0],
+                          [12100.0, 13100.0, 5100.0],
+                          [11900.0, 13200.0, 5200.0]])
+        mesh_vol = navis.Volume(
+            _tm.Trimesh(vertices=verts,
+                        faces=np.array([[0, 1, 2]], dtype=np.int64)),
+            name=roi)
+        monkeypatch.setattr(neu, 'fetch_roi', lambda *a, **k: mesh_vol)
+        monkeypatch.setattr(
+            'neuprint.Client', lambda *a, **k: object(), raising=False)
+        monkeypatch.setattr(
+            token_manager.TokenManager, 'get_neuprint_token',
+            lambda self, *a, **k: 'tok')
+        segids = segid_map or {}
+        vs._get_banc_segid = lambda roi_name: segids.get(roi_name)
+
+        rc = vs.plot_mesh()
+        return rc, vs
+
+    def test_named_roi_fetched_and_bridged(self, tmp_path, monkeypatch):
+        rc, vs = self._run_plot_mesh(tmp_path, monkeypatch)
+        assert rc == 0
+        # The male-cns mesh was bridged into BANC space (nm) and cached
+        # under meshes_transformed/BANC/.
+        cache_dir = (Path(tmp_path) / 'cache' / 'banc_v888'
+                     / 'meshes_transformed' / 'BANC')
+        files = list(cache_dir.glob('*.json'))
+        assert files, 'transformed ROI not cached'
+        vol = navis.Volume.from_json(str(files[0]))
+        zc = np.asarray(vol.vertices)[:, 2].mean()
+        # JRCFIB2022Mraw Z ~5k nm -> BANC Z is hundreds of thousands of nm
+        assert zc > 50_000
+
+    def test_banc_aggregates_skip_transform(self, tmp_path, monkeypatch):
+        import trimesh as _tm
+        verts = np.array([[500000.0, 100000.0, 100000.0],
+                          [501000.0, 101000.0, 100000.0],
+                          [499000.0, 102000.0, 100000.0]])
+        agg = navis.Volume(
+            _tm.Trimesh(vertices=verts,
+                        faces=np.array([[0, 1, 2]], dtype=np.int64)),
+            name='BANC_neuropil')
+        # Pre-stage the aggregate mesh the way _get_banc_region_volume
+        # does (it caches the product as a side effect).
+        mesh_dir = Path(tmp_path) / 'cache' / 'banc_v888' / 'meshes'
+        mesh_dir.mkdir(parents=True, exist_ok=True)
+        agg.to_json(str(mesh_dir / 'BANC__n_e_u_r_o_p_i_l.json'))
+        rc, vs = self._run_plot_mesh(tmp_path, monkeypatch,
+                                     roi='BANC_neuropil',
+                                     segid_map={'BANC_neuropil': 2})
+        assert rc == 0
+        # No transformed cache entry: native aggregates need no bridging
+        # (the directory itself may be created by cache-path helpers).
+        tx_dir = (Path(tmp_path) / 'cache' / 'banc_v888' /
+                  'meshes_transformed')
+        assert not tx_dir.exists() or not any(tx_dir.rglob('*.json'))
 
 
 class TestBancResolver:
@@ -543,18 +646,21 @@ class TestSplitBancCns:
     def test_template_info_names_brain_portion(self):
         """Plan item E2: template mode is labelled '(brain)'."""
         vs = _make_visualizer()
-        vs.brain_mesh = 'template'
+        vs.brain_mesh = 'native'
         vs._get_banc_template_volume = self._two_sided_volume
         info = vs._get_template_info()
         assert info['mesh_name'] == 'BANC (brain)'
 
-    def test_whole_info_keeps_cns_outline_name(self):
+    def test_banc_outline_spec(self):
         vs = _make_visualizer()
         vs._vprint = lambda *a, **k: None
-        vs.brain_mesh = 'whole'
+        vs.brain_mesh = 'BANC'
         vs._get_banc_template_volume = self._two_sided_volume
-        info = vs._get_template_info()
-        assert info['mesh_name'] == 'BANC (CNS outline)'
+        spec = vs._get_outline_template_info()
+        assert spec['space'] == 'BANC'
+        assert spec['split'] == 'banc'
+        brain, vnc = vs._split_banc_cns_volume(spec['build']())
+        assert brain is not None and vnc is not None
 
     def test_vnc_template_info_names_vnc_portion(self):
         """Plan item E3: the VNC branch is labelled '(VNC)' and carries

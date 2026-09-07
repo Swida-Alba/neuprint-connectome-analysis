@@ -154,10 +154,14 @@ table is newer — no manual cache step and no CAVE token. Notes:
 
 ## ROI meshes, brain and VNC outlines
 
-The public `region_outlines` CloudVolume layer provides 311 named regions
-plus four aggregates (`BANC_outline`, `BANC_neuropil`, `BANC_brain_neuropil`,
-`BANC_vnc_neuropil`), all in nanometres — the same frame as the skeletons, so
-ROI meshes render without any transform. `brain_mesh='template'` draws the
+The public `region_outlines` CloudVolume layer provides four aggregates
+(`BANC_outline`, `BANC_neuropil`, `BANC_brain_neuropil`, `BANC_vnc_neuropil`),
+all in nanometres — the same frame as the skeletons, so they render without
+any transform. The release publishes **no named ROI meshes**, so named ROIs
+(e.g. `AL(R)`) use the same handling as FAFB: fetched from **male-cns**
+(`JRCFIB2022Mraw`) and bridged into BANC space at render time, cached under
+`cache/<ds>/meshes_transformed/BANC/`. The offered ROI list is the male-cns
+set plus the four native aggregates. `brain_mesh='native'` (or the explicit `brain_mesh='BANC'`) draws the
 **brain portion** of the whole-CNS outline and `vnc_mesh=True` the **VNC
 portion**: the two are segmented by the neck coordinate
 (`y = 470 µm` waist; cut at `y = 350 µm` so the neck stays with the VNC),
@@ -183,7 +187,7 @@ from visualize_skeleton import VisualizeSkeleton
 vs = VisualizeSkeleton(
     dataset='banc_v888',
     neuron_layers=[['l-LNv']],
-    brain_mesh='template',
+    brain_mesh='native',
     mesh_roi=['BANC_neuropil'],
     skip_synapse=True,
 )

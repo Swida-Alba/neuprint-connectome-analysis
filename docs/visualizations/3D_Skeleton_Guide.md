@@ -91,7 +91,7 @@ sv.LogInHemibrain(token='your_token', dataset='hemibrain:v1.2.1')
 # Visualize neurons with 3D skeletons
 vs = VisualizeSkeleton(
     neuron_layers=['KC.*', 'MBON03'],  # Neuron types to visualize
-    brain_mesh='template',              # 'none', 'template', or 'whole'
+    brain_mesh='native',                # 'native', 'BANC', 'FAFB', 'male-cns', or 'none'
     mesh_roi=['MB(R)', 'CA(R)'],       # ROI meshes to display
     neuron_alpha=0.2,                   # Neuron transparency (legend shows full opacity)
     synapse_size=3,                     # Synapse marker size
@@ -554,29 +554,36 @@ vs = VisualizeSkeleton(
 vs = VisualizeSkeleton(
     dataset='hemibrain:v1.2.1',
     neuron_layers=['KC.*'],
-    brain_mesh='template'  # JRCFIB2018F for hemibrain, MANC for manc
+    brain_mesh='native'  # JRCFIB2018F for hemibrain, MANC for manc
 )
 
-# Option 3: Whole brain/VNC mesh (standard resolution, requires download)
+# Cross-template scenes: render everything (neurons + outline) in the
+# selected template's coordinates:
 vs = VisualizeSkeleton(
-    dataset='hemibrain:v1.2.1',
-    neuron_layers=['KC.*'],
-    brain_mesh='whole'  # JRC2018F whole brain, ~500MB one-time download
+    dataset='male-cns:v1.0',
+    neuron_layers=['l-LNv'],
+    brain_mesh='FAFB',  # whole scene moved to FLYWIRE/FAFB coordinates
 )
+# 'BANC' and 'male-cns' work the same way from any dataset whose template
+# space bridges to theirs (FLYWIRE / JRCFIB2022M / BANC) within two hops;
+# unreachable selections keep the native scene with a warning.
 ```
 
-**Dataset-Specific Templates:**
+**Dataset-Specific Templates (`brain_mesh='native'`):**
 
-| Dataset              | `brain_mesh='template'` | `brain_mesh='whole'` | Transform Required |
-| -------------------- | ----------------------- | -------------------- | ------------------ |
-| **hemibrain:v1.2.1** | JRCFIB2018F (EM)        | JRC2018F (confocal)  | ✅ Yes (~10GB)      |
-| **optic-lobe:v1.1**  | JRCFIB2018F (EM)        | JRC2018F (confocal)  | ✅ Yes (~10GB)      |
-| **manc:v1.2.3**      | MANC (native VNC)       | —                    | ❌ No               |
-| **male-cns:v0.9**    | JRCFIB2022M (native)    | —                    | ❌ No               |
+| Dataset              | Native outline         | Transform Required |
+| -------------------- | ---------------------- | ------------------ |
+| **hemibrain:v1.2.1** | JRCFIB2018F (EM)       | ❌ No (affine)      |
+| **optic-lobe:v1.1**  | JRCFIB2022M (EM)       | ❌ No (affine)      |
+| **manc:v1.2.3**      | MANC (native VNC)      | ❌ No               |
+| **male-cns:v1.0**    | JRCFIB2022M (brain)    | ❌ No (affine)      |
+| **flywire_FAFB**     | FLYWIRE (native)       | ❌ No               |
+| **banc_v888**        | BANC (brain)           | ❌ No               |
 
-**Transform Storage:**
-
-Transforms for `brain_mesh='whole'` are stored in `~/flybrain-data` (managed by flybrains). First use will prompt:
+**Retired mode:** the former `brain_mesh='whole'` (which moved the entire
+scene into JRC2018F and required a ~10GB H5 transform download) was
+replaced by the explicit `FAFB`/`BANC`/`male-cns` outline selections; legacy
+'whole'/'template' values in saved settings are normalized automatically.
 
 ```
 ⚠ Brain transforms not found for hemibrain:v1.2.1

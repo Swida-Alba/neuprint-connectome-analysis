@@ -168,7 +168,7 @@ vs = VisualizeSkeleton(
     min_synapse_num=10,
     skeleton_mode='tube',
     synapse_mode='cone',
-    brain_mesh='whole',
+    brain_mesh='native',
     output_dir='./output_data'
 )
 
