@@ -1063,3 +1063,135 @@ def test_panel_and_viewer_share_mapped_type_backend(mapper):
     # unique count, not the 243 per-flow multiplicity sum
     assert unique_neurons == 219, unique_neurons
     assert len(panel_targets) == 40
+
+
+def _apdn3_bridge_flows_and_pools():
+    """The user-reported APDN3 scenario (2026-09-07): the four male-cns
+    types that bridge onto FAFB APDN3 (CL125, SLP249 4 neurons each;
+    SLP250, PLP080 2 each), with per-pair bodyId pools attached."""
+    from comparison.mapping_visualization import (
+        dedupe_mirrored_pairs,
+        origin_seeded_flows,
+    )
+    from ui.neuron_index import (
+        count_types_in_index,
+        load_cached_neuron_index,
+        pool_bridge_body_ids,
+    )
+
+    index = load_cached_neuron_index(MCNS)
+    foreign_index = load_cached_neuron_index(FW)
+    queries = ['CL125', 'SLP249', 'SLP250', 'PLP080']
+    flows = origin_seeded_flows(
+        MCNS, queries, FW,
+        source_counts=count_types_in_index(index, queries))
+    assert flows
+    assert {f['foreign_type'] for f in flows} == {'APDN3'}
+    foreign_counts = count_types_in_index(foreign_index, ['APDN3'])
+    for flow in flows:
+        flow['foreign_count'] = foreign_counts.get(
+            flow['foreign_type'], 0)
+    flows = dedupe_mirrored_pairs({(MCNS, FW): flows}, [MCNS])[(MCNS, FW)]
+    pools = {}
+    for flow in flows:
+        chain = preferred_bridge_chain(flow['bridges'], MCNS, FW)
+        if chain is None:
+            continue
+        key = (flow['source_type'], flow['foreign_type'])
+        if key not in pools:
+            pools[key] = pool_bridge_body_ids(
+                MCNS, FW, standardize_bridge(chain, MCNS, FW),
+                flow['source_type'], flow['foreign_type'],
+                indexes={MCNS: index, FW: foreign_index})
+    return flows, pools
+
+
+def test_pair_edge_weights_match_sankey_and_are_pair_specific():
+    """User report: every network edge showed the same "12" (the source
+    type's whole count duplicated onto each edge) and disagreed with the
+    Sankey ribbon.  The network edge, the linker-path edge and the
+    Sankey ribbon all draw the shared pair_flow_weight now — the pair's
+    own granularity (4 / 2), never the shared target's 12."""
+    from comparison.mapping_visualization import (
+        build_bridge_linker_graph,
+        build_mapping_network_graph,
+        build_mapping_sankey_paths,
+    )
+
+    flows, pools = _apdn3_bridge_flows_and_pools()
+
+    graph = build_mapping_network_graph(flows, pools=pools)
+    network = {}
+    for u, v, d in graph.edges(data=True):
+        if u.startswith('0|'):
+            network[(u.split('|', 2)[2], v.split('|', 2)[2])] = d['weight']
+    sankey = {
+        (names[0].split(' · ')[0], names[1].split(' · ')[0]): ws[0]
+        for names, ws in build_mapping_sankey_paths(
+            flows, pools=pools, variant='type')}
+    assert network == sankey
+    # pair-specific: 4-neuron sources carry 4, 2-neuron sources 2 —
+    # never the shared 12-neuron target's count on every edge
+    assert set(network.values()) == {2, 4}
+
+    linker_graph = build_bridge_linker_graph(
+        flows, source_dataset=MCNS, target_dataset=FW, pools=pools)
+    final_weights = {d['weight'] for u, v, d in linker_graph.edges(
+        data=True) if v.endswith('|APDN3')}
+    assert final_weights == {2, 4}
+
+
+def test_apdn3_node_hover_pools_union_across_pairs():
+    """User report: the FAFB APDN3 node hovered "pool 4 bodyIds" next to
+    "(12 neurons)".  Each male-cns counterpart bridges a DIFFERENT
+    disjoint subset of APDN3's bodyIds (4/4/2/2); the hover count is the
+    UNION across the pairs — 12 — not the largest single subset."""
+    from comparison.mapping_visualization import build_mapping_network_graph
+
+    flows, pools = _apdn3_bridge_flows_and_pools()
+    graph = build_mapping_network_graph(flows, pools=pools)
+    title = graph.nodes[f'1|{FW}|APDN3']['title']
+    assert '(12 neurons)' in title
+    assert 'pool 12 bodyIds' in title
+
+
+def test_sankey_renders_no_parallel_duplicate_links():
+    """User report: PLP080 → APDN3 drew TWO parallel ribbons because the
+    pair's two derivation chains (direct annotation bridge + crosswalk
+    chain) reached the shared band at different hop depths and the
+    backend keyed its edges by layer.  Edge keys are layer-less now, so
+    the same node pair merges into ONE link (max weight)."""
+    import json
+
+    from comparison.mapping_visualization import render_mapping_sankey_html
+
+    flows, pools = _apdn3_bridge_flows_and_pools()
+    html = render_mapping_sankey_html(flows, pools=pools)
+    assert html
+    start = html.index('[', html.index('Plotly.newPlot('))
+    figure = json.JSONDecoder().raw_decode(html[start:])[0][0]
+    labels = figure['node']['label']
+    links_by_pair = {}
+    for s, t, v in zip(figure['link']['source'],
+                       figure['link']['target'],
+                       figure['link']['value']):
+        links_by_pair.setdefault((labels[s], labels[t]), []).append(v)
+    duplicates = {pair: values for pair, values in links_by_pair.items()
+                  if len(values) > 1}
+    assert not duplicates, duplicates
+
+
+def test_network_html_edge_label_font_size_control():
+    """User report: the on-edge weight labels were pinned to 9px while
+    only the node labels had a size control.  The network now carries an
+    'Edge Label Size' spinner, wired through the undo history."""
+    from comparison.mapping_visualization import render_bridge_linker_html
+
+    flows, pools = _apdn3_bridge_flows_and_pools()
+    html = render_bridge_linker_html(
+        flows, source_dataset=MCNS, target_dataset=FW, pools=pools)
+    assert html
+    assert 'id="edgeLabelSizeSlider"' in html
+    assert 'function updateEdgeLabelFontSize' in html
+    assert 'edgeLabelFontSize: globalEdgeLabelFontSize' in html
+    assert "updateEdgeLabelFontSize(gs.edgeLabelFontSize)" in html

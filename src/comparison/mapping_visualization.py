@@ -398,23 +398,53 @@ def dedupe_mirrored_pairs(pair_flows: Dict[tuple, list],
 def _endpoint_pool_counts(pools) -> tuple:
     """Pooled bodyId counts per type on each side (user report).
 
-    Returns ``(source_counts, target_counts)`` — type name → the pooled
-    bodyId count for that type on that side (max across the pairs it
-    participates in; the pool per pair may reach different subsets of
-    the type's neurons).  Nodes carry this on their hover next to the
-    index neuron count, because the bodyId count is what the mapped
-    granularity actually rests on.
+    Returns ``(source_counts, target_counts)`` — type name → the UNIQUE
+    pooled bodyId count for that type on that side (the UNION across
+    every pair the type participates in).  An N-to-1 target pools a
+    DIFFERENT subset of its bodyIds per counterpart — male-cns CL125 /
+    SLP249 (4 each) and PLP080 / SLP250 (2 each) bridge onto disjoint
+    subsets of FAFB APDN3's 12 bodyIds — so the old max-across-pairs
+    aggregation reported the largest single subset ("pool 4 bodyIds"
+    next to "12 neurons"); the union reports what the mapping actually
+    reaches.  Nodes carry this on their hover next to the index neuron
+    count, because the bodyId count is what the mapped granularity
+    actually rests on.
     """
-    src_counts: Dict[str, int] = {}
-    tgt_counts: Dict[str, int] = {}
+    src_ids: Dict[str, set] = {}
+    tgt_ids: Dict[str, set] = {}
     for (s_type, f_type), pool in (pools or {}).items():
-        s_ids = len(pool.get("source_body_ids") or [])
-        t_ids = len(pool.get("target_body_ids") or [])
-        if s_ids:
-            src_counts[s_type] = max(src_counts.get(s_type, 0), s_ids)
-        if t_ids:
-            tgt_counts[f_type] = max(tgt_counts.get(f_type, 0), t_ids)
-    return src_counts, tgt_counts
+        if pool.get("source_body_ids"):
+            src_ids.setdefault(s_type, set()).update(
+                str(b) for b in pool["source_body_ids"])
+        if pool.get("target_body_ids"):
+            tgt_ids.setdefault(f_type, set()).update(
+                str(b) for b in pool["target_body_ids"])
+    return ({t: len(v) for t, v in src_ids.items()},
+            {t: len(v) for t, v in tgt_ids.items()})
+
+
+def pair_flow_weight(flow, pool: Optional[Dict[str, Any]] = None) -> int:
+    """The per-pair mapped-flow weight — ONE formula for every artifact.
+
+    The Sankey ribbon, the network pair edge, the linker-path edges and
+    the composed-graph edges all render the same mapped pair, so they
+    must all carry the same number.  Per side: the pooled bodyId count
+    when a pool exists, else that side's neuron count (a side with no
+    data falls back to the other side's), collapsed by min — a pair
+    maps at most min(source, foreign) neurons, so a 12-neuron type
+    bridging a 4-neuron counterpart draws 4, not 12 (the old network
+    duplicated the SOURCE type's whole count onto every edge, the
+    linker graph fell back foreign-first, and only the pooled case
+    agreed).
+    """
+    source_count = int(flow.get("source_count") or 0)
+    foreign_count = int(flow.get("foreign_count") or 0)
+    pool = pool or {}
+    src_side = (len(pool.get("source_body_ids") or [])
+                or source_count or foreign_count or 1)
+    tgt_side = (len(pool.get("target_body_ids") or [])
+                or foreign_count or source_count or 1)
+    return max(1, min(src_side, tgt_side))
 
 
 def _pool_title_suffix(count: int) -> str:
@@ -436,11 +466,12 @@ def build_mapping_network_graph(flows, *,
     together with the per-side neuron counts — never as a node.
 
     Layer 0 = current dataset types, layer 1 = foreign dataset types,
-    layer 2 = matched query entries.  Pair-edge weight is the source
-    side's neuron count when known (falls back to the foreign count);
-    coverage-edge weight is the foreign count, summing to the entry
-    label's total.  With ``pools``, node hovers also carry the pooled
-    bodyId count of the type on its side.
+    layer 2 = matched query entries.  Pair-edge weight is the shared
+    ``pair_flow_weight`` (pooled granularity / min of the two sides) —
+    the same number the Sankey ribbon draws for the pair; coverage-edge
+    weight is the foreign count, summing to the entry label's total.
+    With ``pools``, node hovers also carry the pooled bodyId count of
+    the type on its side.
 
     ``orphans`` (W3) are queried types with NO mapped counterpart in a
     target dataset: ``{'dataset', 'type', 'count', 'target'}``.  Each is
@@ -449,6 +480,7 @@ def build_mapping_network_graph(flows, *,
     disappearing.
     """
     src_pool_ids, tgt_pool_ids = _endpoint_pool_counts(pools)
+    pools = pools or {}
     graph = nx.DiGraph()
     ordered = sorted(
         flows,
@@ -464,12 +496,17 @@ def build_mapping_network_graph(flows, *,
         src_id = f"0|{flow.get('source_dataset', '')}|{flow.get('source_type', '')}"
         tgt_id = f"1|{flow.get('target_dataset', '')}|{flow.get('foreign_type', '')}"
 
-        pair_weight = source_count or max(1, foreign_count)
+        # the pair edge carries the SHARED per-pair flow weight (the same
+        # number the Sankey ribbon draws) — never the source type's whole
+        # count duplicated onto every edge it participates in
+        pair_weight = pair_flow_weight(
+            flow, pools.get((flow.get("source_type", ""),
+                             flow.get("foreign_type", ""))))
         graph.add_node(src_id, node_type="source",
                        label=flow.get("source_type", ""),
                        title=(f"{flow.get('source_type', '')} · "
                               f"{flow.get('source_dataset', '')} "
-                              f"({pair_weight} neurons)"
+                              f"({source_count or pair_weight} neurons)"
                               + _pool_title_suffix(
                                   src_pool_ids.get(
                                       flow.get("source_type", ""), 0))))
@@ -699,6 +736,7 @@ def _render_mapping_graph(graph, output_path: str, *, open_browser: bool = False
             "generate_empty_network": False, "sheet_name": None,
             "min_edge_width": 1, "max_edge_width": 8,
             "min_font_size": 8, "max_font_size": 16,
+            "edge_label_font_size": 9,
             "min_node_size": 8, "max_node_size": 40,
             "edge_width_scale": "log", "edge_width_factor": 1.0,
             "edge_width_log_base": None, "edge_opacity": 0.6,
@@ -916,8 +954,10 @@ def build_bridge_linker_graph(flows, *, source_dataset: str,
     for flow in ordered:
         source_type = flow.get("source_type", "")
         foreign_type = flow.get("foreign_type", "")
-        count = max(1, flow.get("foreign_count")
-                    or flow.get("source_count") or 1)
+        # the shared per-pair flow weight — the same number the Sankey
+        # ribbon and the type-level network edge draw for this pair
+        count = pair_flow_weight(
+            flow, pools.get((source_type, foreign_type)))
         src_id = _endpoint(0, flow.get("source_dataset", ""), source_type,
                            flow.get("source_count"))
         tgt_id = _endpoint(1, flow.get("target_dataset", ""), foreign_type,
@@ -1204,22 +1244,12 @@ def build_mapping_sankey_paths(flows, *, pools: Optional[Dict[tuple,
         target_ds = flow.get("target_dataset", "")
         source_type = flow.get("source_type", "")
         foreign_type = flow.get("foreign_type", "")
-        # the fallback count is the SOURCE side's neuron count — the
-        # mapped neurons originate there; a foreign-first fallback made
-        # every fan-in edge into one shared target carry the SAME
-        # weight (the counting bug)
-        count = max(1, flow.get("source_count")
-                    or flow.get("foreign_count") or 1)
+        # the shared per-pair flow weight — the pooled granularity (min
+        # of the two sides), CONSTANT along the whole path: a shared
+        # target must not flatten fan-in ribbons to its own (identical)
+        # count, and the network edge for this pair draws the SAME number
         pool = pools.get((source_type, foreign_type)) or {}
-        src_count = (len(pool.get("source_body_ids", []))
-                     if pool.get("source_body_ids") else count) or 1
-        tgt_count = (len(pool.get("target_body_ids", []))
-                     if pool.get("target_body_ids") else count) or 1
-        # the path's ribbon is THIS pair's mapped flow — the pooled
-        # granularity (min of the two sides), CONSTANT along the whole
-        # path: a shared target must not flatten fan-in ribbons to its
-        # own (identical) count
-        flow_weight = min(src_count, tgt_count) or 1
+        flow_weight = pair_flow_weight(flow, pool)
         src_name = f"{source_type} · {dataset_abbrev(source_ds)}"
         tgt_name = f"{foreign_type} · {dataset_abbrev(target_ds)}"
 
@@ -1260,6 +1290,141 @@ def build_mapping_sankey_paths(flows, *, pools: Optional[Dict[tuple,
             seen_paths.add(key)
             rows.append(([name], [max(1, int(orphan.get("count") or 1))]))
     return rows
+
+
+def build_type_coverage(pair_flows,
+                        pools: Optional[Dict[tuple, Dict[str, Any]]] = None
+                        ) -> Dict[str, List[Dict[str, Any]]]:
+    """Bidirectional type-level coverage rows for the mapping results.
+
+    Two views over the same mapped pairs (user 2026-09-07):
+
+    * ``forward`` — one row per QUERIED (source) type: its neuron count,
+      the target types it maps to, the relationship (``1-to-N`` when the
+      query fans out), how many of its OWN bodyIds the mapping reaches
+      in total (union over its pairs) and how many target-side bodyIds
+      the targets cover.
+    * ``reverse`` — one row per RECEIVING (target) type: the source
+      types that converge on it — several sources make an N-to-1
+      explicit (three FAFB types mapping onto male-cns ``SMP227``) —
+      with both sides' coverage.
+
+    Coverage cells are pool-based ``x of y`` bodyIds counts; pairs
+    without pools contribute nothing to the unions and a row without
+    any pooled pair reads ``not pooled``.  Pure: no UI, no I/O.
+    """
+    pools = pools or {}
+    forward: Dict[tuple, Dict[str, Any]] = {}
+    reverse: Dict[tuple, Dict[str, Any]] = {}
+    for (src_ds, tgt_ds), flows in (pair_flows or {}).items():
+        for flow in flows or []:
+            s_type = flow.get("source_type", "")
+            f_type = flow.get("foreign_type", "")
+            if not s_type or not f_type:
+                continue
+            s_count = int(flow.get("source_count") or 0)
+            f_count = int(flow.get("foreign_count") or 0)
+            pool = pools.get((s_type, f_type)) or {}
+            s_ids = set(pool.get("source_body_ids") or [])
+            t_ids = set(pool.get("target_body_ids") or [])
+            pooled = bool(pool)
+
+            fwd = forward.setdefault((src_ds, s_type), {
+                "dataset": src_ds, "type": s_type, "count": s_count,
+                "targets": {}, "any_pooled": False,
+            })
+            fwd["count"] = max(fwd["count"], s_count)
+            fwd["any_pooled"] = fwd["any_pooled"] or pooled
+            entry = fwd["targets"].setdefault(
+                (tgt_ds, f_type),
+                {"s_ids": set(), "t_ids": set(), "t_total": 0,
+                 "pooled": False})
+            entry["s_ids"] |= s_ids
+            entry["t_ids"] |= t_ids
+            entry["t_total"] = max(entry["t_total"], f_count)
+            entry["pooled"] = entry["pooled"] or pooled
+
+            rev = reverse.setdefault((tgt_ds, f_type), {
+                "dataset": tgt_ds, "type": f_type, "count": f_count,
+                "sources": {}, "any_pooled": False,
+            })
+            rev["count"] = max(rev["count"], f_count)
+            rev["any_pooled"] = rev["any_pooled"] or pooled
+            sentry = rev["sources"].setdefault(
+                (src_ds, s_type),
+                {"s_ids": set(), "t_ids": set(), "s_total": 0,
+                 "pooled": False})
+            sentry["s_ids"] |= s_ids
+            sentry["t_ids"] |= t_ids
+            sentry["s_total"] = max(sentry["s_total"], s_count)
+            sentry["pooled"] = sentry["pooled"] or pooled
+
+    def _cov(union: set, total: int, pooled: bool) -> str:
+        return f"{len(union)} of {total}" if pooled else "not pooled"
+
+    forward_rows: List[Dict[str, Any]] = []
+    for row in forward.values():
+        groups: Dict[str, List[str]] = {}
+        query_union: set = set()
+        target_union = 0
+        target_total = 0
+        for (t_ds, f_type), entry in sorted(row["targets"].items()):
+            code = dataset_abbrev(t_ds) or t_ds
+            groups.setdefault(code, []).append(f_type)
+            if entry["pooled"]:
+                query_union |= entry["s_ids"]
+                target_union += len(entry["t_ids"])
+                target_total += entry["t_total"]
+        forward_rows.append({
+            "dataset": row["dataset"],
+            "type": row["type"],
+            "count": row["count"],
+            "maps_to": " · ".join(
+                f"{code}: {', '.join(names)}"
+                for code, names in sorted(groups.items())),
+            "targets": len(row["targets"]),
+            "relationship": ("1-to-N" if len(row["targets"]) > 1
+                             else "1-to-1"),
+            "query_cov": _cov(query_union, row["count"], row["any_pooled"]),
+            "target_cov": _cov(set(range(target_union)), target_total,
+                               row["any_pooled"]),
+        })
+    forward_rows.sort(key=lambda r: (-int(r["count"] or 0),
+                                     str(r["type"])))
+
+    reverse_rows: List[Dict[str, Any]] = []
+    for row in reverse.values():
+        groups: Dict[str, List[str]] = {}
+        source_union: set = set()
+        source_total = 0
+        target_union: set = set()
+        for (s_ds, s_type), entry in sorted(row["sources"].items()):
+            code = dataset_abbrev(s_ds) or s_ds
+            groups.setdefault(code, []).append(s_type)
+            if not entry["pooled"]:
+                continue
+            source_union |= entry["s_ids"]
+            source_total += entry["s_total"]
+            target_union |= entry["t_ids"]
+        reverse_rows.append({
+            "dataset": row["dataset"],
+            "type": row["type"],
+            "count": row["count"],
+            "mapped_from": " · ".join(
+                f"{code}: {', '.join(names)}"
+                for code, names in sorted(groups.items())),
+            "sources": len(row["sources"]),
+            "relationship": ("N-to-1" if len(row["sources"]) > 1
+                             else "1-to-1"),
+            "source_cov": _cov(source_union, source_total,
+                               row["any_pooled"]),
+            "target_cov": _cov(target_union, row["count"],
+                               row["any_pooled"]),
+        })
+    reverse_rows.sort(key=lambda r: (0 if r["relationship"] == "N-to-1"
+                                     else 1, -int(r["count"] or 0),
+                                     str(r["type"])))
+    return {"forward": forward_rows, "reverse": reverse_rows}
 
 
 def render_mapping_sankey_html(flows, *, pools: Optional[Dict[tuple,
@@ -1531,7 +1696,7 @@ def build_composed_mapping_graph(pair_flows, *, node_cap: int = 80):
                     for l in standardize_bridge(c, src_ds, tgt_ds))
                 for c in (flow.get("bridges") or [])[:2])
             edges.append(((src_ds, src_type), (tgt_ds, tgt_type), {
-                "weight": src_count or max(1, tgt_count),
+                "weight": pair_flow_weight(flow),
                 "bridge_texts": build_bridge_texts(flow.get("bridges")),
                 "linker_bearing": linker_bearing,
                 "source_count": src_count,

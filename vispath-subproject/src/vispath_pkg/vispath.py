@@ -279,6 +279,7 @@ class VisualizePath:
         max_edge_width=30,       # NEW: Maximum edge width in pixels
         min_font_size=6,         # NEW: Minimum font size in pixels
         max_font_size=48,        # NEW: Maximum font size in pixels
+        edge_label_font_size=9,  # NEW: On-edge weight label size in px (adjustable in the UI)
         min_node_size=20,        # NEW: Minimum node size in pixels
         max_node_size=80,        # NEW: Maximum node size in pixels
         heatmap_row_order=None,  # NEW: Custom row order for heatmap
@@ -569,6 +570,7 @@ class VisualizePath:
         # Font and node size parameters
         self.min_font_size = min_font_size  # Minimum font size in pixels
         self.max_font_size = max_font_size  # Maximum font size in pixels
+        self.edge_label_font_size = edge_label_font_size  # On-edge weight label size (px)
         self.min_node_size = min_node_size  # Minimum node size in pixels
         self.max_node_size = max_node_size  # Maximum node size in pixels
         
@@ -2556,7 +2558,7 @@ class VisualizePath:
         path_df_sorted = path_df_with_score.sort_values('_min_weight', ascending=False)
         
         # Extract layer information from paths
-        # edge_data: {(layer_idx, source, target): {'weight': ..., 'ratio': ..., 'prob': ..., 'count': ...}}
+        # edge_data: {(source, target): {'weight': ..., 'ratio': ..., 'prob': ..., 'count': ...}}
         edge_data = {}
         node_layers = {}  # {node: set of layer indices}
         
@@ -2601,19 +2603,26 @@ class VisualizePath:
             for i in range(len(nodes) - 1):
                 source = nodes[i]
                 target = nodes[i + 1]
-                layer_idx = i  # Layer index is the hop position
-                
-                edge_key = (layer_idx, source, target)
+
+                # Edge keys are LAYER-LESS (source, target): every node
+                # renders once, so the same node pair reached at different
+                # hop depths by different paths (one pair's direct
+                # annotation bridge and its longer crosswalk chain) is one
+                # biological connection — keyed by layer it drew as
+                # PARALLEL ribbons with the weight counted twice.
+                edge_key = (source, target)
                 weight = weights[i] if i < len(weights) else 0
                 ratio = ratios[i] if i < len(ratios) else 0
                 prob = probs[i] if i < len(probs) else 0
                 nt = nt_types[i] if i < len(nt_types) else None
-                
+
                 if edge_key not in edge_data:
                     edge_data[edge_key] = {'weight': weight, 'ratio': ratio, 'prob': prob, 'nt': nt}
                 else:
-                    # Same edge in different paths: use max since it's the same biological connection
-                    # (weight should be identical, but use max to be safe)
+                    # Same edge in different paths (possibly at different
+                    # hop depths): use max since it's the same biological
+                    # connection (weight should be identical, but use max
+                    # to be safe)
                     edge_data[edge_key]['weight'] = max(edge_data[edge_key]['weight'], weight)
                     edge_data[edge_key]['ratio'] = max(edge_data[edge_key]['ratio'], ratio)
                     edge_data[edge_key]['prob'] = max(edge_data[edge_key]['prob'], prob)
@@ -2635,23 +2644,22 @@ class VisualizePath:
         simplification_applied = needs_simplification
         original_edge_count = len(edge_data)
         
-        # Build node list ordered by layers (key to proper layering)
+        # Build node list ordered by layers (key to proper layering).
+        # Each node sits at its EARLIEST hop layer (nodes render once).
+        # When the shared selector simplified the path set, nodes whose
+        # every edge was filtered out stay excluded (no orphan
+        # reintroduction).
+        edge_endpoints = set()
+        for source, target in edge_data.keys():
+            edge_endpoints.add(source)
+            edge_endpoints.add(target)
         nodes_by_layer = {}
-        for (layer_idx, source, target) in edge_data.keys():
-            nodes_by_layer.setdefault(layer_idx, set()).add(source)
-            nodes_by_layer.setdefault(layer_idx + 1, set()).add(target)
-
-        # Include nodes that appear in paths (node_layers) even if they had only
-        # zero-weight edges and thus were removed from edge_data. Place them in
-        # their earliest observed layer to preserve ordering in the Sankey.
-        # NOTE: If simplification was applied (edgeN_limit exceeded), we skip this
-        # to avoid re-introducing orphan nodes that were filtered out.
-        if not simplification_applied:
-            for node, layers in node_layers.items():
-                if not layers:
-                    continue
-                earliest = min(layers)
-                nodes_by_layer.setdefault(earliest, set()).add(node)
+        for node, layers in node_layers.items():
+            if not layers:
+                continue
+            if simplification_applied and node not in edge_endpoints:
+                continue
+            nodes_by_layer.setdefault(min(layers), set()).add(node)
         
         # Build network if not already done (to get node types)
         if self.G_network is None:
@@ -2713,7 +2721,7 @@ class VisualizePath:
         has_negative = False  # Track if any negative weights exist
         has_nt_coloring = False  # Track if NT-based coloring is applied
         
-        for (layer_idx, source, target), data in edge_data.items():
+        for (source, target), data in edge_data.items():
             source_indices.append(node_to_idx[source])
             target_indices.append(node_to_idx[target])
             
@@ -5811,6 +5819,11 @@ class VisualizePath:
                     <span class="vp-unit">px</span>
                 </div>
                 <div class="vp-spinner vp-spinner-inline">
+                    <label for="edgeLabelSizeSlider" title="Text size of the on-edge weight labels (the 🏋️ Edge Weights toggle)">Edge Label Size</label>
+                    <input type="number" id="edgeLabelSizeSlider" min="1" step="1" value="{self.edge_label_font_size}" oninput="updateEdgeLabelFontSize(this.value)" title="Text size of the weight labels painted on the edges, in px">
+                    <span class="vp-unit">px</span>
+                </div>
+                <div class="vp-spinner vp-spinner-inline">
                     <label for="nodeSizeSlider" title="Diameter of the nodes">Node Size</label>
                     <input type="number" id="nodeSizeSlider" min="1" step="1" value="40" oninput="updateNodeSize(this.value)" title="Diameter of the nodes in px">
                     <span class="vp-unit">px</span>
@@ -6337,12 +6350,14 @@ class VisualizePath:
                     // On-edge weight labels — applied via the 'wlabel'
                     // class (the Edge Weights toggle in the Filter tab);
                     // the shared text stack (background pill, border,
-                    // wrap) comes from the base edge style.
+                    // wrap) comes from the base edge style.  Size starts
+                    // at edge_label_font_size and follows the Edge Label
+                    // Size control live.
                     selector: 'edge.wlabel',
                     style: {{
                         'label': 'data(display_label)',
                         'text-rotation': 'autorotate',
-                        'font-size': '9px',
+                        'font-size': '{self.edge_label_font_size}px',
                         'color': '#333'
                     }}
                 }},
@@ -8342,6 +8357,7 @@ class VisualizePath:
                     nodeSize: globalNodeSize,
                     edgeWidth: globalEdgeWidth,
                     fontSize: globalFontSize,
+                    edgeLabelFontSize: globalEdgeLabelFontSize,
                     arrowSize: globalArrowSize,
                     edgeWidthScale: globalEdgeWidthScale,
                     metric: currentMetric,
@@ -8421,6 +8437,7 @@ class VisualizePath:
                 applySlider('nodeSizeSlider', gs.nodeSize);
                 applySlider('edgeWidthSlider', gs.edgeWidth);
                 applySlider('fontSizeSlider', gs.fontSize);
+                applySlider('edgeLabelSizeSlider', gs.edgeLabelFontSize);
                 applySlider('arrowSizeSlider', gs.arrowSize);
                 const scaleSelect = document.getElementById('edgeWidthScale');
                 if (scaleSelect && gs.edgeWidthScale) scaleSelect.value = gs.edgeWidthScale;
@@ -8447,6 +8464,7 @@ class VisualizePath:
                 if (gs.nodeSize !== undefined) updateNodeSize(gs.nodeSize);
                 if (gs.edgeWidth !== undefined) updateEdgeWidth(gs.edgeWidth);
                 if (gs.fontSize !== undefined) updateFontSize(gs.fontSize);
+                if (gs.edgeLabelFontSize !== undefined) updateEdgeLabelFontSize(gs.edgeLabelFontSize);
                 if (gs.arrowSize !== undefined) updateArrowSize(gs.arrowSize);
                 updateMetric();
             }} finally {{
@@ -9012,6 +9030,15 @@ class VisualizePath:
                 .update();
         }}
 
+        // Text size of the on-edge weight labels (the 🏋️ Edge Weights
+        // toggle) — independent of the node-label Font Size control.
+        function updateEdgeLabelFontSize(size) {{
+            const value = parseFloat(size);
+            if (!restoringHistoryState && value !== globalEdgeLabelFontSize) pushHistory('Adjust edge label font size');
+            globalEdgeLabelFontSize = value;
+            cy.edges('.wlabel').style('font-size', value + 'px');
+        }}
+
         function updateNodeSize(size) {{
             const value = parseFloat(size);
             const echo = document.getElementById('nodeSizeValue');
@@ -9133,6 +9160,7 @@ class VisualizePath:
         let globalNodeSize = 40;
         let globalEdgeWidth = 3;
         let globalFontSize = 12;
+        let globalEdgeLabelFontSize = {self.edge_label_font_size};
         let globalArrowSize = 9;
         let globalEdgeWidthScale = document.getElementById('edgeWidthScale')?.value || 'log_e';
         let restoringHistoryState = false;

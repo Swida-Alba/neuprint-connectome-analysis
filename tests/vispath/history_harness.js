@@ -34,7 +34,7 @@ const FUNCTIONS = [
     'undo', 'redo',
     'updateUndoRedoButtons', 'updateHistoryList', 'jumpToHistory',
     'restoreGlobalStyles', 'updateNodeSize', 'updateEdgeWidth',
-    'updateFontSize', 'updateArrowSize', 'updateMetric', 'updateEdgeWidths',
+    'updateFontSize', 'updateArrowSize', 'updateEdgeLabelFontSize', 'updateMetric', 'updateEdgeWidths',
     'syncSelectedGeometryInputs', 'updateAlignButtons', 'alignSelectedNodes',
     'syncTransformInputs', 'syncGapDisplays', 'measureAxisGap', 'isVisibleElement', 'metricEdgeValue',
     'visibleNodeCentroid', 'gapAxesSwapped',
@@ -72,6 +72,7 @@ function buildScope(cy) {
         let globalNodeSize = 40;
         let globalEdgeWidth = 3;
         let globalFontSize = 12;
+        let globalEdgeLabelFontSize = 9;
         let globalArrowSize = 9;
         let globalEdgeWidthScale = 'log_e';
         let reciprocalOffset = 5;

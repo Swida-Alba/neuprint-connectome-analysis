@@ -170,6 +170,12 @@ def test_global_search_composes_the_selection(panel_client):
             [str(getattr(b, 'text', '')) for b in _buttons(client)])
     assert any('flywire_FAFB_v783 → male-cns:v1.0' in label
                for label in labels)
+    # bidirectional type-coverage presentation (user 2026-09-07): a
+    # TOP-LEVEL panel per dataset pair, with the pair named in its title
+    assert any(
+        'Type coverage — flywire_FAFB_v783 → male-cns:v1.0' in label
+        and 'bidirectional' in label
+        for label in labels)
     # artifact + CSV actions of the per-pair card are present
     for action in ('Sankey (type-level)', 'Sankey (linker)', 'Network',
                    'Linker paths', 'Export bridges (CSV)'):

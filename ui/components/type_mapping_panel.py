@@ -24,6 +24,25 @@ logger = logging.getLogger(__name__)
 
 COMPOSED_NODE_CAP = 80
 
+# Quasar table cells render nowrap by default, so a long Map used /
+# Maps-to cell stretches its table until the later columns overflow the
+# viewport.  These column helpers cap the width and force wrapping so
+# ALL columns stay visible and long values continue on the next line
+# (user 2026-09-07).
+_WRAP = "white-space: normal; overflow-wrap: anywhere;"
+
+
+def _col(name: str, label: str, field: str, *,
+         max_w=None, min_w=None) -> Dict[str, Any]:
+    """A QTable column def with wrapping and an optional width cap."""
+    bounds = ((f"max-width: {max_w}px;" if max_w else "")
+              + (f"min-width: {min_w}px;" if min_w else ""))
+    return {
+        "name": name, "label": label, "field": field, "align": "left",
+        "headerStyle": _WRAP + bounds,
+        "style": _WRAP + bounds,
+    }
+
 
 def create_type_mapping_entry(get_datasets: Callable[[], list]):
     """The entrance button + preview dialog (spec §3).
@@ -75,12 +94,31 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                 return dataset_aware_suggestions(
                     text, list(get_datasets() or []), "auto", limit=None)
 
+            search_action: Dict[str, Any] = {}
+
+            def _add_search_action() -> None:
+                # The Search button lives IN the input row (right of the
+                # Match-by select) so query box, filter and action share
+                # one toolbar row (user 2026-09-07). self-stretch keeps it
+                # at the row's height; lazy dispatch: _run_click is defined
+                # below the dialog build (NiceGUI schedules the returned
+                # coroutine as a task).
+                search_action["button"] = ui.button(
+                    "Search mappings", icon="search",
+                    on_click=lambda: _run_click()
+                ).classes("self-stretch")
+
             search = neuron_list_input(
                 label="Types to map",
                 placeholder="e.g. APDN3, aMe.* — one query per chip",
                 unit_label="query",
                 show_upload=False,
                 suggestions=_suggest,
+                # Same height as the query box, and the Search button
+                # slots in right of it — the chip input narrows to make
+                # room (user 2026-09-07).
+                filter_dense=False,
+                input_actions=_add_search_action,
                 # Standalone history: the panel's Recent/Frequent list reads
                 # and writes its own store, so panel searches never mix with
                 # the analysis tabs' neuron-query history.
@@ -95,11 +133,7 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                      "selected datasets appear as you type. This box keeps "
                      "its own query history, separate from the tabs.",
             ).classes("w-full")
-            with ui.row():
-                # lazy dispatch: _run_click is defined below the dialog build
-                # (NiceGUI schedules the returned coroutine as a task)
-                search_btn = ui.button("Search mappings", icon="search",
-                                       on_click=lambda: _run_click())
+            search_btn = search_action["button"]
             # Loading notice: painted BEFORE the heavy search leaves the
             # event loop (the first search warms a large index and can take
             # a minute or two — silent freezing looked like a hang).
@@ -161,40 +195,60 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
 
     def _pair_card(src: str, tgt: str, flows, pools: dict) -> None:
         from comparison.cross_dataset_type_mapper import bridge_linker_text
+        from utils.naming_utils import dataset_abbrev
 
         stamp = time.strftime("%Y%m%d_%H%M%S")
+        src_code = dataset_abbrev(src) or src
+        tgt_code = dataset_abbrev(tgt) or tgt
         rows = []
         for flow in flows:
+            s_type = flow.get("source_type", "")
+            f_type = flow.get("foreign_type", "")
             info = bridge_linker_text(flow.get("bridges") or [], src, tgt,
-                                      flow.get("foreign_type", ""))
-            pool = pools.get((flow.get("source_type"),
-                              flow.get("foreign_type"))) or {}
-            # §dedupe (user 2026-09-07): granularity ("n to m") and
-            # coverage ("covered n of m") carried the SAME two numbers —
-            # one Coverage column now uses the pool's own
-            # ``covered <target pool> of <target type total>`` (which
-            # also stays filled when one side's pool is empty, the old
-            # blank-when-either-side-empty case).
-            cov = pool.get("coverage") or "—"
+                                      f_type)
+            pool = pools.get((s_type, f_type)) or {}
+            s_total = int(flow.get("source_count") or 0)
+            t_total = int(flow.get("foreign_count") or 0)
+            s_n = len(pool.get("source_body_ids") or [])
+            t_n = len(pool.get("target_body_ids") or [])
+            # each linker annotated with its own pooled bodyId count on
+            # its home side (user 2026-09-07: "each linker corresponding
+            # neuron number")
+            per_linker = {(l.get("column"), l.get("value")): l
+                          for l in (pool.get("per_linker") or [])}
+            parts = []
+            for entry in info["entries"]:
+                text = entry["text"]
+                linker = per_linker.get((entry["column"], entry["value"]))
+                if linker and linker.get("body_ids"):
+                    text += (f" · {len(linker['body_ids'])} "
+                             f"{dataset_abbrev(linker.get('home', '')) or '?'}"
+                             " bodyIds")
+                parts.append(text)
+            map_used = " + ".join(parts) if parts else (info["text"] or "—")
+            if pool:
+                # both sides, x of y bodyIds (user 2026-09-07: the bare
+                # 'covered n of m' did not say WHICH side)
+                cov = (f"{src_code}: {s_n} of {s_total} · "
+                       f"{tgt_code}: {t_n} of {t_total}")
+            else:
+                cov = "— (not pooled)"
             rows.append([
-                flow.get("source_type", ""),
-                flow.get("foreign_type", ""),
-                f"{flow.get('source_count') or 0} → "
-                f"{flow.get('foreign_count') or 0}",
-                info["text"], cov,
+                s_type, f_type,
+                f"{s_total} {src_code} → {t_total} {tgt_code}",
+                map_used, cov,
             ])
+        # Quasar table cells nowrap by default: cap the long columns and
+        # force wrapping so every column stays visible (user 2026-09-07)
         ui.table(
             columns=[
-                {"name": "name", "label": "Type", "field": "name",
-                 "align": "left"},
-                {"name": "foreign", "label": "Mapped to", "field": "foreign",
-                 "align": "left"},
-                {"name": "counts", "label": "Neurons", "field": "counts",
-                 "align": "left"},
-                {"name": "map_used", "label": "Map used", "field": "map_used",
-                 "align": "left"},
-                {"name": "cov", "label": "Pool coverage", "field": "cov",
-                 "align": "left"},
+                _col("name", f"Type ({src_code})", "name", max_w=170),
+                _col("foreign", f"Mapped to ({tgt_code})", "foreign",
+                     max_w=170),
+                _col("counts", "Neurons", "counts", min_w=150),
+                _col("map_used", "Map used (per linker)", "map_used",
+                     max_w=440),
+                _col("cov", "Pool coverage (bodyIds)", "cov", min_w=210),
             ],
             rows=[dict(zip(("name", "foreign", "counts", "map_used",
                              "cov"), r)) for r in rows],
@@ -215,6 +269,78 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
             ui.button("Export bridges (CSV)",
                       on_click=lambda: _deliver_pair_csv(
                           src, tgt, flows, pools, stamp))
+
+    def _coverage_panel(src: str, tgt: str, flows, pools: dict) -> None:
+        """Bidirectional type-level coverage for ONE dataset pair.
+
+        Rendered at the results' top level (user 2026-09-07: outside
+        the dataset-pair card again, with the pair named in the title):
+        forward = each queried type's total mapped number (1-to-N
+        visible), reverse = each receiving type and the sources
+        converging on it (N-to-1 visible).
+        """
+        from comparison.mapping_visualization import build_type_coverage
+
+        pair_pools = {(f.get("source_type"), f.get("foreign_type")):
+                      pools[key]
+                      for f in flows
+                      for key in ((f.get("source_type"),
+                                   f.get("foreign_type")),)
+                      if key in pools}
+        coverage = build_type_coverage({(src, tgt): flows}, pair_pools)
+        forward = coverage.get("forward") or []
+        reverse = coverage.get("reverse") or []
+        if not (forward or reverse):
+            return
+        with ui.expansion(
+                f"Type coverage — {src} → {tgt} "
+                f"(bidirectional, 1-to-N / N-to-1)",
+                icon="swap_vert").classes("w-full"):
+            ui.label(
+                "Forward — each queried type: its neurons, the "
+                "targets it maps to, and how many of its bodyIds "
+                "the mapping reaches (x of y, per side)."
+            ).classes("text-caption drocat-muted")
+            ui.table(
+                columns=[
+                    _col("type", "Queried type", "type", max_w=170),
+                    _col("dataset", "Dataset", "dataset", max_w=180),
+                    _col("count", "Neurons", "count", min_w=90),
+                    _col("maps_to", "Maps to", "maps_to", max_w=440),
+                    _col("relationship", "Relationship",
+                         "relationship", min_w=110),
+                    _col("query_cov",
+                         "Queried-side coverage (bodyIds)",
+                         "query_cov", min_w=190),
+                    _col("target_cov",
+                         "Target-side coverage (bodyIds)",
+                         "target_cov", min_w=190),
+                ],
+                rows=forward,
+            ).classes("w-full")
+            ui.label(
+                "Reverse — each receiving type and the sources that "
+                "map onto it: several sources make the N-to-1 "
+                "explicit; coverage is per side, x of y bodyIds."
+            ).classes("text-caption drocat-muted")
+            ui.table(
+                columns=[
+                    _col("type", "Receiving type", "type", max_w=170),
+                    _col("dataset", "Dataset", "dataset", max_w=180),
+                    _col("count", "Neurons", "count", min_w=90),
+                    _col("mapped_from", "Mapped from", "mapped_from",
+                         max_w=440),
+                    _col("relationship", "Relationship",
+                         "relationship", min_w=110),
+                    _col("source_cov",
+                         "Source-side coverage (bodyIds)",
+                         "source_cov", min_w=190),
+                    _col("target_cov",
+                         "Target-side coverage (bodyIds)",
+                         "target_cov", min_w=190),
+                ],
+                rows=reverse,
+            ).classes("w-full")
 
     def _render_results() -> None:
         results.clear()
@@ -252,8 +378,11 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                         {"name": "mapped_types", "label": "Mapped types",
                          "field": "mapped_types", "align": "left"},
                         {"name": "mapped_neurons",
-                         "label": "Mapped neurons (per pair)",
+                         "label": "Mapped neurons (received)",
                          "field": "mapped_neurons", "align": "left"},
+                        {"name": "issued_neurons",
+                         "label": "Queried neurons (issued)",
+                         "field": "issued_neurons", "align": "left"},
                         {"name": "unmapped", "label": "Unmapped (orphans)",
                          "field": "unmapped", "align": "left"},
                     ],
@@ -279,6 +408,7 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
             for (src, tgt), flows in sorted(
                     pair_flows.items(),
                     key=lambda kv: (-len(kv[1]), kv[0])):
+                _coverage_panel(src, tgt, flows, pools)
                 with ui.expansion(
                         f"{src} → {tgt} · {len(flows)} mapped pairs",
                         icon="compare_arrows").classes("w-full"):
@@ -326,7 +456,13 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
             "Informational only, please double check.")
 
     def _pool_pair(flows, src, tgt, indexes, pools):
-        """Pool bodyIds per mapped pair via the preferred chain (§12)."""
+        """Pool bodyIds per mapped pair (§12) — every rendered chain.
+
+        The preferred chain provides the pair's side pools and coverage
+        as before; the second rendered chain (when present) is pooled
+        too, so the Map used cell can annotate EACH linker with its own
+        bodyId count (user 2026-09-07).
+        """
         from ..neuron_index import pool_bridge_body_ids
         from comparison.cross_dataset_type_mapper import (
             preferred_bridge_chain,
@@ -336,29 +472,48 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
         for flow in flows:
             chains = [c for c in (flow.get("bridges") or [])
                       if c and c[-1].get("value") == flow.get("foreign_type")]
-            chain = preferred_bridge_chain(
-                chains or flow.get("bridges") or [], src, tgt)
-            if chain is None:
+            chains = chains or flow.get("bridges") or []
+            preferred = preferred_bridge_chain(chains, src, tgt)
+            if preferred is None:
                 continue
+            ordered = ([preferred]
+                       + [c for c in chains if c is not preferred])[:2]
             key = (flow.get("source_type"), flow.get("foreign_type"))
             if key in pools:
                 continue
             foreign_index = indexes.get(tgt)
-            try:
-                pools[key] = pool_bridge_body_ids(
-                    src, tgt,
-                    standardize_bridge(chain, src, tgt),
-                    flow.get("source_type"),
-                    flow.get("foreign_type"),
-                    indexes={src: indexes.get(src), tgt: foreign_index}
-                    if foreign_index is not None else None)
-            except Exception:
-                # one un-poolable pair only loses the pooled-count hover,
-                # but the failure is logged, not silent
-                logger.warning(
-                    "pool_bridge_body_ids failed for %r (%s → %s)",
-                    key, src, tgt, exc_info=True)
+            index_kw = ({src: indexes.get(src), tgt: foreign_index}
+                        if foreign_index is not None else None)
+            base = None
+            per_linker: List[dict] = []
+            seen: set = set()
+            for chain in ordered:
+                try:
+                    result = pool_bridge_body_ids(
+                        src, tgt, standardize_bridge(chain, src, tgt),
+                        flow.get("source_type"),
+                        flow.get("foreign_type"),
+                        indexes=index_kw)
+                except Exception:
+                    # one un-poolable pair only loses the pooled-count
+                    # hover, but the failure is logged, not silent
+                    logger.warning(
+                        "pool_bridge_body_ids failed for %r (%s → %s)",
+                        key, src, tgt, exc_info=True)
+                    continue
+                if base is None:
+                    base = result
+                for linker in result.get("per_linker") or []:
+                    marker = (linker.get("column"), linker.get("value"))
+                    if marker in seen:
+                        continue
+                    seen.add(marker)
+                    per_linker.append(linker)
+            if base is None:
                 continue
+            pools[key] = {**base,
+                          "per_linker": per_linker or base.get(
+                              "per_linker", [])}
 
     def _set_loading(on: bool) -> None:
         """Show/hide the loading notice and freeze the Search button."""
@@ -582,6 +737,16 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
             issued_types = {f.get("foreign_type") or ""
                             for (s, t), fl in pair_flows.items()
                             if s == ds for f in fl}
+            # queried neurons of THIS dataset that issued at least one
+            # mapping — counted once per type (user 2026-09-07: the
+            # queried type's "total mapped number" at dataset level)
+            issued_sources = {f.get("source_type") or ""
+                              for (s, _t), fl in pair_flows.items()
+                              if s == ds for f in fl
+                              if f.get("source_type")}
+            issued_neurons = (sum(count_types_in_index(
+                indexes[ds], sorted(issued_sources)).values())
+                if issued_sources else 0)
             unmapped = sum(len(v) for (s, _t), v in orphans.items()
                            if s == ds)
             summary.append({
@@ -591,6 +756,7 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                 "pairs": pairs,
                 "mapped_types": len(recv_types | issued_types),
                 "mapped_neurons": recv_neurons,
+                "issued_neurons": issued_neurons,
                 "unmapped": unmapped,
             })
 

@@ -191,6 +191,51 @@ compatibility.
 
 ## 7. Visualization contract
 
+- **Panel result presentation** (user 2026-09-07): the Type Mapping
+  panel's results are presentation-refined around the FAFB `APDN3` ↔
+  male-cns example.  `build_type_coverage` derives two views over the
+  mapped pairs, rendered as a TOP-LEVEL "Type coverage" expansion PER
+  dataset pair — placed directly above its pair card and named with the
+  pair (`Type coverage — <source> → <target> (bidirectional,
+  1-to-N / N-to-1)`), scoped to
+  that pair's flows: the FORWARD view (one row per queried type: its
+  neuron
+  count, the target types, `1-to-N`/`1-to-1`, the queried type's TOTAL
+  mapped number as `x of y` bodyIds and the target-side total) and the
+  REVERSE view (one row per receiving type: the source types mapping
+  onto it, `N-to-1` when several converge — three FAFB circadian types
+  onto male-cns `SMP227` — with both sides' `x of y` coverage).  The
+  per-pair cards label both sides ("12 FAFB → 4 MCNS"), annotate every
+  linker in Map used with its own pooled bodyId count (pooling now
+  covers both rendered chains), and show per-side pool coverage
+  (`FAFB: 4 of 12 · MCNS: 4 of 4`); long cells wrap within capped
+  column widths so every column stays visible.  The summary strip
+  splits received vs issued mapped neurons.
+- **One shared per-pair weight** (`pair_flow_weight`, user 2026-09-07):
+  the Sankey ribbon, the network pair edge, the linker-path edges and
+  the composed-graph edges all draw the SAME number for a mapped pair —
+  per side the pooled bodyId count when pooled, else that side's neuron
+  count, collapsed by `min`.  Before, the network duplicated the SOURCE
+  type's whole count onto every edge (all edges of a 12-neuron type
+  showed "12"), the linker graph fell back foreign-first, and only the
+  pooled Sankey agreed — the same pair showed a different number in
+  each artifact.
+- **Pool hover counts are the UNION across pairs** (user 2026-09-07):
+  `_endpoint_pool_counts` uniques the pooled bodyIds per type; an N-to-1
+  target pools a different disjoint subset per counterpart (male-cns
+  CL125/SLP249/PLP080/SLP250 pool 4/4/2/2 of FAFB APDN3's 12 bodyIds),
+  and the old max-across-pairs hovered "pool 4 bodyIds" next to
+  "12 neurons" — the union reports the 12 the mapping actually reaches.
+- **Sankey edge keys are layer-less** (user 2026-09-07): one pair's two
+  derivation chains (direct annotation bridge + crosswalk chain) reach
+  the shared band at different hop depths; keyed by layer, `create_sankey`
+  drew the shared node pair as PARALLEL ribbons with the weight counted
+  twice (PLP080 → APDN3 twice).  Keyed by (source, target), same-pair
+  links merge with max — one biological connection, one ribbon.
+- **Adjustable edge-label size** (user 2026-09-07): the on-edge weight
+  labels were pinned to 9px; the network control panel now carries an
+  "Edge Label Size" spinner (`edge_label_font_size`, default 9) wired
+  through the undo history, independent of the node-label Font Size.
 - **Linker network** (`build_bridge_linker_graph`): one column per
   bridge linker COLUMN, in canonical first-appearance order (male-cns↔FAFB:
   `type | flywireType | additional_type(s) | type` = four columns).
@@ -213,8 +258,8 @@ compatibility.
 | `tests/core/test_type_mapper_source_map.py` | declarative licensing vs the tables, per-pair sweeps |
 | `tests/core/test_type_mapper_bridge_rules.py` | the algebra: reverse crosswalk legs, connector licenses, BANC ban, no-flip order, untyped exclusion, real-data acceptance |
 | `tests/core/test_type_mapper_annotation_bridge.py` | overlay precedence, exports, release-name resolution |
-| `tests/core/test_type_mapper_real_datasets.py` | circadian parity (panel == viewer, 219 unique), linker layout + header legend chips, DNp50 crosswalk-verified route, two-linker cap |
-| `tests/core/test_type_mapping_composed.py` | bridges CSV `pool_coverage` contract, uniform widths |
+| `tests/core/test_type_mapper_real_datasets.py` | circadian parity (panel == viewer, 219 unique), linker layout + header legend chips, DNp50 crosswalk-verified route, two-linker cap, APDN3 pair weights == Sankey ribbons, APDN3 pool-union hover, Sankey no parallel links, edge-label size control |
+| `tests/core/test_type_mapping_composed.py` | bridges CSV `pool_coverage` contract, uniform widths, shared `pair_flow_weight` formula, pool-count union, forward 1-to-N + reverse N-to-1 coverage rows |
 | `tests/ui/test_alias_matches.py` | viewer enrichment, mapped-type view, pool granularity |
 
 Probes under `local_data/`: `repro_two_flows.py` (surface parity),
