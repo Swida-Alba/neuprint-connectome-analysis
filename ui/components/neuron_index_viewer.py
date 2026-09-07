@@ -39,6 +39,23 @@ MATCH_GROUP_PAGE_SIZE = 50
 # delayed table update. Cover the maximum scroll-settle plus notification
 # lifetime so that these events can never start a second focus animation.
 FOCUS_DEDUP_SECONDS = 3.2
+# The viewer's table search ignores single-character input: one letter would
+# re-filter the whole index on every keystroke with mostly noise, while the
+# standard query inputs keep their own first-character suggestion menu.
+MIN_SEARCH_CHARS = 2
+
+
+def _effective_search_text(raw: str) -> str:
+    """Return the search text this box sends to the backend.
+
+    Queries shorter than :data:`MIN_SEARCH_CHARS` (measured after stripping)
+    stay unfiltered, so the first typed character alone never matches.
+    """
+    text = str(raw or "").strip()
+    if len(text) < MIN_SEARCH_CHARS:
+        return ""
+    return text
+
 
 _ALIAS_MAPPER_PREWARM_STARTED = False
 
@@ -335,23 +352,27 @@ def _render_index(
                         refresh_query_preview()
                 ui.label(
                     "Search returns all matches across bodyId, type, instance, and useful "
-                    "type/taxonomy fields: strict case-sensitive prefixes come first, "
-                    "followed by case-insensitive substring matches. Choose a target "
-                    "column and match mode to apply that rule directly to this search "
-                    "box; leave it unset for the global search. Numeric input is verified "
-                    "against bodyId. Match details also keeps a secondary matched name "
-                    "when the same row matches in another field. Select a matched name "
-                    "to select every body sharing it, or select individual body rows to "
-                    "add their body IDs."
+                    "type/taxonomy fields once the query has at least two characters; a "
+                    "single character never filters the table. Strict case-sensitive "
+                    "prefixes come first, followed by case-insensitive substring "
+                    "matches. Choose a target column and match mode to apply that rule "
+                    "directly to this search box (Contains matches anywhere, without "
+                    "starts-with priority); leave it unset for the global search. "
+                    "Numeric input is verified against bodyId. Match details also keeps "
+                    "a secondary matched name when the same row matches in another "
+                    "field. Select a matched name to select every body sharing it, or "
+                    "select individual body rows to add their body IDs."
                 ).classes("text-caption drocat-muted drocat-neuron-search-help")
         else:
             ui.label(
                 "Search returns all matches across bodyId, type, instance, and useful "
-                "type/taxonomy fields: strict case-sensitive prefixes come first, "
-                "followed by case-insensitive substring matches. Choose a target "
-                "column and match mode to apply that rule directly to this search "
-                "box; leave it unset for the global search. Numeric input is verified "
-                "against bodyId."
+                "type/taxonomy fields once the query has at least two characters; a "
+                "single character never filters the table. Strict case-sensitive "
+                "prefixes come first, followed by case-insensitive substring matches. "
+                "Choose a target column and match mode to apply that rule directly to "
+                "this search box (Contains matches anywhere, without starts-with "
+                "priority); leave it unset for the global search. Numeric input is "
+                "verified against bodyId."
             ).classes("text-caption drocat-muted drocat-neuron-search-help")
 
         with ui.row().classes(
@@ -402,7 +423,13 @@ def _render_index(
                 "drocat-select drocat-neuron-search-field"
             ).style("min-width: 140px")
             page_size = ui.select(
-                options={25: "25 / page", 50: "50 / page", 100: "100 / page", 200: "200 / page"},
+                options={
+                    25: "25 / page",
+                    50: "50 / page",
+                    100: "100 / page",
+                    200: "200 / page",
+                    500: "500 / page",
+                },
                 value=50,
                 label="Rows",
             ).props("outlined").classes(
@@ -548,7 +575,7 @@ def _render_index(
                     "__match_value__" if direction.value == "desc" else None
                 )
             return {
-                "search": search_input.value or "",
+                "search": _effective_search_text(search_input.value),
                 "search_column": target_column.value,
                 "search_operator": filter_operator.value,
                 "sort_by": requested_sort,
@@ -1428,6 +1455,15 @@ def _render_index(
         ) as alias_section:
             alias_container = ui.element("div").classes("w-full")
         alias_section.set_visibility(False)
+        # Generation counter for the zero-hit alias scan: every new query or
+        # hidden panel voids the result of a scan still running in the
+        # background, so a stale scan can never overwrite newer UI state.
+        alias_scan = {"generation": 0}
+
+        def _hide_alias_panel() -> None:
+            """Hide the panel and void any alias scan still in flight."""
+            alias_scan["generation"] += 1
+            alias_section.set_visibility(False)
 
         def _export_matches_csv() -> None:
             """Download every matched entry of the expansion as a CSV file.
@@ -1532,211 +1568,283 @@ def _render_index(
                 # change handler.
                 search_input.set_value(name)
 
-        def render_alias_matches() -> None:
-            try:
-                matches = collect_zero_hit_matches(
-                    dataset, str(search_input.value or "").strip()
-                )
-            except Exception:
-                alias_section.set_visibility(False)
-                return
-            native = matches.get("native", [])
-            mapped = matches.get("mapped", [])
-            native_useful = any(
-                entry.get("types") or entry.get("labels") for entry in native
-            )
-            mapped_useful = any(
-                entry["outcome"] == "matched" and entry["candidates"]
-                for entry in mapped
-            )
-            useful = native_useful or mapped_useful
-            alias_section.set_visibility(useful)
-            if not useful:
-                alias_container.clear()
-                return
+        def _render_alias_status(text: str, *, busy: bool) -> None:
+            """One-line zero-hit status row with an optional busy spinner."""
+            alias_section.set_visibility(True)
             alias_container.clear()
             with alias_container:
-                ui.separator()
                 with ui.row().classes("w-full items-center gap-2 flex-wrap"):
                     ui.icon("travel_explore", color="warning").classes("text-lg")
-                    ui.label(
-                        "No rows here. Cross-dataset matches — informational "
-                        "only, please double check."
-                    ).classes("text-subtitle2 font-bold")
-                    ui.button(
-                        "Export matched entries (CSV)",
-                        icon="download",
-                    ).props("flat dense").on_click(_export_matches_csv)
+                    ui.label(text).classes("text-subtitle2 font-bold")
+                    if busy:
+                        ui.spinner(type="hourglass", size="lg")
 
-                def _annotation_text(ann) -> str:
-                    if not ann:
-                        return "— no counterpart in this dataset"
-                    if ann["kind"] == "one of N":
-                        return "— here: one of " + ", ".join(ann["targets"])
-                    if ann["kind"] == "renamed":
-                        return "— here: maps to '" + ann["targets"][0] + "'"
-                    if ann["kind"] == "same name":
-                        return ("— same name in this dataset "
-                                "(no metadata verification — "
-                                "please double check)")
-                    return f"— here: {ann['kind']} {', '.join(ann['targets'])}"
+        def render_alias_matches() -> None:
+            """Zero-hit panel: instant status, mapper scan in the background.
 
-                if native_useful:
-                    with ui.row().classes("w-full items-center gap-2 flex-wrap"):
-                        ui.label(
-                            "Type-name matches in other datasets "
-                            "(name-similar — not necessarily the same type):"
-                        ).classes("text-caption font-bold drocat-muted")
-                    for entry in native:
-                        if not (entry.get("types") or entry.get("labels")):
-                            continue
-                        mapped_names = entry.get("mapped_type_names", [])
-                        with ui.row().classes(
-                            "w-full items-start gap-2 flex-wrap "
-                            "drocat-neuron-alias-row"
-                        ):
-                            ui.badge(entry["dataset"]).props("outline")
-                            # The button sits beside its dataset badge so it
-                            # always names the block it expands.
-                            if mapped_names:
-                                ui.button(
-                                    f"Show mapped types here "
-                                    f"({len(mapped_names)} types)",
-                                    icon="table_view",
-                                ).props("flat dense").on_click(
-                                    lambda _e=None, entry_ref=entry:
-                                    _enter_mapped_view(entry_ref)
-                                )
-                                with ui.button(
-                                    "Sankey", icon="multiple_stop"
-                                ).props("flat dense"):
-                                    with ui.menu():
-                                        ui.menu_item(
-                                            "Type-level",
-                                            on_click=lambda _e=None,
-                                            ref=entry: (
-                                                _view_mapping_visualization(
-                                                    "sankey", "type", ref)))
-                                        ui.menu_item(
-                                            "Linker view",
-                                            on_click=lambda _e=None,
-                                            ref=entry: (
-                                                _view_mapping_visualization(
-                                                    "sankey", "linker", ref)))
-                                with ui.button(
-                                    "Network", icon="account_tree"
-                                ).props("flat dense"):
-                                    with ui.menu():
-                                        ui.menu_item(
-                                            "Type-level",
-                                            on_click=lambda _e=None,
-                                            ref=entry: (
-                                                _view_mapping_visualization(
-                                                    "network", "type", ref)))
-                                        ui.menu_item(
-                                            "Linker view",
-                                            on_click=lambda _e=None,
-                                            ref=entry: (
-                                                _view_mapping_visualization(
-                                                    "network", "linker", ref)))
-                            with ui.element("div").classes("flex-grow"):
-                                for cand in entry.get("types", []):
-                                    text = (
-                                        f"'{cand['name']}' "
-                                        f"({cand['count']:,} neurons) "
-                                        + _annotation_text(cand.get("mapped"))
-                                    )
-                                    ui.label(text).classes("text-caption")
-                                if entry.get("types_truncated"):
-                                    ui.label(
-                                        f"+{entry['types_truncated']} more types"
-                                    ).classes("text-caption drocat-muted")
-                                for label in entry.get("labels", []):
-                                    ui.label(
-                                        f"label '{label['label']}' · "
-                                        f"{label['column']} "
-                                        f"({label['count']:,} neurons)"
-                                    ).classes("text-caption")
-                                    covered = [
-                                        f"'{t['name']}' ({t['count']:,}) "
-                                        + _annotation_text(t.get("mapped"))
-                                        for t in label.get("types", [])
-                                    ]
-                                    if covered:
-                                        ui.label(
-                                            "    types under this label: "
-                                            + "; ".join(covered)
-                                        ).classes("text-caption drocat-muted")
-                                    if label.get("types_truncated"):
-                                        ui.label(
-                                            f"    +{label['types_truncated']} "
-                                            "more types under this label"
-                                        ).classes("text-caption drocat-muted")
-                                if entry.get("labels_truncated"):
-                                    ui.label(
-                                        f"+{entry['labels_truncated']} more labels"
-                                    ).classes("text-caption drocat-muted")
+            The auto type mapper initializes lazily and its first scan can
+            take a while, so the panel shows an explicit "no matches here,
+            checking other datasets" status immediately and the scan runs in
+            a daemon thread. The generation counter voids results superseded
+            by a newer query or a hidden panel.
+            """
+            query_text = str(search_input.value or "").strip()
+            alias_scan["generation"] += 1
+            generation = alias_scan["generation"]
 
-                if mapped_useful:
-                    with ui.row().classes("w-full items-center gap-2 flex-wrap"):
-                        ui.label(
-                            "Auto type mapping:"
-                        ).classes("text-caption font-bold drocat-muted")
-                    for entry in mapped:
-                        if entry["outcome"] != "matched" or not entry["candidates"]:
-                            continue
-                        with ui.row().classes(
-                            "w-full items-start gap-2 flex-wrap "
-                            "drocat-neuron-alias-row"
-                        ):
-                            ui.badge(
-                                entry["dataset"]
-                                + (" (this dataset)" if entry["is_selected"] else "")
-                            ).props("outline")
-                            for cand in entry["candidates"]:
-                                text = f"'{cand['name']}' — {cand['kind']}"
-                                if cand["kind"] == "same name":
-                                    text += (" (no metadata verification — "
-                                             "please double check)")
-                                if cand.get("aggregates"):
-                                    text += (
-                                        "; a match also covers: "
-                                        + ", ".join(cand["aggregates"])
-                                    )
-                                if cand.get("count") is not None:
-                                    text += f" ({cand['count']:,} neurons)"
-                                ui.label(text).classes("text-caption")
-                                if entry["is_selected"]:
-                                    ui.button(
-                                        f"Search '{cand['name']}' here",
-                                        icon="search",
-                                    ).props("flat dense").on_click(
-                                        lambda _e=None, name=cand["name"]:
-                                        _search_local_alias(name)
-                                    )
-
-                matched_datasets = {
-                    entry["dataset"]
-                    for entry in mapped
-                    if entry["outcome"] == "matched" and entry["candidates"]
-                }
-                matched_datasets.update(
-                    entry["dataset"]
-                    for entry in native
-                    if entry.get("types") or entry.get("labels")
+            def _apply(matches) -> None:
+                native = (matches or {}).get("native", [])
+                mapped = (matches or {}).get("mapped", [])
+                native_useful = any(
+                    entry.get("types") or entry.get("labels") for entry in native
                 )
-                unknown = [
-                    entry["dataset"]
+                mapped_useful = any(
+                    entry["outcome"] == "matched" and entry["candidates"]
                     for entry in mapped
-                    if entry["dataset"] not in matched_datasets
-                ]
-                if unknown:
-                    ui.label(
-                        "No known counterpart in: " + ", ".join(unknown)
-                    ).classes("text-caption drocat-muted")
+                )
+                if not (native_useful or mapped_useful):
+                    # The scan finished without a single counterpart anywhere;
+                    # keep the zero-hit state explicit instead of hiding it.
+                    _render_alias_status(
+                        f"No matches for '{query_text}' in {dataset}, and the "
+                        "other cached datasets have no cross-dataset "
+                        "counterparts either.",
+                        busy=False,
+                    )
+                    return
+                alias_container.clear()
+                with alias_container:
+                    with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                        ui.icon("travel_explore", color="warning").classes("text-lg")
+                        ui.label(
+                            "No rows here. Cross-dataset matches — informational "
+                            "only, please double check."
+                        ).classes("text-subtitle2 font-bold")
+                        ui.button(
+                            "Export matched entries (CSV)",
+                            icon="download",
+                        ).props("flat dense").on_click(_export_matches_csv)
+
+                    def _annotation_text(ann) -> str:
+                        if not ann:
+                            return "— no counterpart in this dataset"
+                        if ann["kind"] == "one of N":
+                            return "— here: one of " + ", ".join(ann["targets"])
+                        if ann["kind"] == "renamed":
+                            return "— here: maps to '" + ann["targets"][0] + "'"
+                        if ann["kind"] == "same name":
+                            return ("— same name in this dataset "
+                                    "(no metadata verification — "
+                                    "please double check)")
+                        return f"— here: {ann['kind']} {', '.join(ann['targets'])}"
+
+                    if native_useful:
+                        with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                            ui.label(
+                                "Type-name matches in other datasets "
+                                "(name-similar — not necessarily the same type):"
+                            ).classes("text-caption font-bold drocat-muted")
+                        # One shared grid for every dataset block: the badge, the
+                        # action buttons, and the detail text each keep their own
+                        # column, so the same items align vertically across rows.
+                        with ui.element("div").classes(
+                            "w-full drocat-neuron-alias-grid"
+                        ):
+                            for entry in native:
+                                if not (entry.get("types") or entry.get("labels")):
+                                    continue
+                                mapped_names = entry.get("mapped_type_names", [])
+                                ui.badge(entry["dataset"]).props("outline").classes(
+                                    "drocat-neuron-alias-col-badge"
+                                )
+                                # The button sits beside its dataset badge so it
+                                # always names the block it expands. The mapped
+                                # type count rides on the tooltip to keep the
+                                # button compact.
+                                if mapped_names:
+                                    ui.button(
+                                        "Mapped types",
+                                        icon="table_view",
+                                    ).props("flat dense").tooltip(
+                                        f"Show these {len(mapped_names)} mapped "
+                                        "types in the current dataset"
+                                    ).classes(
+                                        "drocat-neuron-alias-col-mapped"
+                                    ).on_click(
+                                        lambda _e=None, entry_ref=entry:
+                                        _enter_mapped_view(entry_ref)
+                                    )
+                                    with ui.button(
+                                        "Sankey", icon="multiple_stop"
+                                    ).props("flat dense").classes(
+                                        "drocat-neuron-alias-col-sankey"
+                                    ):
+                                        with ui.menu():
+                                            ui.menu_item(
+                                                "Type-level",
+                                                on_click=lambda _e=None,
+                                                ref=entry: (
+                                                    _view_mapping_visualization(
+                                                        "sankey", "type", ref)))
+                                            ui.menu_item(
+                                                "Linker view",
+                                                on_click=lambda _e=None,
+                                                ref=entry: (
+                                                    _view_mapping_visualization(
+                                                        "sankey", "linker", ref)))
+                                    with ui.button(
+                                        "Network", icon="account_tree"
+                                    ).props("flat dense").classes(
+                                        "drocat-neuron-alias-col-network"
+                                    ):
+                                        with ui.menu():
+                                            ui.menu_item(
+                                                "Type-level",
+                                                on_click=lambda _e=None,
+                                                ref=entry: (
+                                                    _view_mapping_visualization(
+                                                        "network", "type", ref)))
+                                            ui.menu_item(
+                                                "Linker view",
+                                                on_click=lambda _e=None,
+                                                ref=entry: (
+                                                    _view_mapping_visualization(
+                                                        "network", "linker", ref)))
+                                with ui.element("div").classes(
+                                    "drocat-neuron-alias-col-details"
+                                ):
+                                    for cand in entry.get("types", []):
+                                        text = (
+                                            f"'{cand['name']}' "
+                                            f"({cand['count']:,} neurons) "
+                                            + _annotation_text(cand.get("mapped"))
+                                        )
+                                        ui.label(text).classes("text-caption")
+                                    if entry.get("types_truncated"):
+                                        ui.label(
+                                            f"+{entry['types_truncated']} more types"
+                                        ).classes("text-caption drocat-muted")
+                                    for label in entry.get("labels", []):
+                                        ui.label(
+                                            f"label '{label['label']}' · "
+                                            f"{label['column']} "
+                                            f"({label['count']:,} neurons)"
+                                        ).classes("text-caption")
+                                        covered = [
+                                            f"'{t['name']}' ({t['count']:,}) "
+                                            + _annotation_text(t.get("mapped"))
+                                            for t in label.get("types", [])
+                                        ]
+                                        if covered:
+                                            ui.label(
+                                                "    types under this label: "
+                                                + "; ".join(covered)
+                                            ).classes("text-caption drocat-muted")
+                                        if label.get("types_truncated"):
+                                            ui.label(
+                                                f"    +{label['types_truncated']} "
+                                                "more types under this label"
+                                            ).classes("text-caption drocat-muted")
+                                    if entry.get("labels_truncated"):
+                                        ui.label(
+                                            f"+{entry['labels_truncated']} more labels"
+                                        ).classes("text-caption drocat-muted")
+
+                    if mapped_useful:
+                        with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                            ui.label(
+                                "Auto type mapping:"
+                            ).classes("text-caption font-bold drocat-muted")
+                        # Same shared-column idea as the block grid above, reduced
+                        # to badge + text so every dataset's text starts at the
+                        # same x position.
+                        with ui.element("div").classes(
+                            "w-full drocat-neuron-alias-grid "
+                            "drocat-neuron-alias-grid-mapped"
+                        ):
+                            for entry in mapped:
+                                if entry["outcome"] != "matched" or not entry["candidates"]:
+                                    continue
+                                ui.badge(
+                                    entry["dataset"]
+                                    + (" (this dataset)" if entry["is_selected"] else "")
+                                ).props("outline").classes(
+                                    "drocat-neuron-alias-col-badge"
+                                )
+                                with ui.element("div").classes("min-w-0"):
+                                    for cand in entry["candidates"]:
+                                        text = f"'{cand['name']}' — {cand['kind']}"
+                                        if cand["kind"] == "same name":
+                                            text += (" (no metadata verification — "
+                                                     "please double check)")
+                                        if cand.get("aggregates"):
+                                            text += (
+                                                "; a match also covers: "
+                                                + ", ".join(cand["aggregates"])
+                                            )
+                                        if cand.get("count") is not None:
+                                            text += f" ({cand['count']:,} neurons)"
+                                        with ui.row().classes(
+                                            "items-center gap-2 flex-wrap"
+                                        ):
+                                            ui.label(text).classes("text-caption")
+                                            if entry["is_selected"]:
+                                                ui.button(
+                                                    f"Search '{cand['name']}' here",
+                                                    icon="search",
+                                                ).props("flat dense").on_click(
+                                                    lambda _e=None, name=cand["name"]:
+                                                    _search_local_alias(name)
+                                                )
+
+                    matched_datasets = {
+                        entry["dataset"]
+                        for entry in mapped
+                        if entry["outcome"] == "matched" and entry["candidates"]
+                    }
+                    matched_datasets.update(
+                        entry["dataset"]
+                        for entry in native
+                        if entry.get("types") or entry.get("labels")
+                    )
+                    unknown = [
+                        entry["dataset"]
+                        for entry in mapped
+                        if entry["dataset"] not in matched_datasets
+                    ]
+                    if unknown:
+                        ui.label(
+                            "No known counterpart in: " + ", ".join(unknown)
+                        ).classes("text-caption drocat-muted")
+
+            def _scan() -> None:
+                try:
+                    matches = collect_zero_hit_matches(dataset, query_text)
+                except Exception:
+                    matches = None
+                if alias_scan["generation"] != generation:
+                    return  # a newer query or a hidden panel superseded this
+                if matches is None:
+                    _render_alias_status(
+                        f"No matches for '{query_text}' in {dataset}. The "
+                        "cross-dataset mapping check could not be completed.",
+                        busy=False,
+                    )
+                else:
+                    _apply(matches)
+
+            _render_alias_status(
+                f"No matches for '{query_text}' in {dataset}. Mapping other "
+                "datasets — initializing the auto type mapper…",
+                busy=True,
+            )
+            threading.Thread(
+                target=_scan, daemon=True, name="drocat-alias-scan"
+            ).start()
+
 
         # Mapped-type view state: entered from the expansion panel's
-        # "Show mapped types here" buttons; cleared by any query change or
+        # "Mapped types" buttons; cleared by any query change or
         # the explicit exit button.  While active, the main table shows the
         # current dataset's neurons of the mapped types with the two floating
         # provenance columns (foreign types, matched column); the bridge
@@ -2281,7 +2389,7 @@ def _render_index(
         no_results.set_visibility(result.total == 0 and not mapped_view.get("active"))
         if mapped_view.get("active"):
             # Mapped-type view: the warning banner replaces the alias panel.
-            alias_section.set_visibility(False)
+            _hide_alias_panel()
             mapped_warning_label.text = (
                 f"Mapped-type view — showing {result.total:,} {dataset} "
                 f"neurons whose types map to "
@@ -2300,12 +2408,8 @@ def _render_index(
             render_alias_matches()
             mapped_warning_section.set_visibility(False)
         else:
-            alias_section.set_visibility(False)
+            _hide_alias_panel()
             mapped_warning_section.set_visibility(False)
-        if result.total == 0:
-            render_alias_matches()
-        else:
-            alias_section.set_visibility(False)
 
     def _view_active_mapping(kind: str, variant: str) -> None:
         """Mapped-view banner dispatch: render the stored flows + pools

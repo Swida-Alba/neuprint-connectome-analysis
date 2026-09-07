@@ -264,8 +264,9 @@ exported to `auto_type_mapping.csv` (and conflicts to
    different datasets must not be mixed) — and the panel repeats the
    double-check recommendation.
 
-   Each dataset block also has a **"Show mapped types here (N types)"**
-   button. It runs the equivalent search in the selected dataset: the main
+   Each dataset block also has a **"Mapped types"** button (the mapped type
+   count is on its tooltip). It runs the equivalent search in the selected
+   dataset: the main
    table switches to a *mapped-type view* listing the current dataset's
    neurons of the mapped type names, with a prominent warning banner
    ("automatic mapping — please double check") and a "Back to normal

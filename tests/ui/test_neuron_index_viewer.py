@@ -340,10 +340,80 @@ class TestNeuronIndexData:
             page_size=20,
         )
         assert scoped_contains.total == 4
+        # Pure contains: rows order by matched value only (uppercase "M"
+        # sorts before lowercase "a"), with no starts-with promotion.
         assert [row["bodyId"] for row in scoped_contains.rows] == [
-            "100", "400", "200", "600",
+            "200", "600", "100", "400",
         ]
         assert all(row["match_column_key"] == "type" for row in scoped_contains.rows)
+
+    def test_targeted_contains_orders_by_matched_value_without_prefix_priority(
+        self, isolated_index_root
+    ):
+        """Targeted 'contains' is pure contains: no starts-with display staging."""
+        from ui.neuron_index import load_cached_neuron_index, query_neuron_index
+
+        dataset = "contains-ordering:v1.0"
+        folder = dataset.replace(":", "_").replace(".", "_")
+        cache_dir = isolated_index_root / "neuron_indexes" / folder
+        cache_dir.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "bodyId": ["100", "200", "300", "400"],
+                "type": ["aMe1", "XaMe9", "aMe2", "XaMe8"],
+                "instance": ["aMe1_L", "XaMe9_R", "aMe2_L", "XaMe8_R"],
+            }
+        ).write_parquet(cache_dir / "neuron_index.parquet")
+
+        index = load_cached_neuron_index(dataset, enrich=False)
+        result = query_neuron_index(
+            index,
+            search="aMe",
+            search_column="type",
+            search_operator="contains",
+            page_size=20,
+        )
+
+        assert result.total == 4
+        # Substring-only values sort alphabetically within the column instead
+        # of being demoted behind the strict prefixes.
+        assert [row["type"] for row in result.rows] == [
+            "XaMe8", "XaMe9", "aMe1", "aMe2",
+        ]
+        assert all(row["match_column_key"] == "type" for row in result.rows)
+
+        targeted_prefix = query_neuron_index(
+            index,
+            search="aMe",
+            search_column="type",
+            search_operator="prefix",
+            page_size=20,
+        )
+        assert [row["type"] for row in targeted_prefix.rows] == ["aMe1", "aMe2"]
+
+    def test_viewer_search_text_needs_two_characters(self):
+        from ui.components.neuron_index_viewer import _effective_search_text
+
+        assert _effective_search_text("") == ""
+        assert _effective_search_text(None) == ""
+        assert _effective_search_text("   ") == ""
+        assert _effective_search_text("a") == ""
+        assert _effective_search_text(" a ") == ""
+        assert _effective_search_text("aM") == "aM"
+        assert _effective_search_text("  aMe12  ") == "aMe12"
+
+    def test_alias_panel_is_a_fixed_scroll_region(self):
+        """A long alias suggestion list scrolls inside a capped panel."""
+        import ui.app as app_module
+
+        assert ".drocat-neuron-alias-panel" in app_module.DROCAT_CSS
+        rule = (
+            app_module.DROCAT_CSS
+            .split(".drocat-neuron-alias-panel", 1)[1]
+            .split("}", 1)[0]
+        )
+        assert "max-height" in rule
+        assert "overflow-y: auto" in rule
 
     def test_column_filter_operators_are_targeted_and_anded_with_global_search(
         self, isolated_index_root
@@ -1114,6 +1184,25 @@ class TestNeuronIndexViewer:
             "args": "a",
         })
 
+        # A single character never filters: the box needs 2+ characters, so
+        # the unfiltered index is still on screen.
+        tables = [el for el in client.elements.values() if type(el).__name__ == "Table"]
+        match_table = next(
+            table for table in tables
+            if table._props["columns"][0]["name"] == "match_column"
+        )
+        full_table = next(
+            table for table in tables
+            if table._props["columns"][0]["name"] == "bodyId"
+        )
+        assert len(match_table._props["rows"]) == 0
+        assert len(full_table._props["rows"]) == 50
+
+        search_input._handle_event({
+            "listener_id": search_listener.id,
+            "args": "aM",
+        })
+
         tables = [el for el in client.elements.values() if type(el).__name__ == "Table"]
         match_table = next(
             table for table in tables
@@ -1133,6 +1222,60 @@ class TestNeuronIndexViewer:
         assert status_text == [
             "Showing 1–50 of 300 matched names"
         ]
+
+    def _rows_select(self, client):
+        select = next(
+            element for element in client.elements.values()
+            if getattr(element, "_props", {}).get("label") == "Rows"
+        )
+        listener = next(
+            listener for listener in select._event_listeners.values()
+            if listener.type == "update:modelValue"
+        )
+        return select, listener
+
+    def _fire_rows(self, client, value):
+        select, listener = self._rows_select(client)
+        # Quasar reports dict options by index; resolve the wire index the
+        # same way NiceGUI's ChoiceElement does.
+        select._handle_event({
+            "listener_id": listener.id,
+            "args": {"value": select._values.index(value)},
+        })
+
+    def test_rows_select_offers_500_per_page(
+        self, isolated_index_root, monkeypatch
+    ):
+        """The 500/page option renders a 500-row batch and pages normally."""
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.components.neuron_index_viewer as viewer
+        from ui.components.neuron_index_viewer import create_neuron_index_viewer_link
+
+        dataset = _write_paged_index(isolated_index_root, row_count=600)
+        monkeypatch.setattr(viewer, "PROJECT_ROOT", isolated_index_root)
+
+        client = Client(page("/neuron-index-viewer-500-per-page"))
+        with client:
+            link = create_neuron_index_viewer_link(lambda: dataset)
+        self._click(link)
+
+        self._fire_rows(client, 500)
+
+        tables = [el for el in client.elements.values() if type(el).__name__ == "Table"]
+        full_table = next(
+            table for table in tables
+            if table._props["columns"][0]["name"] == "bodyId"
+        )
+        assert len(full_table._props["rows"]) == 500
+        assert any(
+            getattr(element, "text", "") == "Page 1 of 2"
+            for element in client.elements.values()
+        )
+        assert any(
+            getattr(element, "text", "") == "Showing 1–500 of 600 matching rows"
+            for element in client.elements.values()
+        )
 
     def test_match_panel_deduplicates_and_syncs_query_selection(
         self, isolated_index_root, monkeypatch

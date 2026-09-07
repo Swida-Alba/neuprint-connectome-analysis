@@ -190,6 +190,22 @@ def test_query_changes_refresh_the_panel(viewer_client):
     assert 'hidden' in _alias_section(client).classes
 
 
+def test_zero_hit_without_any_counterpart_states_it_explicitly(viewer_client):
+    """A query that matches nothing anywhere keeps the panel visible with an
+    explicit no-counterpart status instead of hiding it silently."""
+    client, search = viewer_client
+    search.set_value('zzq7')  # zero hits and no cross-dataset counterpart
+
+    texts = _wait_for_labels(
+        client,
+        lambda t: any('no cross-dataset counterparts either' in x for x in t),
+    )
+    assert any("No matches for 'zzq7' in male-cns:v1.0" in t for t in texts)
+    # the informational matches block is not rendered for an empty result
+    assert not any(
+        'Cross-dataset matches — informational only' in t for t in texts)
+
+
 def test_mapped_type_view_button_warning_and_exit(viewer_client):
     """The panel button runs the equivalent search for the mapped types in
     the current dataset: warning banner, provenance columns, current-dataset
@@ -198,14 +214,14 @@ def test_mapped_type_view_button_warning_and_exit(viewer_client):
     search.set_value('circadian')  # zero local hits; taxonomy labels match
 
     texts = _wait_for_labels(
-        client, lambda t: any('Show mapped types here' in x for x in t))
-    assert any('Show mapped types here' in t for t in texts)
+        client, lambda t: any('Mapped types' in x for x in t))
+    assert any('Mapped types' in t for t in texts)
 
     # each button follows its own dataset badge (block-local, not detached)
     ordered = []
     for element in client.elements.values():
         text = str(getattr(element, 'text', '') or '')
-        if type(element).__name__ == 'Button' and 'Show mapped types here' in text:
+        if type(element).__name__ == 'Button' and 'Mapped types' in text:
             ordered.append('BUTTON ' + text)
         elif type(element).__name__ == 'Badge' and any(
                 ds in text for ds in ('flywire_', 'banc_', 'manc', 'hemibrain')):
@@ -220,7 +236,7 @@ def test_mapped_type_view_button_warning_and_exit(viewer_client):
 
     # enter the mapped view from the first dataset block (FAFB: it is the
     # first cached dataset with native matches in the scan order)
-    assert _click_button(client, 'Show mapped types here')
+    assert _click_button(client, 'Mapped types')
 
     # warning banner with the foreign dataset and the double-check advice
     texts = _labels(client)
@@ -249,7 +265,7 @@ def test_mapped_type_view_button_warning_and_exit(viewer_client):
     # zero-hit 'circadian', so the expansion panel re-appears)
     assert _click_button(client, 'Back to normal search')
     texts = _wait_for_labels(
-        client, lambda t: any('Show mapped types here' in x for x in t))
+        client, lambda t: any('Mapped types' in x for x in t))
     column_names = [c['name'] for c in _table(client).columns]
     assert not any(c.startswith('__map_') or c.startswith('__match_') for c in column_names)
     section = _alias_section(client)
@@ -260,8 +276,8 @@ def test_search_change_exits_mapped_view(viewer_client):
     client, search = viewer_client
     search.set_value('circadian')
     _wait_for_labels(
-        client, lambda t: any('Show mapped types here' in x for x in t))
-    assert _click_button(client, 'Show mapped types here')
+        client, lambda t: any('Mapped types' in x for x in t))
+    assert _click_button(client, 'Mapped types')
     section = _alias_section(client)
     assert 'hidden' in section.classes  # mapped view active
 
@@ -286,8 +302,8 @@ def test_mapped_view_pinned_columns_and_bridge_hover(viewer_client):
     client, search = viewer_client
     search.set_value('circadian')
     _wait_for_labels(
-        client, lambda t: any('Show mapped types here' in x for x in t))
-    assert _click_button(client, 'Show mapped types here')
+        client, lambda t: any('Mapped types' in x for x in t))
+    assert _click_button(client, 'Mapped types')
 
     table = _table(client)
     column_names = [str(c.get('name', '')) for c in table.columns]
@@ -334,7 +350,7 @@ def test_mapping_visualization_icons(viewer_client):
     client, search = viewer_client
     search.set_value('circadian')
     _wait_for_labels(
-        client, lambda t: any('Show mapped types here' in x for x in t))
+        client, lambda t: any('Mapped types' in x for x in t))
 
     icons = {}
     for element in client.elements.values():
@@ -353,8 +369,8 @@ def test_mapped_view_survives_display_controls(viewer_client):
     client, search = viewer_client
     search.set_value('circadian')
     _wait_for_labels(
-        client, lambda t: any('Show mapped types here' in x for x in t))
-    assert _click_button(client, 'Show mapped types here')
+        client, lambda t: any('Mapped types' in x for x in t))
+    assert _click_button(client, 'Mapped types')
 
     def _mapped_active():
         table = _table(client)
@@ -406,8 +422,8 @@ def test_mapping_visualization_variants_download_not_saved(
 
     search.set_value('circadian')
     _wait_for_labels(
-        client, lambda t: any('Show mapped types here' in x for x in t))
-    assert _click_button(client, 'Show mapped types here')
+        client, lambda t: any('Mapped types' in x for x in t))
+    assert _click_button(client, 'Mapped types')
 
     # every 'Type-level' / 'Linker view' menu item belongs to a mapping
     # artifact button (mapped banner + expansion blocks); invoking them

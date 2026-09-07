@@ -593,6 +593,47 @@ html, body {
     margin: 0;
     line-height: 1.35;
 }
+/* Zero-hit alias panel: every cross-dataset type-name suggestion for the
+   query. A broad query can list dozens of entries; cap the panel and scroll
+   it internally so it cannot stretch (and crowd out) the viewer layout. */
+.drocat-neuron-alias-panel {
+    flex: 0 0 auto;
+    max-height: 40vh;
+    overflow-y: auto;
+    padding: 4px 8px 4px 2px;
+    border: 1px solid var(--drocat-line);
+    border-radius: 8px;
+    background: var(--drocat-toolbar-soft);
+}
+/* Alias panel sections lay every dataset block into one shared grid, so the
+   badges, action buttons, and detail text line up in columns across rows
+   instead of shifting with each row's content width. */
+.drocat-neuron-alias-grid {
+    display: grid;
+    grid-template-columns:
+        max-content max-content max-content max-content minmax(0, 1fr);
+    gap: 8px 12px;
+    align-items: start;
+    margin-top: 4px;
+}
+/* The auto-mapping section has no action buttons: badge + text only. */
+.drocat-neuron-alias-grid-mapped {
+    grid-template-columns: max-content minmax(0, 1fr);
+}
+.drocat-neuron-alias-col-badge,
+.drocat-neuron-alias-col-mapped,
+.drocat-neuron-alias-col-sankey,
+.drocat-neuron-alias-col-network {
+    justify-self: start;
+}
+.drocat-neuron-alias-col-badge { grid-column: 1; }
+.drocat-neuron-alias-col-mapped { grid-column: 2; }
+.drocat-neuron-alias-col-sankey { grid-column: 3; }
+.drocat-neuron-alias-col-network { grid-column: 4; }
+.drocat-neuron-alias-col-details {
+    grid-column: 5;
+    min-width: 0;
+}
 .drocat-neuron-viewer-content {
     min-height: 0;
     overflow: auto;

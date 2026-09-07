@@ -44,52 +44,66 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
         return len(datasets) >= 2 and all(
             load_cached_neuron_index(ds) is not None for ds in datasets)
 
-    with ui.dialog().props("full-width") as dialog, \
-            ui.card().classes("w-full drocat-card"):
-        ui.label("Auto type mapping preview").classes("text-h6")
-        ui.label(
-            "Preview of the auto type mapping the cross-dataset analysis "
-            "will use — informational only, please double check."
-        ).classes("text-caption drocat-muted")
-        def _suggest(text: str):
-            """Dataset-aware suggestions — the SAME staged semantics as
-            the tab's query boxes: types first, widening to the metadata
-            columns when no type matched, so typing 'circadian' offers
-            'circadian_clock' (FAFB) and 'circadian_neuron' (BANC) here
-            too."""
-            from ..type_suggestions import dataset_aware_suggestions
+    # Same fixed window as the 'See available neurons' viewer: the backdrop
+    # never dismisses it, the card is viewport-bounded with internal scroll,
+    # and the corner 'x' is the only way out.
+    dialog = ui.dialog().props("persistent")
+    with dialog, \
+            ui.card().classes(
+                "w-[min(98vw,1800px)] max-w-none drocat-neuron-viewer-card"
+            ):
+        with ui.row().classes(
+            "w-full items-center justify-between gap-2 drocat-neuron-dialog-header"
+        ):
+            ui.label("Auto type mapping preview").classes(
+                "text-h6 drocat-neuron-dialog-title")
+            ui.button(icon="close", on_click=dialog.close).props(
+                "flat round dense")
+        with ui.column().classes("w-full gap-2 drocat-neuron-viewer-content"):
+            ui.label(
+                "Preview of the auto type mapping the cross-dataset analysis "
+                "will use — informational only, please double check."
+            ).classes("text-caption drocat-muted")
+            def _suggest(text: str):
+                """Dataset-aware suggestions — the SAME staged semantics as
+                the tab's query boxes: types first, widening to the metadata
+                columns when no type matched, so typing 'circadian' offers
+                'circadian_clock' (FAFB) and 'circadian_neuron' (BANC) here
+                too."""
+                from ..type_suggestions import dataset_aware_suggestions
 
-            return dataset_aware_suggestions(
-                text, list(get_datasets() or []), "auto", limit=None)
+                return dataset_aware_suggestions(
+                    text, list(get_datasets() or []), "auto", limit=None)
 
-        search = neuron_list_input(
-            label="Types to map",
-            placeholder="e.g. APDN3, aMe.* — one query per chip",
-            unit_label="query",
-            show_upload=False,
-            suggestions=_suggest,
-            hint="One query per chip. The filter modes match the standard "
-                 "query (exact / starts with / contains / ends with / "
-                 "regex); dataset-aware type suggestions from the "
-                 "selected datasets appear as you type.",
-        ).classes("w-full")
-        with ui.row():
-            # lazy dispatch: _run_click is defined below the dialog build
-            # (NiceGUI schedules the returned coroutine as a task)
-            search_btn = ui.button("Search mappings", icon="search",
-                                   on_click=lambda: _run_click())
-        # Loading notice: painted BEFORE the heavy search leaves the
-        # event loop (the first search warms a large index and can take
-        # a minute or two — silent freezing looked like a hang).
-        loading_row = ui.row().classes("items-center gap-2")
-        with loading_row:
-            ui.spinner("dots", size="md", color="primary")
-            ui.label("Loading the selected datasets' type indexes and "
-                     "mapping — the first search can take a minute or "
-                     "two. Please wait …").classes("text-caption drocat-muted")
-        loading_row.set_visibility(False)
-        notes_label = ui.label("").classes("text-caption drocat-muted")
-        results = ui.column().classes("w-full")
+            search = neuron_list_input(
+                label="Types to map",
+                placeholder="e.g. APDN3, aMe.* — one query per chip",
+                unit_label="query",
+                show_upload=False,
+                suggestions=_suggest,
+                hint="One query per chip. The filter modes match the standard "
+                     "query (exact / starts with / contains / ends with / "
+                     "regex); dataset-aware type suggestions from the "
+                     "selected datasets appear as you type.",
+            ).classes("w-full")
+            with ui.row():
+                # lazy dispatch: _run_click is defined below the dialog build
+                # (NiceGUI schedules the returned coroutine as a task)
+                search_btn = ui.button("Search mappings", icon="search",
+                                       on_click=lambda: _run_click())
+            # Loading notice: painted BEFORE the heavy search leaves the
+            # event loop (the first search warms a large index and can take
+            # a minute or two — silent freezing looked like a hang).
+            loading_row = ui.row().classes("items-center gap-2")
+            with loading_row:
+                ui.spinner("dots", size="md", color="primary")
+                ui.label("Loading the selected datasets' type indexes and "
+                         "mapping — the first search can take a minute or "
+                         "two. Please wait …").classes(
+                    "text-caption drocat-muted")
+            loading_row.set_visibility(False)
+            notes_label = ui.label("").classes("text-caption drocat-muted")
+            results = ui.column().classes("w-full")
 
     def _deliver(html: str, name: str) -> None:
         ui.download.content(html, name, "text/html")

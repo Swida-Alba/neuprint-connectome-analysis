@@ -192,6 +192,62 @@ _SUGGEST_KEYNAV_SCRIPT = """
 </script>
 """
 
+# Quasar's QMenu positions itself once at open time and only repositions on
+# window resize — scrolling an inner container (the fixed-height type-mapping
+# dialog, the viewer card) leaves the open suggestion/history menu behind at
+# its old viewport position, visually detached from the query box. QMenu's
+# own component instance is not reachable from the portaled DOM, so anchor
+# the menu by hand: the per-input token pair (drocat-suggest-anchor-<token> /
+# drocat-suggest-menu-<token>) identifies the query box each menu belongs to,
+# and the scroll handler re-writes the same inline top/left that Quasar's
+# position engine set at open time (anchor="bottom start" self="top start",
+# flipping above the box when the viewport bottom would be overflowed).
+# Capture phase reaches scroll events of inner overflow containers, which
+# never bubble to the document.
+_SUGGEST_SCROLL_SCRIPT = """
+<script>
+(function () {
+  if (window.__drocatSuggestScrollAnchor) return;
+  window.__drocatSuggestScrollAnchor = true;
+
+  function reposition(menu) {
+    if (menu.style.display === 'none') return;
+    var token = null;
+    menu.classList.forEach(function (cls) {
+      if (cls.indexOf('drocat-suggest-menu-') === 0) {
+        token = cls.slice('drocat-suggest-menu-'.length);
+      }
+    });
+    if (!token) return;
+    var anchor = document.querySelector('.drocat-suggest-anchor-' + token);
+    if (!anchor) return;
+    var rect = anchor.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) return;
+    var top = rect.bottom;
+    var left = rect.left;
+    // Skip the write when the anchor has not moved (scroll events can fire
+    // many times per frame; the positioning work itself is trivial).
+    if (menu.style.top === top + 'px' && menu.style.left === left + 'px') {
+      return;
+    }
+    var height = menu.offsetHeight;
+    if (top + height > window.innerHeight - 8 && rect.top - height > 8) {
+      top = rect.top - height;
+    }
+    menu.style.top = top + 'px';
+    menu.style.left = left + 'px';
+  }
+
+  // Positioning runs synchronously per scroll event: the work is one anchor
+  // lookup plus an inline style write, and scroll events must still land
+  // when the page's rendering loop is throttled.
+  document.addEventListener('scroll', function () {
+    document.querySelectorAll('.drocat-suggest-menu').forEach(reposition);
+  }, true);
+})();
+</script>
+"""
+
 
 # =============================================================================
 # Page layout helper (focus panel + results / contact sheet)
@@ -1122,12 +1178,13 @@ def neuron_list_input(
         suggest_token = next(_SUGGEST_TOKEN)
         chip_input_anchor.classes(f"drocat-suggest-anchor-{suggest_token}")
         suggest_menu.classes(f"drocat-suggest-menu-{suggest_token}")
-        # The arrow-key navigation script is page-global; register it once
-        # per client connection.
+        # The arrow-key navigation + scroll-anchoring scripts are page-global;
+        # register them once per client connection.
         if not getattr(suggest_menu.client,
-                       "_drocat_suggest_keynav_added", False):
+                       "_drocat_suggest_scripts_added", False):
             ui.add_head_html(_SUGGEST_KEYNAV_SCRIPT)
-            suggest_menu.client._drocat_suggest_keynav_added = True
+            ui.add_head_html(_SUGGEST_SCROLL_SCRIPT)
+            suggest_menu.client._drocat_suggest_scripts_added = True
         # Anchor the popup to THIS input's wrapper explicitly. Parent-component
         # anchoring alone can detach (menu renders at the page origin) when the
         # input is rebuilt inside nested containers (e.g. the inline grouper's

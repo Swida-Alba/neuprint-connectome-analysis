@@ -459,71 +459,6 @@ def _match_hit_lists(
     return compact(key_items), compact(value_items)
 
 
-def _secondary_hit_lists(
-    frame,
-    columns: List[str],
-    text: str,
-    prefix_mode: str = "prefix",
-    substring_mode: str = "substring",
-):
-    """Return useful secondary hits after applying field suppression rules.
-
-    A type name is the canonical identity for a row.  If the same query also
-    matches that row's instance, the instance is redundant and is omitted
-    from the secondary display.  This keeps values such as ``MeVPaMe2_L``
-    and ``MeVPaMe2_R`` from competing with their matched type ``MeVPaMe2``.
-    """
-    import polars as pl
-
-    available = [column for column in columns if column in frame.columns]
-    empty = pl.lit([], dtype=pl.List(pl.Utf8))
-    if not available:
-        return empty, empty
-
-    needle = normalize_search_text(text)
-    body_guard = _body_id_guard(frame, available, needle, substring_mode)
-    type_matches = pl.lit(False)
-    if "type" in frame.columns:
-        type_matches = (
-            (
-                _match_column_expression(frame, "type", needle, prefix_mode)
-                | _match_column_expression(frame, "type", needle, substring_mode)
-            )
-            & _body_id_guard(frame, ["type"], needle, substring_mode)
-        )
-
-    key_items = []
-    value_items = []
-    for column in available:
-        prefix_match = _match_column_expression(
-            frame, column, needle, prefix_mode
-        ) & body_guard
-        substring_match = _match_column_expression(
-            frame, column, needle, substring_mode
-        ) & body_guard
-        matched = substring_match & ~prefix_match
-        if column == "instance":
-            matched = matched & ~type_matches
-        display_value = (
-            _display_expression(column, frame)
-            .cast(pl.Utf8, strict=False)
-            .fill_null("")
-        )
-        key_items.append(
-            pl.when(matched).then(pl.lit(column)).otherwise(pl.lit(""))
-        )
-        value_items.append(
-            pl.when(matched).then(display_value).otherwise(pl.lit(""))
-        )
-
-    def compact(items):
-        return pl.concat_list(items).list.eval(
-            pl.element().filter(pl.element() != "")
-        )
-
-    return compact(key_items), compact(value_items)
-
-
 def _contains_expression(frame, columns: List[str], text: str):
     """Case-insensitive substring expression for an explicit column filter."""
     return _match_expression(frame, columns, text, "substring")
@@ -1408,9 +1343,10 @@ def query_neuron_index(
     means a query such as ``aMe`` also returns ``MeVPaMe*`` values while
     keeping true prefixes at the top. Numeric input is verified against the
     real bodyId column only. An explicit column filter may target any retained
-    metadata column and uses its selected operator directly on the main search
-    text. With no selected search column, the global prefix-first behavior is
-    used. The legacy ``filter_column``/``filter_text`` pair remains supported
+    metadata column and applies its selected operator directly — "contains"
+    matches anywhere in that column with no starts-with display staging. With
+    no selected search column, the global prefix-first behavior is used. The
+    legacy ``filter_column``/``filter_text`` pair remains supported
     as an additional AND restriction for callers that still use it. When a
     query is present and no explicit sort is supplied, rows are grouped by
     matched-column priority (bodyId → type → instance → taxonomy), then by
@@ -1530,63 +1466,23 @@ def query_neuron_index(
     scoped_search = bool(search_text and search_target_columns)
     match_text = search_text or (filter_text if active_column_filter else "")
     match_stage: SearchStage | None = None
-    prefix_stage: SearchStage | None = None
-    substring_stage: SearchStage | None = None
     staged_search = False
     presorted_search = False
     fast_hit_entries = None
     fast_membership_entries = None
     if scoped_search:
         match_stage = SearchStage(search_mode, tuple(search_target_columns))
-        if search_mode == "substring":
-            # A targeted "contains" search still presents strict,
-            # case-sensitive prefixes first.  The operator controls which
-            # rows qualify; the two stages control their display priority.
-            prefix_stage = SearchStage("prefix", tuple(search_target_columns))
-            substring_stage = SearchStage(
-                "substring", tuple(search_target_columns)
+        # A targeted search applies its selected operator directly. "Contains"
+        # matches anywhere in the column with no starts-with display staging;
+        # users who want prefixes choose the "prefix" mode explicitly.
+        filtered = filtered.filter(
+            _match_expression(
+                filtered,
+                search_target_columns,
+                search_text,
+                search_mode,
             )
-            prefix_rows = filtered.filter(
-                _match_expression(
-                    filtered,
-                    search_target_columns,
-                    search_text,
-                    "prefix",
-                )
-            ).with_columns(pl.lit(0).alias("__match_kind_priority"))
-            substring_rows = filtered.filter(
-                _match_expression(
-                    filtered,
-                    search_target_columns,
-                    search_text,
-                    "substring",
-                )
-            )
-            if prefix_rows.height:
-                substring_rows = substring_rows.join(
-                    prefix_rows.select("__neuron_key").unique(),
-                    on="__neuron_key",
-                    how="anti",
-                )
-            substring_rows = substring_rows.with_columns(
-                pl.lit(1).alias("__match_kind_priority")
-            )
-            if prefix_rows.height and substring_rows.height:
-                filtered = pl.concat([prefix_rows, substring_rows], how="vertical")
-            elif prefix_rows.height:
-                filtered = prefix_rows
-            else:
-                filtered = substring_rows
-            staged_search = True
-        else:
-            filtered = filtered.filter(
-                _match_expression(
-                    filtered,
-                    search_target_columns,
-                    search_text,
-                    search_mode,
-                )
-            )
+        )
     elif search_text:
         # The default viewer search can use the compact sidecar. It is
         # already ordered by the exact match priority used by the UI, so the
@@ -1604,9 +1500,7 @@ def query_neuron_index(
             filtered, fast_hit_entries, fast_membership_entries = fast_matches
             presorted_search = True
         else:
-            filtered, prefix_stage, substring_stage = all_viewer_matches(
-                filtered, search_text
-            )
+            filtered, _, _ = all_viewer_matches(filtered, search_text)
         staged_search = True
     elif active_column_filter:
         match_stage = SearchStage(filter_mode, tuple(filter_columns))
@@ -1731,55 +1625,6 @@ def query_neuron_index(
                     secondary_hit_columns.list.first().fill_null(""),
                     secondary_hit_values.list.first().fill_null(""),
                 )
-        elif staged_search:
-            prefix_metadata = _match_metadata(
-                filtered, columns, match_text, stage=prefix_stage
-            )
-            substring_metadata = _match_metadata(
-                filtered, columns, match_text,
-                stage=substring_stage or SearchStage("substring", tuple(search_columns)),
-            )
-            is_substring = pl.col("__match_kind_priority") == 1
-            match_priority = pl.when(is_substring).then(
-                substring_metadata[0]
-            ).otherwise(prefix_metadata[0])
-            match_column = pl.when(is_substring).then(
-                substring_metadata[1]
-            ).otherwise(prefix_metadata[1])
-            match_column_key = pl.when(is_substring).then(
-                substring_metadata[2]
-            ).otherwise(prefix_metadata[2])
-            match_value = pl.when(is_substring).then(
-                substring_metadata[3]
-            ).otherwise(prefix_metadata[3])
-            prefix_hit_columns, prefix_hit_values = _match_hit_lists(
-                filtered,
-                list(prefix_stage.columns) if prefix_stage is not None else [],
-                match_text,
-                "prefix",
-                suppress_instance_if_type=bool(search_text and not scoped_search),
-            )
-            substring_hit_columns, substring_hit_values = _match_hit_lists(
-                filtered,
-                list(substring_stage.columns)
-                if substring_stage is not None
-                else search_columns,
-                match_text,
-                "substring",
-                suppress_instance_if_type=bool(search_text and not scoped_search),
-            )
-            secondary_hit_columns, secondary_hit_values = _secondary_hit_lists(
-                filtered,
-                list(substring_stage.columns)
-                if substring_stage is not None
-                else search_columns,
-                match_text,
-            )
-            secondary_metadata = (
-                substring_metadata[1],
-                substring_metadata[2],
-                substring_metadata[3],
-            )
         else:
             match_priority, match_column, match_column_key, match_value = _match_metadata(
                 filtered, columns, match_text, stage=match_stage
@@ -1833,34 +1678,22 @@ def query_neuron_index(
             (
                 global_kind_priority
                 if global_search
-                else (
-                    pl.col("__match_kind_priority")
-                    if staged_search
-                    else pl.lit(0)
-                )
+                else pl.lit(0)
             ).alias("__match_kind_priority"),
-            (
-                pl.lit(len(search_columns))
-                if global_search
-                else (
-                    substring_metadata[0]
-                    if staged_search
-                    else pl.lit(len(search_columns))
-                )
-            ).alias("__secondary_match_priority"),
+            pl.lit(len(search_columns)).alias("__secondary_match_priority"),
             (
                 secondary_metadata[0]
-                if global_search or staged_search
+                if global_search
                 else pl.lit("")
             ).alias("__secondary_match_column"),
             (
                 secondary_metadata[1]
-                if global_search or staged_search
+                if global_search
                 else pl.lit("")
             ).alias("__secondary_match_column_key"),
             (
                 secondary_metadata[2]
-                if global_search or staged_search
+                if global_search
                 else pl.lit("")
             ).alias("__secondary_match_value"),
         )
