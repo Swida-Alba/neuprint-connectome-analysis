@@ -41,7 +41,11 @@ MORPH_METHODS = {
 
 
 def create_morphology_tab():
-    runner = ScriptRunner()
+    # One runner per output panel: a shared runner would let a second run
+    # clobber the first run's process handle (cancel would kill the wrong
+    # process and orphan the other).
+    similar_runner = ScriptRunner()
+    comparison_runner = ScriptRunner()
     output_panel = OutputPanel("Morphology Output")
     comparison_output = OutputPanel("Comparison Output")
     dataset = None
@@ -539,7 +543,7 @@ def create_morphology_tab():
                 constructor_params = dict(base_params)
                 constructor_params["query"] = query
                 result = await output_panel.run(
-                    runner, "find_similar_morphology", constructor_params,
+                    similar_runner, "find_similar_morphology", constructor_params,
                     "find_similar", output_dir=morph_output_dir.value,
                 )
                 results.append(result)
@@ -578,7 +582,7 @@ def create_morphology_tab():
             output_panel.set_running(False)
 
     output_panel.run_button.on_click(run_find_similar)
-    output_panel.cancel_button.on_click(runner.cancel)
+    output_panel.cancel_button.on_click(similar_runner.cancel)
 
     async def run_comparison():
         if is_banc_dataset(comparison_dataset.value):
@@ -616,7 +620,7 @@ def create_morphology_tab():
         }
         try:
             result = await comparison_output.run(
-                runner, "morphology_comparison", constructor_params,
+                comparison_runner, "morphology_comparison", constructor_params,
                 "run", output_dir=comparison_output_dir.value,
             )
             succeeded = result.get("returncode") == 0
@@ -644,7 +648,7 @@ def create_morphology_tab():
             comparison_output.set_running(False)
 
     comparison_output.run_button.on_click(run_comparison)
-    comparison_output.cancel_button.on_click(runner.cancel)
+    comparison_output.cancel_button.on_click(comparison_runner.cancel)
 
     def _on_comparison_dataset_change(_e=None):
         comparison_banc_warning.set_visibility(

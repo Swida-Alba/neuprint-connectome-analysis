@@ -1012,12 +1012,18 @@ def create_skeleton_tab():
         def _sync_banc_synapse_default():
             # Keep the BANC synapse default (skip) in sync with the dataset.
             if is_banc_dataset(dataset.value):
-                if synapse_view_mode.value != "skip":
-                    synapse_view_mode.set_value("skip")
+                default_view = banc_synapse_view_default(dataset.value)
+                if synapse_view_mode.value != default_view:
+                    synapse_view_mode.set_value(default_view)
                 _banc_synapse_note.set_visibility(
                     synapse_view_mode.value != "skip")
             else:
                 _banc_synapse_note.set_visibility(False)
+
+        def _refresh_banc_note_from_view():
+            _banc_synapse_note.set_visibility(
+                is_banc_dataset(dataset.value)
+                and synapse_view_mode.value != "skip")
 
         def _sync_banc_controls_visibility():
             visible = is_banc_dataset(dataset.value)
@@ -1033,14 +1039,13 @@ def create_skeleton_tab():
             _sync_banc_synapse_default(),
             _refresh_banc_note_from_view(),
         ))
+        banc_normalize_radius.on_value_change(
+            lambda _e: banc_radius_target_nm.set_enabled(
+                is_banc_dataset(dataset.value)
+                and banc_normalize_radius.value))
         _sync_roi_options()
         _sync_banc_controls_visibility()
         _sync_banc_synapse_default()
-
-        def _refresh_banc_note_from_view():
-            _banc_synapse_note.set_visibility(
-                is_banc_dataset(dataset.value)
-                and synapse_view_mode.value != "skip")
 
     with results_col:
         skeleton_output.create(run_label="Generate 3D Skeleton", run_icon="view_in_ar")

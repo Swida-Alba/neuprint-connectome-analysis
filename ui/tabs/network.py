@@ -153,14 +153,20 @@ def create_network_tab():
                 "Advanced Settings", icon="settings_suggest",
             ).classes("w-full drocat-section-expansion"):
                 with param_grid(2):
+                    # F9: ratio/probability filters are disabled (ratio is a
+                    # readout column now). The entrances stay in the code,
+                    # hidden, for the future ratio-weighted mode.
                     min_ratio = number_input(
-                        "Min Connection Ratio", get_user_default("min_ratio"), 0, 1, 0.01,
-                        hint="Minimum weight/post ratio (0-1). Higher = stronger connections only. 0 = include all.",
-                    )
+                        "Min Connection Ratio", 0, 0, 1, 0.01,
+                        hint="Disabled: connection_ratio is a readout column "
+                             "(weight / all-post incoming weight) — it no longer "
+                             "filters.",
+                    ).set_visibility(False)
                     min_traversal = number_input(
-                        "Min Traversal Prob.", get_user_default("min_traversal_probability"), 0, 1, 0.01,
-                        hint="Minimum traversal probability (ratio/0.3, capped at 1.0). Controls connection confidence threshold.",
-                    )
+                        "Min Traversal Prob.", 0, 0, 1, 0.01,
+                        hint="Disabled: traversal_probability is a readout column "
+                             "(ratio/0.3, capped at 1.0) — it no longer filters.",
+                    ).set_visibility(False)
                 search_columns = select_input(
                     "Search Columns", SEARCH_COLUMNS, get_user_default("search_columns"),
                     hint="Which columns to search when resolving neuron names. "
@@ -206,8 +212,9 @@ def create_network_tab():
             "targetNeurons": query,
             "output_dir": output_dir.value,
             "min_synapse_num": int(min_synapse.value),
-            "min_ratio": float(min_ratio.value),
-            "min_traversal_probability": float(min_traversal.value),
+            # F9: ratio/probability filters are disabled — hidden UI, sent 0.
+            "min_ratio": 0.0,
+            "min_traversal_probability": 0.0,
             "search_columns": search_columns.value,
             "network_layout": network_layout.value,
             "use_cache": use_cache.value,

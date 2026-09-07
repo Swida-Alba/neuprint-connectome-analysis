@@ -40,7 +40,11 @@ def _resolve_comparison_output_dir(value):
 
 
 def create_connectivity_tab():
-    runner = ScriptRunner()
+    # One runner per output panel: a shared runner would let a second run
+    # clobber the first run's process handle (cancel would kill the wrong
+    # process and orphan the other).
+    similar_runner = ScriptRunner()
+    comparison_runner = ScriptRunner()
     similar_output = OutputPanel("Similarity Output")
     comparison_output = OutputPanel("Comparison Output")
     source_dataset = None
@@ -385,7 +389,7 @@ def create_connectivity_tab():
 
         try:
             result = await similar_output.run(
-                runner, "find_homologs", constructor_params,
+                similar_runner, "find_homologs", constructor_params,
                 "find_homologs_multi", method_params=method_params,
                 output_dir=output_dir.value,
             )
@@ -457,68 +461,70 @@ def create_connectivity_tab():
 
         comparison_output.clear()
         comparison_output.set_running(True)
+        try:
 
-        # Keep the path selected in this sub-tab as the single source of truth
-        # for both the backend constructor and the output-file scanner.  The
-        # fallback matters when the input has not emitted its first browser
-        # change event yet (for example, after opening the tab and clicking
-        # Run immediately).
-        output_path = _resolve_comparison_output_dir(comparison_output_dir.value)
+            # Keep the path selected in this sub-tab as the single source of truth
+            # for both the backend constructor and the output-file scanner.  The
+            # fallback matters when the input has not emitted its first browser
+            # change event yet (for example, after opening the tab and clicking
+            # Run immediately).
+            output_path = _resolve_comparison_output_dir(comparison_output_dir.value)
 
-        constructor_params = {
-            "query": query,
-            "datasets": selected_datasets,
-            "output_dir": output_path,
-            "top_k": int(top_k_cmp.value),
-            "top_m": int(top_m_cmp.value),
-            "min_synapse_threshold": int(min_synapse_threshold_cmp.value),
-            "direction": direction,
-            "generate_heatmaps": cluster_heatmap.value,
-            "show_figures": show_figures.value,
-            "verbose": True,
-            "use_cache": get_user_default("use_cache"),
-            "aggregation_level": {
-                "type": "type",
-                "bodyid": "bodyid",
-                "custom group": "custom",
-            }[aggregation_level.value],
-            "skip_bodyId_level": skip_bodyid_param,
-            "ensure_cache_complete": full_cache_cmp.value,
-        }
+            constructor_params = {
+                "query": query,
+                "datasets": selected_datasets,
+                "output_dir": output_path,
+                "top_k": int(top_k_cmp.value),
+                "top_m": int(top_m_cmp.value),
+                "min_synapse_threshold": int(min_synapse_threshold_cmp.value),
+                "direction": direction,
+                "generate_heatmaps": cluster_heatmap.value,
+                "show_figures": show_figures.value,
+                "verbose": True,
+                "use_cache": get_user_default("use_cache"),
+                "aggregation_level": {
+                    "type": "type",
+                    "bodyid": "bodyid",
+                    "custom group": "custom",
+                }[aggregation_level.value],
+                "skip_bodyId_level": skip_bodyid_param,
+                "ensure_cache_complete": full_cache_cmp.value,
+            }
 
-        if aggregation_level.value == "custom group":
-            constructor_params["custom_mapping_file"] = mapping_path
+            if aggregation_level.value == "custom group":
+                constructor_params["custom_mapping_file"] = mapping_path
 
-        result = await comparison_output.run(
-            runner,
-            "connectivity_profiling",
-            constructor_params,
-            "run",
-            output_dir=output_path,
-        )
-
-        # The comparison pipeline resolves the query before comparing
-        # profiles, so a completed run means the queried chips are useful
-        # history entries for the selected datasets.
-        if result["returncode"] == 0:
-            from ..history_store import record as _record_history
-            _record_history(
-                [str(v) for v in query],
-                datasets=list(selected_datasets),
+            result = await comparison_output.run(
+                comparison_runner,
+                "connectivity_profiling",
+                constructor_params,
+                "run",
+                output_dir=output_path,
             )
 
-        comparison_output.set_running(False)
-        comparison_output.set_status(
-            "Completed" if result["returncode"] == 0 else "Failed",
-            "green" if result["returncode"] == 0 else "red",
-        )
-        comparison_output.show_files(
-            result["files"], result.get("output_folder") or output_path
-        )
+            # The comparison pipeline resolves the query before comparing
+            # profiles, so a completed run means the queried chips are useful
+            # history entries for the selected datasets.
+            if result["returncode"] == 0:
+                from ..history_store import record as _record_history
+                _record_history(
+                    [str(v) for v in query],
+                    datasets=list(selected_datasets),
+                )
+
+            comparison_output.set_status(
+                "Completed" if result["returncode"] == 0 else "Failed",
+                "green" if result["returncode"] == 0 else "red",
+            )
+            comparison_output.show_files(
+                result["files"], result.get("output_folder") or output_path
+            )
+        finally:
+            comparison_output.set_running(False)
 
     similar_output.run_button.on_click(run_similar)
-    similar_output.cancel_button.on_click(runner.cancel)
+    similar_output.cancel_button.on_click(similar_runner.cancel)
     comparison_output.run_button.on_click(run_comparison)
-    comparison_output.cancel_button.on_click(runner.cancel)
+    comparison_output.cancel_button.on_click(comparison_runner.cancel)
 
     sync_mode()

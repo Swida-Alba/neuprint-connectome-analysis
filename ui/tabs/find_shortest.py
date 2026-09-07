@@ -242,14 +242,20 @@ def create_find_shortest_tab():
                 )
 
                 with param_grid(3):
+                    # F9: ratio/probability filters are disabled (ratio is a
+                    # readout column now). The entrances stay in the code,
+                    # hidden, for the future ratio-weighted mode.
                     min_ratio = number_input(
-                        "Min Connection Ratio", get_user_default("min_ratio"), 0, 1, 0.01,
-                        hint="Minimum weight/post ratio (0-1). Higher = stronger connections only. 0 = include all.",
-                    )
+                        "Min Connection Ratio", 0, 0, 1, 0.01,
+                        hint="Disabled: connection_ratio is a readout column "
+                             "(weight / all-post incoming weight) — it no longer "
+                             "filters.",
+                    ).set_visibility(False)
                     min_traversal = number_input(
-                        "Min Traversal Prob.", get_user_default("min_traversal_probability"), 0, 1, 0.01,
-                        hint="Minimum traversal probability (ratio/0.3, capped at 1.0). Controls path confidence threshold.",
-                    )
+                        "Min Traversal Prob.", 0, 0, 1, 0.01,
+                        hint="Disabled: traversal_probability is a readout column "
+                             "(ratio/0.3, capped at 1.0) — it no longer filters.",
+                    ).set_visibility(False)
                     # Fix C: the lossy bodyId edge limit is deprecated and
                     # ignored — shortest paths are always complete.
 
@@ -352,8 +358,9 @@ def create_find_shortest_tab():
             "targetNeurons": targets,
             "output_dir": output_dir.value,
             "min_synapse_num": int(min_synapse.value),
-            "min_ratio": float(min_ratio.value),
-            "min_traversal_probability": float(min_traversal.value),
+            # F9: ratio/probability filters are disabled — hidden UI, sent 0.
+            "min_ratio": 0.0,
+            "min_traversal_probability": 0.0,
             "max_interlayer": 0 if (src_all or tgt_all) else int(max_interlayer.value),
             "filter_by": filter_by.value,
             "max_paths_bodyid": int(max_paths.value) or None,

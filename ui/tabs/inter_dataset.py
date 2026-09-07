@@ -1,7 +1,10 @@
 """Cross-Dataset Comparison Tab - runs ComparisonAnalyzer over N datasets."""
 
+import json
+import os
+
 from nicegui import ui
-from ..config import COMPARISON_MODES, PATH_MODES, PATHFINDING_ALGORITHMS, SEARCH_COLUMNS, get_user_default
+from ..config import COMPARISON_MODES, PATH_MODES, SEARCH_COLUMNS, get_user_default
 from ..components.common import (
     dataset_multi_selector, neuron_list_input, number_input, select_input,
     checkbox_input, dir_input, section_header, param_grid, tool_page,

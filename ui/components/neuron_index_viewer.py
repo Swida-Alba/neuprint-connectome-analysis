@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-import os
 import threading
 import time
-import webbrowser
 from pathlib import Path
 from typing import Callable, List
 
-from nicegui import ui
+from nicegui import run, ui
 
 from ..config import PROJECT_ROOT
 from utils.naming_utils import dataset_abbrev
@@ -1817,9 +1816,12 @@ def _render_index(
                             "No known counterpart in: " + ", ".join(unknown)
                         ).classes("text-caption drocat-muted")
 
-            def _scan() -> None:
+            async def _scan_async() -> None:
+                # Heavy scan off the event loop; NiceGUI elements are only
+                # touched here, back on the loop, after the await.
                 try:
-                    matches = collect_zero_hit_matches(dataset, query_text)
+                    matches = await run.io_bound(
+                        collect_zero_hit_matches, dataset, query_text)
                 except Exception:
                     matches = None
                 if alias_scan["generation"] != generation:
@@ -1838,9 +1840,14 @@ def _render_index(
                 "datasets — initializing the auto type mapper…",
                 busy=True,
             )
-            threading.Thread(
-                target=_scan, daemon=True, name="drocat-alias-scan"
-            ).start()
+            # On the app loop (production), scan off-loop and render the
+            # result back on the loop; without a running loop (direct /
+            # test invocation) execute inline so results land
+            # deterministically.
+            try:
+                asyncio.get_running_loop().create_task(_scan_async())
+            except RuntimeError:
+                asyncio.run(_scan_async())
 
 
         # Mapped-type view state: entered from the expansion panel's
