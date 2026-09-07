@@ -188,6 +188,7 @@ except ImportError:
 try:
     from skeleton_simplification import (
         BANC_FULL_MIN_KEEP_FACES,
+        BANC_L2_EQUIVALENT_SIMPLIFICATION,
         BANC_LINE_FULL_NODE_REDUCTION,
         FAFB_FAST_NODE_RETENTION,
         FAFB_LINE_NODE_REDUCTION,
@@ -197,6 +198,7 @@ try:
 except ImportError:
     from .skeleton_simplification import (
         BANC_FULL_MIN_KEEP_FACES,
+        BANC_L2_EQUIVALENT_SIMPLIFICATION,
         BANC_LINE_FULL_NODE_REDUCTION,
         FAFB_FAST_NODE_RETENTION,
         FAFB_LINE_NODE_REDUCTION,
@@ -2691,7 +2693,7 @@ class VisualizeSkeleton:
     per-call source selection anymore.
     '''
     banc_normalize_radius: bool = True
-    banc_radius_target_nm: float = 120.0
+    banc_radius_target_nm: float = 240.0
 
     force_API_fetching: bool = False
     '''
@@ -6279,9 +6281,9 @@ class VisualizeSkeleton:
             getattr(self, 'banc_normalize_radius', True))
         try:
             self.banc_radius_target_nm = max(
-                1.0, float(getattr(self, 'banc_radius_target_nm', 120.0)))
+                1.0, float(getattr(self, 'banc_radius_target_nm', 240.0)))
         except (TypeError, ValueError):
-            self.banc_radius_target_nm = 120.0
+            self.banc_radius_target_nm = 240.0
         
         # Silence navis INFO messages (like "Use the `.show()` method to plot the figure.")
         # These are not useful for automated visualization and clutter output
@@ -10248,6 +10250,10 @@ class VisualizeSkeleton:
         on coarse L2 edge lengths, and CAVE repair does not apply).  Node
         reduction applies only to full-resolution sources in the fast
         pipeline; the coarse L2 skeletons already sit at cache density.
+        The L2 product counts as ~90% simplified (BANC_L2_EQUIVALENT_
+        SIMPLIFICATION): face decimation touches L2 tubes only for the
+        asked simplification above that baseline, scaled onto the L2
+        density (asked 0.95 -> 50% of L2 faces removed).
         Line mode: full-resolution sources reduce 50%; L2 sources keep
         every node.
         """
@@ -10301,6 +10307,15 @@ class VisualizeSkeleton:
                 self._simplify_mesh_vertex_clustering
                 if banc_pipeline == 'artistic'
                 else self._simplify_mesh_fafb_fine)
+            # L2 skeletons are the cache-level product, already ~90%
+            # coarser than the full-resolution skeletons (measured ~3.3 um
+            # vs ~0.34 um mean edge spacing).  An asked simplification
+            # above that baseline applies to L2 tubes with the excess
+            # scaled onto the L2 density: asked 0.95 -> remove 50% of the
+            # L2 tube faces; asked 0.90 or below leaves L2 as-is.
+            l2_excess_simp = max(
+                0.0, (target_simp - BANC_L2_EQUIVALENT_SIMPLIFICATION)
+                / (1 - BANC_L2_EQUIVALENT_SIMPLIFICATION))
 
             all_mesh_neurons = []
             neurons_list = []
@@ -10351,16 +10366,41 @@ class VisualizeSkeleton:
 
                 if getattr(mesh_n, 'trimesh', None) is not None:
                     n_faces = len(mesh_n.trimesh.faces)
-                    # L2 tubes are already the cache-level product: they
-                    # skip face decimation entirely (the default 90% pass
-                    # is what made L2 renders sketchy).  Only
-                    # full-resolution sources get the pipeline decimation.
+                    # L2 tubes are the cache-level product, already ~90%
+                    # simplified against full: they only get the EXCESS of
+                    # the asked simplification above that baseline, scaled
+                    # onto the L2 density (0.95 -> 50% removed).
                     if not is_full_resolution(n):
-                        stage_log(f'  ℹ️ L2 tube kept as-is {neuron_id} '
-                                  f'({n_faces} faces)')
-                        # Keep the per-neuron identity: downstream color
-                        # and legend mapping key off the mesh id/name
-                        # (meshing may not carry it over).
+                        l2_target_faces = max(
+                            100, int(n_faces * (1 - l2_excess_simp)))
+                        if l2_target_faces >= n_faces:
+                            stage_log(
+                                f'  ℹ️ L2 tube kept as-is {neuron_id} '
+                                f'({n_faces} faces)')
+                            # Keep the per-neuron identity: downstream
+                            # color and legend mapping key off the mesh
+                            # id/name (meshing may not carry it over).
+                            mesh_n.id = getattr(n, 'id', None)
+                            if hasattr(n, 'name'):
+                                mesh_n.name = n.name
+                            all_mesh_neurons.append(mesh_n)
+                            report(neuron_id, 'ready', done=True)
+                            continue
+                        try:
+                            report(neuron_id, 'decimate')
+                            simplified = decimator(mesh_n.trimesh,
+                                                   l2_target_faces)
+                            stage_log(
+                                f'  ⚡ decimate L2 {neuron_id} '
+                                f'(-{l2_excess_simp:.0%}, '
+                                f'{n_faces}→{l2_target_faces} faces)')
+                        except Exception as exc:
+                            self._vprint(
+                                f'  ⚠️ L2 decimation failed for '
+                                f'{neuron_id}: {exc}',
+                                level='full', use_tqdm=True)
+                            simplified = mesh_n.trimesh
+                        mesh_n = navis.MeshNeuron(simplified)
                         mesh_n.id = getattr(n, 'id', None)
                         if hasattr(n, 'name'):
                             mesh_n.name = n.name

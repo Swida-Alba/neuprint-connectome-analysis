@@ -98,9 +98,12 @@ was removed from the Skeleton tab — the chain is always L2 → full → pcg.
 The deprecated `banc_skeleton_resolution` constructor argument is still
 accepted (validated, ignored) for script compatibility.
 
-Rendered tube radii are normalized per neuron (median → a shared 120 nm
-target by default; see below). L2 tubes skip the
-face-decimation stage entirely — they are already the cache-level product.
+Rendered tube radii are normalized per neuron (median → a shared 240 nm
+target by default; see below). L2 tubes are the cache-level product and
+count as ~90% simplified against the full-resolution skeletons: they skip
+face decimation unless the asked `skeleton_mesh_simplification` exceeds
+that baseline — the excess is scaled onto the L2 density (asked 0.95
+removes 50% of L2 tube faces; asked 0.99 removes 90%).
 The Skeleton tab's mesh-simplification default stays the FAFB-style 0.90:
 it drives the full-resolution sources, and a 4,000-face floor bounds
 full-resolution decimation at extreme slider values.
@@ -114,7 +117,7 @@ always reaches its v626 pcg-skel twin and vice versa.
 radius calibers per neuron (median radii range ~50–172 nm), which shows up
 as mismatched tube thicknesses in one scene. The Skeleton tab exposes a
 **Normalized Tube Radius** checkbox (default on) with a **Radius Target**
-(120 nm median by default): each neuron's radii are rescaled so its median
+(240 nm median by default): each neuron's radii are rescaled so its median
 hits the target, preserving relative branch thickness. Uncheck to use the
 raw radii.
 

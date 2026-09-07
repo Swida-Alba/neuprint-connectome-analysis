@@ -185,10 +185,12 @@ class TestBancProcessor:
         assert calls == [(2, visualize_skeleton.BANC_LINE_FULL_NODE_REDUCTION)]
         assert {n.id: len(n.nodes) for n in out} == {1: 4, 2: 4}
 
-    def test_faces_l2_kept_full_decimated(self, monkeypatch):
-        """Plan item B: L2 tubes skip the face-decimation stage entirely;
-        full-resolution sources are decimated to the slider target with the
-        4,000-face safety floor."""
+    def test_faces_l2_excess_decimation(self, monkeypatch):
+        """L2 tubes are the cache-level product, already ~90% simplified:
+        the asked simplification only touches them through the EXCESS above
+        the 0.90 baseline, scaled onto the L2 density (0.95 -> 50% of L2
+        faces removed).  Full-resolution sources are decimated to the
+        slider target with the 4,000-face safety floor."""
         dense = trimesh.creation.icosphere(subdivisions=4)  # 5120 faces
         assert len(dense.faces) == 5120
         decimate_calls = []
@@ -199,22 +201,73 @@ class TestBancProcessor:
             navis.conversion, 'tree2meshneuron',
             lambda work, tube_points=6: navis.MeshNeuron(dense))
 
+        l2, full = _tree('l2'), _tree('full')
+        l2.id, full.id = 1, 2
+
         vs = _make_visualizer(skeleton_mode='tube')
         vs._vprint = lambda *a, **k: None
         vs._simplify_mesh_fafb_fine = (
             lambda mesh, target: decimate_calls.append(target) or mesh)
-
-        l2, full = _tree('l2'), _tree('full')
-        l2.id, full.id = 1, 2
         out, already = vs._process_banc_layer(
             navis.NeuronList([l2, full]), 'fast')
         assert already is True
-        # L2: untouched 5120-face tube. Full: one decimation call with the
-        # floored target — max(max(100, int(5120 * 0.05)), 4000) = 4000.
+        # asked 0.95 -> L2 excess = (0.95-0.90)/0.10 = 50% removed:
+        # max(100, int(5120 * 0.50)) = 2560.  Full: floored 4000 target.
         by_id = {n.id: n for n in out}
-        assert len(by_id[1].faces) == 5120
+        assert decimate_calls == [2560, 4000]
+        assert len(by_id[1].faces) == 5120  # pass-through decimator
+        assert len(by_id[2].faces) == 5120
+
+    def test_faces_l2_untouched_at_baseline(self, monkeypatch):
+        """Asked simplification at or below the 0.90 L2 baseline leaves
+        L2 tubes as-is."""
+        dense = trimesh.creation.icosphere(subdivisions=4)  # 5120 faces
+        decimate_calls = []
+        monkeypatch.setattr(
+            visualize_skeleton, 'simplify_skeleton_nodes',
+            lambda n, factor: (n, {'raw_nodes': 4, 'achieved_nodes': 4}))
+        monkeypatch.setattr(
+            navis.conversion, 'tree2meshneuron',
+            lambda work, tube_points=6: navis.MeshNeuron(dense))
+
+        l2, full = _tree('l2'), _tree('full')
+        l2.id, full.id = 1, 2
+
+        vs = _make_visualizer(skeleton_mode='tube')
+        vs.skeleton_mesh_simplification = 0.90
+        vs._vprint = lambda *a, **k: None
+        vs._simplify_mesh_fafb_fine = (
+            lambda mesh, target: decimate_calls.append(target) or mesh)
+        out, already = vs._process_banc_layer(
+            navis.NeuronList([l2, full]), 'fast')
+        by_id = {n.id: n for n in out}
+        # L2: no decimation call, 5120 faces kept.  Full: 0.90 -> int(5120
+        # * 0.10) = 512, lifted to the 4,000-face full-res safety floor.
         assert decimate_calls == [4000]
-        assert len(by_id[2].faces) == 5120  # pass-through decimator
+        assert len(by_id[1].faces) == 5120
+        assert len(by_id[2].faces) == 5120
+
+    def test_faces_l2_excess_scales_to_ninety_nine(self, monkeypatch):
+        """asked 0.99 -> L2 excess 90% removed (10% of faces kept)."""
+        dense = trimesh.creation.icosphere(subdivisions=4)  # 5120 faces
+        decimate_calls = []
+        monkeypatch.setattr(
+            visualize_skeleton, 'simplify_skeleton_nodes',
+            lambda n, factor: (n, {'raw_nodes': 4, 'achieved_nodes': 4}))
+        monkeypatch.setattr(
+            navis.conversion, 'tree2meshneuron',
+            lambda work, tube_points=6: navis.MeshNeuron(dense))
+
+        l2 = _tree('l2')
+        l2.id = 1
+
+        vs = _make_visualizer(skeleton_mode='tube')
+        vs.skeleton_mesh_simplification = 0.99
+        vs._vprint = lambda *a, **k: None
+        vs._simplify_mesh_fafb_fine = (
+            lambda mesh, target: decimate_calls.append(target) or mesh)
+        vs._process_banc_layer(navis.NeuronList([l2]), 'fast')
+        assert decimate_calls == [max(100, int(5120 * 0.10))]
 
 
 class TestBancResolver:

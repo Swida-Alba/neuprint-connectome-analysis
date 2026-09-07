@@ -47,6 +47,14 @@ BANC_LINE_FULL_NODE_REDUCTION = 0.50
 """BANC line mode removes 50% of nodes — and only on full-resolution
 sources; the coarse L2 skeletons keep every node."""
 
+BANC_L2_EQUIVALENT_SIMPLIFICATION = 0.90
+"""The BANC L2 skeleton product is treated as already ~90% simplified
+relative to the full-resolution skeletons (measured: ~3.3 um mean edge
+spacing vs ~0.34 um, i.e. ~10x coarser node density).  A requested
+skeleton_mesh_simplification ABOVE this baseline applies to L2 tubes with
+the excess scaled onto the L2 density: asked 0.95 -> remove 50% of the L2
+tube faces; asked 0.90 or below leaves L2 tubes untouched."""
+
 BANC_FULL_MIN_KEEP_FACES = 4_000
 """Plan §B safety floor: BANC full-resolution tube decimation never keeps
 fewer than this many faces, however aggressive the simplification slider
