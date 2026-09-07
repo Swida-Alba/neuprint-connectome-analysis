@@ -152,3 +152,30 @@ def dataset_abbrev(dataset) -> str:
             return abbrev
     letters = "".join(c for c in ds.split(":")[0] if c.isalpha())
     return (letters[:4] or "DS").upper()
+
+
+# --------------------------------------------------------------------------
+# Brain-mesh selection tokens shared by the renderer and the UI.
+#
+# 'native' renders in the dataset's own template space; 'BANC' / 'FAFB' /
+# 'male-cns' move the whole scene into that template's coordinates and draw
+# its outline; 'none' hides the outline.
+BRAIN_MESH_OPTIONS = ["native", "BANC", "FAFB", "male-cns", "none"]
+
+# Selections persisted by older builds ('template'/'whole', and the
+# un-capitalized 'banc'/'fafb'/'mcns' spellings) fold onto the renamed
+# options ('whole' previously targeted JRC2018F; that scene-transform mode
+# was retired and the token now selects the FAFB outline).
+_BRAIN_MESH_LEGACY = {
+    "template": "native",
+    "whole": "FAFB",
+    "fafb": "FAFB",
+    "banc": "BANC",
+    "mcns": "male-cns",
+}
+
+
+def normalize_brain_mesh_choice(value) -> str:
+    """Normalize a stored/entered brain-mesh choice to a current option."""
+    v = str(value or "").strip().lower()
+    return _BRAIN_MESH_LEGACY.get(v, v)

@@ -491,27 +491,16 @@ PRE_POST_SHAPES = ["solid (spheres + cones)", "scatter (circles + diamonds)"]
 # Layer editor modes (Skeleton tab), shown as segmented buttons.
 LAYER_EDITOR_MODES = ["Standard", "Advanced", "File upload"]
 
-# Brain mesh options: 'native' renders in the dataset's own template space;
-# 'BANC' / 'FAFB' / 'male-cns' move the whole scene into that template's
-# coordinates and draw its outline.
-BRAIN_MESH_OPTIONS = ["native", "BANC", "FAFB", "male-cns", "none"]
+# Brain-mesh option tokens + legacy normalization are canonical in
+# src/utils/naming_utils and shared with the renderer.
+try:
+    from src.utils.naming_utils import (
+        BRAIN_MESH_OPTIONS, normalize_brain_mesh_choice)
+except ImportError:  # src not importable; keep the current option set
+    BRAIN_MESH_OPTIONS = ["native", "BANC", "FAFB", "male-cns", "none"]
 
-# Selections persisted by older builds ('template'/'whole', and the
-# un-capitalized 'banc'/'fafb'/'mcns' spellings) fold onto the renamed
-# options.
-_BRAIN_MESH_LEGACY = {
-    "template": "native",
-    "whole": "FAFB",
-    "fafb": "FAFB",
-    "banc": "BANC",
-    "mcns": "male-cns",
-}
-
-
-def normalize_brain_mesh_choice(value) -> str:
-    """Normalize a stored/entered brain-mesh choice to a current option."""
-    v = str(value or "").strip().lower()
-    return _BRAIN_MESH_LEGACY.get(v, v)
+    def normalize_brain_mesh_choice(value) -> str:
+        return str(value or "").strip().lower()
 
 # Synapse size presets (screen-space pixels, 1-12, default 3); the UI combo
 # box additionally accepts any typed integer in that range.

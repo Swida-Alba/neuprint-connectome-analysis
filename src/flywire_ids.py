@@ -66,9 +66,9 @@ def is_flywire_dataset(dataset: object) -> bool:
 def dataset_folder(dataset: object) -> str:
     """Map a dataset identifier to the repository folder convention.
 
-    Legacy BANC identifiers canonicalize first, so ``banc_v888``
-    resolves to the same folder as ``banc_v888`` in ``datasets/`` and
-    ``cache/``.
+    Legacy BANC identifiers canonicalize first, so the legacy
+    ``flywire_BANC_v888`` resolves to the same folder as ``banc_v888``
+    in ``datasets/`` and ``cache/``.
     """
 
     return canonical_dataset_name(dataset).replace(":", "_").replace(".", "_")

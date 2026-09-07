@@ -120,9 +120,17 @@ import navis.interfaces.neuprint as neu
 from neuprint import Client, fetch_synapse_connections, SynapseCriteria, fetch_meta
 
 try:
-    from .utils.naming_utils import canonical_dataset_name
+    from .utils.naming_utils import (
+        BRAIN_MESH_OPTIONS,
+        canonical_dataset_name,
+        normalize_brain_mesh_choice as normalize_brain_mesh,
+    )
 except ImportError:  # pragma: no cover - src laid bare on sys.path
-    from utils.naming_utils import canonical_dataset_name
+    from utils.naming_utils import (
+        BRAIN_MESH_OPTIONS,
+        canonical_dataset_name,
+        normalize_brain_mesh_choice as normalize_brain_mesh,
+    )
 import plotly.graph_objects as go
 import bokeh.palettes
 
@@ -1498,27 +1506,10 @@ def dataset_native_space(dataset: str) -> str:
     )
 
 
-BRAIN_MESH_SELECTIONS = ('native', 'BANC', 'FAFB', 'male-cns', 'none')
-# Settings saved by older builds used 'template' (now 'native'), 'whole'
-# (now the 'FAFB' outline; the JRC2018F scene-transform mode was retired
-# with the rename), and the un-capitalized 'banc'/'fafb'/'mcns' spellings.
-_BRAIN_MESH_LEGACY = {
-    'template': 'native',
-    'whole': 'FAFB',
-    'fafb': 'FAFB',
-    'banc': 'BANC',
-    'mcns': 'male-cns',
-}
-
-
-def normalize_brain_mesh(value) -> str:
-    """Normalize a brain-mesh selection to the current option tokens.
-
-    Case-insensitive; accepts legacy 'template'/'whole'/'mcns' values from
-    saved settings; unknown values pass through for validation to reject.
-    """
-    v = str(value or '').strip().lower()
-    return _BRAIN_MESH_LEGACY.get(v, v)
+# Canonical option tokens + legacy normalization live in
+# utils.naming_utils (shared with the UI); re-exported here as the
+# renderer's public API.
+BRAIN_MESH_SELECTIONS = tuple(BRAIN_MESH_OPTIONS)
 
 
 TRANSFORMED_ROI_CACHE_MARKER = '.drocat_tx_cache_v2'
