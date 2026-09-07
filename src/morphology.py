@@ -4466,6 +4466,8 @@ def fetch_skeleton_on_demand(dataset: str, body_id: int,
             )
             return cached
 
+    # Kept classifier-independent on purpose: legacy integrations fake the
+    # shared predicates off to reach this CAVE-skeleton compatibility retry.
     dataset_l = dataset.lower()
     if any(k in dataset_l for k in ("flywire", "fafb", "banc")):
         try:

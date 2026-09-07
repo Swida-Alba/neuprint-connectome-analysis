@@ -5,11 +5,19 @@ dataset-aware rendering defaults without importing the full visualization
 stack.
 """
 
+try:
+    from .flywire_ids import is_flywire_dataset
+except ImportError:  # pragma: no cover - direct/script imports
+    from flywire_ids import is_flywire_dataset
+
 
 def _is_flywire_family(dataset: str) -> bool:
-    """Return whether *dataset* uses the FlyWire/FAFB render family."""
-    normalized = str(dataset or "").strip().lower()
-    return normalized.startswith("flywire_") or "fafb" in normalized
+    """Return whether *dataset* belongs to the FlyWire render family.
+
+    Mirrors ``flywire_ids.is_flywire_dataset``: FAFB and BANC releases both
+    use the FlyWire-family render defaults.
+    """
+    return is_flywire_dataset(dataset)
 
 
 def default_skeleton_tab_simplification(

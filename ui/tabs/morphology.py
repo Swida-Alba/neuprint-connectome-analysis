@@ -96,8 +96,9 @@ def create_morphology_tab():
                 )
                 morph_output_dir = dir_input(scope="find_similar_morphology")
                 morph_dataset_warning = ui.label(
-                    "⚠️ BANC morphological similarity is unavailable because "
-                    "FlyWire does not provide BANC skeletons. Select a non-BANC dataset."
+                    "⚠️ BANC morphological similarity is deferred: public "
+                    "L2/full skeletons still need vector-quality validation. "
+                    "3D skeleton visualization for BANC is available."
                 ).classes("text-caption text-amber-8").set_visibility(False)
                 morph_best_dataset_warning = ui.label(
                     "⚠️ Morphological similarity works best with the "
@@ -360,8 +361,9 @@ def create_morphology_tab():
                 )
                 comparison_output_dir = dir_input(scope="morphology_comparison")
                 comparison_banc_warning = ui.label(
-                    "⚠️ BANC morphological comparison is unavailable because "
-                    "FlyWire does not provide BANC skeletons. Select a non-BANC dataset."
+                    "⚠️ BANC morphological comparison is deferred: public "
+                    "L2/full skeletons still need vector-quality validation. "
+                    "3D skeleton visualization for BANC is available."
                 ).classes("text-caption text-amber-8").set_visibility(False)
 
             with ui.card().classes("w-full drocat-card").props(

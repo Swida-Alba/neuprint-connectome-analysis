@@ -8350,8 +8350,7 @@ class HomologFinder:
         dataset_name = str(options.get('dataset', '') or '').strip().lower()
         options.setdefault(
             'cache_neurons', (
-                True if dataset_name.startswith('flywire_')
-                or 'fafb' in dataset_name
+                True if is_flywire_dataset(dataset_name)
                 else pipeline not in {
                     'fast', 'direct', 'artistic', 'fine_opt1'
                 }

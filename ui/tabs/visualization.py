@@ -42,7 +42,7 @@ from ..components.palette_picker import (
     notify_empty_custom_palettes,
 )
 from ..components.edge_list_editor import edge_list_editor
-from ..dataset_service import is_banc_dataset, is_flywire_dataset
+from ..dataset_service import is_banc_dataset
 from .. import layer_style_store
 from visualization_options import default_skeleton_tab_simplification
 from ..roi_options import (

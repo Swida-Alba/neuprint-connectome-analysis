@@ -21,6 +21,11 @@ try:
 except ImportError:  # pragma: no cover - direct package imports
     from utils.naming_utils import canonical_dataset_name
 
+try:
+    from ..flywire_ids import is_flywire_dataset
+except ImportError:  # pragma: no cover - direct package imports
+    from flywire_ids import is_flywire_dataset
+
 
 @dataclass
 class DatasetConfig:
@@ -32,7 +37,7 @@ class DatasetConfig:
     (shared across all datasets).
     
     Dataset Detection:
-    - If dataset name starts with 'flywire' -> local dataset
+    - FlyWire family (flywire_*/fafb/banc names) -> local dataset
     - Otherwise -> NeuPrint dataset (all use neuprint.janelia.org)
     
     Attributes:
@@ -82,8 +87,8 @@ class DatasetConfig:
     
     @property
     def is_flywire(self) -> bool:
-        """Check if this is a FlyWire local dataset (starts with 'flywire')."""
-        return self.dataset.lower().startswith('flywire')
+        """Check if this is a FlyWire-family local dataset (FAFB or BANC)."""
+        return is_flywire_dataset(self.dataset)
     
     @property
     def is_neuprint(self) -> bool:

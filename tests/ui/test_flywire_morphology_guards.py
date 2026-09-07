@@ -35,7 +35,7 @@ def test_morphology_tab_shows_persistent_banc_warning_when_selected():
     warning = next(
         element
         for element in client.elements.values()
-        if "BANC morphological similarity is unavailable" in str(
+        if "BANC morphological similarity is deferred" in str(
             getattr(element, "text", "")
         )
     )

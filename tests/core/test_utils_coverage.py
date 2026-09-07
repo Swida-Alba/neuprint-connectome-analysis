@@ -492,6 +492,8 @@ class TestVisualizationOptions:
     def test_flywire_family_detection(self):
         assert _is_flywire_family('flywire_FAFB_v783') is True
         assert _is_flywire_family('something_fafb') is True
+        # BANC belongs to the FlyWire family (shared predicates).
+        assert _is_flywire_family('banc_v888') is True
         assert _is_flywire_family('hemibrain:v1.2.1') is False
         assert _is_flywire_family(None) is False
 

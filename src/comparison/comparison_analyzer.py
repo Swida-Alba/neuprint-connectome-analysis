@@ -31,9 +31,9 @@ import numpy as np
 from tqdm import tqdm
 
 try:
-    from ..flywire_ids import is_fafb_dataset
+    from ..flywire_ids import is_fafb_dataset, is_flywire_dataset
 except ImportError:  # pragma: no cover - direct package imports
-    from flywire_ids import is_fafb_dataset
+    from flywire_ids import is_fafb_dataset, is_flywire_dataset
 
 from .dataset_config import DatasetConfig
 from .comparison_parameters import ComparisonParameters
@@ -912,8 +912,8 @@ class ComparisonAnalyzer:
         Returns:
             DataFrame with columns: bodyId_pre, bodyId_post, type_pre, type_post, weight
         """
-        # Check if dataset is local (FlyWire/FAFB) or NeuPrint
-        is_local = 'flywire' in dataset_name.lower() or 'fafb' in dataset_name.lower() or 'banc' in dataset_name.lower()
+        # Check if dataset is local (FlyWire family: FAFB/BANC) or NeuPrint
+        is_local = is_flywire_dataset(dataset_name)
         
         if is_local:
             return self._query_edges_local(dataset_name, source_neurons, target_neurons, min_weight)
@@ -2604,8 +2604,7 @@ class ComparisonAnalyzer:
             self._log(f"Fetching metadata for {dataset_name}...")
             
             # Determine if local or NeuPrint dataset
-            dataset_lower = dataset_name.lower()
-            if 'flywire' in dataset_lower or 'fafb' in dataset_lower or 'banc' in dataset_lower:
+            if is_flywire_dataset(dataset_name):
                 metadata = self._fetch_local_metadata(dataset_name)
             else:
                 metadata = self._fetch_neuprint_metadata(dataset_name)

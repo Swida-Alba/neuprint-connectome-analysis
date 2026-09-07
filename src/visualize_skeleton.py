@@ -3629,8 +3629,8 @@ class VisualizeSkeleton:
             body = source_row.get('bodyId')
             if body is not None and pd.notna(body):
                 base = str(body)
-            is_fafb = is_flywire_dataset(self.dataset)
-            if is_fafb:
+            is_flywire_family = is_flywire_dataset(self.dataset)
+            if is_flywire_family:
                 ntype = None
                 for col in ('flywireType', 'type'):
                     val = source_row.get(col)
@@ -7303,7 +7303,7 @@ class VisualizeSkeleton:
             "fine_opt1": "artistic",
             "fafb": "fine",
         }.get(requested_pipeline, requested_pipeline)
-        is_fafb_dataset = is_flywire_dataset(self.dataset)
+        is_flywire_family = is_flywire_dataset(self.dataset)
         if skeleton_mode == "tube":
             scope = "applied to the rendered tube mesh"
         else:
@@ -7313,13 +7313,13 @@ class VisualizeSkeleton:
                 "in-page export-pipeline warning raised for line mode "
                 "(simplification warning disabled)"
             )
-        elif is_fafb_dataset:
+        elif is_flywire_family:
             warning_note = "in-page warning threshold >0.95"
         elif pipeline in {"fine", "artistic"}:
             warning_note = "in-page warning threshold >0.95"
         else:
             warning_note = "in-page warning threshold >0.90"
-        if is_fafb_dataset:
+        if is_flywire_family:
             pipeline_note = f"neuprint_skeleton_pipeline={pipeline}"
         else:
             pipeline_note = f"neuprint_skeleton_pipeline={pipeline}"
@@ -7911,9 +7911,7 @@ class VisualizeSkeleton:
         if ignore_cache:
             return None, body_ids
         if (self.client_type == 'flywire'
-                or 'flywire' in self.dataset.lower()
-                or 'fafb' in self.dataset.lower()
-                or 'banc' in self.dataset.lower()):
+                or is_flywire_dataset(self.dataset)):
             return None, body_ids
 
         try:
@@ -7956,9 +7954,7 @@ class VisualizeSkeleton:
         ``fast``/``fine`` decimation always starts from the same source level.
         """
         is_neuprint = not (self.client_type == 'flywire'
-                           or 'flywire' in self.dataset.lower()
-                           or 'fafb' in self.dataset.lower()
-                           or 'banc' in self.dataset.lower())
+                           or is_flywire_dataset(self.dataset))
         if not is_neuprint or neuron_vols is None:
             return
 
@@ -8916,9 +8912,7 @@ class VisualizeSkeleton:
         """
         style = (self.skeleton_radius_style or 'auto').strip().lower()
         if style == 'auto':
-            is_flywire = ('flywire' in self.dataset.lower()
-                          or 'fafb' in self.dataset.lower()
-                          or 'banc' in self.dataset.lower())
+            is_flywire = is_flywire_dataset(self.dataset)
             return 'source' if is_flywire else 'fafb'
         return {'default': 'constant'}.get(style, style)
 
@@ -10916,11 +10910,11 @@ class VisualizeSkeleton:
         # - simplification=0.98 (keep 2%): load from cache (5%), simplify to 2% → additional_keep = 0.02/0.05 = 40%
         # - simplification=0.95 (keep 5%): load from cache (5%), no additional simplification needed
         # - simplification=0.5 (keep 50%): cannot use cache (only has 10%), load from ZIP and apply 0.5 simplification
-        is_fafb = is_flywire_dataset(self.dataset)
+        is_flywire_family = is_flywire_dataset(self.dataset)
         is_banc = is_banc_dataset(self.dataset)
         neuprint_pipeline = self._resolved_neuprint_skeleton_pipeline()
         use_neuprint_fine_pipeline = (
-            not is_fafb
+            not is_flywire_family
             and self.skeleton_mode == 'tube'
             and neuprint_pipeline in {'fine', 'artistic'}
         )
@@ -10928,13 +10922,13 @@ class VisualizeSkeleton:
             use_neuprint_fine_pipeline
             and neuprint_pipeline in {'fine', 'artistic'}
         )
-        fafb_pipeline = self._resolved_fafb_pipeline() if is_fafb else None
+        fafb_pipeline = self._resolved_fafb_pipeline() if is_flywire_family else None
 
         # FAFB prepared mesh cache eligibility: caching enabled, tube mode,
         # and the render target at/above the prepared cache level (0.95).
         # Line mode disables the prepared mesh cache entirely.
         use_fafb_cache = (
-            is_fafb and not is_banc
+            is_flywire_family and not is_banc
             and self.skeleton_mode == 'tube' and self.cache_neurons
             and self.skeleton_mesh_simplification
             >= self.FAFB_MESH_CACHE_SIMPLIFICATION
@@ -10943,7 +10937,7 @@ class VisualizeSkeleton:
         # Check for force_API_fetching - bypasses ZIP loading for FAFB.
         # BANC always fetches from the public bucket, so the CAVE override
         # does not apply.
-        use_api_fetching = is_fafb and not is_banc and self.force_API_fetching
+        use_api_fetching = is_flywire_family and not is_banc and self.force_API_fetching
 
         # FAFB source resolution: SWC-first for every render mode.
         # skeleton_cache holds TreeNeuron sources (ZIP / raw SWC cache),
@@ -10955,7 +10949,7 @@ class VisualizeSkeleton:
         # than one layer.  This cache is intentionally in-memory only and is
         # scoped to one visualization run.
         fafb_render_mesh_cache = {}  # canonical bodyId -> MeshNeuron
-        if is_fafb:
+        if is_flywire_family:
             # Collect all body IDs first
             all_fafb_body_ids = []
             for df in self.neuron_dfs:
@@ -11007,7 +11001,7 @@ class VisualizeSkeleton:
         neuprint_prepared_skeletons = {}
         neuprint_prepared_mesh = False
         neuprint_preprocessing_active = (
-            self.client_type == 'neuprint' and not is_fafb)
+            self.client_type == 'neuprint' and not is_flywire_family)
         if neuprint_preprocessing_active:
             neuprint_prepared_skeletons, neuprint_prepared_mesh = (
                 self._prepare_neuprint_skeletons_for_render(
@@ -11106,7 +11100,7 @@ class VisualizeSkeleton:
             cached_mesh_neurons = []  # MeshNeurons loaded from cache
             mesh_missing_ids = layer_body_ids  # IDs that need processing
             
-            if is_fafb and fafb_mesh_cache and not is_custom_layer:
+            if is_flywire_family and fafb_mesh_cache and not is_custom_layer:
                 # Separate mesh sources vs TreeNeuron sources with
                 # type-robust matching
                 cached_mesh_neurons = []
@@ -11180,7 +11174,7 @@ class VisualizeSkeleton:
             # Fetch missing neurons (only those not in the mesh cache when
             # the FAFB or NeuPrint mesh cache is in use)
             fetch_ids = [] if (neuprint_preprocessing_active or is_custom_layer) else (
-                mesh_missing_ids if (is_fafb or use_neuprint_mesh_cache)
+                mesh_missing_ids if (is_flywire_family or use_neuprint_mesh_cache)
                 else missing_ids)
             remaining_fetch_ids = list(fetch_ids)
             if fetch_ids:
@@ -11292,7 +11286,7 @@ class VisualizeSkeleton:
                 # compressed-SWC files. Keep rendering on the selected
                 # in-memory representation; never persist a transformed or
                 # simplified skeleton here.
-                if (raw_neuron_vols is not None and not is_fafb
+                if (raw_neuron_vols is not None and not is_flywire_family
                         and not neuprint_layer_prepared):
                     self._save_cached_neurons(self.neuron_dfs[i], raw_neuron_vols)
                     raw_neuron_vols = render_neuron_vols
@@ -11313,7 +11307,7 @@ class VisualizeSkeleton:
                 neuron_vols = navis.NeuronList([neuron_vols])
             
             # For FAFB with all meshes cached, we can skip skeleton processing
-            if is_fafb and cached_mesh_neurons and (neuron_vols is None or len(neuron_vols) == 0):
+            if is_flywire_family and cached_mesh_neurons and (neuron_vols is None or len(neuron_vols) == 0):
                 # All neurons loaded from mesh cache - neuron_vols stays None/empty
                 # The combine block below will handle adding cached_mesh_neurons with simplification
                 pass
@@ -11351,7 +11345,7 @@ class VisualizeSkeleton:
                         progress_callback=report_fafb_progress,
                     )
                 )
-            elif is_fafb:
+            elif is_flywire_family:
                 neuron_vols, fafb_already_simplified = (
                     self._process_fafb_layer(
                         neuron_vols,
@@ -11369,7 +11363,7 @@ class VisualizeSkeleton:
             # plotting.  FAFB line renders were handled by their own branch.
             if (self.skeleton_mode == 'line'
                     and neuron_vols is not None
-                    and not is_fafb
+                    and not is_flywire_family
                     and not neuprint_preprocessing_active):
                 prepared_lines = []
                 neurons_list = (
@@ -11627,7 +11621,7 @@ class VisualizeSkeleton:
             # in the aggregate preprocessing phase; this block handles only
             # the remaining legacy/direct paths and line mode is skipped.
             render_simplification = self._effective_render_simplification(
-                is_fafb,
+                is_flywire_family,
             )
             if (render_simplification > 0 and self.skeleton_mode == 'tube'
                     and not fafb_already_simplified
@@ -12068,7 +12062,7 @@ class VisualizeSkeleton:
             # bodyId column so the render-wide bar still reaches its total.
             remaining = (
                 n_in_layer - processed_this_layer
-                if is_fafb else n_in_layer
+                if is_flywire_family else n_in_layer
             )
             if remaining > 0:
                 layer_pbar.update(remaining)
@@ -12499,7 +12493,6 @@ class VisualizeSkeleton:
                 
                 # Apply FAFB tilt correction if using template mode
                 # This corrects the left-right tilt in the FLYWIRE template mesh
-                is_fafb = is_flywire_dataset(self.dataset) and not is_banc_dataset(self.dataset)
                 if self._fafb_tilt_applies():
                     xyz_df = self._apply_fafb_tilt_correction(xyz_df)
                 
@@ -12635,7 +12628,6 @@ class VisualizeSkeleton:
                 
                 # Apply FAFB tilt correction if using template mode
                 # This corrects the left-right tilt in the FLYWIRE template mesh
-                is_fafb = is_flywire_dataset(self.dataset)
                 if self._fafb_tilt_applies():
                     pre_coords = self._apply_fafb_tilt_correction(pre_coords)
                     post_coords = self._apply_fafb_tilt_correction(post_coords)
@@ -13373,7 +13365,6 @@ class VisualizeSkeleton:
             template_info = self._get_template_info()
             with self._suppress_output():
                 coords = navis.xform_brain(coords, source=template_info['source'], target=template_info['target'])
-        is_fafb = is_flywire_dataset(self.dataset)
         if self._fafb_tilt_applies():
             coords = self._apply_fafb_tilt_correction(coords)
         return site_df.assign(x=coords['x'], y=coords['y'], z=coords['z'])
@@ -16580,8 +16571,7 @@ class VisualizeSkeleton:
 
                     # Apply FAFB tilt correction in native mode.
                     # This corrects the left-right tilt in the FLYWIRE template mesh
-                    is_fafb = is_flywire_dataset(self.dataset)
-                    if is_fafb and brain_mesh is not None:
+                    if self._fafb_tilt_applies() and brain_mesh is not None:
                         brain_mesh = self._apply_fafb_tilt_correction(brain_mesh)
                 except Exception as e:
                     self._vprint(f'⚠️  Failed to load {mesh_display_name} mesh: {e}', level='full')

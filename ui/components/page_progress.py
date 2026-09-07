@@ -195,10 +195,13 @@ def progress_steps_for(
         if source == "auto":
             dataset = str(context.get("dataset", "") or "").lower()
             # Mirrors the backend's auto resolution: NeuPrint datasets screen
-            # by ROI distributions, FlyWire searches the vector cache. A
-            # server-side fallback from roi to profile keeps the same 6-step
-            # protocol, so the checklist stays valid either way.
-            source = "cache" if dataset.startswith("flywire_") else "roi"
+            # by ROI distributions, the FlyWire family (FAFB *and* BANC)
+            # searches the vector cache. A server-side fallback from roi to
+            # profile keeps the same 6-step protocol, so the checklist stays
+            # valid either way.
+            is_flywire_family = any(
+                token in dataset for token in ("flywire", "fafb", "banc"))
+            source = "cache" if is_flywire_family else "roi"
         key = (tool_name, source)
         if key in METHOD_PROGRESS_STEPS:
             return list(METHOD_PROGRESS_STEPS[key])

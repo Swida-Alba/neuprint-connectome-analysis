@@ -276,10 +276,11 @@ def require_flywire_skeleton_access(
 ) -> dict:
     """Validate access for a skeleton-based FlyWire workflow.
 
-    BANC is always rejected because no BANC skeleton source is available.
-    FAFB is accepted when either local skeleton data or a CAVE token is
-    available.  When both are absent, the log includes the local preparation
-    and token setup instructions before raising a clear exception.
+    BANC is always accepted: skeletons fetch on demand from the public
+    release bucket and no CAVE token is involved.  FAFB is accepted when
+    either local skeleton data or a CAVE token is available.  When both are
+    absent, the log includes the local preparation and token setup
+    instructions before raising a clear exception.
     """
 
     status = flywire_skeleton_readiness(dataset, project_root)

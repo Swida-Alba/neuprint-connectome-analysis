@@ -17,9 +17,9 @@ from datetime import datetime
 import os
 
 try:
-    from ..flywire_ids import is_fafb_dataset
+    from ..flywire_ids import is_fafb_dataset, is_flywire_dataset
 except ImportError:  # pragma: no cover - direct package imports
-    from flywire_ids import is_fafb_dataset
+    from flywire_ids import is_fafb_dataset, is_flywire_dataset
 
 try:
     from ..utils.naming_utils import canonical_dataset_name
@@ -655,7 +655,9 @@ class ComparisonParameters:
         # Warn about FAFB hemisphere annotation when mixed datasets are used
         dataset_names = self.get_dataset_names()
         has_fafb = any(is_fafb_dataset(str(ds)) for ds in dataset_names)
-        has_neuprint = any('fafb' not in str(ds).lower() and 'flywire' not in str(ds).lower() for ds in dataset_names)
+        # BANC shares the FlyWire hemisphere convention; only true NeuPrint
+        # datasets trigger the reversal warning.
+        has_neuprint = any(not is_flywire_dataset(str(ds)) for ds in dataset_names)
         if has_fafb and has_neuprint and len(dataset_names) > 1:
             print("\033[33m⚠️  FAFB hemisphere labels are reversed relative to NeuPrint datasets.\n"
                   "   Interpret L/R comparisons across FAFB vs NeuPrint with caution.\033[0m")

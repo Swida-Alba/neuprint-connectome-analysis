@@ -2557,7 +2557,7 @@ class FindNeuronConnection:
             except ImportError:
                 from utils.flywire_readiness import print_download_instructions
             print_download_instructions(self.dataset, dataset_dir)
-            if 'BANC' not in self.dataset:
+            if not is_banc_dataset(self.dataset):
                 print("\n\033[36mAlternative: use CAVE API (slow, for testing/small queries):\033[0m")
                 print("   Set force_API_fetching=True in your script:")
                 print("   fnc = FindNeuronConnection(..., force_API_fetching=True)")
@@ -5541,19 +5541,32 @@ class FindNeuronConnection:
                 neuron_info = pd.concat([neuron_info, extra], ignore_index=True)
             else:
                 # Fallback: fetch from API (batched to bound query/response size)
-                try:
-                    ndf = (
-                        self._fetch_flywire_neurons_online(
-                            list(missing_ids),
-                            columns=['bodyId', 'type', 'instance', 'post'],
-                        )
-                        if is_flywire_dataset(self.dataset)
-                        else self._fetch_neurons_batched(list(missing_ids))
+                if is_banc_dataset(self.dataset):
+                    # BANC neuron metadata lives only in the locally prepared
+                    # tables; the CAVE annotation API is FAFB-only, so an
+                    # online attempt would silently return nothing.
+                    self._vprint(
+                        f'  ⚠️ BANC metadata for {len(missing_ids):,} neurons '
+                        f'requires the locally prepared tables for '
+                        f'{self.dataset} '
+                        f'(run BANC_file_converter.ensure_banc_data); '
+                        f'there is no online metadata API for BANC.',
+                        level='always',
                     )
-                    extra = ndf[['bodyId', 'type', 'instance', 'post']].copy()
-                    neuron_info = pd.concat([neuron_info, extra], ignore_index=True)
-                except Exception:
-                    pass
+                else:
+                    try:
+                        ndf = (
+                            self._fetch_flywire_neurons_online(
+                                list(missing_ids),
+                                columns=['bodyId', 'type', 'instance', 'post'],
+                            )
+                            if is_flywire_dataset(self.dataset)
+                            else self._fetch_neurons_batched(list(missing_ids))
+                        )
+                        extra = ndf[['bodyId', 'type', 'instance', 'post']].copy()
+                        neuron_info = pd.concat([neuron_info, extra], ignore_index=True)
+                    except Exception:
+                        pass
         
         # Count connections per neuron
         self._vprint(f'  ⏳ Counting connections per neuron...', level='full')
@@ -6622,12 +6635,30 @@ class FindNeuronConnection:
         else:
             # Check if we should enforce local-only for FAFB/FlyWire
             if is_flywire and not self.use_cache:
+                if is_banc_dataset(self.dataset):
+                    # BANC neuron metadata lives only in the locally prepared
+                    # tables; the CAVE annotation API is FAFB-only, so an
+                    # online attempt would silently return nothing.
+                    self._vprint(
+                        f'  ⚠️ BANC neuron metadata requires the locally '
+                        f'prepared tables for {self.dataset} '
+                        f'(run BANC_file_converter.ensure_banc_data); '
+                        f'there is no online metadata API for BANC.',
+                        level='always',
+                    )
+                    return pd.DataFrame(columns=columns if columns else [])
                 return self._fetch_flywire_neurons_online(bodyIds, columns)
 
             if is_flywire:
                  self._vprint(f"\n  ⚠️  Local neuron data not found for dataset '{self.dataset}'.", level='full')
-                 self._vprint("  Please download the neuron table from: https://codex.flywire.ai/api/download?dataset=fafb", level='full')
-                 self._vprint(f"  Save the file to: {dataset_path}", level='full') 
+                 if is_banc_dataset(self.dataset):
+                     self._vprint(
+                         "  Prepare it with BANC_file_converter.ensure_banc_data "
+                         "(public release bucket).",
+                         level='full')
+                 else:
+                     self._vprint("  Please download the neuron table from: https://codex.flywire.ai/api/download?dataset=fafb", level='full')
+                 self._vprint(f"  Save the file to: {dataset_path}", level='full')
                  self._vprint("  Skipping API fetch to avoid timeouts/limits.", level='full')
                  return pd.DataFrame(columns=columns if columns else [])
 
@@ -6690,6 +6721,18 @@ class FindNeuronConnection:
         # CAVEDataFetcher searches the public annotation/tag table; a legacy
         # adapter can provide its own type-aware query implementation.
         if is_flywire and not self.use_cache:
+            if is_banc_dataset(self.dataset):
+                # BANC type resolution comes from the locally prepared
+                # tables only; the CAVE annotation tables are FAFB-only,
+                # so an online attempt would silently return nothing.
+                self._vprint(
+                    f'  ⚠️ BANC type resolution requires the locally prepared '
+                    f'tables for {self.dataset} '
+                    f'(run BANC_file_converter.ensure_banc_data); '
+                    f'there is no online metadata API for BANC.',
+                    level='always',
+                )
+                return pd.DataFrame(columns=columns if columns else [])
             if self.client_flywire is not None:
                 all_neurons = []
                 for neuron_type in types:
@@ -6774,8 +6817,14 @@ class FindNeuronConnection:
             # Check if we should enforce local-only for FAFB/FlyWire
             if is_flywire:
                  self._vprint(f"\n  ⚠️  Local neuron data not found for dataset '{self.dataset}'.", level='full')
-                 self._vprint("  Please download the neuron table from: https://codex.flywire.ai/api/download?dataset=fafb", level='full')
-                 self._vprint(f"  Save the file to: {dataset_path}", level='full') 
+                 if is_banc_dataset(self.dataset):
+                     self._vprint(
+                         "  Prepare it with BANC_file_converter.ensure_banc_data "
+                         "(public release bucket).",
+                         level='full')
+                 else:
+                     self._vprint("  Please download the neuron table from: https://codex.flywire.ai/api/download?dataset=fafb", level='full')
+                 self._vprint(f"  Save the file to: {dataset_path}", level='full')
                  self._vprint("  Skipping API fetch to avoid timeouts/limits.", level='full')
                  return pd.DataFrame(columns=columns if columns else [])
 
@@ -7282,6 +7331,19 @@ class FindNeuronConnection:
                         f'  ⚠️ Local FlyWire incoming lookup failed: {exc}',
                         level='full',
                     )
+
+            if is_banc_dataset(self.dataset):
+                # BANC connections live only in the locally prepared merged
+                # table; there is no CAVE connectivity fallback (the BANC
+                # datastack has no synapse view), so an attempt would just
+                # silently return nothing. Raise so the caller's warning-note
+                # machinery reports the real cause.
+                raise RuntimeError(
+                    f'BANC incoming connections require the locally prepared '
+                    f'tables for {self.dataset} '
+                    f'(run BANC_file_converter.ensure_banc_data); there is '
+                    f'no CAVE connectivity fallback for BANC.'
+                )
 
             fetcher = self._get_cave_fetcher()
             incoming = fetcher.fetch_connections(

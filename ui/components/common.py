@@ -2704,7 +2704,12 @@ def dataset_status_card() -> ui.card:
                     ui.badge(text, color=color).props("outline")
 
                 for name, info in results.items():
-                    is_flywire = name.startswith("flywire_")
+                    # Trust the resolved source field (BANC is FlyWire-family);
+                    # the raw name only covers entries without one.
+                    is_flywire = (
+                        getattr(info, "source", "") == "flywire"
+                        or name.startswith("flywire_")
+                    )
                     src_badge_text = "FlyWire" if is_flywire else "NeuPrint"
                     src_badge_color = "purple" if is_flywire else "blue"
 
