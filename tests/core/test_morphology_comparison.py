@@ -339,7 +339,7 @@ def test_flywire_fetch_uses_bundle_loader(monkeypatch, tmp_path):
     monkeypatch.setattr(
         mc, "find_similar_dataset_cache_v2",
         lambda dataset, project_root=None, n_workers=8, verbose=True: cache)
-    monkeypatch.setattr(mc, "is_flywire_dataset", lambda d: True)
+    monkeypatch.setattr(mc, "is_fafb_dataset", lambda d: True)
     monkeypatch.setattr(mc, "_neuron_rep", lambda n: "skeleton")
 
     loader_calls = []
@@ -580,3 +580,49 @@ def test_completion_marker_printed(vector_setup, capsys):
     captured = capsys.readouterr().out
     assert f"[MorphologyProfileComparer] Output: {result['output_folder']}" \
         in captured
+
+
+# ------------------------------------------------------- BANC vector fetch
+def test_banc_missing_vectors_route_to_public_swc_chain(monkeypatch):
+    """BANC must never enter the FlyWire/CAVE fetch machinery: the vector
+    cache's missing bodies resolve through the shared batch fetch, whose
+    BANC branch uses the official public-bucket SWCs (fetch_banc_swc).
+
+    Drives _fetch_missing_vectors on a stub instance because the comparer
+    constructor deliberately defers BANC comparison (vector-quality
+    validation pending); the routing contract must hold when that lifts.
+    """
+    from types import SimpleNamespace
+
+    calls = {}
+
+    def _batch(dataset, body_ids, **kw):
+        calls["batch"] = (dataset, list(body_ids))
+        # skeleton-rep stand-in: _neuron_rep only checks .nodes
+        return {bid: SimpleNamespace(nodes=[object()]) for bid in body_ids}
+
+    def _fail_fafb(*_a, **_kw):
+        raise AssertionError("BANC must not use the FAFB healed-bundle loader")
+
+    monkeypatch.setattr(mc, "fetch_skeletons_on_demand_batch", _batch)
+    monkeypatch.setattr(mc, "load_flywire_skeletons_batch", _fail_fafb)
+
+    stub = SimpleNamespace(
+        dataset="banc_v888",
+        project_root=Path("."),
+        n_workers=2,
+        _body_id=lambda b: int(b),
+        _log=lambda *a, **k: None,
+    )
+    cache = SimpleNamespace(
+        _vectorize_neuron=lambda neuron: ("raw", np.zeros(DIM)),
+        _default_basis=lambda: "raw",
+        append_vectors=lambda rows, vector_basis=None: calls.update(
+            rows=len(rows)),
+    )
+    fetched = mc.MorphologyProfileComparer._fetch_missing_vectors(
+        stub, cache, [1001, 1002])
+
+    assert fetched == 2
+    assert calls["batch"] == ("banc_v888", [1001, 1002])
+    assert calls["rows"] == 2

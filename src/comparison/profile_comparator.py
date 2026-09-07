@@ -8420,7 +8420,18 @@ class HomologFinder:
             project_root = str(Path(__file__).resolve().parents[2])
 
             fetched = []
-            if is_flywire_dataset(source_dataset):
+            if is_banc_dataset(source_dataset):
+                # BANC ships no CAVE/NeuPrint skeleton product: resolve
+                # through the shared batch fetch, whose BANC branch uses
+                # the official public-bucket SWCs (fetch_banc_swc).
+                from morphology import fetch_skeletons_on_demand_batch
+                resolved = fetch_skeletons_on_demand_batch(
+                    source_dataset, [int(b) for b in query_bodyids],
+                    project_root=project_root, persist=True)
+                fetched = [resolved[int(b)] for b in query_bodyids
+                           if int(b) in resolved
+                           and resolved[int(b)] is not None]
+            elif is_flywire_dataset(source_dataset):
                 from morphology import load_flywire_skeletons_batch
                 resolved = load_flywire_skeletons_batch(
                     source_dataset, query_bodyids,

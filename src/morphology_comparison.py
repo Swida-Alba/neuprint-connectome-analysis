@@ -78,10 +78,10 @@ except ImportError:  # direct src/ execution
     )
 
 try:
-    from flywire_ids import is_banc_dataset, is_flywire_dataset
+    from flywire_ids import is_banc_dataset, is_fafb_dataset
 except ImportError:  # pragma: no cover - direct src/ execution
     from flywire_ids import (  # type: ignore
-        is_banc_dataset, is_flywire_dataset)
+        is_banc_dataset, is_fafb_dataset)
 
 try:
     from utils.naming_utils import dataset_abbrev
@@ -305,15 +305,18 @@ class MorphologyProfileComparer:
         the cache — the same contract as Find Similar's cache-direct search.
 
         NeuPrint datasets go through the shared batch fetch (raw SWC staged
-        + persisted into the shared skeleton cache); FlyWire/FAFB goes
-        through ``load_flywire_skeletons_batch`` (raw cache → healed FAFB
-        bundle → CAVE fallback). Fetched neurons are re-vectorized with the
+        + persisted into the shared skeleton cache); FAFB goes through
+        ``load_flywire_skeletons_batch`` (raw cache → healed FAFB bundle →
+        CAVE fallback); BANC goes through the shared batch fetch too — its
+        branch resolves each body via the official public-bucket SWC chain
+        (``fetch_banc_swc``), never the FlyWire CAVE machinery, which has
+        no BANC products. Fetched neurons are re-vectorized with the
         cache's own vectorizer so rows land in the cache's exact schema.
         Returns the number of neurons vectorized."""
         self._log(
             f"Vector cache miss: fetching {len(missing_ids)} skeleton(s) "
             "online.")
-        if is_flywire_dataset(self.dataset):
+        if is_fafb_dataset(self.dataset):
             neurons = load_flywire_skeletons_batch(
                 self.dataset, [int(self._body_id(b)) for b in missing_ids],
                 project_root=str(self.project_root), log=self._log)
