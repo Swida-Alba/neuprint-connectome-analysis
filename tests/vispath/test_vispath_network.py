@@ -934,6 +934,102 @@ class TestUiRedesign:
         assert "classList.remove('vp-editmode')" in js
         assert "document.getElementById('editBadge').style.display" in js
 
+    def test_canvas_mouse_behavior_hints(self, network_html):
+        """Two toggle buttons at the canvas TOP-RIGHT switch the drag mode:
+        ✋ Pan (default — drag pans, Shift+drag box-selects) vs □ Select
+        (plain drag box-selects). The switch turns cytoscape user panning
+        off/on — the recipe cytoscape maps to box-select-on-drag — and the
+        buttons carry active/aria-pressed state plus hover labels."""
+        html = network_html.read_text(encoding="utf-8")
+        js = _script_text(network_html)
+        assert 'id="cyHints"' in html
+        # inside the canvas container, beside the edit badge
+        assert html.index('id="cy"') < html.index('id="cyHints"') \
+            < html.index('id="hoverInfo"')
+        assert 'id="panModeBtn"' in html and 'id="selectModeBtn"' in html
+        assert "onclick=\"setCanvasDragMode('pan')\"" in html
+        assert "onclick=\"setCanvasDragMode('select')\"" in html
+        # pan ships as the active default; select starts inactive
+        pan_seg = html[html.index('id="panModeBtn"') - 60:html.index('id="panModeBtn"') + 300]
+        assert "vp-cy-hint active" in pan_seg
+        assert 'aria-pressed="true"' in pan_seg
+        sel_seg = html[html.index('id="selectModeBtn"') - 60:html.index('id="selectModeBtn"') + 400]
+        assert 'aria-pressed="false"' in sel_seg
+        # the switch drives cytoscape: panning off in select mode, box
+        # selection pinned on, button state + aria-pressed kept in sync
+        assert "function setCanvasDragMode" in js
+        fn_body = js[js.index("function setCanvasDragMode"):js.index("function setCanvasDragMode") + 1600]
+        assert "cy.userPanningEnabled(mode === 'pan')" in fn_body
+        assert "cy.boxSelectionEnabled(true)" in fn_body
+        assert "'active-bg-opacity': mode === 'pan' ? 0.15 : 0" in fn_body
+        assert "classList.toggle('active'" in fn_body
+        assert "setAttribute('aria-pressed'" in fn_body
+        # toggle styling + clickable buttons
+        hint_rule = re.search(r"\.vp-cy-hint \{[^}]*\}", html).group(0)
+        assert "cursor: pointer" in hint_rule
+        assert re.search(r"\.vp-cy-hint\.active \{[^}]*\}", html)
+
+    def test_directional_box_selection(self, network_html):
+        """Box selection follows design-tool conventions: a LEFT→RIGHT frame
+        selects only elements FULLY inside it (solid frame), a RIGHT→LEFT
+        frame selects everything it TOUCHES (dashed frame) — and it is a
+        combined select/deselect gesture: a frame over ONLY already-selected
+        elements removes them from the selection, ⇧+drag per-element toggles,
+        an empty frame is a no-op. Cytoscape's built-in frame is hidden
+        (selection-box-opacity 0) and the result is re-derived on boxend —
+        deferred, since cytoscape applies its own selection right after
+        emitting the event."""
+        html = network_html.read_text(encoding="utf-8")
+        js = _script_text(network_html)
+        # overlay lives inside the canvas, hidden until a box gesture runs
+        assert 'id="boxOverlay"' in html
+        assert html.index('id="cy"') < html.index('id="boxOverlay"') \
+            < html.index('id="cyHints"')
+        overlay_rule = re.search(r"#boxOverlay \{[^}]*\}", html).group(0)
+        assert "pointer-events: none" in overlay_rule
+        assert "display: none" in overlay_rule
+        touch_rule = re.search(r"#boxOverlay\.vp-touch \{[^}]*\}", html).group(0)
+        assert "dashed" in touch_rule
+        # the built-in cytoscape frame is hidden in the stylesheet; the
+        # background-press circle stays as the pan affordance at half the
+        # default radius (select mode hides it via setCanvasDragMode)
+        assert "'selection-box-opacity': 0" in html
+        assert "'active-bg-size': 15" in html
+        assert "'active-bg-opacity': 0.15" in html
+        # gesture wiring + deferred override
+        for wire in ("cy.on('boxstart', onBoxFrameStart)",
+                     "cy.on('tapdrag', onBoxFrameDrag)",
+                     "cy.on('boxend', onBoxFrameEnd)"):
+            assert wire in js
+        assert "setTimeout(() => {" in js
+        end_seg = js[js.index("function onBoxFrameEnd"):js.index("function onBoxFrameEnd") + 1200]
+        assert "applyDirectionalBoxSelection" in end_seg
+        # gesture start zeroes the overlay at the anchor (no stale-frame
+        # flash from the previous gesture) and the dashed border has a
+        # dead-zone so the style cannot flicker at the drag origin
+        start_seg = js[js.index("function onBoxFrameStart"):js.index("function onBoxFrameStart") + 1400]
+        assert "o.style.width = '0px'" in start_seg
+        assert "o.style.height = '0px'" in start_seg
+        drag_seg = js[js.index("function drawBoxOverlay"):js.index("function onBoxFrameStart")]
+        assert "Math.abs(dx) > 4" in drag_seg
+        # direction semantics: full containment vs touch
+        assert "const full = x2 >= x1;" in js
+        for fn in ("function boxNormalized", "function pointInRect",
+                   "function segmentIntersectsRect", "function nodeRect",
+                   "function nodeFullyInRect", "function nodeTouchesRect",
+                   "function edgeSamplePoints", "function edgeFullyInRect",
+                   "function edgeTouchesRect"):
+            assert fn in js
+        fn_seg = js[js.index("function applyDirectionalBoxSelection"):js.index("function drawBoxOverlay")]
+        assert "nodeFullyInRect(n, rect) : nodeTouchesRect(n, rect)" in fn_seg
+        assert "edgeFullyInRect(e, rect) : edgeTouchesRect(e, rect)" in fn_seg
+        # combined select/deselect: subtract when the frame only covers
+        # already-selected elements, ⇧ toggle, empty-frame no-op
+        assert "inFrame.difference(base).empty()" in fn_seg
+        assert "result = base.difference(inFrame);" in fn_seg
+        assert "base.difference(inFrame).union(inFrame.difference(base))" in fn_seg
+        assert "result = base;" in fn_seg
+
     def test_single_letter_shortcuts_skip_inputs_and_dialogs(self, network_html):
         js = _script_text(network_html)
         # H/E/L handlers ignore keystrokes while typing and while a dialog

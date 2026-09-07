@@ -91,6 +91,45 @@ function check(name, got, expected) {
     if (!pass) failures++;
 }
 
+// Scope for the directional box-selection geometry: the REAL frame tests
+// and selection applier run against a positioned headless graph.
+function buildBoxScope(cy) {
+    const names = ['isVisibleElement', 'boxNormalized', 'pointInRect',
+        'segmentIntersectsRect', 'nodeRect', 'nodeFullyInRect', 'nodeTouchesRect',
+        'edgeSamplePoints', 'edgeFullyInRect', 'edgeTouchesRect',
+        'applyDirectionalBoxSelection'];
+    const src = names.map(f => extractFunction(f, html)).join('\n') + `
+        return { apply: applyDirectionalBoxSelection, seg: segmentIntersectsRect };
+    `;
+    return new Function('cy', src)(cy);
+}
+
+// A(0,0), B(100,0), C(0,50); e1 A→B horizontal, e2 A→C vertical,
+// e3 B→C diagonal. Default nodes are 30x30 (±15 around the center).
+function buildBoxGraph() {
+    const cy = cytoscape({
+        headless: true,
+        styleEnabled: true,
+        elements: [
+            { data: { id: 'A', node_type: 'source', label: 'Apple' } },
+            { data: { id: 'B', node_type: 'intermediate', label: 'bee' } },
+            { data: { id: 'C', node_type: 'target', label: 'Cherry' } },
+            { group: 'edges', data: { id: 'e1', source: 'A', target: 'B', weight: 5 } },
+            { group: 'edges', data: { id: 'e2', source: 'A', target: 'C', weight: 5 } },
+            { group: 'edges', data: { id: 'e3', source: 'B', target: 'C', weight: 5 } },
+        ],
+    });
+    const coords = { A: [0, 0], B: [100, 0], C: [0, 50] };
+    for (const [id, [x, y]] of Object.entries(coords)) {
+        cy.getElementById(id).position({ x: x, y: y });
+    }
+    return cy;
+}
+
+function selectedIds(cy) {
+    return cy.elements(':selected').map(e => e.id()).sort();
+}
+
 // Promise-resolution assertions below need an async context.
 (async function main() {
 
@@ -188,6 +227,131 @@ function check(name, got, expected) {
     api.cycle(1);
     api.cycle(-1);
     check('empty matches never apply', api.getApplied(), before);
+}
+
+// ===== Test E: the canvas drag-mode switch drives cytoscape =====
+// (Select mode turns user panning OFF with box selection pinned ON —
+// cytoscape maps a non-pannable canvas to box-select-on-drag)
+{
+    const cy = buildGraph();
+    const els = {};
+    const document = {
+        getElementById: (id) => (els[id] = els[id] || {
+            toggles: [],
+            classList: { toggle(c, on) { this._t = this._t || []; this._t.push([c, !!on]); } },
+            setAttribute() {}
+        })
+    };
+    const hover = [];
+    function updateHoverInfo(m) { hover.push(m); }
+    const src = `
+        let canvasDragMode = 'pan';
+        ${extractFunction('setCanvasDragMode', html)}
+        return { set: (m) => setCanvasDragMode(m), mode: () => canvasDragMode };
+    `;
+    const api = new Function('cy', 'document', 'updateHoverInfo', src)(cy, document, updateHoverInfo);
+    check('pan is the default mode', api.mode(), 'pan');
+    check('pan mode keeps panning on', cy.userPanningEnabled(), true);
+    api.set('select');
+    check('select mode disables panning', cy.userPanningEnabled(), false);
+    check('box selection pinned on', cy.boxSelectionEnabled(), true);
+    check('mode tracker at select', api.mode(), 'select');
+    api.set('pan');
+    check('pan mode restores panning', cy.userPanningEnabled(), true);
+    check('feedback shown for both switches', hover.length, 2);
+    api.set('nonsense');
+    check('invalid mode is a no-op', cy.userPanningEnabled(), true);
+    check('invalid mode adds no feedback', hover.length, 2);
+}
+
+// ===== Test F: directional box selection (L→R full / R→L touch) =====
+// The reported asymmetry: nodes select on touch while edges need full
+// containment. Now the DIRECTION decides — L→R frames are strict for
+// everything, R→L (dashed) frames select on touch for everything. The
+// gesture is also a combined select/deselect: a frame over ONLY
+// already-selected elements removes them, ⇧+drag per-element toggles,
+// and an empty frame is a no-op.
+{
+    // the box (80,-20)-(140,20) swallows B entirely and CROSSES e1 near x=100
+    const rect = [80, -20, 140, 20];
+
+    // L→R = full: B in; e1 is REJECTED even though the frame crosses it
+    {
+        const cy = buildBoxGraph();
+        const api = buildBoxScope(cy);
+        api.apply(rect[0], rect[1], rect[2], rect[3], false, null);
+        check('L→R full selects only the contained node', selectedIds(cy), ['B']);
+    }
+    // R→L = touch (same frame, reversed drag): e1 and e3 join B
+    {
+        const cy = buildBoxGraph();
+        const api = buildBoxScope(cy);
+        api.apply(rect[2], rect[3], rect[0], rect[1], false, null);
+        check('R→L touch adds the crossed edges', selectedIds(cy), ['B', 'e1', 'e3']);
+    }
+    // a frame that only PARTLY overlaps A: full rejects it, touch selects it
+    {
+        const cy = buildBoxGraph();
+        const api = buildBoxScope(cy);
+        api.apply(10, -20, 140, 20, false, null);
+        check('L→R full skips the half-covered node', selectedIds(cy), ['B']);
+        api.apply(140, 20, 10, -20, false, null);
+        check('R→L touch selects the half-covered node',
+            selectedIds(cy), ['A', 'B', 'e1', 'e3']);
+    }
+    // ⇧ (additive) unions with the pre-gesture selection instead of
+    // replacing it
+    {
+        const cy = buildBoxGraph();
+        const api = buildBoxScope(cy);
+        cy.getElementById('A').select();
+        const base = cy.elements().filter(e => e.selected());
+        api.apply(rect[0], rect[1], rect[2], rect[3], true, base);
+        check('additive keeps the pre-gesture selection',
+            selectedIds(cy), ['A', 'B']);
+    }
+    // Liang–Barsky sanity: a segment crossing the frame with BOTH endpoints
+    // outside still counts as touching
+    {
+        const cy = buildBoxGraph();
+        const api = buildBoxScope(cy);
+        check('crossing segment touches', api.seg(50, -30, 50, 30,
+            { x1: 40, y1: -10, x2: 60, y2: 10 }), true);
+        check('non-crossing segment does not', api.seg(50, 12, 50, 30,
+            { x1: 40, y1: -10, x2: 60, y2: 10 }), false);
+    }
+    // ===== combined select/deselect =====
+    // a frame over ONLY already-selected elements DESELECTS them and keeps
+    // the rest of the selection
+    {
+        const cy = buildBoxGraph();
+        const api = buildBoxScope(cy);
+        cy.getElementById('A').select();
+        cy.getElementById('B').select();
+        const base = cy.elements().filter(e => e.selected());
+        api.apply(rect[0], rect[1], rect[2], rect[3], false, base);
+        check('frame over selected objects deselects them',
+            selectedIds(cy), ['A']);
+    }
+    // ⇧ over a MIX flips each covered element: A drops out, B and e1 join
+    {
+        const cy = buildBoxGraph();
+        const api = buildBoxScope(cy);
+        cy.getElementById('A').select();
+        const base = cy.elements().filter(e => e.selected());
+        api.apply(-20, -20, 140, 20, true, base);
+        check('⇧ toggle flips covered elements both ways',
+            selectedIds(cy), ['B', 'e1']);
+    }
+    // a frame that catches nothing leaves the selection alone
+    {
+        const cy = buildBoxGraph();
+        const api = buildBoxScope(cy);
+        cy.getElementById('A').select();
+        const base = cy.elements().filter(e => e.selected());
+        api.apply(200, 200, 210, 210, false, base);
+        check('empty frame is a no-op', selectedIds(cy), ['A']);
+    }
 }
 
 console.log(failures === 0 ? 'ALL UI-FEEDBACK TESTS PASSED' : failures + ' UI-FEEDBACK TEST(S) FAILED');

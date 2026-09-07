@@ -5640,6 +5640,52 @@ class VisualizePath:
             display: none;
             pointer-events: none;
         }}
+        /* Canvas drag-mode switch at the canvas top-right: Pan (default —
+           drag pans, Shift+drag box-selects) vs Select (plain drag
+           box-selects — the switch turns user panning off, which cytoscape
+           maps to box-select-on-drag). DOM overlay, never in exports. */
+        #cyHints {{
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            z-index: 50;
+            display: flex;
+            gap: 6px;
+        }}
+        .vp-cy-hint {{
+            background: var(--vp-hover-bg);
+            border: 1px solid var(--vp-border);
+            color: var(--vp-text-2);
+            font-size: 11px;
+            font-weight: 600;
+            padding: 3px 10px;
+            border-radius: 10px;
+            white-space: nowrap;
+            cursor: pointer;
+            font-family: inherit;
+        }}
+        .vp-cy-hint:hover {{
+            color: var(--vp-text-1);
+        }}
+        .vp-cy-hint.active {{
+            color: var(--vp-accent-arrange);
+            border-color: var(--vp-accent-arrange);
+        }}
+        /* Directional box-selection frame drawn over the canvas: SOLID border
+           for a left-to-right (FULL containment) frame, DASHED for a
+           right-to-left (TOUCH) frame. pointer-events:none keeps the gesture
+           on the canvas underneath. */
+        #boxOverlay {{
+            position: absolute;
+            display: none;
+            z-index: 40;
+            border: 1px solid var(--vp-accent-arrange);
+            background: rgba(25, 118, 210, 0.08);
+            pointer-events: none;
+        }}
+        #boxOverlay.vp-touch {{
+            border: 2px dashed var(--vp-accent-arrange);
+        }}
 
         /* Collapsed states: hide the top control bar and reclaim the right
            palette column so the canvas grows into the freed space. */
@@ -5887,7 +5933,7 @@ class VisualizePath:
     
     <!-- Color Palette Panel -->
     <div class="main">
-        <div id="cy"><div id="editBadge">✏️ EDIT MODE</div></div>
+        <div id="cy"><div id="editBadge">✏️ EDIT MODE</div><div id="boxOverlay"></div><div id="cyHints"><button type="button" id="panModeBtn" class="vp-cy-hint active" aria-pressed="true" onclick="setCanvasDragMode('pan')" title="Pan mode (default): drag the blank canvas to pan — Shift+drag still box-selects">✋ Pan</button><button type="button" id="selectModeBtn" class="vp-cy-hint" aria-pressed="false" onclick="setCanvasDragMode('select')" title="Select mode: drag the blank canvas to box-select without Shift — left-to-right frame = full selection, right-to-left dashed frame = touch; dragging over already-selected objects deselects them (⇧+drag toggles)">□ Select</button></div></div>
         <div class="color-palette" id="colorPalette">
             <div class="palette-content">
                 <!-- Edit accordion (collapsed by default) -->
@@ -6112,7 +6158,7 @@ class VisualizePath:
                     <h4>🖱️ Mouse</h4>
                     <table>
                         <tr><td class="vp-key">Click</td><td>Select a node / edge</td></tr>
-                        <tr><td class="vp-key">Shift+Click / drag</td><td>Multi-select (box select)</td></tr>
+                        <tr><td class="vp-key">Shift+Click / drag</td><td>Multi-select (box select) — L→R frame: FULL; R→L dashed frame: TOUCH; frame over selected objects deselects them (⇧ toggles)</td></tr>
                         <tr><td class="vp-key">Double-click</td><td>Highlight a node's connections</td></tr>
                         <tr><td class="vp-key">Right-click</td><td>Hide node / edge</td></tr>
                         <tr><td class="vp-key">Drag node</td><td>Move it (undoable)</td></tr>
@@ -6176,6 +6222,21 @@ class VisualizePath:
             container: document.getElementById('cy'),
             elements: elements,
             style: [
+                {{
+                    // Hide the built-in selection frame: the directional box
+                    // overlay below draws its own (solid = full, dashed =
+                    // touch). Both fill AND border of the built-in frame
+                    // multiply by selection-box-opacity, so 0 hides it all.
+                    // The background-press circle stays visible as the PAN
+                    // affordance — at half the default 30px radius; select
+                    // mode hides it (see setCanvasDragMode).
+                    selector: 'core',
+                    style: {{
+                        'selection-box-opacity': 0,
+                        'active-bg-size': 15,
+                        'active-bg-opacity': 0.15
+                    }}
+                }},
                 {{
                     selector: 'node',
                     style: {{
@@ -7679,6 +7740,221 @@ class VisualizePath:
             dialogCtl.cancel();
             closeDialogOverlay();
         }}
+
+        // ===== CANVAS DRAG MODE: pan (default) vs box-select =====
+        // Cytoscape pans on plain drag and box-selects on Shift+drag. In
+        // select mode user panning is switched OFF while box selection stays
+        // on — cytoscape treats a non-pannable canvas as box-select-on-drag,
+        // so a plain drag draws the selection box. The ✋ Pan button restores
+        // dragging-as-panning.
+        let canvasDragMode = 'pan';
+
+        function setCanvasDragMode(mode) {{
+            if (mode !== 'pan' && mode !== 'select') return;
+            if (typeof cy === 'undefined') return;
+            canvasDragMode = mode;
+            cy.userPanningEnabled(mode === 'pan');
+            cy.boxSelectionEnabled(true);
+            // The background-press circle is the pan affordance: visible at
+            // half the default radius in pan mode, hidden in select mode so
+            // a selection drag never flashes a pan symbol.
+            cy.style().selector('core').style({{
+                'active-bg-size': 15,
+                'active-bg-opacity': mode === 'pan' ? 0.15 : 0
+            }}).update();
+            const panBtn = document.getElementById('panModeBtn');
+            const selBtn = document.getElementById('selectModeBtn');
+            if (panBtn) {{
+                panBtn.classList.toggle('active', mode === 'pan');
+                panBtn.setAttribute('aria-pressed', String(mode === 'pan'));
+            }}
+            if (selBtn) {{
+                selBtn.classList.toggle('active', mode === 'select');
+                selBtn.setAttribute('aria-pressed', String(mode === 'select'));
+            }}
+            updateHoverInfo(mode === 'pan'
+                ? '✋ Pan mode: drag the canvas to pan (⇧+drag still box-selects)'
+                : '□ Select mode: drag the canvas to box-select (✋ Pan restores panning)');
+        }}
+
+        // ===== DIRECTIONAL BOX SELECTION: L→R full / R→L touch =====
+        // Design-tool conventions: a LEFT→RIGHT frame selects only elements
+        // FULLY inside it (solid frame); a RIGHT→LEFT frame selects anything
+        // the frame TOUCHES (dashed frame). The gesture stays cytoscape's
+        // (boxstart/tapdrag/boxend) but its built-in frame is hidden via
+        // selection-box-opacity and its selection result is re-derived here.
+        let boxStartPos = null;        // model-coords anchor of the frame
+        let boxStartRendered = null;   // rendered anchor for overlay drawing
+        let boxStartSelection = null;  // pre-gesture selection (⇧ additive)
+        let boxAdditive = false;
+
+        function boxNormalized(x1, y1, x2, y2) {{
+            return {{ x1: Math.min(x1, x2), y1: Math.min(y1, y2), x2: Math.max(x1, x2), y2: Math.max(y1, y2) }};
+        }}
+
+        function pointInRect(px, py, r) {{
+            return px >= r.x1 && px <= r.x2 && py >= r.y1 && py <= r.y2;
+        }}
+
+        // Liang–Barsky clip: does the segment cross the rect at all?
+        function segmentIntersectsRect(x1, y1, x2, y2, r) {{
+            let t0 = 0, t1 = 1;
+            const dx = x2 - x1, dy = y2 - y1;
+            const p = [-dx, dx, -dy, dy];
+            const q = [x1 - r.x1, r.x2 - x1, y1 - r.y1, r.y2 - y1];
+            for (let i = 0; i < 4; i++) {{
+                if (p[i] === 0) {{
+                    if (q[i] < 0) return false;
+                }} else {{
+                    const t = q[i] / p[i];
+                    if (p[i] < 0) {{ if (t > t1) return false; if (t > t0) t0 = t; }}
+                    else {{ if (t < t0) return false; if (t < t1) t1 = t; }}
+                }}
+            }}
+            return true;
+        }}
+
+        function nodeRect(node) {{
+            const p = node.position();
+            const hw = node.width() / 2, hh = node.height() / 2;
+            return {{ x1: p.x - hw, y1: p.y - hh, x2: p.x + hw, y2: p.y + hh }};
+        }}
+
+        function nodeFullyInRect(node, r) {{
+            const nr = nodeRect(node);
+            return nr.x1 >= r.x1 && nr.x2 <= r.x2 && nr.y1 >= r.y1 && nr.y2 <= r.y2;
+        }}
+
+        function nodeTouchesRect(node, r) {{
+            const nr = nodeRect(node);
+            return nr.x1 <= r.x2 && nr.x2 >= r.x1 && nr.y1 <= r.y2 && nr.y2 >= r.y1;
+        }}
+
+        // Endpoints + curve midpoint: exact for straight edges, a good
+        // approximation for the curved reciprocal edges. Headless cores
+        // (tests) have no renderer midpoint — the straight-line midpoint
+        // is the exact answer there anyway.
+        function edgeSamplePoints(edge) {{
+            const sp = edge.source().position(), tp = edge.target().position();
+            const pts = [[sp.x, sp.y], [tp.x, tp.y]];
+            try {{
+                const mid = edge.midpoint();
+                pts.push([mid.x, mid.y]);
+            }} catch (err) {{
+                pts.push([(sp.x + tp.x) / 2, (sp.y + tp.y) / 2]);
+            }}
+            return pts;
+        }}
+
+        function edgeFullyInRect(edge, r) {{
+            return edgeSamplePoints(edge).every(p => pointInRect(p[0], p[1], r));
+        }}
+
+        function edgeTouchesRect(edge, r) {{
+            if (edgeSamplePoints(edge).some(p => pointInRect(p[0], p[1], r))) return true;
+            const sp = edge.source().position(), tp = edge.target().position();
+            return segmentIntersectsRect(sp.x, sp.y, tp.x, tp.y, r);
+        }}
+
+        // Re-derive the box selection: full containment for L→R frames,
+        // touch for R→L frames — combined select/deselect semantics:
+        //   plain drag  → if the frame covers ONLY already-selected
+        //                 elements it DESELECTS them from the selection;
+        //                 otherwise it replaces the selection with the
+        //                 frame contents.
+        //   ⇧ drag      → per-element TOGGLE: covered selected elements
+        //                 drop out, covered unselected ones join; the
+        //                 outside selection is kept.
+        // An empty frame is a no-op. `baseSelection` is the PRE-gesture
+        // selection — the live state is already tainted by cytoscape's
+        // built-in box select when this runs (deferred after boxend).
+        function applyDirectionalBoxSelection(x1, y1, x2, y2, additive, baseSelection) {{
+            const rect = boxNormalized(x1, y1, x2, y2);
+            const full = x2 >= x1;  // left-to-right = full containment
+            let inFrame = cy.collection();
+            cy.nodes().filter(isVisibleElement).forEach(n => {{
+                if (full ? nodeFullyInRect(n, rect) : nodeTouchesRect(n, rect)) inFrame = inFrame.union(n);
+            }});
+            cy.edges().filter(isVisibleElement).forEach(e => {{
+                if (full ? edgeFullyInRect(e, rect) : edgeTouchesRect(e, rect)) inFrame = inFrame.union(e);
+            }});
+            const base = baseSelection || cy.collection();
+            let result;
+            if (inFrame.empty()) {{
+                result = base;  // caught nothing — leave the selection alone
+            }} else if (additive) {{
+                result = base.difference(inFrame).union(inFrame.difference(base));
+            }} else if (inFrame.difference(base).empty()) {{
+                // everything the frame covers was already selected → remove
+                result = base.difference(inFrame);
+            }} else {{
+                result = inFrame;  // plain select: replace with the frame contents
+            }}
+            cy.batch(() => {{
+                cy.elements().unselect();
+                result.select();
+            }});
+            return result;
+        }}
+
+        function drawBoxOverlay(rp) {{
+            const o = document.getElementById('boxOverlay');
+            if (!o || !boxStartRendered) return;
+            o.style.left = Math.min(boxStartRendered.x, rp.x) + 'px';
+            o.style.top = Math.min(boxStartRendered.y, rp.y) + 'px';
+            o.style.width = Math.abs(rp.x - boxStartRendered.x) + 'px';
+            o.style.height = Math.abs(rp.y - boxStartRendered.y) + 'px';
+            // touch mode (right-to-left) shows the dashed frame — with a
+            // small dead-zone so the border style doesn't flicker while the
+            // drag direction is still ambiguous at the anchor
+            const dx = rp.x - boxStartRendered.x;
+            if (Math.abs(dx) > 4) o.classList.toggle('vp-touch', dx < 0);
+        }}
+
+        function onBoxFrameStart(e) {{
+            boxStartPos = e.position;
+            boxStartRendered = e.renderedPosition ||
+                {{ x: e.position.x * cy.zoom() + cy.pan().x, y: e.position.y * cy.zoom() + cy.pan().y }};
+            boxAdditive = !!(e.originalEvent &&
+                (e.originalEvent.shiftKey || e.originalEvent.metaKey || e.originalEvent.ctrlKey));
+            boxStartSelection = cy.elements().filter(el => el.selected());
+            const o = document.getElementById('boxOverlay');
+            if (o) {{
+                // zero-size at the anchor: showing last gesture's leftover
+                // geometry for a frame reads as a flash at the drag start
+                o.classList.remove('vp-touch');
+                o.style.display = 'block';
+                o.style.left = boxStartRendered.x + 'px';
+                o.style.top = boxStartRendered.y + 'px';
+                o.style.width = '0px';
+                o.style.height = '0px';
+            }}
+        }}
+
+        function onBoxFrameDrag(e) {{
+            if (boxStartPos && e.renderedPosition) drawBoxOverlay(e.renderedPosition);
+        }}
+
+        function onBoxFrameEnd(e) {{
+            if (!boxStartPos) return;
+            const endPos = e.position || boxStartPos;
+            const x1 = boxStartPos.x, y1 = boxStartPos.y;
+            const additive = boxAdditive, baseSelection = boxStartSelection;
+            boxStartPos = null; boxStartRendered = null;
+            const o = document.getElementById('boxOverlay');
+            if (o) o.style.display = 'none';
+            // cytoscape applies its built-in box selection right AFTER
+            // emitting boxend — defer past it, then override with the
+            // directional result.
+            setTimeout(() => {{
+                applyDirectionalBoxSelection(x1, y1, endPos.x, endPos.y, additive, baseSelection);
+                boxStartSelection = null; boxAdditive = false;
+            }}, 0);
+        }}
+
+        cy.on('boxstart', onBoxFrameStart);
+        cy.on('tapdrag', onBoxFrameDrag);
+        cy.on('boxend', onBoxFrameEnd);
 
         // ===== COMMAND STRIP: node search =====
         let searchMatches = [];
