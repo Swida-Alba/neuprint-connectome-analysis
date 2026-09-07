@@ -13,6 +13,8 @@ Comprehensive guides for all visualization types in the DROCAT toolkit.
 | [Network Guide](./Network_Guide.md)                           | Basic network visualization                          |
 | [Sankey Guide](./Sankey_Guide.md)                             | Flow-based diagram guide                             |
 | [3D Skeleton Guide](./3D_Skeleton_Guide.md)                   | 3D anatomical visualization                          |
+| [Skeleton Pipeline Report](../technical/SKELETON_DATA_PIPELINE.md) | Skeleton fetch/cache/simplification + templates/ROIs |
+| [Skeleton Pipeline Diagram](./skeleton_pipeline.html)         | Editorial data-flow rendering of the pipeline        |
 
 ## Recent Updates (2026)
 

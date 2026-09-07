@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FAFB ROI mesh resolution — first run vs cache used · Flowchart</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --paper: #f5f5f5; --ink: #2d3142; --muted: #4f5d75; --soft: #7a8399;
+    --accent: #eb6c36; --sans: 'Geist', system-ui, sans-serif;
+    --serif: 'Instrument Serif', serif; --mono: 'Geist Mono', ui-monospace, monospace;
+  }
+  body { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 3rem 2rem; background: var(--paper); color: var(--ink); font-family: var(--sans); }
+  .frame { width: 100%; max-width: 1100px; }
+  .eyebrow { margin-bottom: 0.5rem; color: var(--muted); font: 500 0.66rem var(--mono); letter-spacing: 0.18em; text-transform: uppercase; }
+  h1 { margin-bottom: 1.5rem; color: var(--ink); font: 400 clamp(1.5rem, 2.4vw + 0.75rem, 2rem)/1.15 var(--serif); letter-spacing: -0.02em; }
+  svg { display: block; width: 100%; min-width: 700px; }
+  .node-title { fill: var(--ink); font: 600 12px var(--sans); text-anchor: middle; }
+  .node-sub { fill: var(--muted); font: 400 9px var(--mono); text-anchor: middle; }
+  .arrow-label { fill: var(--ink); font: 600 9px var(--mono); }
+  .rail-label { fill: var(--muted); font: 600 10px var(--mono); letter-spacing: 0.14em; text-anchor: middle; }
+  .note-text { fill: var(--soft); font: 400 9px var(--mono); text-anchor: middle; }
+  footer { margin-top: 1.5rem; color: var(--soft); font: 400 0.72rem var(--mono); }</style>
+</head>
+<body>
+  <main class="frame">
+    <p class="eyebrow">Flowchart · Diagram Design</p>
+    <h1>FAFB ROI mesh resolution — first run vs cache used</h1>
+<svg viewBox="0 0 840 700" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="fc-title fc-desc">
+<title id="fc-title">FAFB ROI mesh resolution — first run vs cache used</title>
+<desc id="fc-desc">Exact decision flow for one mesh_roi entry on a FAFB scene: transformed-cache reuse, male-cns fetch, bridge into FLYWIRE space, then the data-level tilt correction.</desc>
+<defs>
+<pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="11" cy="11" r="0.8" fill="rgba(45,49,66,0.10)"/></pattern>
+<marker id="arr-muted" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 Z" fill="#4f5d75"/></marker>
+<marker id="arr-accent" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 Z" fill="#eb6c36"/></marker>
+</defs>
+<rect width="840" height="700" fill="#f5f5f5"/>
+<rect width="840" height="700" fill="url(#dots)"/>
+<rect width="840" height="700" fill="#f5f5f5"/>
+<rect width="840" height="700" fill="url(#dots)"/>
+<text class="rail-label" x="130" y="150">FIRST RUN</text>
+<text class="rail-label" x="760" y="150">CACHE USED</text>
+<rect x="170" y="20" width="220" height="34" rx="17" fill="#f5f5f5" stroke="#2d3142" stroke-width="1"/>
+<text class="node-title" x="280.0" y="41.0">mesh_roi entry 'X' (FAFB scene)</text>
+<path d="M 280 54 L 280 76" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arr-muted)"/>
+<rect x="150" y="76" width="260" height="44" rx="6" fill="#f5f5f5" stroke="rgba(45,49,66,0.25)" stroke-width="1"/>
+<text class="node-title" x="280.0" y="94">Dataset cache lookup</text>
+<text class="node-sub" x="280.0" y="110">meshes/{X}.json (case-safe name)</text>
+<path d="M 280 120 L 280 142" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arr-muted)"/>
+<polygon points="280,160.0 405.0,196 280,232.0 155.0,196" fill="#f5f5f5" stroke="#2d3142" stroke-width="1"/>
+<text class="node-title" x="280" y="194.0">transformed cache hit?</text>
+<text class="node-title" x="280" y="206.0">(meshes_transformed/FLYWIRE)</text>
+<path d="M 405 196 L 470 196 L 470 208" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arr-muted)"/>
+<text class="arrow-label" x="476" y="190">yes</text>
+<rect x="410" y="208" width="220" height="60" rx="6" fill="#f5f5f5" stroke="rgba(45,49,66,0.25)" stroke-width="1"/>
+<text class="node-title" x="520.0" y="226">plot as-is</text>
+<text class="node-sub" x="520.0" y="242">already FLYWIRE nm (tilt incl.)</text>
+<path d="M 530 268 L 800 268 L 800 612 L 392 612" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arr-muted)"/>
+<path d="M 280 232 L 280 250" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arr-muted)"/>
+<rect x="264.0" y="233.0" width="34" height="14" fill="#f5f5f5"/>
+<text class="arrow-label" x="280.0" y="244.0">no</text>
+<rect x="150" y="250" width="260" height="52" rx="6" fill="#f5f5f5" stroke="rgba(45,49,66,0.25)" stroke-width="1"/>
+<text class="node-title" x="280.0" y="268">male-cns:v0.9 fetch_roi</text>
+<text class="node-sub" x="280.0" y="284">named ROIs only · failures logged</text>
+<path d="M 280 302 L 280 324" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arr-muted)"/>
+<polygon points="280,340.0 380.0,372 280,404.0 180.0,372" fill="#f5f5f5" stroke="#2d3142" stroke-width="1"/>
+<text class="node-title" x="280" y="370.0">ROI found in</text>
+<text class="node-title" x="280" y="382.0">male-cns?</text>
+<path d="M 380 372 L 450 372 L 450 384" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arr-muted)"/>
+<text class="arrow-label" x="456" y="366">no</text>
+<rect x="380" y="384" width="230" height="40" rx="20" fill="#f5f5f5" stroke="#2d3142" stroke-width="1"/>
+<text class="node-title" x="495.0" y="408.0">ROI skipped (warning)</text>
+<path d="M 280 404 L 280 428" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arr-muted)"/>
+<rect x="264.0" y="408.0" width="34" height="14" fill="#f5f5f5"/>
+<text class="arrow-label" x="280.0" y="419.0">yes</text>
+<rect x="150" y="428" width="260" height="44" rx="6" fill="#f5f5f5" stroke="rgba(45,49,66,0.25)" stroke-width="1"/>
+<text class="node-title" x="280.0" y="446">Save raw to dataset cache</text>
+<text class="node-sub" x="280.0" y="462">space: JRCFIB2022Mraw</text>
+<path d="M 280 472 L 280 496" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arr-muted)"/>
+<rect x="130" y="496" width="300" height="56" rx="6" fill="rgba(235,108,54,0.07)" stroke="#eb6c36" stroke-width="1"/>
+<text class="node-title focal-text" x="280.0" y="514">Bridge → FLYWIRE + tilt</text>
+<text class="node-sub" x="280.0" y="530">JRCFIB2022Mraw → JRCFIB2022M → FLYWIRE → level</text>
+<path d="M 280 552 L 280 574" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arr-muted)"/>
+<circle cx="280" cy="578" r="4" fill="#2d3142"/>
+<rect x="175" y="592" width="210" height="40" rx="20" fill="#f5f5f5" stroke="#2d3142" stroke-width="1"/>
+<text class="node-title" x="280.0" y="616.0">plot (FLYWIRE nm, level)</text>
+<text class="note-text" x="280" y="662">tilt correction is DATA-LEVEL (rotates coordinates of mesh + neurons + synapses + ROIs alike) — the FAFB camera itself has no tilt</text>
+<text class="note-text" x="280" y="680">the hemibrain fallback does not apply to FAFB scenes</text>
+</svg>
+    <footer>Exactly as coded in VisualizeSkeleton.plot_mesh(): dataset cache → transformed cache (FLYWIRE) → male-cns:v0.9 fetch_roi → bridge JRCFIB2022Mraw → JRCFIB2022M → FLYWIRE → tilt level. The hemibrain fallback does not apply to FAFB scenes.</footer>
+  </main>
+</body>
+</html>
