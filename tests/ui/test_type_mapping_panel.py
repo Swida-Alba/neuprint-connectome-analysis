@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+import ui.history_store as hs
+import ui.type_mapping_history as tmh
 from ui.neuron_index import clear_neuron_index_cache
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -26,9 +28,15 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture
-def panel_client():
+def panel_client(tmp_path, monkeypatch):
     from nicegui import Client, ui
     from nicegui.page import page
+
+    # the panel's query box keeps its own history store; isolate both it
+    # and the shared neuron history so tests never touch the real files
+    monkeypatch.setattr(tmh, "_HISTORY_PATH",
+                        tmp_path / "type_mapping_history.json")
+    monkeypatch.setattr(hs, "_HISTORY_PATH", tmp_path / "neuron_history.json")
 
     clear_neuron_index_cache()
     # Warm the type mapper up front: its first load takes a minute and
@@ -167,6 +175,42 @@ def test_global_search_composes_the_selection(panel_client):
                    'Linker paths', 'Export bridges (CSV)'):
         assert any(action in str(getattr(b, 'text', ''))
                    for b in _buttons(client)), action
+    # the confirmed search is recorded in the panel's OWN history store —
+    # never in the shared neuron-query history of the analysis tabs
+    assert tmh.recent() == ['APDN3']
+    assert tmh.datasets_of('APDN3') == sorted([MCNS, FAFB])
+    assert hs.recent() == []
+
+
+def test_failed_search_never_records_history(panel_client):
+    """A zero-hit query matches no type, so nothing lands in the store."""
+    client, button, _selection = panel_client
+    search = button.search_container
+    search.add_values(['zzz_no_such_type_zzz'])
+    assert _click_button(client, 'Search mappings')
+    assert tmh.recent() == []
+    assert hs.recent() == []
+
+
+def test_history_rows_show_dataset_and_column_hints(panel_client):
+    """The panel's Recent list annotates rows like its suggestions do."""
+    client, button, _selection = panel_client
+    search = button.search_container
+    search.add_values(['APDN3'])
+    assert _click_button(client, 'Search mappings')
+
+    # refocus the empty editor: the panel's own Recent list carries the
+    # confirmed query with the suggestion-style gray hint
+    focus = next(
+        listener for listener in search.chip_input._event_listeners.values()
+        if listener.type == 'focus'
+    )
+    search.chip_input._handle_event({'listener_id': focus.id, 'args': None})
+    labels = _labels(client)
+    assert 'APDN3' in labels
+    # APDN3 lives in FAFB's type column only, so the hint is exactly the
+    # matched column · dataset pair its suggestion row would show
+    assert 'type · flywire_FAFB_v783' in labels
 
 
 def test_empty_search_produces_no_results(panel_client):

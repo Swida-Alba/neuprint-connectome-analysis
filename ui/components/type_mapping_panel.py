@@ -81,10 +81,19 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                 unit_label="query",
                 show_upload=False,
                 suggestions=_suggest,
+                # Standalone history: the panel's Recent/Frequent list reads
+                # and writes its own store, so panel searches never mix with
+                # the analysis tabs' neuron-query history.
+                history_kind="type_mapping",
+                # History rows annotated like suggestion rows: the matched
+                # column and dataset(s) ("type · flywire_FAFB_v783") from
+                # the current selection's local pools.
+                history_hint_datasets=lambda: list(get_datasets() or []),
                 hint="One query per chip. The filter modes match the standard "
                      "query (exact / starts with / contains / ends with / "
                      "regex); dataset-aware type suggestions from the "
-                     "selected datasets appear as you type.",
+                     "selected datasets appear as you type. This box keeps "
+                     "its own query history, separate from the tabs.",
             ).classes("w-full")
             with ui.row():
                 # lazy dispatch: _run_click is defined below the dialog build
@@ -384,6 +393,7 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
             outcome = await loop.run_in_executor(
                 None, lambda: _compute(queries, datasets, mode))
             _apply(outcome)
+            _record_panel_history(queries, datasets, outcome)
         except Exception:
             logger.exception(
                 "type mapping search failed (queries=%r, datasets=%r)",
@@ -392,6 +402,28 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                       "check the query and try again.", type="negative")
         finally:
             _set_loading(False)
+
+    def _record_panel_history(queries, datasets, outcome) -> None:
+        """Record the searched chips in the panel's OWN history store.
+
+        Only confirmed hits are recorded, mirroring the shared neuron
+        history's rule: at least one queried type must have matched a
+        dataset (the per-dataset summary's matched-type count). Failed or
+        zero-hit searches never pollute the Recent/Frequent list.
+        """
+        matched = sum(int(row.get("types") or 0)
+                      for row in (outcome.get("summary") or []))
+        if not matched:
+            return
+        try:
+            from ..type_mapping_history import record as _record_history
+
+            _record_history([str(q) for q in queries],
+                            datasets=[str(d) for d in datasets])
+        except Exception:
+            # history is a convenience, never an error
+            logger.warning("type mapping history record failed",
+                           exc_info=True)
 
     def _collect_queries() -> tuple:
         mode, chips = search.get_value()

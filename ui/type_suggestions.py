@@ -430,6 +430,86 @@ def dataset_aware_suggestions(
     return entries
 
 
+def dataset_aware_history_hints(
+    values: Sequence[str],
+    datasets: Sequence[str],
+) -> Dict[str, Optional[str]]:
+    """Suggestion-style gray hints for query-history rows.
+
+    The cross-dataset counterpart of :func:`dataset_aware_suggestions` for
+    COMPLETE stored queries: each value gets the same gray hint its
+    auto-suggestion row shows — the matched column and the dataset it came
+    from (``type · male-cns:v1.0``), with identical columns grouped across
+    datasets (``type · ds1, ds2``) and differing columns listed per dataset
+    (``type · ds1 · instance · ds2``). Membership is exact, with the same
+    staged priority as suggestions: a type match hides same-value matches in
+    the other columns (suggestions stop at the first non-empty stage), and a
+    numeric value resolves through the bodyId pool to its cached instance.
+    Values found in no local pool map to ``None`` so their rows stay
+    unannotated — history also keeps regex patterns that no pool contains.
+    """
+    wanted: List[str] = []
+    seen: set = set()
+    for value in values or []:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            wanted.append(text)
+    hints: Dict[str, Optional[str]] = {value: None for value in wanted}
+    if not wanted:
+        return hints
+
+    # value -> [(hint, dataset)] in the caller's dataset order.
+    pairs: Dict[str, List[Tuple[str, str]]] = {}
+    for dataset in datasets or []:
+        if not dataset:
+            continue
+        pools = get_dataset_pools(str(dataset))
+        if not pools:
+            continue
+        # Per-column membership sets, built once per dataset for the whole
+        # batch of history rows (the pools themselves are already cached).
+        columns = [
+            column for column in viewer_search_columns(pools.keys())
+            if column != "bodyId"
+        ]
+        sets = {
+            column: {v for v, _ in pools.get(column, [])}
+            for column in columns
+        }
+        body_ids: Optional[Dict[str, str]] = None
+        for value in wanted:
+            if re.fullmatch(r"\d+(?:\.0+)?", value):
+                if body_ids is None:
+                    body_ids = {
+                        v: hint for v, hint in pools.get("bodyId", [])
+                    }
+                key = (value.split(".", 1)[0]
+                       if re.fullmatch(r"\d+\.0+", value) else value)
+                hint = body_ids.get(key)
+                if hint:
+                    pairs.setdefault(value, []).append(
+                        (str(hint), str(dataset)))
+                continue
+            if value in sets.get("type", set()):
+                pairs.setdefault(value, []).append(("type", str(dataset)))
+                continue
+            for column in columns:
+                if column != "type" and value in sets[column]:
+                    pairs.setdefault(value, []).append(
+                        (column, str(dataset)))
+
+    for value, entries in pairs.items():
+        grouped: Dict[str, List[str]] = {}
+        for hint, dataset in entries:
+            grouped.setdefault(hint, []).append(dataset)
+        hints[value] = " · ".join(
+            f"{hint} · {', '.join(ds_list)}"
+            for hint, ds_list in grouped.items()
+        )
+    return hints
+
+
 def filter_candidate_entries(
     text: str,
     candidates: Sequence[Entry],

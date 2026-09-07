@@ -73,6 +73,7 @@ config_local.json
 ui/local_config.json
 ui/neuron_history.json
 ui/line_history.json
+ui/type_mapping_history.json
 
 # Reorganization updates
 output/

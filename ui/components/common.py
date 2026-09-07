@@ -684,11 +684,14 @@ def neuron_list_input(
     available_neurons: Optional[Callable[[], object]] = None,
     history_datasets: Optional[Callable[[], object]] = None,
     history_kind: Optional[str] = None,
+    history_hint_datasets: Optional[Callable[[], object]] = None,
     show_history_datasets: bool = False,
     suggestion_min_chars: int = 1,
     suggestion_limit: int = 50,
     show_count: bool = True,
     show_clear: bool = True,
+    filter_dense: bool = True,
+    input_actions: Optional[Callable[[], None]] = None,
 ) -> ui.element:
     """
     Create a chip-based list input for neurons or driver lines.
@@ -706,6 +709,12 @@ def neuron_list_input(
       with ``unit_label`` ("neuron" by default; pass e.g. "threshold" for
       non-neuron chip inputs so the counter reads "3 thresholds" instead of
       "3 neurons").
+    - ``filter_dense`` (default True) keeps the Match-by select compact;
+      pass ``False`` to render it at the chip input's height (same-row
+      layouts that place other controls beside it).
+    - ``input_actions``: optional callback invoked INSIDE the input row,
+      right of the Match-by select — create action buttons there (they
+      share the row with the chip input, which narrows accordingly).
     - ``suggestions``: optional provider ``typed_text -> [(value, hint)]``
       powering the auto-suggest dropdown (dataset type/instance/bodyId names
       with the searched column as a gray hint). The provider is prefiltered
@@ -718,7 +727,14 @@ def neuron_list_input(
       rows (the searched column, or the cached instance for bodyIds). Set
       ``history_kind="line"`` for a driver-line input; line history is stored
       separately from neuron history and works even without a suggestion
-      provider. With
+      provider. Set ``history_kind="type_mapping"`` for the Type Mapping
+      panel's query box, which keeps its own standalone history store so
+      panel searches never mix with the analysis tabs' query history. With
+      ``history_hint_datasets`` (a dataset getter), history rows render the
+      same gray hint as auto-suggestion rows — the matched column and the
+      dataset(s) it came from (``type · male-cns:v1.0``) — computed with
+      exact membership over those datasets' local pools; the history list
+      itself stays unscoped. With
       ``show_history_datasets=True`` (the cross-dataset tab), history rows
       additionally show a gray tag per dataset the value was recorded for —
       restricted to the datasets currently selected in the tab's dataset
@@ -741,8 +757,9 @@ def neuron_list_input(
 
     Returns container with .get_value() -> (filter_mode, neuron_list).
     """
-    if history_kind not in (None, "neuron", "line"):
-        raise ValueError("history_kind must be 'neuron', 'line', or None")
+    if history_kind not in (None, "neuron", "line", "type_mapping"):
+        raise ValueError(
+            "history_kind must be 'neuron', 'line', 'type_mapping', or None")
     history_enabled = suggestions is not None or history_kind is not None
 
     def _unit(count: int) -> str:
@@ -823,11 +840,20 @@ def neuron_list_input(
                     },
                     value="exact",
                     label="Match by",
-                ).classes("w-32 drocat-select drocat-neuron-match-filter").props("dense outlined").tooltip(
+                ).classes("w-32 drocat-select drocat-neuron-match-filter").props(
+                    "dense outlined" if filter_dense else "outlined"
+                ).tooltip(
                     "How the query matches the Search Columns: exact, prefix "
                     "(starts with), substring (contains), suffix (ends with) "
                     "or regex pattern"
                 )
+
+            if input_actions is not None:
+                # Extra row widgets (e.g. an action button) placed to the
+                # RIGHT of the Match-by select — callers keep their own
+                # handlers; ``filter_dense=False`` lets them match the
+                # chip input's height.
+                input_actions()
 
             if show_upload:
                 # Compact upload: hidden inside a dropdown attached to the input row
@@ -1375,6 +1401,14 @@ def neuron_list_input(
                     recent as _recent,
                     remove as _remove,
                 )
+            elif history_kind == "type_mapping":
+                from ..type_mapping_history import (
+                    datasets_of as _datasets_of,
+                    frequent as _frequent,
+                    prune_orphaned_custom as _prune_orphaned_custom,
+                    recent as _recent,
+                    remove as _remove,
+                )
             else:
                 from ..history_store import (
                     datasets_of as _datasets_of,
@@ -1435,6 +1469,30 @@ def neuron_list_input(
                 _close_suggest()
                 return
 
+            # Suggestion-style hints (Type Mapping panel): one batched,
+            # exact-membership lookup over the getter's datasets annotates
+            # every row with the matched column and dataset(s) — the same
+            # gray hint its auto-suggestion rows show. Built once per menu
+            # render; a dataset without local pools simply contributes no
+            # hint, and the history list itself stays unscoped.
+            _history_hints = None
+            if history_hint_datasets is not None:
+                try:
+                    hint_datasets = [
+                        str(dataset).strip()
+                        for dataset in (history_hint_datasets() or [])
+                        if str(dataset).strip()
+                    ]
+                except Exception:
+                    hint_datasets = []
+                if hint_datasets:
+                    from ..type_suggestions import (
+                        dataset_aware_history_hints,
+                    )
+
+                    _history_hints = dataset_aware_history_hints(
+                        [*recents, *freqs], hint_datasets)
+
             def _remove_history_value(value: str):
                 # Removing an item is deliberately independent from picking
                 # it. The client-side stopPropagation below keeps the parent
@@ -1445,7 +1503,10 @@ def neuron_list_input(
             def _history_hint(value: str) -> str | None:
                 """Category hint for a history row, mirroring suggestion rows.
 
-                Body-ID rows use the cached instance as their hint; other
+                With ``history_hint_datasets`` the row carries the full
+                suggestion-style hint (matched column · dataset(s)), numeric
+                rows included (cached instance per dataset). Otherwise
+                body-ID rows use the cached instance as their hint and other
                 values resolve their searched column (type/instance/bodyId)
                 from the active dataset pools, so history rows read like
                 auto-suggestion rows.
@@ -1453,6 +1514,8 @@ def neuron_list_input(
                 text = str(value).strip()
                 if not text:
                     return None
+                if _history_hints is not None:
+                    return _history_hints.get(text)
                 if re.fullmatch(r"\d+(?:\.0+)?", text):
                     if suggestions is None:
                         return None

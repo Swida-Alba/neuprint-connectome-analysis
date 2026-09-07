@@ -19,6 +19,7 @@ from nicegui.page import page  # noqa: E402
 
 import ui.history_store as hs  # noqa: E402
 import ui.line_history_store as lhs  # noqa: E402
+import ui.type_mapping_history as tmh  # noqa: E402
 from ui.components.output_panel import OutputPanel  # noqa: E402
 from ui.tabs.connectivity import (  # noqa: E402
     create_connectivity_tab,
@@ -33,6 +34,8 @@ from ui.tabs.nb_find_neuron import create_nb_find_neuron_tab  # noqa: E402
 def isolated_history(tmp_path, monkeypatch):
     monkeypatch.setattr(hs, "_HISTORY_PATH", tmp_path / "neuron_history.json")
     monkeypatch.setattr(lhs, "_HISTORY_PATH", tmp_path / "line_history.json")
+    monkeypatch.setattr(tmh, "_HISTORY_PATH",
+                        tmp_path / "type_mapping_history.json")
     return hs
 
 
@@ -261,3 +264,126 @@ class TestLineHistoryMenu:
         ]
         assert "R10A06" in texts
         assert "aMe12" not in texts
+
+
+class TestTypeMappingHistory:
+    def test_store_is_standalone(
+        self, isolated_history
+    ):
+        """Panel records land in the type-mapping store only; the shared
+        neuron and driver-line stores stay untouched."""
+        tmh.record(["APDN3", "aMe.*"], now="2026-08-11T11:00:00",
+                   datasets=["flywire_FAFB_v783", "male-cns:v1.0"])
+
+        assert tmh.recent() == ["APDN3", "aMe.*"]
+        assert tmh.datasets_of("APDN3") == [
+            "flywire_FAFB_v783", "male-cns:v1.0"]
+        assert isolated_history.recent() == []
+        assert lhs.recent() == []
+
+    def test_panel_input_shows_type_mapping_history_only(
+        self, isolated_history
+    ):
+        tmh.record(["APDN3"], now="2026-08-11T11:00:00")
+        isolated_history.record(["aMe12"], now="2026-08-11T11:01:00")
+
+        client = Client(page("/history-type-mapping-menu"))
+        with client:
+            from ui.components.common import neuron_list_input
+
+            box = neuron_list_input(
+                label="Types to map",
+                show_filter=False,
+                show_upload=False,
+                history_kind="type_mapping",
+            )
+
+        focus = next(
+            listener for listener in box.chip_input._event_listeners.values()
+            if listener.type == "focus"
+        )
+        box.chip_input._handle_event({"listener_id": focus.id, "args": None})
+        texts = [
+            element.text for element in client.elements.values()
+            if getattr(element, "text", "")
+        ]
+        assert "APDN3" in texts
+        assert "aMe12" not in texts
+
+
+def _fake_pools(monkeypatch):
+    """Two-dataset pool fixture for hint tests.
+
+    APDN3 is a type in ds-a and only an instance in ds-b; bodyId 123 has
+    the cached instance Neuron001 in ds-b.
+    """
+    from ui import type_suggestions as ts
+
+    pools = {
+        "ds-a": {
+            "type": [("APDN3", "type"), ("aMe12", "type")],
+            "instance": [("APDN3", "instance"), ("Neuron001", "instance")],
+        },
+        "ds-b": {
+            "instance": [("APDN3", "instance")],
+            "bodyId": [("123", "Neuron001")],
+        },
+    }
+
+    def fake_get_dataset_pools(dataset):
+        return pools.get(str(dataset), {})
+
+    monkeypatch.setattr(ts, "get_dataset_pools", fake_get_dataset_pools)
+    return ts
+
+
+class TestTypeMappingHistoryHints:
+    def test_hint_helper_mirrors_suggestion_presentation(
+        self, monkeypatch
+    ):
+        ts = _fake_pools(monkeypatch)
+
+        # a type match stops at the first suggestion stage: the same value
+        # in the dataset's instance pool does not widen the hint
+        assert ts.dataset_aware_history_hints(
+            ["APDN3"], ["ds-a"]) == {"APDN3": "type · ds-a"}
+        # identical columns group their datasets, differing columns list
+        # per dataset — the dataset_aware_suggestions format
+        assert ts.dataset_aware_history_hints(
+            ["APDN3"], ["ds-a", "ds-b"]) == {
+                "APDN3": "type · ds-a · instance · ds-b"}
+        # numeric values resolve through the bodyId pool to the cached
+        # instance; values in no pool stay unannotated
+        assert ts.dataset_aware_history_hints(
+            ["123", "zzz"], ["ds-a", "ds-b"]) == {
+                "123": "Neuron001 · ds-b", "zzz": None}
+
+    def test_panel_history_rows_carry_suggestion_style_hints(
+        self, isolated_history, monkeypatch
+    ):
+        _fake_pools(monkeypatch)
+        tmh.record(["APDN3"], now="2026-08-11T11:00:00")
+
+        client = Client(page("/history-type-mapping-hints"))
+        with client:
+            from ui.components.common import neuron_list_input
+
+            box = neuron_list_input(
+                label="Types to map",
+                show_filter=False,
+                show_upload=False,
+                history_kind="type_mapping",
+                history_hint_datasets=lambda: ["ds-a", "ds-b"],
+            )
+
+        focus = next(
+            listener for listener in box.chip_input._event_listeners.values()
+            if listener.type == "focus"
+        )
+        box.chip_input._handle_event({"listener_id": focus.id, "args": None})
+        texts = [
+            element.text for element in client.elements.values()
+            if getattr(element, "text", "")
+        ]
+        assert "APDN3" in texts
+        assert "type · ds-a · instance · ds-b" in texts
