@@ -52,8 +52,14 @@ filters connection rows at fetch time (weight = synapse count).
   target expands incoming edges until the requested sources are seen or
   the hop bound expires. A target's first-appearance depth is its exact
   shortest distance, so discovery **stops early** once every target is
-  enrolled (provably safe), and per-target hop limits are recorded for
-  enumeration (`_shortest_target_hop_limits`).
+  enrolled (provably safe), and per-target hop limits — the FARTHEST
+  requested source's own shortest distance, per the per-pair contract —
+  are recorded for enumeration (`_shortest_target_hop_limits`). The
+  per-target distance maps are passed to the enumerator, which skips its
+  own reverse BFS, and a per-POST incoming cache
+  (`incoming_connections.parquet` + `incoming_complete.json` beside the
+  source-oriented `connections.parquet`) serves proven-complete frontier
+  posts without re-querying (2026-09-08 shortest-path fixation).
 - **Comprehensive re-querying** (`forward_only=False`, script-only)
   re-queries all discovered neurons at every layer; since 2026-09-06 the
   duplicate `(pre, post)` rows this produces are **dropped** at fetch
@@ -61,6 +67,39 @@ filters connection rows at fetch time (weight = synapse count).
   summed them, multiplying the pair's weight by its layer count (§4.1 of
   the audit). The default `forward_only=True` is unaffected (each pair
   is fetched once).
+
+### Stage 1b — Untyped-neuron filter (`drop_untyped`, both modes)
+
+`FindNeuronConnection.drop_untyped` (default `True`; UI checkbox "Drop
+Untyped Neurons" in Output Options of both tabs, payload key
+`drop_untyped`, configurable in Settings → Default Settings) removes
+connection rows whose pre- or post-side label is untyped. It runs in
+the shared `_find_paths_core` for BOTH modes — the 'all' forward layer
+loop and the 'shortest' target-rooted backward discovery
+(`_discover_shortest_backward`) — AFTER label enrichment and BEFORE
+graph construction, so an untyped neuron can never be an intermediate
+node of a returned path or visualization.
+
+- **Predicate**: `utils.label_utils.is_untyped_type_label` — a label is
+  untyped when it is empty after strip, one of the Unknown/None/NaN
+  sentinels (case-insensitive), or all-digit (numeric bodyId fallback).
+  Cross-Dataset Comparison delegates to the same predicate
+  (`ComparisonAnalyzer._is_untyped_type_value`) but keeps its own
+  POST-label-mapping timing: the per-dataset `FindNeuronConnection`
+  runs execute with `drop_untyped=False` so only the comparison-level
+  filter fires (`_drop_untyped_neurons` in
+  `src/comparison/comparison_analyzer.py`).
+- **Records**: `data_details/untyped_dropped_records.csv` (written only
+  when rows were dropped) — columns `dataset`, `threshold`,
+  `conn_layer`, then the connection columns present, plus
+  `untyped_side` (`pre` | `post` | `pre+post`). `user_warning_notes.txt`
+  gains an `[untyped dropped]` entry only when rows were dropped
+  (never for a no-op enabled filter).
+- Untyped source/target bodyIds may remain enrolled in
+  `source_neurons.csv` / `target_neurons.csv` while their incident
+  edges were removed.
+- `drop_untyped` is part of the FindAllPath graph-cache key
+  (`_findallpath_cache_key`).
 
 ### Stage 2 — Lossless hop-budget pruning (fixpoint)
 `prune_layers_hop_budget` (`max_passes=4` since 2026-09-06):
@@ -197,8 +236,9 @@ to an assertion once the fixpoint settles in.
    siblings.
 - **Contract**: a bitten run is exactly "all min-hop paths with
   bottleneck ≥ τ" (τ reported, loudly); an unbitten run is the complete
-  min-hop set — verified set-identical to
-  `find_paths_shortest_backward` on real data (413,115 paths). The
+  min-hop set — verified set-identical to `find_paths_shortest_backward`
+  (a separate enumerator that exists in the codebase but is **not**
+  called by the pipeline) on real data (413,115 paths). The
   per-pair search is polynomial (no non-shortest branch is explored),
   but the *total* min-hop count can still grow quickly at depth — this
   budget is its bound. Stats: `emitted`, `tau`, `budget_bitten`,
@@ -211,6 +251,34 @@ Per-path bottleneck annotation, τ / canonical-τ / budget reporting into
 replay capture (Feature F), type-path derivation, CSV/XLSX exports,
 visualization (display-only caps: `edgeN_limit`, strongest-interior
 path ranking). Identical for both modes.
+
+After enumeration, every run (BOTH modes — shortest was previously
+never re-stamped) writes the **applied-threshold provenance block** to
+`parameters.txt`, `all_attributes.json`, AND `data_details/parameters.csv`
+(computed by `applied_threshold_provenance()`; finalized by
+`_finalize_threshold_provenance` + `_write_run_metadata`):
+`requested_threshold`, `applied_threshold`, `applied_threshold_source`
+(`requested` | `strongest_first_budget` | `edge_budget` |
+`strongest_first_budget+edge_budget`), `strongest_first_budget`
+(effective budget; auto 1,000,000), `strongest_first_budget_bitten`,
+`strongest_first_tau` (landing τ), `tau_canonical` (minimal equivalent
+threshold: `w2+1` when the bite leaves a gap `[w2+1, τ]`, else the
+natural τ), `strongest_dropped_bottleneck` (w2), `edge_budget`,
+`edge_budget_applied`, `edge_budget_landing` (w1), `edge_weight_floor`
+(w0), `strongest_retained_bottleneck` (W\* — the widest-path ceiling
+after lossless pruning), `paths_complete`. `parameters.txt` keeps the
+backward-compatible alias lines `applied_tau (min path bottleneck)` and
+`edge_weight_floor`. Semantics: `applied_threshold` is the requested
+threshold for complete/unbounded runs (the natural τ is reported
+separately); when a lossy budget affects the output it is the canonical
+minimal threshold reproducing the materialized set, and
+`applied_threshold_source` names the mechanism(s). τ is a
+landing/collapse bound — the budgeted output is a strength-bounded path
+set, never an arbitrary first-N truncation. Replay-materialized folders
+(`minsyn_{t}` via `_replay_output_folder_for_threshold`) and the
+Cross-Dataset per-dataset threshold folders carry the same block. A
+`[combined threshold]` note is appended to `user_warning_notes.txt`
+when BOTH budgets affected a run.
 
 ## 3. Guarantees (what a run promises)
 
@@ -477,9 +545,14 @@ Wt(t) = +∞;   Wt(u) = max_{(u→v) ∈ DAG_t} min( w(u,v), Wt(v) )   (max ∅ 
    with β < τ is the globally strongest dropped path (Theorem 5 lifts
    verbatim: `emitted = { p ∈ 𝒫_short : β(p) ≥ τ }`).
 
-`target_cutoffs` are honored exactly as in
-`find_paths_shortest_backward` (a target first reached at depth d never
-emits a route longer than d). Memory: all per-target states coexist —
+`target_cutoffs` are the per-target FARTHEST requested source's own
+shortest distance (per-pair contract, 2026-09-08): every reachable
+`(source, target)` pair gets its own minimum-hop set, and the discovery
+BFS distance maps seed the enumerator directly (no second reverse BFS).
+`find_paths_shortest_backward`, the separate backward enumerator that
+shares this contract, is **not** called by the pipeline —
+`find_paths_shortest_strongest_first` is the pipeline's shortest-mode
+enumerator. Memory: all per-target states coexist —
 `Σ_t (|V_t| + |E_t|)` — modest for the deep/few-target explosions this
 budget targets, linear in |T| for very broad queries. Zero-hop pairs
 (source = target) are excluded, matching the sibling enumerator.
@@ -599,6 +672,27 @@ suite: 3,599 passed.
   floored at; τ = the strength the *path list* was cut at; W\* = your
   best route (never removed); effective cutoff = max(τ, t\*).
 
+### Filter and cap distinctions
+
+Five different knobs bound what a run computes vs. shows — do not
+conflate them:
+
+- **Min Synapse Count** (`min_synapse_num`): threshold — edges below it
+  never enter the graph.
+- **Edge Budget** (`graph_edge_limit_bodyid`): graph-level lossy weight
+  floor (floor w0 above the landing tier w1), 'all' mode only — exactly
+  equivalent to raising the threshold; reported as `edge_weight_floor`
+  (w0) / `edge_budget_landing` (w1); shortest mode is never floored.
+- **Max Paths (BodyId)** (`max_paths_bodyid`): path-output budget
+  (StrongestFirst), both modes — the graph is not trimmed.
+- **Drop Untyped Neurons** (`drop_untyped`): neuron-label filter
+  (Stage 1b) — rows touching an untyped label are dropped after
+  enrichment, before the graph is built.
+- **Visualization Edge Limit** (`edgeN_limit`): DRAWING-ONLY cap on the
+  unique edges rendered per HTML view — never changes fetching, the
+  graph, or path outputs; a single complete path may exceed it to stay
+  intact.
+
 ## 8. Design decisions and rejected alternatives
 
 - **Exact "keep only edges on a simple path" is NP-complete** (directed
@@ -625,8 +719,9 @@ suite: 3,599 passed.
 
 | Concern | Location |
 | --- | --- |
-| Pipeline orchestration, pruning, budget-fit | `src/coana.py` (`_find_paths_core`, `_graph_edge_frames`, `prune_layers_hop_budget`, `_hop_budget_pass_once`, `fit_edge_budget`, `apply_edge_budget_floor`) |
-| Graph + enumerators | `vispath-subproject/src/vispath_pkg/fast_graph_core.py` (`find_paths_strongest_first`, `find_paths_shortest_strongest_first`, `find_paths_shortest_backward`, complete enumerators); shared core `strongest_core.py` |
-| UI | `ui/tabs/find_path.py`, `ui/tabs/find_shortest.py` (Max Paths field), `ui/config.py` DEFAULTS, `ui/runner.py` TOOL_REGISTRY |
+| Pipeline orchestration, pruning, budget-fit, untyped filter, provenance | `src/coana.py` (`_find_paths_core`, `_graph_edge_frames`, `prune_layers_hop_budget`, `_hop_budget_pass_once`, `fit_edge_budget`, `apply_edge_budget_floor`, `_discover_shortest_backward`, `drop_untyped`, `applied_threshold_provenance`, `_finalize_threshold_provenance`, `_write_run_metadata`) |
+| Untyped predicate | `src/utils/label_utils.py` (`is_untyped_type_label`; also delegated to by `ComparisonAnalyzer._is_untyped_type_value`) |
+| Graph + enumerators | `vispath-subproject/src/vispath_pkg/fast_graph_core.py` (`find_paths_strongest_first`, `find_paths_shortest_strongest_first` — the pipeline's shortest-mode enumerator; `find_paths_shortest_backward` exists but is not called by the pipeline; complete enumerators); shared core `strongest_core.py` |
+| UI | `ui/tabs/find_path.py`, `ui/tabs/find_shortest.py` (Max Paths and Drop Untyped Neurons fields), `ui/config.py` DEFAULTS, `ui/runner.py` TOOL_REGISTRY |
 | Validation | `tests/core/test_hop_budget_pruning.py`, `test_edge_budget_floor.py`, `test_budget_fit_and_shortest_sf.py`, `test_pathfinding.py`; `scripts/verify_budget_fit_pruning.py`, `scripts/compare_budget_fit_real_data.py`, `scripts/verify_production_real_data.py` |
 | Design history | `_plan/plan-pathfinding-doc-audit.md` (§7 planned + status), `_plan/plan-sf-only-edge-budget.md`, `_plan/plan-cross-dataset-pathfinding-optimization.md` |

@@ -38,6 +38,7 @@ params = ComparisonParameters(
     keep_only_hemisphere_conserved_connections=False,
     symmetry_analysis=False,
     find_reciprocal=False,
+    drop_untyped=True,                  # Drop Untyped Neurons: applied post label-mapping
     overall_mapping_json=None,          # custom cross-dataset mapping
 )
 
@@ -80,6 +81,24 @@ labeler = LabelMapper()                # standardize labels if names differ
 
 `ComparisonParameters.auto_type_mapping=True` (plus `overall_mapping_json`) is the
 usual way to resolve differing type names; `LabelMapper` is the manual override.
+
+## Untyped-neuron drop (drop_untyped)
+
+`drop_untyped=True` (default) removes edges touching untyped neurons from the
+cross-dataset results. The predicate is the shared
+`utils.label_utils.is_untyped_type_label` (empty label, Unknown/None/NaN
+sentinel, all-digit bodyId-fallback label), but the analyzer applies it AFTER
+standardized cross-dataset label mapping — the later, authoritative timing.
+The delegated per-dataset `FindNeuronConnection` runs therefore execute with
+`drop_untyped=False`, so only the comparison-level filter fires and no
+per-dataset `data_details/` records are written.
+
+Outputs, only when rows were dropped:
+
+- `comparison_results/untyped_dropped_records.csv` — dropped rows with
+  `dataset`, `threshold`, the connection columns, and `untyped_side`
+  (`pre` / `post` / `pre+post`).
+- Per-run counts appended to the run root's `user_warning_notes.txt`.
 
 ## Notes
 

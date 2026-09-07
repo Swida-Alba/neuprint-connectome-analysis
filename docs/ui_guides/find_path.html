@@ -68,11 +68,12 @@
     <tr><th>Parameter</th><th>Default</th><th>Meaning</th><th>Example</th></tr>
     <tr><td>Max Intermediate Layers</td><td>2</td><td>Path length: 0 = direct, 2 = two intermediates</td><td>3 finds longer circuits but is slower</td></tr>
     <tr><td>Min Synapse Count</td><td>3</td><td>Connections below this weight are removed</td><td>10 keeps only strong edges</td></tr>
-    <tr><td>Visualization Edge Limit</td><td>500</td><td>Maximum edges drawn per visualization (network / Sankey / heatmap, incl. the network_early preview); does not alter pathfinding</td><td>50 for very dense regions</td></tr>
-    <tr><td>Edge Budget</td><td>1,000,000</td><td>Fix D (budget-fit search): after the lossless prunes, a discovery cone exceeding this many bodyId edges is floored at the weakest weight tier whose lossless-closed cone still fits the cap — a pure threshold raise, reported as <code>edge_weight_floor</code> together with the residual slack and probe trace; when even the full closed cone fits, no floor is applied. 0 = off</td><td>0 to keep the full lossless-pruned cone</td></tr>
+    <tr><td>Visualization Edge Limit</td><td>500</td><td>Drawing-only cap: maximum edges drawn per visualization (network / Sankey / heatmap, incl. the network_early preview); never changes fetching, the graph, or path outputs — a single complete path may exceed it to stay intact, and bodyId-level and type-level visualizations share the same cap</td><td>50 for very dense regions</td></tr>
+    <tr><td>Edge Budget</td><td>1,000,000</td><td>Graph-level floor ('all' mode only). Fix D (budget-fit search): after the lossless prunes, a discovery cone exceeding this many bodyId edges is floored at the weakest weight tier whose lossless-closed cone still fits the cap — exactly equivalent to raising Min Synapse Count, reported as <code>edge_weight_floor</code> together with the residual slack and probe trace; when even the full closed cone fits, no floor is applied. 0 = off</td><td>0 to keep the full lossless-pruned cone</td></tr>
     <tr><td>Min Connection Ratio</td><td>hidden</td><td>F9: readout column only (weight / ALL-POST incoming weight, threshold-free); no longer filters</td><td>—</td></tr>
     <tr><td>Min Traversal Prob.</td><td>hidden</td><td>F9: readout column only (ratio/0.3, capped at 1.0); no longer filters</td><td>—</td></tr>
-    <tr><td>Max Paths (BodyId)</td><td>0 = auto (1M)</td><td>StrongestFirst path budget: when the search exceeds it, ALL paths above the achieved strength cutoff (tau) are kept and tau is reported in the run notes. StrongestFirst is the built-in algorithm (the Algorithm selector was removed). See the <a href="pathfinding_algorithms.html">pathfinding algorithms guide</a>.</td><td>Lower for bounded runs on dense queries</td></tr>
+    <tr><td>Max Paths (BodyId)</td><td>0 = auto (1M)</td><td>Path-output budget. StrongestFirst path budget: when the search exceeds it, ALL paths above the achieved strength cutoff (tau) are kept and tau is reported in the run notes. StrongestFirst is the built-in algorithm (the Algorithm selector was removed). See the <a href="pathfinding_algorithms.html">pathfinding algorithms guide</a>.</td><td>Lower for bounded runs on dense queries</td></tr>
+    <tr><td>Drop Untyped Neurons</td><td>checked</td><td>Neuron-label filter (shared predicate with Cross-Dataset Comparison, <code>utils.label_utils.is_untyped_type_label</code>): removes edges touching untyped neurons — empty, Unknown/None/NaN sentinel (case-insensitive), or all-digit bodyId-fallback type labels. Applied after label enrichment and BEFORE graph construction, so an untyped neuron can never be an intermediate node of a returned path or visualization (an untyped source/target stays enrolled but its incident edges are removed). Dropped rows: <code>data_details/untyped_dropped_records.csv</code> (written only when something was dropped, with an <code>untyped_side</code> flag); counts appended to <code>user_warning_notes.txt</code>. Distinct from the Edge Budget, Max Paths and the Visualization Edge Limit</td><td>uncheck to keep bodyId-fallback neurons</td></tr>
     <tr><td>Search Columns</td><td>auto</td><td>Columns searched when resolving source/target names: <code>auto</code> = all columns (bodyId → type → instance → flywireType/hemibrainType/…), or restrict to <code>type</code> / <code>instance</code> / <code>bodyId</code>. Needed when a name lives in a cross-dataset column (e.g. <code>MTe07</code> only exists in <code>flywireType</code> on male-cns v1.0).</td><td><code>auto</code></td></tr>
     <tr><td>Filter By</td><td>bodyId</td><td>bodyId (per neuron) or type (aggregated)</td><td>type for cleaner summaries</td></tr>
     <tr><td>Output Format</td><td>csv</td><td>csv (fast) or xlsx</td><td>xlsx for Excel formatting</td></tr>
@@ -183,6 +184,17 @@ find-paths-shortest_MCNS_aMe12_to_PPL101_L1w3r0p0_20260815_142717/  &lt;!-- Shor
     (<code>..._allpaths_bodyId.csv</code>) are written next to the type-level
     ones; with Output Format = xlsx, the tables become multi-sheet Excel
     workbooks. The full reference is in <code>docs/OUTPUT_FILES.md</code>.</p>
+  <p class="small">Every run also writes an <b>applied-threshold
+    provenance</b> block to <code>parameters.txt</code>,
+    <code>all_attributes.json</code> and
+    <code>data_details/parameters.csv</code>: requested vs
+    <code>applied_threshold</code>, <code>applied_threshold_source</code>,
+    the StrongestFirst landing tau (<code>strongest_first_tau</code>),
+    <code>tau_canonical</code>, <code>strongest_dropped_bottleneck</code>
+    (w2) / <code>strongest_retained_bottleneck</code> (W*), and the
+    Edge-Budget fields (<code>edge_budget</code>,
+    <code>edge_budget_landing</code>, <code>edge_weight_floor</code>) — so a
+    budgeted run states the exact strength cutoff its outputs represent.</p>
 
   <h2>Common issues &amp; tips</h2>
   <div class="callout tip">

@@ -1919,6 +1919,11 @@ class TestFetchIncomingAndBackward:
         assert api_calls == [["10"]]
 
     def test_backward_source_cache_complete_skips_api(self, tmp_path):
+        """F-PERF-03 fix (2026-09-08): a source's ``downstream_complete``
+        flag says nothing about a post's incoming completeness. The online
+        incoming query must still run for a post that is not proven
+        incoming-complete, and the source-oriented cached row still merges
+        into the layer."""
         fc, logs = make_fc(dataset="test:v1", script_path=str(tmp_path),
                            use_cache=True, cache_only=False)
         cached = pl.DataFrame({
@@ -1935,11 +1940,29 @@ class TestFetchIncomingAndBackward:
         }
         fc._load_connection_db = lambda force_reload=False: cached
         api_calls = []
-        fc._fetch_incoming_connections_online = lambda posts: (
-            api_calls.append(1) or pd.DataFrame())
+
+        def _online(posts):
+            api_calls.append(list(posts))
+            # a real incoming query returns the post's complete incoming set
+            return pd.DataFrame({
+                "bodyId_pre": ["1"], "bodyId_post": ["10"], "weight": [5],
+                "roi": ["r"],
+            })
+
+        fc._fetch_incoming_connections_online = _online
         out = fc._fetch_path_connections_backward(["10"], source_bodyIds=["1"])
-        assert api_calls == []
+        # the query ran for the unproven post (the old source-gate skipped it)
+        assert api_calls == [["10"]]
+        # the successful incoming query proves post 10's incoming set ...
+        assert fc._incoming_cache["complete"] == {"10"}
+        # ...and the row merged in
         assert len(out) == 1
+
+        # once incoming-complete, the post is served from the incoming
+        # cache without re-querying
+        out2 = fc._fetch_path_connections_backward(["10"], source_bodyIds=["1"])
+        assert api_calls == [["10"]]
+        assert len(out2) == 1
 
     def test_backward_cache_only_warns_when_unproven(self, tmp_path):
         fc, logs = make_fc(dataset="test:v1", script_path=str(tmp_path),

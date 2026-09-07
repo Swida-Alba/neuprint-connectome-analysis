@@ -164,6 +164,37 @@ Result: Complete picture of all PPL1→MBON pathways within 3 layers.
 - `max_interlayer`: Maximum layers to search (default: 2)
 - `min_synapse_num`: Minimum synapses for connection (default: 10)
 - `min_traversal_probability`: Minimum probability threshold (default: 0.001)
+- `drop_untyped`: Drop edges touching untyped neurons before the graph is
+  built (type `bool`, default `True`). The shared predicate
+  (`utils.label_utils.is_untyped_type_label`, also used by Cross-Dataset
+  Comparison) treats a label as untyped when it is empty, an
+  Unknown/None/NaN sentinel (case-insensitive), or the all-digit bodyId
+  fallback. Applied after label enrichment and BEFORE graph construction in
+  both modes, so an untyped neuron can never be an intermediate node of a
+  returned path or visualization; an untyped source/target stays enrolled
+  in `source_neurons.csv` / `target_neurons.csv` while its incident edges
+  are removed. Dropped rows are exported to
+  `data_details/untyped_dropped_records.csv` (only when something was
+  dropped, with an `untyped_side` flag) and the counts appended to
+  `user_warning_notes.txt`. This is a neuron-LABEL filter — distinct from
+  graph budgets, path budgets and the drawing cap. `drop_untyped` is part
+  of the FindAllPath graph-cache key, so runs with different values never
+  reuse each other's cached graphs.
+
+### Threshold provenance
+
+Every pathfinding run (both modes) writes an applied-threshold provenance
+block to `parameters.txt`, `all_attributes.json` and
+`data_details/parameters.csv` with: `requested_threshold`,
+`applied_threshold`, `applied_threshold_source` ('requested' |
+'strongest_first_budget' | 'edge_budget' |
+'strongest_first_budget+edge_budget'), `strongest_first_budget` (auto
+1,000,000) and `strongest_first_budget_bitten`, `strongest_first_tau` (the
+landing tau), `tau_canonical`, `strongest_dropped_bottleneck` (w2),
+`edge_budget`, `edge_budget_applied`, `edge_budget_landing` (w1),
+`edge_weight_floor` (w0), `strongest_retained_bottleneck` (W*), and
+`paths_complete`. Backward-compatible `applied_tau` /
+`edge_weight_floor` lines remain in `parameters.txt`.
 
 ## Performance Considerations
 

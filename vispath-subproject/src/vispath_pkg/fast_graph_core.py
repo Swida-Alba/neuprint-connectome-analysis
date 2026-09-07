@@ -1397,7 +1397,8 @@ class FastGraph:
 
     def find_paths_shortest_strongest_first(self, targets, sources, cutoff=None,
                                             budget=None, stats=None,
-                                            target_cutoffs=None, verbose=False):
+                                            target_cutoffs=None, verbose=False,
+                                            target_distances=None):
         """Budgeted best-first enumeration of MINIMUM-HOP paths (§7.2).
 
         For every target ``t``: one backward BFS gives ``dist_t`` (hops to
@@ -1417,9 +1418,14 @@ class FastGraph:
         no visited bookkeeping is needed inside a path.
 
         ``target_cutoffs`` optionally caps each target's hop depth (same
-        contract as ``find_paths_shortest_backward``). ``stats`` receives
-        ``emitted``, ``tau``, ``budget_bitten``, ``strongest_dropped`` and
-        ``per_target`` ({target: emitted}).
+        contract as ``find_paths_shortest_backward``). ``target_distances``
+        optionally seeds each target's distance map from an earlier
+        discovery BFS (``{target: {node: hops-to-target}}``), skipping the
+        per-target reverse BFS entirely — the maps must label the same
+        graph the enumeration runs on (the DROCAT pipeline seeds them from
+        its discovery stage). ``stats`` receives ``emitted``, ``tau``,
+        ``budget_bitten``, ``strongest_dropped`` and ``per_target``
+        ({target: emitted}).
 
         Memory note: the merge keeps every per-target stream (BFS dist +
         DAG maximin DP) alive simultaneously — state is bounded by
@@ -1429,7 +1435,8 @@ class FastGraph:
 
         Cost: per target O(V_t + E_t) for the BFS/DP plus best-first work
         proportional to the emitted prefix tree — no branching^depth
-        explosion over non-shortest branches.
+        explosion over non-shortest branches; with ``target_distances``
+        the BFS is skipped and only the DP + emission remain.
         """
         import heapq
         from collections import deque
@@ -1441,21 +1448,32 @@ class FastGraph:
             return
         radj = self._ensure_radj()
         adj = self.adj
+        target_distances = target_distances or {}
 
-        def target_stream(target, hop_cap):
+        def target_stream(target, hop_cap, seeded_dist=None):
             """All min-hop paths to ``target``, descending bottleneck."""
-            # Backward BFS: dist[v] = min hops from v to target.
-            dist = {target: 0}
-            queue = deque([target])
-            while queue:
-                node = queue.popleft()
-                node_dist = dist[node]
-                if hop_cap is not None and node_dist >= hop_cap:
-                    continue
-                for predecessor in radj.get(node, ()):
-                    if predecessor not in dist:
-                        dist[predecessor] = node_dist + 1
-                        queue.append(predecessor)
+            # Backward BFS: dist[v] = min hops from v to target. A seeded
+            # map (from the pipeline's discovery stage) replaces the BFS;
+            # it is capped to the same hop bound the BFS would respect.
+            if seeded_dist is not None:
+                dist = {
+                    node: d for node, d in seeded_dist.items()
+                    if hop_cap is None or d <= hop_cap
+                }
+                if target not in dist:
+                    dist[target] = 0
+            else:
+                dist = {target: 0}
+                queue = deque([target])
+                while queue:
+                    node = queue.popleft()
+                    node_dist = dist[node]
+                    if hop_cap is not None and node_dist >= hop_cap:
+                        continue
+                    for predecessor in radj.get(node, ()):
+                        if predecessor not in dist:
+                            dist[predecessor] = node_dist + 1
+                            queue.append(predecessor)
             # Per-target maximin DP over the shortest-path DAG (edges with
             # dist[v] == dist[u] - 1): Wt[v] = best bottleneck over DAG
             # paths v -> target. Nodes processed by INCREASING dist so a
@@ -1527,7 +1545,11 @@ class FastGraph:
                     configured = target_cutoffs.get(str(target))
                 if configured is not None:
                     hop_cap = max(0, int(configured))
-            streams.append(target_stream(target, hop_cap))
+            seeded = None
+            if target_distances:
+                seeded = (target_distances.get(target)
+                          or target_distances.get(str(target)))
+            streams.append(target_stream(target, hop_cap, seeded_dist=seeded))
 
         emitted = 0
         tau = None

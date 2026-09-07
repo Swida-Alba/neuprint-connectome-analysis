@@ -42,7 +42,7 @@ conn_types — type-level edges, every one backed by a real bodyId path
    label-level graph, and no label-level edge limit — the bodyId
    discovery already bounds the search space; the Visualization Edge
    Limit `edgeN_limit` remains the only type-level cap, applied when
-   drawing). Custom-group paths are derived exactly like type paths, so
+   drawing and shared with the bodyId-level view, §6b). Custom-group paths are derived exactly like type paths, so
    they cannot chain group edges backed by different bodyId pairs into
    phantom routes.
 ```
@@ -130,7 +130,23 @@ strings `''`, `'nan'`, `'None'` are all missing. Without the `NaN` guard,
 untyped neurons project to the bogus type `'nan'` and every type path
 through them is silently dropped (`_is_missing_type_label` in `coana.py`).
 Verified on real male-cns data: untyped targets survive as their bodyId
-in the type and group outputs.
+in the type and group outputs (verified with the pathfinding
+`drop_untyped` filter disabled — see below — since the default filter
+removes untyped-labeled rows before graph construction).
+
+Pathfinding adds a **separate, later filter** on top of this aggregation
+rule: `FindNeuronConnection.drop_untyped=True` (the default; UI "Drop
+Untyped Neurons") removes connection rows whose pre- or post-side label
+is untyped (`utils.label_utils.is_untyped_type_label`) AFTER enrichment
+and BEFORE graph construction, in both Complete and Shortest Paths, so
+an untyped neuron can never appear even as an intermediate node of a
+returned path or visualization. Dropped rows are exported to
+`data_details/untyped_dropped_records.csv` (with an `untyped_side`
+column) only when rows were dropped, and an untyped source/target can
+remain enrolled in `source_neurons.csv` / `target_neurons.csv` while
+its incident edges are removed. The aggregation statement above is
+unaffected: it governs how labels resolve, while `drop_untyped` governs
+which rows enter the graph.
 
 ## 2. Why the type level cannot simply aggregate all pairs (the bundle effect)
 
@@ -253,12 +269,42 @@ bodyId discovery) is legitimate **only as a different artifact**, never as
 a drop-in replacement for `allpaths`:
 
 - ✅ as a **type-topology overview** of the discovered network (the role
-  `network_early` plays) — it shows which type pairs connect, without
-  claiming any path is real;
+  the `network_early/` / `network_early_bodyId/` early previews play) —
+  it shows which type pairs connect, without claiming any path is real;
 - ✅ when bodyId-level data is unavailable and only type-level edges exist;
 - ❌ as the "allpaths" result — its phantom paths have no path metrics, no
   real route, and would silently change downstream analyses that assume
   each path is realized by neurons.
+
+## 6b. Visualization naming parity and the shared drawing cap
+
+Both visualization levels a pathfinding run produces follow the same
+naming convention (`<run>` = the run-folder name):
+
+- **Type level** — `visualization/`: `Network_<run>.html`,
+  `Heatmap_<run>.html`, `Sankey_<run>.html`, and the exported data
+  under `visualization/visualization_data/<run>_data_*.csv`.
+- **BodyId level** — `bodyId_visualization/`: the same names
+  (`Network_<run>.html`, `Heatmap_<run>.html`, `Sankey_<run>.html`,
+  `bodyId_visualization/visualization_data/<run>_data_*.csv`).
+  The historical raw names (e.g. `bodyId_visualization_network.html`)
+  are no longer produced, and missing artifact types stay absent —
+  a direct-connection view gains no Sankey from naming parity alone.
+- **Early previews** keep their own folders, `network_early/` and
+  `network_early_bodyId/`, but now use the same `Network_<run>.html`
+  prefix inside.
+
+Both levels also share the same **drawing cap**: the Visualization Edge
+Limit `edgeN_limit` is passed to the shared VisualizePath edge selector
+(`_select_edges_for_plot` in
+`vispath-subproject/src/vispath_pkg/vispath.py`) at both levels. The
+cap is drawing-only — it never changes fetching, the graph, or the
+path outputs, and a single complete path may exceed it to stay intact.
+When the cap actually trims, companion files record the exact path
+rows the rendered (edge-limited) network represents:
+`visualization/visualization_data/type_paths_visualized.csv` (type
+level) and `bodyId_visualization/visualization_data/bodyId_paths_visualized.csv`
+(bodyId level).
 
 ## 7. Related documents
 

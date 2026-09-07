@@ -190,11 +190,14 @@ def create_inter_dataset_tab():
                     )
                     edge_budget = number_input(
                         "Edge Budget", get_user_default("graph_edge_limit_bodyid"), 0, 100000000,
-                        hint="After the lossless prunes, discovery cones exceeding this "
-                             "many bodyId edges are floored just above the N-th strongest "
-                             "edge's weight (w0 = w1 + 1) — exactly equivalent to raising "
-                             "the threshold; the applied floor is reported as "
-                             "edge_weight_floor. 0 = off. Shortest mode never floors.",
+                        hint="Graph filter ('all' path mode): after the lossless prunes, "
+                             "discovery cones exceeding this many bodyId edges are "
+                             "floored just above the N-th strongest edge's weight "
+                             "(w0 = w1 + 1) — exactly equivalent to raising the "
+                             "threshold; the applied floor is reported as "
+                             "edge_weight_floor. Distinct from the drawing-only "
+                             "Visualization Edge Limit. 0 = off. Shortest mode "
+                             "never floors.",
                     )
                     top_edges = number_input(
                         "Top Edges in Analysis Reports", 500, 10, 5000,
@@ -239,11 +242,16 @@ def create_inter_dataset_tab():
                 )
                 drop_untyped = checkbox_input(
                     "Drop Untyped Neurons", get_user_default("drop_untyped"),
-                    hint="Remove edges touching untyped neurons (Unknown / bodyId-fallback "
-                         "labels) from the cross-dataset results — they can never match "
-                         "across datasets. Dropped rows are exported to "
-                         "untyped_dropped_records.csv and the dropped-neuron counts are "
-                         "appended to user_warning_notes.txt.",
+                    hint="Remove edges touching untyped neurons — shared "
+                         "predicate with the pathfinding tabs (empty / "
+                         "Unknown / NaN / bodyId-fallback labels). They can "
+                         "never match across datasets. Applied AFTER the "
+                         "standardized cross-dataset labels are resolved. "
+                         "Dropped rows: comparison_results/"
+                         "untyped_dropped_records.csv (per-dataset "
+                         "pathfinding runs record data_details/"
+                         "untyped_dropped_records.csv); counts appended to "
+                         "user_warning_notes.txt.",
                 )
 
                 # Feature E: per-dataset thresholds (vertical comparison).
@@ -354,9 +362,12 @@ def create_inter_dataset_tab():
                     # StrongestFirst path budget above is the single knob.
                     edge_limit_viz = number_input(
                         "Visualization Edge Limit", get_user_default("edgeN_limit"), 10, 5000,
-                        hint="Maximum edges drawn per visualization (network / Sankey / "
-                             "heatmap) in the FindAllPath runs. Limits memory usage for "
-                             "highly connected neurons. Same default as the Complete Paths tab.",
+                        hint="Drawing-only cap: at most this many unique edges are "
+                             "rendered per visualization (network / Sankey / heatmap) "
+                             "in the FindAllPath runs. It never changes fetching, the "
+                             "graph, or the path output; a single complete path may "
+                             "still exceed it to stay intact. Same default as the "
+                             "Complete Paths tab.",
                     )
 
                 def _apply_path_mode_defaults(notify=False):

@@ -120,7 +120,9 @@ applied. Shortest mode is never floored.</p>
       <h3>Bidirectional (BFS)</h3>
       <p>Searches forward from sources and backward from targets at the same
         time, then stitches the two half-trees at the middle layer.</p>
-      <p class="small">Shortest paths first. <b>Highest memory</b>: stores
+      <p class="small">Shortest-first <i>emission order</i> (the path set is
+        identical to every other complete enumerator). <b>Highest memory</b>:
+        stores
         the full search trees from both sides, and memory grows with the
         cutoff (452 MB at 4 layers, 1.1 GB at 5 on a small query). The
         extra memory buys a smaller search frontier, but not faster
@@ -129,8 +131,11 @@ applied. Shortest mode is never floored.</p>
         path</b> of all four (measured 10.4 µs/path vs 1.8 for DFS/DP on a
         controlled graph) — the classic bidirectional win only applies to
         shortest-path search, where you can stop at the first meeting.</p>
-      <p class="small"><b>Best for:</b> shallow queries where you want
-        shortest paths first and memory is not a concern.</p>
+      <p class="small"><b>Best for:</b> shallow API queries where you want
+        shortest-first ordering and memory is not a concern. Note the
+        <b>Shortest Paths</b> tab does not use it — that tab runs the
+        target-rooted StrongestFirst enumerator
+        <code>find_paths_shortest_strongest_first</code> (see below).</p>
     </div>
   </div>
 
@@ -186,18 +191,56 @@ applied. Shortest mode is never floored.</p>
     from DP to <b>MemoizedDFS</b>.
   </div>
 
+  <h2>The Shortest Paths tab</h2>
+  <p>The Shortest Paths tab does not use any 'all'-mode enumerator above.
+    It enumerates through
+    <code>FastGraph.find_paths_shortest_strongest_first</code>: a
+    per-target reverse BFS outlines the min-hop DAG, a maximin bottleneck
+    DP annotates every branch with the best achievable strength, and tied
+    shortest paths are emitted best-first in strength order with a k-way
+    merge across targets. The <b>Max Paths (BodyId)</b> budget bounds it
+    exactly like an 'all'-mode run — a bitten run is tau-bounded ("all
+    min-hop paths with bottleneck &ge; tau") — and the <b>Edge Budget
+    never applies</b>: shortest mode is never floored. (The
+    <code>find_paths_shortest_backward</code> exporter also exists in
+    FastGraph, but the pipeline does not call it.)</p>
+  <hr/>
   <h2>What bounds a run today?</h2>
   <table>
     <tr><th>Knob</th><th>Bounds</th><th>Reported as</th></tr>
     <tr><td><b>Min Synapse Count</b> (asked threshold)</td><td>the discovery cone, a priori</td><td>the folder <code>minsyn_{t}</code></td></tr>
-    <tr><td><b>Edge Budget</b> (<code>graph_edge_limit_bodyid</code>, default 1M)</td><td>the lossless-pruned cone, lossy: budget-fit floor at the weakest tier t* whose closed cone fits the cap</td><td><code>edge_weight_floor</code> / <code>edge_budget_landing</code> + residual slack in the run attributes + a lossy-floor note</td></tr>
-    <tr><td><b>Max Paths (BodyId)</b> (<code>max_paths_bodyid</code>, 0 = auto → 1M)</td><td>the output path list: keeps all intact paths with bottleneck ≥ tau</td><td><code>tau</code> + <code>paths_complete</code> in the run notes and exports</td></tr>
+    <tr><td><b>Edge Budget</b> (<code>graph_edge_limit_bodyid</code>, default 1M)</td><td>the lossless-pruned cone, lossy: budget-fit floor at the weakest tier t* whose closed cone fits the cap</td><td><code>edge_weight_floor</code> (w0) / <code>edge_budget_landing</code> (w1) + residual slack in the run attributes + a lossy-floor note</td></tr>
+    <tr><td><b>Max Paths (BodyId)</b> (<code>max_paths_bodyid</code>, 0 = auto → 1M)</td><td>the output path list: keeps all intact paths with bottleneck ≥ tau</td><td><code>strongest_first_tau</code> (tau) + <code>paths_complete</code> in the run notes and exports</td></tr>
   </table>
   <p class="small">They compose exactly: effective cutoff =
   <b>max(tau_budget, t*)</b>, and the run equals a complete run at that
   threshold. A complete run reports its natural tau (weakest emitted
   bottleneck) — every threshold up to that value yields the identical
-  set.</p>
+  set. The <b>Drop Untyped Neurons</b> checkbox is a neuron-label filter,
+  not a bound: it removes edges touching untyped labels (empty /
+  Unknown / NaN / bodyId-fallback) before the graph is built and is
+  distinct from graph budgets, path budgets and the drawing cap.</p>
+  <p class="small">Every run consolidates these into an
+  <b>applied-threshold provenance</b> block written to
+  <code>parameters.txt</code>, <code>all_attributes.json</code> and
+  <code>data_details/parameters.csv</code>: <code>requested_threshold</code>,
+  <code>applied_threshold</code>, <code>applied_threshold_source</code>
+  ('requested' | 'strongest_first_budget' | 'edge_budget' |
+  'strongest_first_budget+edge_budget'),
+  <code>strongest_first_budget</code> (auto 1,000,000) with
+  <code>strongest_first_budget_bitten</code>, <code>strongest_first_tau</code>
+  (the landing tau), <code>tau_canonical</code>,
+  <code>strongest_dropped_bottleneck</code> (w2 — the strongest path NOT
+  kept), <code>edge_budget_applied</code>, <code>edge_budget_landing</code>
+  (w1), <code>edge_weight_floor</code> (w0),
+  <code>strongest_retained_bottleneck</code> (W* — the widest-path ceiling
+  after lossless pruning; lossless pruning never changes it) and
+  <code>paths_complete</code>. When a gap exists between w2 and tau, every
+  threshold in [w2+1, tau] yields the identical set and w2+1
+  (= <code>tau_canonical</code>) is the minimal equivalent; for an
+  unbounded run <code>applied_threshold</code> stays at the requested
+  threshold and the natural tau is reported separately. A budgeted output
+  is a strength-bounded path set, never an arbitrary first-N truncation.</p>
 
   <h2>Practical tips</h2>
   <ul>

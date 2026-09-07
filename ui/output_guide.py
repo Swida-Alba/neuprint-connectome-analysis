@@ -206,17 +206,71 @@ COLUMN_GLOSSARY = {
     # --- Cross-dataset comparison ------------------------------------------------
     "threshold": ("Minimum synapse threshold applied (ASKED value — see "
                   "applied_threshold for the real cutoff in effect).", "integer"),
+    "requested_threshold": ("The user-entered Min Synapse Count before any "
+                            "budget effect.", "integer"),
     "applied_threshold": ("The CANONICAL (minimal) threshold that reproduces "
                           "this run's output: w2 + 1 for a budget-bitten run "
                           "(w2 = strongest dropped path bottleneck — every "
                           "threshold in [w2+1, tau] yields the identical set), "
                           "else the asked threshold for complete runs (whose "
-                          "natural tau equals it).", "integer"),
+                          "natural tau equals it). See applied_threshold_source "
+                          "for which mechanism(s) set it.", "integer"),
+    "applied_threshold_source": ("Which mechanism(s) determined "
+                                 "applied_threshold: 'requested' (no budget "
+                                 "bit), 'strongest_first_budget', "
+                                 "'edge_budget', or "
+                                 "'strongest_first_budget+edge_budget'.",
+                                 "text"),
+    "strongest_first_budget": ("Effective StrongestFirst path budget for the "
+                               "run (the auto default 1,000,000 when the "
+                               "user left Max Paths at 0).", "integer"),
+    "strongest_first_budget_bitten": ("True when the StrongestFirst path "
+                                      "budget was reached and the output was "
+                                      "tau-bounded.", "boolean"),
+    "strongest_first_tau": ("StrongestFirst budget LANDING tau (same value as "
+                            "the tau column).", "number"),
+    "tau_canonical": ("The minimal threshold that reproduces this run's "
+                      "materialized path set: w2 + 1 when a budget bite left "
+                      "a gap in [w2+1, tau]; the natural tau otherwise. "
+                      "Distinct from the landing tau, which is only the "
+                      "collapse bound.", "integer"),
     "strongest_dropped": ("w2 — the strongest path bottleneck NOT in the "
                           "output (budget-bitten runs): lowering the threshold "
                           "to w2 or below admits new paths; any value in "
                           "[w2+1, tau] changes nothing. Empty for complete "
                           "runs.", "number"),
+    "strongest_dropped_bottleneck": ("w2 — the strongest path bottleneck NOT "
+                                     "emitted after the StrongestFirst budget "
+                                     "bit (same value as strongest_dropped). "
+                                     "Empty for complete runs.", "number"),
+    "strongest_retained_bottleneck": ("W* — the widest-path (best bottleneck) "
+                                      "ceiling after the lossless pruning "
+                                      "passes. Lossless pruning never changes "
+                                      "it, so it states that the top paths "
+                                      "are untouched by pruning.", "number"),
+    "edge_budget": ("Configured Edge Budget cap in bodyId-level edges "
+                    "(0/empty = off). 'all' path mode only — shortest mode is "
+                    "never floored.", "integer"),
+    "edge_budget_applied": ("True when the Edge Budget floor fired for this "
+                            "run (the lossless-pruned cone exceeded the "
+                            "cap).", "boolean"),
+    "edge_budget_landing": ("w1 — the edge-weight tier that determined the "
+                            "Edge Budget landing: the first tier that would "
+                            "exceed the budget. The floor w0 sits just below "
+                            "it (w0 = w1 + 1 conceptually).", "number"),
+    "drop_untyped": ("Neuron-label filter: when True, edges touching untyped "
+                     "neurons (empty / Unknown / NaN / bodyId-fallback type "
+                     "labels — the shared predicate in utils.label_utils) "
+                     "were removed before the path graph was built. Dropped "
+                     "rows are exported to untyped_dropped_records.csv.",
+                     "boolean"),
+    "untyped_side": ("Which side of a dropped edge is untyped: 'pre', "
+                     "'post', or 'pre+post'.", "text"),
+    "untyped_dropped_rows": ("Connections removed by the Drop Untyped "
+                             "Neurons filter for this run.", "integer"),
+    "untyped_dropped_neurons": ("Distinct untyped neurons whose incident "
+                                "connections were dropped for this run.",
+                                "integer"),
     "pruned": ("True when the Edge-Budget floor (the only lossy stage) fired "
                "for this run: the cone exceeded the budget and was floored at "
                "w0 = (N-th strongest edge) + 1 — the run is exactly a "
@@ -527,9 +581,59 @@ _PATHFINDING_FILES = [
      "preview_title": "Target neurons",
      "columns": ["Checked", "Layer"]},
     {"pattern": "all_attributes.json",
-     "description": "Serialized run attributes (machine-readable)."},
+     "description": "Serialized run attributes (machine-readable). Includes "
+                    "the applied-threshold provenance block: "
+                    "requested_threshold, applied_threshold, "
+                    "applied_threshold_source, strongest_first_tau, "
+                    "tau_canonical, strongest_dropped_bottleneck (w2), "
+                    "edge_budget, edge_budget_landing (w1), "
+                    "edge_weight_floor (w0), strongest_retained_bottleneck "
+                    "(W*), paths_complete."},
     {"pattern": "parameters.txt",
-     "description": "Human-readable record of all run parameters."},
+     "description": "Human-readable record of all run parameters, including "
+                    "the same applied-threshold provenance keys."},
+    {"pattern": "data_details/untyped_dropped_records.csv",
+     "description": "Connections removed by the Drop Untyped Neurons filter "
+                    "(written only when the filter actually dropped rows) "
+                    "with dataset/threshold/layer context and an untyped_side "
+                    "flag. An untyped source/target can remain enrolled in "
+                    "source_neurons.csv/target_neurons.csv while its incident "
+                    "edges were removed.",
+     "columns": ["drop_untyped", "untyped_side"]},
+    {"pattern": "visualization/visualization_data/type_paths_visualized.csv",
+     "description": "When the Visualization Edge Limit trimmed the drawn "
+                    "graph: the exact complete type-level path rows the "
+                    "rendered network represents."},
+    {"pattern": "bodyId_visualization/Network_*.html",
+     "description": "BodyId-level interactive network graph (written when "
+                    "Skip BodyId is off). Shares the drawing cap with the "
+                    "type-level visualization."},
+    {"pattern": "bodyId_visualization/Heatmap_*.html",
+     "description": "BodyId-level connection weight heatmap (Skip BodyId "
+                    "off). Same drawing cap as the type-level heatmap."},
+    {"pattern": "bodyId_visualization/Sankey_*.html",
+     "description": "BodyId-level Sankey flow diagram (Skip BodyId off). "
+                    "Same drawing cap as the type-level Sankey."},
+    {"pattern": "bodyId_visualization/visualization_data/*_data_connections.csv",
+     "description": "Edge list backing the bodyId-level HTML "
+                    "visualizations.",
+     "columns": ["source", "target", "weight", "ratio", "probability",
+                 "nt_type"]},
+    {"pattern": "bodyId_visualization/visualization_data/*_data_original_paths.csv",
+     "description": "Original bodyId-level path records backing the HTML "
+                    "files."},
+    {"pattern": "bodyId_visualization/visualization_data/bodyId_paths_visualized.csv",
+     "description": "When the Visualization Edge Limit trimmed the bodyId "
+                    "graph: the exact bodyId path rows the rendered network "
+                    "represents (parallel to type_paths_visualized.csv)."},
+    {"pattern": "network_early/Network_*.html",
+     "description": "Early type-level network preview drawn from the "
+                    "discovered graph before path reconstruction (only with "
+                    "visualize_before_reconstruct=True)."},
+    {"pattern": "network_early_bodyId/Network_*.html",
+     "description": "Early bodyId-level network preview (only with "
+                    "visualize_before_reconstruct=True and Skip BodyId "
+                    "off)."},
     {"pattern": WARNING_FILENAME,
      "description": "Warnings/notes collected during the run (rendered in "
                     "the Warnings section above)."},
@@ -604,6 +708,126 @@ _PATHFINDING_FILES = [
      "description": "Reciprocal heatmap visualization."},
     {"pattern": "find_reciprocal/parameters.csv",
      "description": "Reciprocal-analysis parameters."},
+]
+
+# Reusable pathfinding explanation, rendered by all three run-guide formats
+# (HTML / Markdown / plain text) for find_path, find_shortest, and
+# inter_dataset. Sections: heading, paragraphs, optional table
+# (first row = header).
+_PATHFINDING_EXPLANATION = [
+    {
+        "heading": "How the path set was produced",
+        "paragraphs": [
+            "Every pathfinding run passes through the same stages, in this "
+            "order — each stage can only narrow the previous one:",
+        ],
+        "table": None,
+        "pipeline": [
+            "requested threshold (Min Synapse Count)",
+            "lossless hop/dead-end pruning (never changes which paths exist)",
+            "optional Edge Budget floor w0 ('all' mode only — a graph "
+            "budget, exactly equivalent to raising the threshold)",
+            "StrongestFirst path-budget ordering and tau (a path-output "
+            "budget; applies in both Complete and Shortest Paths)",
+            "applied threshold / retained path set",
+            "visualization-only edge limit (drawing only — never affects "
+            "the analysis outputs)",
+        ],
+    },
+    {
+        "heading": "Threshold & bottleneck vocabulary",
+        "paragraphs": [
+            "The bottleneck of a path is its MINIMUM edge weight — the "
+            "weakest link. All budgeted outputs are strength-bounded path "
+            "sets: the StrongestFirst enumerator emits intact paths in "
+            "descending bottleneck order, so a budgeted result is exactly "
+            "'all intact paths with bottleneck >= tau', never an arbitrary "
+            "first-N truncation.",
+        ],
+        "table": [
+            ["Name", "Key", "Meaning"],
+            ["W*", "strongest_retained_bottleneck",
+             "Widest-path ceiling after lossless pruning; pruning must not "
+             "change it."],
+            ["tau", "strongest_first_tau",
+             "StrongestFirst landing: all intact paths with bottleneck at "
+             "least tau are retained when the path budget bites. For a "
+             "complete run it is the natural weakest emitted-path "
+             "bottleneck."],
+            ["w2", "strongest_dropped_bottleneck",
+             "Strongest path not emitted when the StrongestFirst budget "
+             "bites."],
+            ["w0", "edge_weight_floor",
+             "Edge Budget floor; the effective graph is equivalent to "
+             "raising the threshold to this floor."],
+            ["w1", "edge_budget_landing",
+             "Edge-weight tier used to determine the Edge Budget "
+             "landing/floor."],
+            ["applied threshold", "applied_threshold",
+             "Canonical threshold describing the materialized output; "
+             "applied_threshold_source names the contributing mechanism(s) "
+             "(requested / strongest_first_budget / edge_budget / both)."],
+            ["paths_complete", "paths_complete",
+             "True when every intact path within the search bound was "
+             "emitted — no budget bit."],
+            ["pruned", "pruned",
+             "True when the Edge Budget floor fired (the only lossy graph "
+             "stage)."],
+        ],
+        "pipeline": None,
+    },
+    {
+        "heading": "Reading tau vs applied_threshold",
+        "paragraphs": [
+            "tau is a landing/collapse bound: the maximal threshold "
+            "equivalent to this run. It is not always the minimal one — "
+            "when the budget bite leaves a gap in the bottleneck "
+            "distribution, every threshold in [w2+1, tau] yields the "
+            "identical set, and w2+1 (tau_canonical) is the minimal "
+            "equivalent threshold. applied_threshold reports that canonical "
+            "minimal value with its source; for an unbounded/complete run "
+            "it stays at the requested threshold and the natural tau is "
+            "reported separately.",
+            "Shortest Paths can take the StrongestFirst path budget (and "
+            "reports the same tau metadata) but is NEVER floored: the Edge "
+            "Budget does not apply in shortest mode because trimming edges "
+            "could remove the only shortest route.",
+            "bodyId-level and type-level visualizations share the same "
+            "drawing cap (Visualization Edge Limit). The drawing cap is not "
+            "a path or graph budget: when it trims the rendered graph, the "
+            "exact path rows still represented by the drawing are exported "
+            "as *_paths_visualized.csv companion files, and a single "
+            "complete path may exceed the cap to stay intact.",
+        ],
+        "table": None,
+        "pipeline": None,
+    },
+    {
+        "heading": "Filters and what they affect",
+        "paragraphs": [],
+        "table": [
+            ["Control", "Level", "Effect"],
+            ["Min Synapse Count", "threshold",
+             "Edges below this weight are never fetched into the graph."],
+            ["Edge Budget", "graph",
+             "'all' mode only: lossy floor w0 on the discovery cone; "
+             "exactly equivalent to raising the threshold. Shortest mode "
+             "is never floored."],
+            ["Max Paths (BodyId)", "path output",
+             "StrongestFirst budget on the emitted paths; the graph is not "
+             "trimmed."],
+            ["Drop Untyped Neurons", "neuron labels",
+             "Removes edges touching untyped neurons (empty / Unknown / "
+             "NaN / bodyId-fallback labels — the shared predicate) before "
+             "the graph is built; dropped rows are exported to "
+             "untyped_dropped_records.csv and counted in "
+             "user_warning_notes.txt."],
+            ["Visualization Edge Limit", "drawing only",
+             "Caps unique edges drawn per HTML view; fetched connections, "
+             "the graph, and the path tables are unaffected."],
+        ],
+        "pipeline": None,
+    },
 ]
 
 # Symmetry columns also appear as base_pre/base_post pairs (defined in the
@@ -681,12 +905,14 @@ TOOL_GUIDE_SPECS = {
         "summary": "Multi-hop pathways between source and target neuron "
                    "groups in a single dataset.",
         "files": _PATHFINDING_FILES,
+        "explanation": _PATHFINDING_EXPLANATION,
     },
     "find_shortest": {
         "title": "Shortest Paths",
         "summary": "Minimum-hop paths between source and target neuron "
                    "groups (all ties kept).",
         "files": _PATHFINDING_FILES,
+        "explanation": _PATHFINDING_EXPLANATION,
     },
     "find_network": _FIND_NETWORK,
     "plot3d_skeleton": {
@@ -999,9 +1225,12 @@ TOOL_GUIDE_SPECS = {
             {"pattern": "dataset_data/**",
              "description": "Raw per-dataset FindNeuronConnection runs "
                             "(one subfolder per dataset/threshold, same "
-                            "layout as Complete Paths, plus "
+                            "layout as Complete Paths — see the pathfinding "
+                            "model sections above for the threshold/budget "
+                            "provenance and file naming — plus "
                             "connections_edge.csv)."},
         ],
+        "explanation": _PATHFINDING_EXPLANATION,
     },
     "nb_find_lines": {
         "title": "NeuronBridge — Find Driver Lines",
@@ -1308,6 +1537,7 @@ def assemble_run_content(run_folder: Path, tool_name: str,
         "folder": run_folder.name,
         "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "params": params,
+        "explanation": spec.get("explanation"),
         "entries": entries,
         "metrics": metrics,
         "leftovers": leftovers,
@@ -1336,6 +1566,8 @@ def _key_params(params: dict) -> list:
         "source", "query", "line_names", "lines", "line_name",
         "min_synapse_num", "min_synapse_threshold", "min_ratio",
         "min_traversal_probability", "max_interlayer", "thresholds",
+        "graph_edge_limit_bodyid", "max_paths_bodyid", "drop_untyped",
+        "edgeN_limit",
         "output_format", "skip_bodyId", "similarity_metric", "top_n",
         "top_k", "top_m", "match_type",
     )
@@ -1349,6 +1581,28 @@ def _key_params(params: dict) -> list:
 # =============================================================================
 # Renderers
 # =============================================================================
+
+def _render_explanation_txt(sections) -> list:
+    """Plain-text rendering of the pathfinding explanation block."""
+    lines = []
+    for section in sections:
+        lines.append(section.get("heading", "") + ":")
+        for para in section.get("paragraphs") or []:
+            lines.append(f"  {_math_to_txt(para)}")
+        for step in section.get("pipeline") or []:
+            lines.append(f"  -> {step}")
+        table = section.get("table")
+        if table:
+            width = max(
+                sum(len(str(cell)) for cell in row) + 3 * (len(row) - 1)
+                for row in table)
+            for idx, row in enumerate(table):
+                lines.append("  " + " | ".join(str(cell) for cell in row))
+                if idx == 0:
+                    lines.append("  " + "-" * width)
+        lines.append("")
+    return lines
+
 
 def render_txt(content: dict) -> str:
     lines = []
@@ -1370,6 +1624,12 @@ def render_txt(content: dict) -> str:
         lines.append("-" * 72)
         for key, value in key_params:
             lines.append(f"  {key}: {value}")
+        lines.append("")
+
+    if content.get("explanation"):
+        lines.append("PATHFINDING MODEL")
+        lines.append("-" * 72)
+        lines.extend(_render_explanation_txt(content["explanation"]))
         lines.append("")
 
     lines.append("WARNINGS & NOTES")
@@ -1420,6 +1680,34 @@ def render_txt(content: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _render_explanation_markdown(sections) -> list:
+    """Markdown rendering of the pathfinding explanation block."""
+    md = []
+    for section in sections:
+        md.append(f"### {section.get('heading', '')}")
+        md.append("")
+        for para in section.get("paragraphs") or []:
+            md.append(_math_to_md(para))
+            md.append("")
+        pipeline = section.get("pipeline")
+        if pipeline:
+            md.append("```")
+            md.extend(pipeline)
+            md.append("```")
+            md.append("")
+        table = section.get("table")
+        if table:
+            header = table[0]
+            md.append("| " + " | ".join(str(c) for c in header) + " |")
+            md.append("|" + "|".join([" --- "] * len(header)) + "|")
+            for row in table[1:]:
+                cells = [
+                    str(c).replace("|", "\\|") for c in row]
+                md.append("| " + " | ".join(cells) + " |")
+            md.append("")
+    return md
+
+
 def render_markdown(content: dict) -> str:
     md = []
     md.append(f"# DROCAT Run Guide — {content['title']}")
@@ -1440,6 +1728,11 @@ def render_markdown(content: dict) -> str:
         for key, value in key_params:
             md.append(f"| `{key}` | `{value}` |")
         md.append("")
+
+    if content.get("explanation"):
+        md.append("## Pathfinding model")
+        md.append("")
+        md.extend(_render_explanation_markdown(content["explanation"]))
 
     md.append("## Warnings & notes")
     md.append("")
@@ -1507,6 +1800,10 @@ main { max-width: 960px; margin: 24px auto; padding: 0 20px 48px; }
 .head h1 { margin: 0 0 6px; font-size: 1.5em; }
 .head .meta { color: #b9c6dd; font-size: 0.9em; }
 h2 { font-size: 1.15em; margin: 28px 0 10px; color: #12305e; }
+h3 { font-size: 1em; margin: 12px 0 6px; color: #12305e; }
+.pipeline { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas,
+            monospace; font-size: 0.85em; margin: 6px 0; white-space: pre;
+            color: #33415c; }
 .card { background: #fff; border: 1px solid #dde4ef; border-radius: 10px;
         padding: 14px 18px; margin-bottom: 12px; }
 .warn { background: #fff8e6; border: 1px solid #ecd9a0; border-radius: 10px;
@@ -1567,6 +1864,35 @@ def render_html(content: dict) -> str:
             parts.append(f"<tr><td><code>{_html_escape(key)}</code></td>"
                          f"<td><code>{_html_escape(value)}</code></td></tr>")
         parts.append("</table></div>")
+
+    if content.get("explanation"):
+        parts.append("<h2>Pathfinding model</h2>")
+        for section in content["explanation"]:
+            parts.append('<div class="card">')
+            parts.append(f"<h3>{_html_escape(section.get('heading', ''))}"
+                         "</h3>")
+            for para in section.get("paragraphs") or []:
+                parts.append(f"<p>{_math_to_html(_html_escape(para))}</p>")
+            pipeline = section.get("pipeline")
+            if pipeline:
+                parts.append('<div class="pipeline">'
+                             + "<br>".join(
+                                 "&rarr; " + _html_escape(step)
+                                 for step in pipeline)
+                             + "</div>")
+            table = section.get("table")
+            if table:
+                parts.append("<table><tr>"
+                             + "".join(f"<th>{_html_escape(c)}</th>"
+                                       for c in table[0])
+                             + "</tr>")
+                for row in table[1:]:
+                    parts.append("<tr>"
+                                 + "".join(f"<td>{_html_escape(c)}</td>"
+                                           for c in row)
+                                 + "</tr>")
+                parts.append("</table>")
+            parts.append("</div>")
 
     parts.append("<h2>Warnings &amp; notes</h2>")
     if content["warnings"]:

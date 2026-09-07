@@ -51,6 +51,25 @@ vp = VisualizePath(path_file=None, output_folder="/abs/output/empty_network",
 vp.visualize()
 ```
 
+## Edge cap and artifact naming (pathfinding runs)
+
+- `_select_edges_for_plot` is the shared selector behind the Visualization Edge
+  Limit (`edgeN_limit`): a drawing-only cap on the number of unique edges
+  rendered per HTML view. It never changes fetch, graph, or path outputs, and a
+  single complete path may exceed the cap to stay intact. Type-level and
+  bodyId-level visualizations share the same cap.
+- `_organize_vispath_artifacts` (generalized in `src/coana.py`) fixes the
+  canonical naming contract for both levels: `Network_<run>.html`,
+  `Heatmap_<run>.html`, `Sankey_<run>.html`, and
+  `visualization_data/<run>_data_*.csv` inside `visualization/` and
+  `bodyId_visualization/` (raw legacy names such as
+  `bodyId_visualization_network.html` no longer remain). Early previews keep
+  `network_early/` and `network_early_bodyId/` with `Network_<run>.html` inside.
+- When the drawing cap trims, a companion CSV lists what was rendered:
+  `visualization/visualization_data/type_paths_visualized.csv` (type level) and
+  `bodyId_visualization/visualization_data/bodyId_paths_visualized.csv`
+  (bodyId level). Missing artifact types stay absent.
+
 ## Notes
 
 - The input may be CSV or Excel; for Excel use `sheet_name="path_type"` /

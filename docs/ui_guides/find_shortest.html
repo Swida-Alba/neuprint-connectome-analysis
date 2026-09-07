@@ -80,7 +80,8 @@
     <tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr>
     <tr><td>Max Intermediate Layers (optional)</td><td>5</td><td>0 = direct only; &gt;0 caps path length at <i>layers + 1</i> edges</td></tr>
     <tr><td>Min Synapse Count</td><td>3</td><td>Minimum edge weight</td></tr>
-    <tr><td>Max Paths (BodyId)</td><td>0 = auto (1M)</td><td>StrongestFirst budget on min-hop paths: when the search exceeds it, all min-hop paths above the achieved strength cutoff (tau) are kept and tau is reported; unbitten runs are the complete min-hop set</td></tr>
+    <tr><td>Max Paths (BodyId)</td><td>0 = auto (1M)</td><td>Path-output budget. StrongestFirst budget on min-hop paths: when the search exceeds it, all min-hop paths above the achieved strength cutoff (tau) are kept and tau is reported; unbitten runs are the complete min-hop set</td></tr>
+    <tr><td>Drop Untyped Neurons</td><td>checked</td><td>Neuron-label filter (same shared predicate as Complete Paths and Cross-Dataset Comparison, <code>utils.label_utils.is_untyped_type_label</code>): removes edges touching untyped neurons — empty, Unknown/None/NaN sentinel (case-insensitive), or all-digit bodyId-fallback labels — after label enrichment and BEFORE the graph is built, so an untyped neuron can never be an intermediate node of a returned path or visualization. Dropped rows: <code>data_details/untyped_dropped_records.csv</code> (only when something was dropped); counts in <code>user_warning_notes.txt</code></td></tr>
     <tr><td>Min Connection Ratio</td><td>hidden</td><td>F9: readout column only (weight / ALL-POST incoming weight); no longer filters</td></tr>
     <tr><td>Min Traversal Prob.</td><td>hidden</td><td>F9: readout column only (ratio/0.3, capped at 1.0); no longer filters</td></tr>
     <tr><td>Edge Budget</td><td>off in shortest mode</td><td>Shortest mode is never floored (the tab disables the input) — flooring would raise the threshold and can inflate shortest distances</td></tr>
@@ -111,11 +112,17 @@
     <a href="../core-features/ScoreCalculation_Guide.md">Score Calculation Guide</a>.</p>
 
   <div class="callout tip">
-    <b>No algorithm selector:</b> shortest enumeration is a backward-BFS
-    distance pass plus a guided DFS over the shortest-path DAG — polynomial
-    in graph size per pair. The branching^depth explosion of Find All Paths
-    does not exist here, but the total number of min-hop paths can still
-    grow quickly at depth (tied routes multiply at every layer).
+    <b>No algorithm selector:</b> the tab enumerates through
+    <code>FastGraph.find_paths_shortest_strongest_first</code> — a
+    per-target reverse BFS outlines the min-hop DAG, a maximin bottleneck
+    DP annotates every branch with the best achievable strength, and tied
+    shortest paths are emitted best-first in strength order with a k-way
+    merge across targets — polynomial in graph size per pair. (The
+    <code>find_paths_shortest_backward</code> exporter also exists in
+    FastGraph, but the pipeline does not call it.) The branching^depth
+    explosion of Find All Paths does not exist here, but the total number
+    of min-hop paths can still grow quickly at depth (tied routes multiply
+    at every layer).
   </div>
 
   <div class="callout tip">

@@ -72,6 +72,11 @@ except ImportError:  # pragma: no cover - src laid bare on sys.path
     from utils.naming_utils import canonical_dataset_name
 
 try:
+    from .utils.label_utils import is_untyped_type_label, untyped_side
+except ImportError:  # pragma: no cover - src laid bare on sys.path
+    from utils.label_utils import is_untyped_type_label, untyped_side
+
+try:
     from .neuron_index_builder import (
         build_search_cache_frame,
         is_search_cache_compatible,
@@ -449,6 +454,7 @@ def _findallpath_cache_key(
     min_ratio: float,
     min_traversal_probability: float,
     exclude_intra_type_connections: bool,
+    drop_untyped: bool = True,
 ) -> str:
     """
     Build the FindAllPath graph-cache key.
@@ -456,9 +462,9 @@ def _findallpath_cache_key(
     The key must include every parameter that changes which edges the
     graph contains - not only the topology (source/target/interlayer) but
     also the connection filters applied during fetching (filter_by level,
-    ratio/probability thresholds, intra-type exclusion, hemisphere mode).
-    Otherwise a later run with different filters would silently reuse a
-    graph built under different filter conditions.
+    ratio/probability thresholds, intra-type exclusion, hemisphere mode,
+    untyped-neuron drop). Otherwise a later run with different filters
+    would silently reuse a graph built under different filter conditions.
 
     ``max_interlayer=None`` (FindShortestPath) omits the depth from the
     key: shortest runs stop discovery early, so the fetched depth is a
@@ -470,7 +476,8 @@ def _findallpath_cache_key(
     hemi_flag = 'hemi' if separate_hemispheres else 'nohemi'
     filters = (
         f"{filter_by}|{min_ratio}|{min_traversal_probability}|"
-        f"{int(bool(exclude_intra_type_connections))}"
+        f"{int(bool(exclude_intra_type_connections))}|"
+        f"{int(bool(drop_untyped))}"
     )
     depth_part = f"{max_interlayer}_" if max_interlayer is not None else ""
     return (
@@ -1260,6 +1267,114 @@ def fit_edge_budget(conn_layers, budget, sources, targets, bound,
             f'min synapse = {best_t:g}: paths with bottleneck < {best_t:g} '
             'do not exist in the output.')
     return best_closed, stats
+
+
+def applied_threshold_provenance(
+    requested_threshold,
+    strongest_first_tau=None,
+    strongest_first_budget_bitten=False,
+    strongest_dropped_bottleneck=None,
+    tau_canonical=None,
+    edge_weight_floor=None,
+    edge_budget_landing=None,
+    edge_budget=None,
+    strongest_retained_bottleneck=None,
+):
+    """Canonical threshold/bottleneck provenance for one pathfinding run.
+
+    Single source for the applied-threshold contract shared by
+    parameters.txt, all_attributes.json, data_details/parameters.csv,
+    the replay folders, and the run guides:
+
+    - ``requested_threshold``: the user-entered Min Synapse Count before
+      any budget effect.
+    - ``strongest_first_tau``: the StrongestFirst LANDING tau — all intact
+      paths with bottleneck >= tau are retained when the path budget
+      bites. For a complete run it is the natural weakest emitted-path
+      bottleneck.
+    - ``tau_canonical`` / applied threshold: the MINIMAL threshold that
+      reproduces the materialized output set (``w2 + 1`` when the budget
+      bite leaves a gap; the landing tau otherwise).
+    - ``strongest_dropped_bottleneck`` (w2): the strongest path NOT
+      emitted after the StrongestFirst budget bites.
+    - ``edge_weight_floor`` (w0) / ``edge_budget_landing`` (w1): the Edge
+      Budget floor and the tier that determined it; a floored run is
+      exactly a complete run at ``max(requested, w0)``.
+    - ``strongest_retained_bottleneck`` (W*): the widest-path ceiling
+      after lossless pruning; lossless pruning must not change it.
+
+    ``applied_threshold`` is the requested threshold for an
+    unbounded/complete run (the natural tau is reported separately);
+    when a lossy budget affects the output it is the canonical minimal
+    threshold describing the materialized set, and
+    ``applied_threshold_source`` names the contributing mechanism(s):
+    'requested', 'strongest_first_budget', 'edge_budget', or
+    'strongest_first_budget+edge_budget'.
+    """
+    requested_threshold = int(requested_threshold)
+    bitten = bool(strongest_first_budget_bitten)
+    floor_applied = edge_weight_floor is not None
+    sources = []
+    if bitten:
+        sources.append('strongest_first_budget')
+    if floor_applied:
+        sources.append('edge_budget')
+
+    if not sources:
+        applied_threshold = requested_threshold
+        applied_source = 'requested'
+        paths_complete = True
+        # Complete runs: the natural tau IS the canonical (minimal)
+        # threshold for this set.
+        canonical_tau = (
+            int(strongest_first_tau)
+            if strongest_first_tau is not None else tau_canonical)
+    else:
+        if tau_canonical is not None:
+            canonical_tau = int(tau_canonical)
+        elif strongest_dropped_bottleneck is not None:
+            canonical_tau = int(strongest_dropped_bottleneck) + 1
+        elif strongest_first_tau is not None:
+            canonical_tau = int(strongest_first_tau)
+        else:
+            canonical_tau = None
+        if canonical_tau is None and floor_applied:
+            canonical_tau = int(edge_weight_floor)
+        if canonical_tau is not None and floor_applied:
+            # Invariant: the floored graph cannot emit a path weaker than
+            # the floor, so canonical >= w0. Keep the max as a guard for
+            # degenerate inputs rather than emitting a contradiction.
+            canonical_tau = max(canonical_tau, int(edge_weight_floor))
+        applied_threshold = canonical_tau
+        applied_source = '+'.join(sources)
+        paths_complete = False
+
+    return {
+        'requested_threshold': requested_threshold,
+        'applied_threshold': applied_threshold,
+        'applied_threshold_source': applied_source,
+        'strongest_first_budget_bitten': bitten,
+        'strongest_first_tau': strongest_first_tau,
+        'tau_canonical': canonical_tau,
+        'strongest_dropped_bottleneck': strongest_dropped_bottleneck,
+        'edge_budget': (int(edge_budget) if edge_budget else None),
+        'edge_budget_applied': floor_applied,
+        'edge_budget_landing': edge_budget_landing,
+        'edge_weight_floor': edge_weight_floor,
+        'strongest_retained_bottleneck': strongest_retained_bottleneck,
+        'paths_complete': paths_complete,
+    }
+
+
+def _format_provenance_value(value):
+    """Human-readable parameters.txt rendering for a provenance value."""
+    if value is None:
+        return 'n/a'
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float):
+        return f'{value:g}'
+    return str(value)
 
 
 def clear_findallpath_cache(dataset: str = None):
@@ -2841,6 +2956,26 @@ class FindNeuronConnection:
     (type-level outputs are derived from them), but the multi-GB bodyId
     exports (connMatrix CSVs, raw path lists) are suppressed — measured
     3.6 GB -> ~30 MB per run folder on a 4x5-type L2 query.
+    '''
+
+    drop_untyped: bool = True
+    '''
+    Drop edges touching untyped neurons from the pathfinding connection
+    frames (default on). A neuron is untyped when its resolved type label
+    is empty, an Unknown/None/NaN sentinel, or its own bodyId (the numeric
+    fallback label) — the shared predicate in ``utils.label_utils``
+    (``is_untyped_type_label``), the same one Cross-Dataset Comparison
+    applies after label mapping.
+
+    The filter runs right after label enrichment and BEFORE graph
+    construction in both FindAllPath ('all' mode) and FindShortestPath
+    (target-rooted backward discovery), so an untyped neuron can never
+    appear as an intermediate node of a returned path or visualization.
+    Dropped rows are exported to ``data_details/untyped_dropped_records.csv``
+    and counted in ``user_warning_notes.txt`` (only when something was
+    actually dropped). An untyped source/target can remain enrolled in
+    source_neurons.csv/target_neurons.csv while its incident edges are
+    removed. The value is part of the FindAllPath graph-cache key.
     '''
 
     find_reciprocal: bool = False
@@ -7224,6 +7359,146 @@ class FindNeuronConnection:
             self._warn_conversion_memory('converting a connection layer to Polars')
             raise
 
+    # ------------------------------------------------------------------------
+    # Untyped-neuron drop (drop_untyped).  The label predicate is the shared
+    # utils.label_utils.is_untyped_type_label, also used by Cross-Dataset
+    # Comparison (post label-mapping).  Here it runs right after label
+    # enrichment and BEFORE graph construction, so an untyped neuron can
+    # never be an intermediate node of a returned path or visualization.
+    # Dropped rows accumulate for data_details/untyped_dropped_records.csv.
+    # ------------------------------------------------------------------------
+
+    def _reset_untyped_drop_tracking(self):
+        """Reset the per-run untyped-drop accumulators."""
+        self._untyped_drop_stats = {
+            'rows': 0, 'neurons': set(), 'untyped_pre': 0, 'untyped_post': 0,
+        }
+        self._untyped_dropped_frames = []
+
+    def _untyped_label_set(self, values):
+        """Return the subset of *values* the shared predicate calls untyped."""
+        return {v for v in values if is_untyped_type_label(v)}
+
+    def _accumulate_untyped_drops(self, dropped, untyped_pre_mask,
+                                  untyped_post_mask, layer_label):
+        """Record one layer's dropped rows and per-side counts."""
+        stats = self._untyped_drop_stats
+        stats['rows'] += len(dropped)
+        for col in ('bodyId_pre', 'bodyId_post'):
+            if col in dropped.columns:
+                stats['neurons'] |= set(dropped[col].astype(str))
+        stats['untyped_pre'] += int(untyped_pre_mask.sum())
+        stats['untyped_post'] += int(untyped_post_mask.sum())
+        record = dropped.copy()
+        record['dataset'] = self.dataset
+        record['threshold'] = self.min_synapse_num
+        record['conn_layer'] = layer_label
+        record['untyped_side'] = [
+            untyped_side(bool(p), bool(q)) for p, q in
+            zip(untyped_pre_mask, untyped_post_mask)
+        ]
+        self._untyped_dropped_frames.append(record)
+
+    def _filter_untyped_pandas(self, conn_df, layer_label=''):
+        """Drop edges touching untyped neurons from a pandas layer frame.
+
+        Returns the filtered copy; a no-op frame back when the option is
+        off or the frame carries no resolved type columns.
+        """
+        if not getattr(self, 'drop_untyped', True):
+            return conn_df
+        if conn_df is None or conn_df.empty:
+            return conn_df
+        if 'type_pre' not in conn_df.columns or 'type_post' not in conn_df.columns:
+            return conn_df
+        pre = conn_df['type_pre'].astype(str).str.strip()
+        post = conn_df['type_post'].astype(str).str.strip()
+        untyped_pre = pre.isin(self._untyped_label_set(pd.unique(pre)))
+        untyped_post = post.isin(self._untyped_label_set(pd.unique(post)))
+        drop_mask = (untyped_pre | untyped_post).to_numpy()
+        if not drop_mask.any():
+            return conn_df
+        self._accumulate_untyped_drops(
+            conn_df.loc[drop_mask].copy(),
+            untyped_pre[drop_mask], untyped_post[drop_mask], layer_label,
+        )
+        self._vprint(
+            f'    Dropped {int(drop_mask.sum()):,} connections touching '
+            'untyped neurons (drop_untyped=True)',
+            level='full',
+        )
+        return conn_df.loc[~drop_mask].copy()
+
+    def _filter_untyped_polars(self, conn_pl, layer_label=''):
+        """Polars twin of :meth:`_filter_untyped_pandas`.
+
+        The predicate is evaluated on the layer's distinct label values so
+        pathfinding and comparison share the exact same untyped semantics
+        (``utils.label_utils.is_untyped_type_label``).
+        """
+        if not getattr(self, 'drop_untyped', True):
+            return conn_pl
+        if conn_pl is None or conn_pl.is_empty():
+            return conn_pl
+        if 'type_pre' not in conn_pl.columns or 'type_post' not in conn_pl.columns:
+            return conn_pl
+        pre = conn_pl.select(
+            pl.col('type_pre').cast(pl.Utf8).fill_null('').alias('label')
+        ).get_column('label')
+        post = conn_pl.select(
+            pl.col('type_post').cast(pl.Utf8).fill_null('').alias('label')
+        ).get_column('label')
+        bad_pre = list(self._untyped_label_set(pre.unique().to_list()))
+        bad_post = list(self._untyped_label_set(post.unique().to_list()))
+        untyped_pre = (
+            pl.col('type_pre').cast(pl.Utf8).fill_null('').is_in(bad_pre))
+        untyped_post = (
+            pl.col('type_post').cast(pl.Utf8).fill_null('').is_in(bad_post))
+        drop_mask = conn_pl.select(
+            (untyped_pre | untyped_post).alias('drop')
+        ).get_column('drop')
+        n_dropped = int(drop_mask.sum())
+        if not n_dropped:
+            return conn_pl
+        dropped_pl = conn_pl.filter(drop_mask)
+        # Per-row side flags computed in Polars land (null labels already
+        # normalized to '') so the counts match the drop decision exactly.
+        untyped_pre_side = dropped_pl.select(
+            untyped_pre.alias('u')).get_column('u').to_list()
+        untyped_post_side = dropped_pl.select(
+            untyped_post.alias('u')).get_column('u').to_list()
+        dropped = dropped_pl.to_pandas()
+        self._accumulate_untyped_drops(
+            dropped,
+            pd.Series(untyped_pre_side, dtype=bool),
+            pd.Series(untyped_post_side, dtype=bool),
+            layer_label,
+        )
+        self._vprint(
+            f'    Dropped {n_dropped:,} connections touching untyped '
+            'neurons (drop_untyped=True)',
+            level='full',
+        )
+        return conn_pl.filter(~drop_mask)
+
+    def _export_untyped_drop_records(self, folder):
+        """Write ``data_details/untyped_dropped_records.csv`` when the
+        drop_untyped filter actually removed rows during this run."""
+        frames = getattr(self, '_untyped_dropped_frames', None) or []
+        if not frames:
+            return
+        details_dir = os.path.join(folder, 'data_details')
+        os.makedirs(details_dir, exist_ok=True)
+        record = pd.concat(frames, ignore_index=True)
+        leading = [c for c in ('dataset', 'threshold', 'conn_layer')
+                   if c in record.columns]
+        record = record[leading + [c for c in record.columns
+                                   if c not in leading]]
+        out_path = os.path.join(details_dir, 'untyped_dropped_records.csv')
+        self._save_df_to_csv_polars(record, out_path)
+        self._vprint(
+            f'  ✓ Saved untyped-drop records: {out_path}', level='full')
+
     def _finalize_path_connection_frame(self, combined):
         """Enrich and apply the path-edge filters to a raw connection frame.
 
@@ -7415,111 +7690,232 @@ class FindNeuronConnection:
             return self._empty_path_connection_frame()
         return pd.concat(frames, ignore_index=True)
 
+    # ------------------------------------------------------------------------
+    # Incoming-direction connection cache (audit F-PERF-03/F-PERF-04 fix).
+    # The source-oriented ``connections.parquet`` cache is keyed by UPSTREAM
+    # neuron: a few cached rows for a post do not prove that the post's
+    # incoming set is complete, and its completion state describes the wrong
+    # direction. Shortest-path reverse discovery therefore maintains its own
+    # per-POST cache beside the source-oriented one:
+    #   <cache_folder>/incoming_connections.parquet  (bodyId_pre, bodyId_post,
+    #                                                 weight, roi)
+    #   <cache_folder>/incoming_complete.json        ({"version": 1,
+    #                                                 "complete": [posts]})
+    # A post is 'incoming-complete' only after a full incoming query returned
+    # ALL of its incoming rows; complete posts are never re-queried online.
+    # Forward tools never read this table, so the source-oriented cache
+    # semantics are untouched.
+    # ------------------------------------------------------------------------
+
+    def _incoming_cache_paths(self):
+        base = getattr(self, 'cache_folder', None)
+        return (
+            os.path.join(base, 'incoming_connections.parquet'),
+            os.path.join(base, 'incoming_complete.json'),
+        )
+
+    def _load_incoming_cache(self):
+        """Load the per-post incoming cache (parquet rows + complete set)."""
+        if getattr(self, '_incoming_cache', None) is not None:
+            return self._incoming_cache
+        rows = pl.DataFrame(schema={
+            'bodyId_pre': pl.Utf8, 'bodyId_post': pl.Utf8,
+            'weight': pl.Int64, 'roi': pl.Utf8,
+        })
+        complete = set()
+        base = getattr(self, 'cache_folder', None)
+        if base:
+            rows_path, complete_path = self._incoming_cache_paths()
+            try:
+                if os.path.exists(rows_path):
+                    loaded = pl.read_parquet(rows_path)
+                    keep = [c for c in ('bodyId_pre', 'bodyId_post',
+                                        'weight', 'roi')
+                            if c in loaded.columns]
+                    rows = loaded.select(keep).with_columns([
+                        pl.col('bodyId_pre').cast(pl.Utf8, strict=False),
+                        pl.col('bodyId_post').cast(pl.Utf8, strict=False),
+                    ])
+                if os.path.exists(complete_path):
+                    with open(complete_path, encoding='utf-8') as f:
+                        payload = json.load(f)
+                    complete = {
+                        str(post) for post in
+                        (payload.get('complete') or [])
+                    }
+            except Exception as exc:
+                self._vprint(
+                    f'  ⚠️ Incoming cache unreadable ({exc}) — treating it '
+                    'as empty', level='full')
+                rows = pl.DataFrame(schema={
+                    'bodyId_pre': pl.Utf8, 'bodyId_post': pl.Utf8,
+                    'weight': pl.Int64, 'roi': pl.Utf8,
+                })
+                complete = set()
+        self._incoming_cache = {'rows': rows, 'complete': complete}
+        return self._incoming_cache
+
+    def _save_incoming_cache(self, new_rows, completed_posts):
+        """Persist fetched incoming rows and mark the posts complete.
+
+        Never raises into the caller: a failed cache write only degrades to
+        re-fetching on the next run. The in-memory mirror is always updated;
+        without a cache folder only the disk write is skipped.
+        """
+        completed_posts = {str(p) for p in completed_posts}
+        try:
+            cache = self._load_incoming_cache()
+            combined = cache['rows']
+            if new_rows is not None and len(new_rows):
+                cols = [c for c in ('bodyId_pre', 'bodyId_post', 'weight',
+                                    'roi') if c in new_rows.columns]
+                new_pl = pl.from_pandas(new_rows[cols]).with_columns([
+                    pl.col('bodyId_pre').cast(pl.Utf8, strict=False),
+                    pl.col('bodyId_post').cast(pl.Utf8, strict=False),
+                ])
+                if 'weight' in new_pl.columns:
+                    new_pl = new_pl.with_columns(
+                        pl.col('weight').cast(pl.Int64, strict=False))
+                else:
+                    new_pl = new_pl.with_columns(
+                        pl.lit(None, dtype=pl.Int64).alias('weight'))
+                if 'roi' in new_pl.columns:
+                    new_pl = new_pl.with_columns(
+                        pl.col('roi').cast(pl.Utf8, strict=False)
+                        .fill_null(''))
+                else:
+                    new_pl = new_pl.with_columns(
+                        pl.lit('', dtype=pl.Utf8).alias('roi'))
+                combined = (
+                    pl.concat([combined, new_pl], how='vertical_relaxed')
+                    .unique(subset=['bodyId_pre', 'bodyId_post', 'roi'],
+                            keep='last')
+                )
+            cache['complete'] |= completed_posts
+            cache['rows'] = combined
+
+            base = getattr(self, 'cache_folder', None)
+            if not base:
+                return
+            rows_path, complete_path = self._incoming_cache_paths()
+            os.makedirs(os.path.dirname(rows_path), exist_ok=True)
+            tmp_path = rows_path + '.tmp'
+            combined.write_parquet(tmp_path)
+            os.replace(tmp_path, rows_path)
+            payload = {'version': 1, 'complete': sorted(cache['complete'])}
+            tmp_json = complete_path + '.tmp'
+            with open(tmp_json, 'w', encoding='utf-8') as f:
+                json.dump(payload, f)
+            os.replace(tmp_json, complete_path)
+        except Exception as exc:
+            self._vprint(
+                f'  ⚠️ Could not persist the incoming cache: {exc}',
+                level='full')
+
     def _fetch_path_connections_backward(self, downstream_bodyIds,
                                          source_bodyIds=None):
         """Fetch one target-rooted layer by querying incoming connections.
 
-        Cached rows are retrieved through the post-synaptic row index.  If a
-        target has no cached incoming rows, the method falls back to an online
-        incoming query unless ``cache_only`` is active.  The returned rows
-        retain the normal ``pre -> post`` orientation for graph construction.
+        Direction-aware cache (audit F-PERF-03/F-PERF-04 fix): a post whose
+        incoming set is proven complete is served from the incoming cache
+        and never re-queried; the online incoming query runs only for the
+        remaining frontier posts, and its rows are persisted with a
+        completeness marker so repeated runs skip them. The legacy
+        source-oriented post-index rows are still merged as a partial
+        supplement for posts that are not (yet) incoming-complete — a
+        source's ``downstream_complete`` flag says nothing about a post's
+        incoming completeness and no longer gates the fetch.
         """
         requested_posts = {str(value) for value in downstream_bodyIds}
-        requested_sources = {
-            str(value)
-            for value in (source_bodyIds if source_bodyIds is not None else [])
-        }
         if not requested_posts:
             return self._empty_path_connection_frame()
 
-        cached_raw = self._empty_path_connection_frame()
-        if getattr(self, 'use_cache', False):
+        use_cache = getattr(self, 'use_cache', False)
+        cache_stats = getattr(self, '_shortest_cache_stats', None)
+        if cache_stats is None:
+            cache_stats = {
+                'posts_cache_complete': 0, 'posts_online': 0,
+                'rows_from_cache': 0, 'rows_from_legacy_index': 0,
+                'rows_online': 0, 'online_calls': 0,
+            }
+            self._shortest_cache_stats = cache_stats
+
+        incoming_raw = self._empty_path_connection_frame()
+        complete_posts = set()
+        pending_posts = set(requested_posts)
+        if use_cache:
+            inc = self._load_incoming_cache()
+            complete_posts = requested_posts & inc['complete']
+            pending_posts = requested_posts - complete_posts
+            if complete_posts and not inc['rows'].is_empty():
+                cached_pl = inc['rows'].filter(
+                    pl.col('bodyId_post').is_in(sorted(complete_posts)))
+                incoming_raw = cached_pl.to_pandas()
+                incoming_raw['bodyId_pre'] = \
+                    incoming_raw['bodyId_pre'].astype(str)
+                incoming_raw['bodyId_post'] = \
+                    incoming_raw['bodyId_post'].astype(str)
+                cache_stats['posts_cache_complete'] += len(complete_posts)
+                cache_stats['rows_from_cache'] += len(incoming_raw)
+
+        # Partial legacy supplement for posts that are not proven
+        # incoming-complete: rows already present in the source-oriented
+        # cache (indexed by upstream neuron) are merged but do NOT prove
+        # completeness, so an online supplement still runs for them.
+        legacy_raw = self._empty_path_connection_frame()
+        if use_cache and pending_posts:
             conn_db = self._load_connection_db()
-            # Instances that picked the connection frame up from the
-            # module-level cache may not have the row indexes built yet; the
-            # post-synaptic index is required for the target-rooted lookup.
             if getattr(self, '_conn_index_post', None) is None:
                 self._build_conn_index()
             row_indices = []
             post_index = getattr(self, '_conn_index_post', None) or {}
-            for post_id in requested_posts:
-                row_indices.extend(
-                    post_index.get(post_id, [])
-                )
+            for post_id in pending_posts:
+                row_indices.extend(post_index.get(post_id, []))
             if row_indices:
-                # Project to the columns the finalize path needs while the
-                # rows are still Polars: the downstream finalize step
-                # re-adds the neuron-info columns, so converting the DB's
-                # extra bookkeeping columns to pandas is pure waste.
                 cached_pl = conn_db[row_indices]
                 keep = [
-                    col for col in ('bodyId_pre', 'bodyId_post', 'weight', 'roi')
+                    col for col in ('bodyId_pre', 'bodyId_post', 'weight',
+                                    'roi')
                     if col in cached_pl.columns
                 ]
-                cached_raw = cached_pl.select(keep).to_pandas()
-                cached_raw['bodyId_pre'] = cached_raw['bodyId_pre'].astype(str)
-                cached_raw['bodyId_post'] = cached_raw['bodyId_post'].astype(str)
-                cached_raw = cached_raw[
-                    cached_raw['bodyId_post'].isin(requested_posts)
+                legacy_raw = cached_pl.select(keep).to_pandas()
+                legacy_raw['bodyId_pre'] = \
+                    legacy_raw['bodyId_pre'].astype(str)
+                legacy_raw['bodyId_post'] = \
+                    legacy_raw['bodyId_post'].astype(str)
+                legacy_raw = legacy_raw[
+                    legacy_raw['bodyId_post'].isin(pending_posts)
                 ].copy()
-
-        # The connection cache is indexed by upstream neuron.  A few cached
-        # rows for a target do not prove that the target's incoming set is
-        # complete.  Reuse it without an online supplement only when every
-        # requested source bodyId is marked downstream-complete; otherwise an
-        # incoming target query is required to avoid silently losing pairs.
-        source_cache_complete = False
-        if requested_sources and getattr(self, 'use_cache', False):
-            neuron_index = getattr(self, '_neuron_index_dict', None)
-            if neuron_index is None:
-                try:
-                    self._load_neuron_index()
-                    neuron_index = getattr(self, '_neuron_index_dict', None)
-                except Exception:
-                    neuron_index = None
-            if neuron_index:
-                cached_pre_ids = {
-                    str(body_id) for body_id in
-                    (getattr(self, '_conn_index', None) or {})
-                }
-
-                def _source_cache_entry_is_complete(source):
-                    info = neuron_index.get(source, {})
-                    if not bool(info.get('downstream_complete', False)):
-                        return False
-                    # Metadata imports can mark a neuron complete before a
-                    # connection table is available.  A positive recorded
-                    # outdegree must therefore have a matching cached row;
-                    # zero-outdegree neurons are complete without one.
-                    count = info.get('connection_count', -1)
-                    try:
-                        count = float(count)
-                    except (TypeError, ValueError):
-                        count = -1
-                    return count == 0 or source in cached_pre_ids
-
-                source_cache_complete = all(
-                    _source_cache_entry_is_complete(source)
-                    for source in requested_sources
-                )
+                cache_stats['rows_from_legacy_index'] += len(legacy_raw)
 
         api_raw = self._empty_path_connection_frame()
-        if not source_cache_complete and not getattr(self, 'cache_only', False):
+        if pending_posts and not getattr(self, 'cache_only', False):
             try:
-                # Query all target-frontier posts, not just posts with no
-                # cached row: the cache is source-complete, not post-complete.
+                # Query ONLY the frontier posts whose incoming set is not
+                # proven complete; complete posts are never re-fetched.
+                cache_stats['posts_online'] += len(pending_posts)
+                cache_stats['online_calls'] += 1
                 api_raw = self._fetch_incoming_connections_online(
-                    requested_posts
+                    sorted(pending_posts)
                 )
                 if api_raw is None or api_raw.empty:
                     api_raw = self._empty_path_connection_frame()
                 else:
                     api_raw = api_raw.copy()
                     api_raw['bodyId_pre'] = api_raw['bodyId_pre'].astype(str)
-                    api_raw['bodyId_post'] = api_raw['bodyId_post'].astype(str)
+                    api_raw['bodyId_post'] = \
+                        api_raw['bodyId_post'].astype(str)
                     api_raw = api_raw[
-                        api_raw['bodyId_post'].isin(requested_posts)
+                        api_raw['bodyId_post'].isin(pending_posts)
                     ].copy()
+                    if 'roi' not in api_raw.columns:
+                        api_raw['roi'] = ''
+                cache_stats['rows_online'] += len(api_raw)
+                if use_cache:
+                    # A successful incoming query returns ALL incoming rows
+                    # for the requested posts (sources=None): mark them
+                    # incoming-complete and persist the rows.
+                    self._save_incoming_cache(api_raw, pending_posts)
             except Exception as exc:
                 self._vprint(
                     f'  ⚠️ Incoming target lookup failed: {exc}',
@@ -7530,14 +7926,15 @@ class FindNeuronConnection:
                     'one or more target frontier neurons could not be fetched; '
                     'some source-target bodyId pairs may be missing.'
                 )
-        elif not source_cache_complete and getattr(self, 'cache_only', False):
+        elif pending_posts and getattr(self, 'cache_only', False):
             self._warn_notes.append(
                 '- [shortest target-rooted lookup] cache_only=True and incoming '
                 'rows cannot be proven complete for all enrolled source '
                 'bodyIds; some source-target bodyId pairs may be missing.'
             )
 
-        frames = [frame for frame in (cached_raw, api_raw) if not frame.empty]
+        frames = [frame for frame in (incoming_raw, legacy_raw, api_raw)
+                  if not frame.empty]
         if not frames:
             return self._empty_path_connection_frame()
         combined = pd.concat(frames, ignore_index=True)
@@ -11386,6 +11783,13 @@ class FindNeuronConnection:
                 )
                 vp_bodyId.visualize()
                 self._record_viz_edge_trim(vp_bodyId)
+                # Same naming contract as the type-level visualization
+                # (missing artifact types stay absent — direct connections
+                # gain no Sankey from naming parity alone).
+                self._relocate_bodyid_viz_outputs(
+                    os.path.join(self.direct_folder, 'bodyId_visualization'),
+                    run_folder=self.direct_folder,
+                )
                 self._vprint('  ✓ Created VisualizePath visualization for bodyId-level connections:')
                 self._vprint('    - Interactive heatmap (bodyId-level connections)')
                 self._vprint('    - Sankey diagram (bodyId flow visualization)')
@@ -11869,6 +12273,11 @@ class FindNeuronConnection:
                 'edges_removed': prune_stats.get('rows_dropped'),
                 'bound_edges': self.max_interlayer + 1,
             }
+        # W* (strongest retained path bottleneck): pruning is lossless, so
+        # this value is the widest-path ceiling of the final graph. Used by
+        # the applied-threshold provenance block.
+        self.strongest_retained_bottleneck = prune_stats.get(
+            'strongest_retained')
         # Fix D (Edge Budget): a lossy weight floor caps the enumeration
         # cone when it still exceeds the budget after the lossless
         # prunes. The budget-fit search floors at the weakest tier whose
@@ -11883,6 +12292,9 @@ class FindNeuronConnection:
             if floor_stats.get('applied'):
                 self.edge_weight_floor = floor_stats.get('floor')
                 self.edge_budget_landing = floor_stats.get('landing')
+                # W* after the floor: the widest path of the floored cone.
+                self.strongest_retained_bottleneck = floor_stats.get(
+                    'strongest_retained')
                 self.graph_pruning_record = {
                     'lossless': False,
                     'stage': 'edge_budget_fit',
@@ -11918,13 +12330,25 @@ class FindNeuronConnection:
         Each target owns a reverse BFS frontier.  The frontier is expanded
         through incoming edges until all requested source bodyIds have been
         seen for that target or ``max_hops`` is reached.  This avoids fetching
-        the full forward fan-out of uninvolved source neurons and records the
-        earliest source-to-target distance for target enrollment metadata.
+        the full forward fan-out of uninvolved source neurons.
+
+        PER-PAIR CONTRACT: BFS records EVERY requested source's own
+        shortest distance to the target (``distances_by_target``), and the
+        retained shortest-DAG is capped by the FARTHEST source's distance —
+        never by the nearest one — so the per-pair minimum-hop path set of
+        every reachable (source, target) pair survives discovery, with all
+        tied alternatives (audit F-CORR-01 fix).
+
+        Per-target bookkeeping is compact: DAG candidate edges are recorded
+        as (pre, post) tuple sets at scan time instead of copying the shared
+        pandas layer frames per target (audit F-PERF-05 fix).
 
         The returned connection tables keep their biological ``pre -> post``
         orientation.  Their ``conn_layer`` labels identify reverse discovery
         depth; the path-level real-layer map is rebuilt from the actual
-        source-to-target paths later in the pipeline.
+        source-to-target paths later in the pipeline.  ``distances_by_target``
+        is returned so the enumerator can reuse the discovery BFS instead of
+        running its own (audit F-PERF-06 fix).
         """
         import polars as pl
 
@@ -11938,7 +12362,11 @@ class FindNeuronConnection:
         frontier_by_target = {target: {target} for target in target_ids}
         seen_by_target = {target: {target} for target in target_ids}
         distances_by_target = {target: {target: 0} for target in target_ids}
-        edges_by_target = {target: [] for target in target_ids}
+        # Compact per-target shortest-DAG candidate edges ((pre, post)
+        # tuples satisfying dist[pre] == dist[post] + 1), recorded during
+        # each target's own BFS scan — no per-target frame copies.
+        dag_edges_by_target = {target: set() for target in target_ids}
+        frontier_sizes = []
         discovery_complete = True
 
         for reverse_depth in range(max_hops):
@@ -11946,6 +12374,7 @@ class FindNeuronConnection:
                 if frontier_by_target else set()
             if not frontier_posts:
                 break
+            frontier_sizes.append(len(frontier_posts))
 
             self._vprint(
                 f'Backward layer {reverse_depth + 1}: querying incoming '
@@ -11972,6 +12401,12 @@ class FindNeuronConnection:
             conn_df = conn_df[
                 conn_df['bodyId_post'].isin(frontier_posts)
             ].copy()
+
+            # Drop edges touching untyped neurons BEFORE the reverse
+            # frontier expands: untyped predecessors must never enter the
+            # shortest-DAG distances or the returned paths.
+            conn_df = self._filter_untyped_pandas(
+                conn_df, layer_label=f'{reverse_depth}->{reverse_depth + 1}')
 
             if conn_df.empty:
                 all_connections.append(pl.DataFrame())
@@ -12000,20 +12435,27 @@ class FindNeuronConnection:
                 target_rows = conn_df[
                     conn_df['bodyId_post'].isin(current_posts)
                 ]
-                if not target_rows.empty:
-                    # Keep the rows associated with this target's reverse
-                    # search.  The same frontier neuron can be shared by
-                    # several targets, so a final per-target shortest-DAG
-                    # filter is needed before the graph is built.
-                    edges_by_target[target].append(target_rows.copy())
-                predecessors = set(target_rows['bodyId_pre'].unique())
+                t_dist = distances_by_target[target]
+                t_seen = seen_by_target[target]
+                t_dag_edges = dag_edges_by_target[target]
                 next_frontier = set()
-                for predecessor in predecessors:
-                    if predecessor in seen_by_target[target]:
+                for pre, post in zip(target_rows['bodyId_pre'].values,
+                                     target_rows['bodyId_post'].values):
+                    if pre in t_seen:
+                        # Already known. It is still a DAG edge when the
+                        # predecessor sits exactly one hop farther from the
+                        # target than the frontier post (e.g. first seen
+                        # earlier in this same layer via another post).
+                        if t_dist.get(pre) == reverse_depth + 1:
+                            t_dag_edges.add((pre, post))
                         continue
-                    seen_by_target[target].add(predecessor)
-                    distances_by_target[target][predecessor] = reverse_depth + 1
-                    next_frontier.add(predecessor)
+                    # Newly discovered: dist[pre] = dist[post] + 1, i.e. a
+                    # compact shortest-DAG edge record (replaces the former
+                    # per-target pandas frame copy).
+                    t_seen.add(pre)
+                    t_dist[pre] = reverse_depth + 1
+                    t_dag_edges.add((pre, post))
+                    next_frontier.add(pre)
 
                 # Once every requested source has been encountered for this
                 # target, deeper incoming branches cannot improve any of
@@ -12021,7 +12463,7 @@ class FindNeuronConnection:
                 # own reverse BFS independently.
                 found_sources = {
                     source for source in source_set
-                    if source != target and source in seen_by_target[target]
+                    if source != target and source in t_seen
                 }
                 required_sources = source_set - {target}
                 if required_sources and found_sources >= required_sources:
@@ -12047,6 +12489,7 @@ class FindNeuronConnection:
                 discovery_complete = False
 
         target_layers = {}
+        target_hop_limits = {}
         targets_found = []
         for target in target_ids:
             source_distances = [
@@ -12057,6 +12500,11 @@ class FindNeuronConnection:
             ]
             if source_distances:
                 target_layers[target] = min(source_distances)
+                # Per-pair contract: the DAG/cutoff covers the FARTHEST
+                # source's own shortest distance, so every pair's own
+                # minimum-hop set is retained (not just the nearest
+                # source's).
+                target_hop_limits[target] = max(source_distances)
                 targets_found.append(target)
 
         # Retain only edges on a shortest-DAG branch from a requested source
@@ -12068,41 +12516,28 @@ class FindNeuronConnection:
         valid_edges = set()
         valid_nodes = set()
         for target in targets_found:
-            target_edges = edges_by_target[target]
-            if not target_edges:
+            dag_edges = dag_edges_by_target[target]
+            if not dag_edges:
                 continue
-            # Discovery may continue farther upstream for another requested
-            # source, but this target's shortest result is bounded by the
-            # first source distance at which it was found.  Apply that
-            # target-specific cap before building the shortest DAG; otherwise
-            # each source-target pair could still receive a longer branch.
-            target_hop_limit = target_layers[target]
-            target_edge_df = pd.concat(target_edges, ignore_index=True)
+            t_dist = distances_by_target[target]
+            target_hop_limit = target_hop_limits[target]
             reverse_predecessors = {}
-            for pre, post in zip(
-                    target_edge_df['bodyId_pre'],
-                    target_edge_df['bodyId_post']):
-                pre = str(pre)
-                post = str(post)
+            for pre, post in dag_edges:
                 if (
-                    pre in distances_by_target[target]
-                    and post in distances_by_target[target]
-                    and distances_by_target[target][pre] <= target_hop_limit
-                    and distances_by_target[target][post] <= target_hop_limit
-                    and distances_by_target[target][pre]
-                    == distances_by_target[target][post] + 1
+                    t_dist[pre] <= target_hop_limit
+                    and t_dist[post] <= target_hop_limit
                 ):
                     reverse_predecessors.setdefault(post, set()).add(pre)
 
             source_nodes = {
                 source for source in source_set
                 if source != target
-                and source in distances_by_target[target]
-                and distances_by_target[target][source] <= target_hop_limit
+                and source in t_dist
+                and t_dist[source] <= target_hop_limit
             }
             keep_nodes = set(source_nodes)
             for node, node_distance in sorted(
-                    distances_by_target[target].items(),
+                    t_dist.items(),
                     key=lambda item: item[1], reverse=True):
                 if node_distance > target_hop_limit:
                     continue
@@ -12157,12 +12592,33 @@ class FindNeuronConnection:
         # shortest-DAG set, not the union of every source bodyId or every raw
         # reverse-reachable branch. This is what keeps uninvolved sources out
         # of the graph and enrollment report.
+        # Discovery diagnostics ride on the instance for the run metadata
+        # (audit fixation 8).
+        self._shortest_discovery_diagnostics = {
+            'reverse_layers_fetched': len(reverse_layers) - 1,
+            'frontier_sizes': frontier_sizes,
+            'targets_found': len(targets_found),
+            'per_target_distance_states': {
+                target: len(distances_by_target[target])
+                for target in targets_found
+            },
+            'dag_nodes': len(valid_nodes),
+            'dag_edges': len(valid_edges),
+            'discovery_complete': discovery_complete,
+            'cache_stats': dict(
+                getattr(self, '_shortest_cache_stats', {})),
+        }
         return {
             'all_connections': all_connections,
             'layer_neurons': filtered_reverse_layers,
             'all_neurons_in_network': valid_nodes,
             'targets_found': targets_found,
             'target_layers': target_layers,
+            'target_hop_limits': target_hop_limits,
+            'distances_by_target': {
+                target: distances_by_target[target]
+                for target in targets_found
+            },
             'complete': discovery_complete,
         }
 
@@ -12224,6 +12680,10 @@ class FindNeuronConnection:
         target while also discarding a valid shortest route to a farther
         target.  The pair key deliberately includes both endpoints so the
         type-level aggregation receives only exact bodyId-level shortest paths.
+
+        Retained for script/API compatibility and unit tests. The pipeline
+        itself no longer re-filters (F-PERF-08): the enumerator's output is
+        verified instead (see ``_verify_shortest_bodyid_paths``).
         """
         shortest_distance = {}
         for path in all_paths:
@@ -12239,6 +12699,41 @@ class FindNeuronConnection:
             path for path in all_paths
             if path and shortest_distance.get((path[0], path[-1])) == len(path) - 1
         ]
+
+    def _verify_shortest_bodyid_paths(self, all_paths):
+        """Verify (never re-filter) that emitted shortest paths are exactly
+        the per-pair minimum-hop sets.
+
+        A violation means the enumerator's shortest guarantee broke; it is
+        reported loudly as a warning note instead of being silently repaired
+        by a second full path-list allocation (audit F-PERF-08).
+        """
+        shortest_distance = {}
+        for path in all_paths:
+            if not path:
+                continue
+            pair = (path[0], path[-1])
+            distance = len(path) - 1
+            previous = shortest_distance.get(pair)
+            if previous is None or distance < previous:
+                shortest_distance[pair] = distance
+        violations = sum(
+            1 for path in all_paths
+            if path
+            and shortest_distance.get((path[0], path[-1])) != len(path) - 1
+        )
+        if violations:
+            self._warn_notes.append(
+                f'- [shortest invariant violation] {violations} emitted '
+                'path(s) were NOT minimum-hop for their exact bodyId pair '
+                '— this indicates an enumerator bug; please report the '
+                'query. The paths were NOT removed from the output.'
+            )
+            self._vprint(
+                f'  ⚠️ {violations} path(s) violate the per-pair minimum-hop '
+                'invariant (see user_warning_notes.txt)',
+                level='always',
+            )
 
     def _write_user_warning_notes(self, folder):
         """
@@ -12260,6 +12755,19 @@ class FindNeuronConnection:
                 f'edges in each rendered network/heatmap/Sankey view; pathfinding '
                 f'and fetched analysis connections were not trimmed.'
             )
+        _prov = getattr(self, '_last_provenance', None) or {}
+        if (_prov.get('applied_threshold_source')
+                == 'strongest_first_budget+edge_budget'):
+            notes.append(
+                '- [combined threshold] BOTH budgets affected this run: the '
+                'Edge Budget floor (edge_weight_floor) raised the threshold '
+                'before enumeration, then the StrongestFirst path budget bit '
+                f'and kept ALL intact paths with bottleneck >= '
+                f'{_prov.get("applied_threshold")} (applied_threshold, the '
+                'canonical minimal value). The output is exactly a complete '
+                'run at that threshold; see parameters.txt / '
+                'all_attributes.json for the full provenance block.'
+            )
         if getattr(self, 'min_ratio', 0) > 0:
             notes.append(
                 f'- [threshold] min_ratio={self.min_ratio}: connections below this '
@@ -12278,6 +12786,22 @@ class FindNeuronConnection:
             notes.append(
                 f'- [filter] keyword_in_path_to_remove={keywords}: paths containing '
                 f'these keywords were removed from the outputs.'
+            )
+        _untyped_stats = getattr(self, '_untyped_drop_stats', None) or {}
+        if getattr(self, 'drop_untyped', True) and _untyped_stats.get('rows'):
+            notes.append(
+                f'- [untyped dropped] drop_untyped=True removed '
+                f'{_untyped_stats["rows"]:,} connection(s) touching '
+                f'{len(_untyped_stats.get("neurons", ())):,} distinct untyped '
+                f'neurons (pre-side {_untyped_stats.get("untyped_pre", 0)}, '
+                f'post-side {_untyped_stats.get("untyped_post", 0)}) before '
+                'graph construction. Per-row records: '
+                'data_details/untyped_dropped_records.csv. The shared '
+                'predicate treats empty labels, Unknown/None/NaN sentinels, '
+                'and numeric bodyId-fallback labels as untyped; an untyped '
+                'source or target can remain enrolled in '
+                'source_neurons.csv/target_neurons.csv while its incident '
+                'edges were removed.'
             )
         if (getattr(self, 'max_interlayer', 0) >= 4
                 and getattr(self, '_depth_cap_reached', False)):
@@ -13235,6 +13759,16 @@ class FindNeuronConnection:
                 )
                 vp_bodyId.visualize()
                 self._record_viz_edge_trim(vp_bodyId)
+                # Same naming contract as the type-level visualization,
+                # applied inside the legacy path's bodyId_visualization/.
+                _bodyid_visualized = None
+                if getattr(vp_bodyId, 'edge_limit_trimmed', False):
+                    _bodyid_visualized = vp_bodyId.visualized_paths_for_export()
+                self._relocate_bodyid_viz_outputs(
+                    os.path.join(self.path_folder, 'bodyId_visualization'),
+                    run_folder=self.path_folder,
+                    input_df=_bodyid_visualized,
+                )
                 self._vprint('  Created bodyId-level visualizations in bodyId_visualization subfolder')
 
         except Exception as e:
@@ -13307,6 +13841,15 @@ class FindNeuronConnection:
             )
             vp.visualize(plot_heatmap=False, plot_Sankey=False, plot_network=True)
             self._record_viz_edge_trim(vp)
+            # Same Network_<run>.html prefix contract as the final
+            # visualizations, applied inside the preview folder
+            # (network_early/ or network_early_bodyId/); the preview stays
+            # in its own documented location.
+            self._organize_vispath_artifacts(
+                source_dir=output_folder,
+                viz_dir=output_folder,
+                run_name=os.path.basename(self.allpath_folder.rstrip(os.sep)),
+            )
             return True
         except Exception as e:
             self._vprint(f'  ⚠️  Early network visualization failed: {e}', level='always')
@@ -13356,47 +13899,104 @@ class FindNeuronConnection:
             if self._run_early_visualization(body_df, body_folder):
                 self._vprint('  ✓ BodyId-level early network visualization created (network_early_bodyId)', level='always')
 
-    def _relocate_viz_outputs(self, input_df=None, input_name='type_paths',
-                              input_filename=None):
-        """Organize the Phase-4 VisualizePath artifacts of the main
-        type-level visualization into subfolders:
+    def _organize_vispath_artifacts(self, source_dir, viz_dir, run_name,
+                                    input_df=None, input_name='type_paths',
+                                    input_filename=None):
+        """Organize one VisualizePath output location into its final form.
 
-        - ``visualization/`` holds the html artifacts, renamed with the
-          artifact type as prefix and the redundant type suffix dropped:
-          ``Network_<base>.html``, ``Sankey_<base>.html``,
-          ``Heatmap_<base>.html``.
-        - ``visualization/visualization_data/`` holds the vispath-exported
-          data files (``<base>_data_*``) plus an optional companion DataFrame.
-          The caller can name that file explicitly with ``input_filename``;
-          otherwise the historical ``<input_name>_input.csv`` name is used.
+        Shared naming rules for EVERY path level (type-level and
+        bodyId-level alike):
 
-        The duplicated artifacts are kept, just organized (VisualizePath
-        writes them into the run-folder root first).
+        - html artifacts are renamed with the artifact type as prefix and
+          the redundant level suffix dropped: ``Network_<run>.html``,
+          ``Sankey_<run>.html``, ``Heatmap_<run>.html`` (``<run>`` is the
+          run-folder name). Missing artifact types stay absent — a
+          network-only preview never gains a Sankey file from naming
+          parity alone.
+        - the vispath-exported data files (``<source>_data*``) move to
+          ``<viz_dir>/visualization_data/``.
+        - an optional companion DataFrame is saved there as
+          ``input_filename`` (or the historical ``<input_name>_input.csv``).
+
+        For the type-level visualization the artifacts are first written
+        into the run-folder root (``source_dir``) and move into
+        ``visualization/``; bodyId-level artifacts are written directly
+        into ``bodyId_visualization/`` and are reorganized in place.
         """
         import shutil
-        base = os.path.basename(self.allpath_folder.rstrip(os.sep))
-        viz_dir = os.path.join(self.allpath_folder, 'visualization')
+        base = os.path.basename(source_dir.rstrip(os.sep))
+        os.makedirs(viz_dir, exist_ok=True)
         data_dir = os.path.join(viz_dir, 'visualization_data')
         os.makedirs(data_dir, exist_ok=True)
         for prefix, suffix in (('Network', '_network.html'),
                                ('Sankey', '_Sankey.html'),
                                ('Heatmap', '_heatmap.html')):
-            src = os.path.join(self.allpath_folder, base + suffix)
+            src = os.path.join(source_dir, base + suffix)
             if os.path.exists(src):
-                # prefix + run name; the type suffix is redundant now
-                shutil.move(src, os.path.join(viz_dir, f'{prefix}_{base}.html'))
-        for fname in os.listdir(self.allpath_folder):
+                # prefix + run name; the level suffix is redundant now
+                shutil.move(src, os.path.join(viz_dir, f'{prefix}_{run_name}.html'))
+        for fname in os.listdir(source_dir):
             if fname.startswith(base + '_data'):
-                shutil.move(os.path.join(self.allpath_folder, fname),
-                            os.path.join(data_dir, fname))
+                # Rename to the shared <run>_data* convention while moving:
+                # a no-op at type level (base == run name), and it strips
+                # the redundant level prefix from bodyId/preview folders.
+                target = run_name + fname[len(base):]
+                shutil.move(os.path.join(source_dir, fname),
+                            os.path.join(data_dir, target))
         if input_df is not None and len(input_df) > 0:
             if input_filename is None:
                 input_filename = f'{input_name}_input.csv'
             self._save_df_to_csv_polars(
                 input_df, os.path.join(data_dir, input_filename))
-        self._vprint('  ✓ Visualization outputs organized under visualization/ '
+        base_folder = getattr(self, 'allpath_folder', None)
+        try:
+            rel_viz = (os.path.relpath(viz_dir, base_folder)
+                       if base_folder else viz_dir)
+            if rel_viz.startswith('..'):
+                rel_viz = viz_dir
+        except (ValueError, TypeError):
+            rel_viz = viz_dir
+        self._vprint(f'  ✓ Visualization outputs organized under {rel_viz} '
                      '(visualization_data/ for the exported data and inputs)',
                      level='full')
+
+    def _relocate_viz_outputs(self, input_df=None, input_name='type_paths',
+                              input_filename=None):
+        """Organize the Phase-4 VisualizePath artifacts of the main
+        type-level visualization into ``visualization/`` (see
+        ``_organize_vispath_artifacts`` for the shared naming rules)."""
+        return self._organize_vispath_artifacts(
+            source_dir=self.allpath_folder,
+            viz_dir=os.path.join(self.allpath_folder, 'visualization'),
+            run_name=os.path.basename(self.allpath_folder.rstrip(os.sep)),
+            input_df=input_df,
+            input_name=input_name,
+            input_filename=input_filename,
+        )
+
+    def _relocate_bodyid_viz_outputs(self, viz_folder, run_folder=None,
+                                     input_df=None):
+        """Mirror the type-level naming convention inside a
+        ``bodyId_visualization/`` folder: ``Network_<run>.html``,
+        ``Heatmap_<run>.html``, ``Sankey_<run>.html`` and
+        ``visualization_data/<run>_data_*.csv`` — same rules, level-specific
+        location. Missing artifact types stay absent (direct-connection
+        bodyId visualizations gain nothing they did not draw). The optional
+        companion DataFrame is the edge-limited selected-path export,
+        named ``bodyId_paths_visualized.csv`` in parallel to the type-level
+        ``type_paths_visualized.csv``.
+        """
+        run_folder = run_folder or self.allpath_folder
+        return self._organize_vispath_artifacts(
+            source_dir=viz_folder,
+            viz_dir=viz_folder,
+            run_name=os.path.basename(run_folder.rstrip(os.sep)),
+            input_df=input_df,
+            input_name='bodyId_paths',
+            input_filename=('bodyId_paths_visualized.csv'
+                            if input_df is not None and len(input_df) > 0
+                            else None),
+        )
     
     def FindAllPath(self, find_bodyId_path=True, forward_only=True, exclude_searched_neurons=None, 
                     use_graph_cache=True, find_reciprocal: bool = False):
@@ -13431,18 +14031,29 @@ class FindNeuronConnection:
         - Discovery: shortest mode is target-rooted by default. It fetches
           incoming edges from each target frontier and reconstructs only
           branches that reach requested source bodyIds, so uninvolved source
-          fan-out is not built into the search graph.
+          fan-out is not built into the search graph. Frontier posts with a
+          proven-complete incoming set are served from the direction-aware
+          incoming cache (``incoming_connections.parquet`` beside the
+          source-oriented ``connections.parquet``); only unproven posts are
+          queried online, and their rows are persisted with a completeness
+          marker for later runs.
         - Depth: ``max_interlayer`` is an EXACT explored-graph bound: paths
           are capped at ``max_interlayer + 1`` edges (0 = direct connections
           only). A returned path is shortest within the explored,
           threshold-filtered graph; if the graph is depth-limited, a longer
           returned path is not proof of a globally shortest route. Increase
           the bound for a deeper search.
-        - Enumeration: target-rooted backward BFS plus source-aware guided
-          DFS (``FastGraph.find_paths_shortest_backward``); the
-          pathfinding-algorithm selector does not apply. Shortest enumeration
-          is polynomial, so the combinatorial-explosion warning/limits of
-          FindAllPath are unnecessary.
+        - Enumeration: ``FastGraph.find_paths_shortest_strongest_first`` —
+          a per-target reverse BFS builds distance buckets, a maximin
+          bottleneck dynamic program scores every distance-reachable node,
+          and a best-first heap emits shortest paths in strength order
+          (streams for multiple targets are k-way merged) under the
+          StrongestFirst budget. The pathfinding-algorithm selector does
+          not apply. Shortest enumeration is polynomial, so the
+          combinatorial-explosion warning/limits of FindAllPath are
+          unnecessary. The StrongestFirst path budget may bite here (the
+          run reports its tau), but the Edge Budget floor never applies —
+          the shortest mode is never floored.
         - BodyId edge limit: OFF by default in shortest mode (0 = no
           trimming). Trimming keeps pair reachability but not shortest
           distances, so enabling it can inflate reported distances (noted
@@ -13539,6 +14150,13 @@ class FindNeuronConnection:
         self.save_folder = new_base
         self.allpath_folder = new_base
 
+        # The slice's threshold state (tau / canonical tau / floor) was
+        # set by the caller before this redirect — finalize the provenance
+        # from it so the folder's metadata describes THIS slice, and
+        # data_details/parameters.csv (written by the following
+        # _materialize_paths) carries the same block.
+        self._finalize_threshold_provenance(path_mode='all')
+
         public_attrs = self._run_export_attributes(path_mode='all')
         public_attrs['replay_source_threshold'] = base_threshold
         with open(os.path.join(new_base, 'all_attributes.json'), 'w') as f:
@@ -13551,13 +14169,14 @@ class FindNeuronConnection:
                 keylen = len(key)
                 f.write(f'{key}:{" " * (30 - keylen)}{value}\n')
             f.write(f'path_mode:{" " * 21}all\n')
-            _tau = getattr(self, 'strongest_first_cutoff', None)
-            _tau_str = f'{_tau:g}' if _tau is not None else 'not reached'
-            f.write(f'applied_tau (min path bottleneck):{" " * 4}{_tau_str}\n')
-            _floor = getattr(self, 'edge_weight_floor', None)
-            _floor_str = (f'{_floor:g}' if _floor is not None
-                          else 'not applied')
-            f.write(f'edge_weight_floor:{" " * 18}{_floor_str}\n')
+            prov = getattr(self, '_last_provenance', None) or {}
+            tau = prov.get('strongest_first_tau')
+            tau_str = f'{tau:g}' if tau is not None else 'not reached'
+            f.write(f'applied_tau (min path bottleneck):{" " * 4}{tau_str}\n')
+            floor = prov.get('edge_weight_floor')
+            floor_str = (f'{floor:g}' if floor is not None
+                         else 'not applied')
+            f.write(f'edge_weight_floor:{" " * 18}{floor_str}\n')
             f.write(f'replayed_from:{" " * 17}{base_threshold}\n')
             f.write('\n')
 
@@ -13570,6 +14189,130 @@ class FindNeuronConnection:
             # slice is still the tau0-bounded set
             return float(t0_tau), False
         return float(sorted_bn[start]), True
+
+    def _finalize_threshold_provenance(self, path_mode='all'):
+        """Compute and record the canonical threshold/bottleneck provenance.
+
+        Single call site for the applied-threshold contract (see
+        ``applied_threshold_provenance``): reads the post-enumeration run
+        state, mirrors the canonical fields onto public instance
+        attributes (all_attributes.json exports them verbatim), appends
+        them to ``parameter_dict`` / ``parameter_df`` so
+        ``data_details/parameters.csv`` carries them, and caches the block
+        on the instance for the parameters.txt re-stamp.
+        """
+        if path_mode == 'shortest':
+            # Shortest Paths can take the StrongestFirst path budget but
+            # is NEVER floored: the Edge Budget does not apply.
+            effective_edge_budget = None
+        else:
+            effective_edge_budget = getattr(
+                self, 'graph_edge_limit_bodyid', None)
+        sf_budget = self.max_paths_bodyid if self.max_paths_bodyid else 1000000
+        prov = applied_threshold_provenance(
+            requested_threshold=self.min_synapse_num,
+            strongest_first_tau=getattr(self, 'strongest_first_cutoff', None),
+            strongest_first_budget_bitten=getattr(
+                self, 'strongest_first_budget_bitten', False),
+            strongest_dropped_bottleneck=getattr(
+                self, 'strongest_dropped_bottleneck', None),
+            tau_canonical=getattr(self, 'tau_canonical', None),
+            edge_weight_floor=getattr(self, 'edge_weight_floor', None),
+            edge_budget_landing=getattr(self, 'edge_budget_landing', None),
+            edge_budget=effective_edge_budget,
+            strongest_retained_bottleneck=getattr(
+                self, 'strongest_retained_bottleneck', None),
+        )
+        prov['strongest_first_budget'] = int(sf_budget)
+
+        # Public instance attributes -> all_attributes.json export.
+        self.requested_threshold = prov['requested_threshold']
+        self.applied_threshold = prov['applied_threshold']
+        self.applied_threshold_source = prov['applied_threshold_source']
+        self.strongest_first_budget = prov['strongest_first_budget']
+        self.strongest_first_budget_bitten = prov[
+            'strongest_first_budget_bitten']
+        self.strongest_first_tau = prov['strongest_first_tau']
+        self.tau_canonical = prov['tau_canonical']
+        self.strongest_dropped_bottleneck = prov[
+            'strongest_dropped_bottleneck']
+        self.edge_budget = prov['edge_budget']
+        self.edge_budget_applied = prov['edge_budget_applied']
+        self.edge_budget_landing = prov['edge_budget_landing']
+        self.edge_weight_floor = prov['edge_weight_floor']
+        self.strongest_retained_bottleneck = prov[
+            'strongest_retained_bottleneck']
+        self.paths_complete = prov['paths_complete']
+        self._last_provenance = prov
+
+        # Structured parameter export (data_details/parameters.csv).
+        fmt = _format_provenance_value
+        self.parameter_dict.update({
+            'requested_threshold': str(prov['requested_threshold']),
+            'applied_threshold': fmt(prov['applied_threshold']),
+            'applied_threshold_source': str(
+                prov['applied_threshold_source']),
+            'strongest_first_budget': str(prov['strongest_first_budget']),
+            'strongest_first_budget_bitten': str(
+                prov['strongest_first_budget_bitten']),
+            'strongest_first_tau': fmt(prov['strongest_first_tau']),
+            'tau_canonical': fmt(prov['tau_canonical']),
+            'strongest_dropped_bottleneck': fmt(
+                prov['strongest_dropped_bottleneck']),
+            'edge_budget': fmt(prov['edge_budget']),
+            'edge_budget_applied': str(prov['edge_budget_applied']),
+            'edge_budget_landing': fmt(prov['edge_budget_landing']),
+            'edge_weight_floor': fmt(prov['edge_weight_floor']),
+            'strongest_retained_bottleneck': fmt(
+                prov['strongest_retained_bottleneck']),
+            'paths_complete': str(prov['paths_complete']),
+        })
+        self.parameter_df = pd.DataFrame.from_dict(
+            self.parameter_dict, orient='index', columns=['value'])
+        self.parameter_df.reset_index(inplace=True)
+        self.parameter_df.columns = ['parameter', 'value']
+        return prov
+
+    def _write_run_metadata(self, path_mode, extra_lines=()):
+        """Post-enumeration re-stamp of all_attributes.json + parameters.txt.
+
+        The early writes ran before enumeration, so the tau/floor/budget
+        state they captured was still unset. This re-stamp finalizes both
+        files with the applied-threshold provenance block; it runs for
+        BOTH path modes ('all' previously skipped the parameters.txt
+        provenance and 'shortest' was never re-stamped at all).
+        """
+        try:
+            final_attrs = self._run_export_attributes(path_mode=path_mode)
+            with open(os.path.join(self.allpath_folder,
+                                   'all_attributes.json'), 'w') as af:
+                json.dump(final_attrs, af, indent=4,
+                          default=lambda o: '<not serializable>')
+            prov = getattr(self, '_last_provenance', None) or {}
+            with open(os.path.join(self.allpath_folder,
+                                   'parameters.txt'), 'w') as f:
+                f.write(f'Parameters for processing {self.source_fname} '
+                        f'to {self.target_fname}:\n')
+                for key, value in self.parameter_dict.items():
+                    keylen = len(key)
+                    f.write(f'{key}:{" " * (30 - keylen)}{value}\n')
+                f.write(f'path_mode:{" " * 21}{path_mode}\n')
+                if prov:
+                    # Backward-compatible aliases (pre-provenance readers
+                    # grep these two lines).
+                    tau = prov.get('strongest_first_tau')
+                    tau_str = f'{tau:g}' if tau is not None else 'not reached'
+                    f.write(f'applied_tau (min path bottleneck):'
+                            f'{" " * 4}{tau_str}\n')
+                    floor = prov.get('edge_weight_floor')
+                    floor_str = (f'{floor:g}' if floor is not None
+                                 else 'not applied')
+                    f.write(f'edge_weight_floor:{" " * 18}{floor_str}\n')
+                for line in extra_lines:
+                    f.write(f'{line}\n')
+                f.write('\n')
+        except Exception:
+            pass
 
     def FindAllPathMultiThreshold(self, thresholds, find_bodyId_path=True,
                                   forward_only=True, use_graph_cache=True,
@@ -13640,14 +14383,7 @@ class FindNeuronConnection:
         # Re-stamp the t0 folder's run attributes now that the final
         # state (tau / trim_policy / graph_pruning) is known — the early
         # all_attributes.json write ran before enumeration.
-        try:
-            final_attrs = self._run_export_attributes(path_mode='all')
-            with open(os.path.join(
-                    self.allpath_folder, 'all_attributes.json'), 'w') as af:
-                json.dump(final_attrs, af, indent=4,
-                          default=lambda o: '<not serializable>')
-        except Exception:
-            pass
+        self._write_run_metadata('all')
 
         if capture is None:
             results['_fallback'] = True
@@ -13870,6 +14606,16 @@ class FindNeuronConnection:
         # natural tau otherwise); strongest_dropped_bottleneck is w2.
         self.tau_canonical = None
         self.strongest_dropped_bottleneck = None
+        # Untyped-neuron drop accumulators (drop_untyped) reset per run so
+        # sequential calls never mix records across runs.
+        self._reset_untyped_drop_tracking()
+        # Per-run shortest-discovery cache diagnostics (incoming cache).
+        self._shortest_cache_stats = {
+            'posts_cache_complete': 0, 'posts_online': 0,
+            'rows_from_cache': 0, 'rows_from_legacy_index': 0,
+            'rows_online': 0, 'online_calls': 0,
+        }
+        self.shortest_discovery_diagnostics = {}
         # F9: ratio/probability thresholds are DISABLED —
         # connection_ratio and traversal_probability are readout columns
         # computed against the all-post denominator, not filter knobs.
@@ -14010,6 +14756,7 @@ class FindNeuronConnection:
             self.min_ratio,
             self.min_traversal_probability,
             self.exclude_intra_type_connections,
+            drop_untyped=getattr(self, 'drop_untyped', True),
         )
         
         # Shortest mode now owns a target-rooted discovery direction.  Do not
@@ -14165,10 +14912,20 @@ class FindNeuronConnection:
             ]
             discovery_complete = backward_result['complete']
             self._shortest_target_layers = backward_result['target_layers']
+            # Per-pair contract (F-CORR-01 fix): enumeration cutoffs cover
+            # the FARTHEST source's own shortest distance per target, not
+            # the nearest source's.
             self._shortest_target_hop_limits = dict(
-                backward_result['target_layers']
+                backward_result['target_hop_limits']
+            )
+            self._shortest_target_distances = dict(
+                backward_result['distances_by_target']
             )
             self._shortest_targets_found = backward_result['targets_found']
+            # Discovery diagnostics -> run metadata (public: exported by
+            # _run_export_attributes).
+            self.shortest_discovery_diagnostics = dict(
+                getattr(self, '_shortest_discovery_diagnostics', {}))
             self._depth_cap_reached = not discovery_complete
             self._shortest_scope_limited = not discovery_complete
 
@@ -14256,6 +15013,12 @@ class FindNeuronConnection:
                 # alive at once and OOM'ed 32 GB machines on
                 # multi-million-row layers.
                 conn_pl = self._as_polars_conn_frame(conn_df)
+
+                # Drop edges touching untyped neurons BEFORE the graph
+                # membership grows: an untyped neuron can then never enter
+                # the discovery frontier or appear inside a returned path.
+                conn_pl = self._filter_untyped_polars(
+                    conn_pl, layer_label=f'{layer_idx}->{layer_idx + 1}')
 
                 if not forward_only and not conn_pl.is_empty():
                     # §4.1: drop (pre, post) pairs already fetched at an
@@ -14694,6 +15457,10 @@ class FindNeuronConnection:
                 target_cutoffs=getattr(
                     self, '_shortest_target_hop_limits', {}
                 ),
+                # F-PERF-06 fix: seed each target's distance map from the
+                # discovery BFS instead of re-running a reverse BFS here.
+                target_distances=getattr(
+                    self, '_shortest_target_distances', None),
             )
         
         elif use_strongest_first:
@@ -14786,16 +15553,14 @@ class FindNeuronConnection:
             # arbitrary truncation anymore.
 
             all_paths = list(path_iter)
-            raw_path_count = len(all_paths)
             if path_mode == 'shortest':
-                all_paths = self._keep_shortest_bodyid_paths(all_paths)
-                if len(all_paths) != raw_path_count:
-                    self._vprint(
-                        f'  Shortest bodyId filter: kept {len(all_paths):,} of '
-                        f'{raw_path_count:,} paths after applying the minimum '
-                        f'hop count per exact source-target pair',
-                        level='full',
-                    )
+                # F-PERF-08 fix: the enumerator already emits exactly the
+                # per-pair minimum-hop sets (discovery-seeded distances +
+                # per-target DAG), so the former second filtering pass
+                # (which allocated a full second path list) is now a
+                # verify-only assertion: violations are reported, never
+                # silently re-filtered.
+                self._verify_shortest_bodyid_paths(all_paths)
 
                 if backward_shortest:
                     # Reverse discovery layers are not forward path layers.
@@ -15006,6 +15771,10 @@ class FindNeuronConnection:
         # This means if neuron A→B exists in both Layer 0→1 and Layer 2→3, both are kept
         # Initialize lists for accumulation (more efficient than repeated concat)
         _phase_t0 = _time_mod.time()
+        # Finalize the canonical applied-threshold provenance BEFORE
+        # materialization so data_details/parameters.csv (written inside)
+        # carries the same block as all_attributes.json / parameters.txt.
+        self._finalize_threshold_provenance(path_mode=path_mode)
         self._materialize_paths(
             path_mode,
             all_connections=all_connections,
@@ -15031,36 +15800,12 @@ class FindNeuronConnection:
                 f"{name} {val:g}s" for name, val in self.phase_timers.items()),
             level='full')
 
-        if path_mode == 'all':
-            # F4: re-stamp the run metadata now that the final state (tau,
-            # edge-weight floor) is known — the early writes ran before
-            # enumeration (the multi-threshold orchestrator re-stamps its
-            # own folders the same way).
-            try:
-                final_attrs = self._run_export_attributes(path_mode=path_mode)
-                with open(os.path.join(self.allpath_folder,
-                                       'all_attributes.json'), 'w') as af:
-                    json.dump(final_attrs, af, indent=4,
-                              default=lambda o: '<not serializable>')
-                with open(os.path.join(self.allpath_folder,
-                                       'parameters.txt'), 'w') as f:
-                    f.write(f'Parameters for processing {self.source_fname} '
-                            f'to {self.target_fname}:\n')
-                    for key, value in self.parameter_dict.items():
-                        keylen = len(key)
-                        f.write(f'{key}:{" " * (30 - keylen)}{value}\n')
-                    f.write(f'path_mode:{" " * 21}{path_mode}\n')
-                    _tau = getattr(self, 'strongest_first_cutoff', None)
-                    _tau_str = f'{_tau:g}' if _tau is not None else 'not reached'
-                    f.write(f'applied_tau (min path bottleneck):'
-                            f'{" " * 4}{_tau_str}\n')
-                    _floor = getattr(self, 'edge_weight_floor', None)
-                    _floor_str = (f'{_floor:g}' if _floor is not None
-                                  else 'not applied')
-                    f.write(f'edge_weight_floor:{" " * 18}{_floor_str}\n')
-                    f.write('\n')
-            except Exception:
-                pass
+        # F4: re-stamp the run metadata now that the final state (tau,
+        # floor, applied threshold) is known — the early writes ran before
+        # enumeration. BOTH modes are re-stamped: 'shortest' used to keep
+        # its pre-enumeration snapshot (tau/floor still None) and never
+        # received the provenance block.
+        self._write_run_metadata(path_mode)
 
     def _materialize_paths(
         self,
@@ -17105,6 +17850,21 @@ class FindNeuronConnection:
                 )
                 vp_bodyId.visualize()
                 self._record_viz_edge_trim(vp_bodyId)
+                # Same artifact naming contract as the type-level
+                # visualization (Network_/Heatmap_/Sankey_ +
+                # visualization_data/), applied inside
+                # bodyId_visualization/. When the visualization edge limit
+                # trimmed the graph, export the exact bodyId path rows the
+                # rendered graph represents (bodyId_paths_visualized.csv),
+                # parallel to type_paths_visualized.csv.
+                _bodyid_visualized = None
+                if getattr(vp_bodyId, 'edge_limit_trimmed', False):
+                    _bodyid_visualized = vp_bodyId.visualized_paths_for_export()
+                self._relocate_bodyid_viz_outputs(
+                    os.path.join(self.allpath_folder, 'bodyId_visualization'),
+                    run_folder=self.allpath_folder,
+                    input_df=_bodyid_visualized,
+                )
                 if self.verbose_mode == 'simple':
                     self._vprint('Done', level='simple')
                 else:
@@ -17141,6 +17901,7 @@ class FindNeuronConnection:
 
         # Standalone warning notes (graph trims, thresholds, filters...) at
         # the run folder root — written whenever an op may tilt the outputs.
+        self._export_untyped_drop_records(self.allpath_folder)
         self._write_user_warning_notes(self.allpath_folder)
 
     def _is_symmetric_dataset(self) -> bool:

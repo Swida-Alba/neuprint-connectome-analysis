@@ -42,6 +42,15 @@ from .data_loader import DataLoader
 from .metrics import ComparisonMetrics
 from .interactive_heatmap import generate_interactive_heatmap
 
+try:
+    from utils.label_utils import is_untyped_type_label, untyped_side
+except ImportError:  # pragma: no cover - direct package imports
+    try:
+        from src.utils.label_utils import is_untyped_type_label, untyped_side
+    except ImportError:
+        is_untyped_type_label = None
+        untyped_side = None
+
 
 def _escape_cypher_string_fallback(value):
     """Inline escape fallback (only used when src.utils.api_utils is unavailable)."""
@@ -712,8 +721,12 @@ class ComparisonAnalyzer:
             separate_hemispheres=self.parameters.separate_hemispheres,
             symmetry_analysis=self.parameters.symmetry_analysis,
             keep_only_hemisphere_conserved_connections=self.parameters.keep_only_hemisphere_conserved_connections,
+            # Same as the replay constructor above: the comparison-level
+            # drop_untyped fires post label-mapping in the analyzer, so the
+            # delegated per-dataset run keeps every row.
+            drop_untyped=False,
         )
-        
+
         # Initialize and run analysis
         # Use FindAllPath()/FindShortestPath() as specified in TODO_comparison.md:
         # "DO NOT use the FindDirectConnection() function, because the FindAllPath() 
@@ -1375,7 +1388,13 @@ class ComparisonAnalyzer:
     def _is_untyped_type_value(self, value) -> bool:
         """True when a type label means 'untyped': empty, an explicit
         Unknown/none sentinel, or the bodyId-fallback label (the neuron's
-        own id used as its type when no name resolved)."""
+        own id used as its type when no name resolved).
+
+        Delegates to the shared predicate in ``utils.label_utils`` so
+        pathfinding (``FindNeuronConnection.drop_untyped``) and comparison
+        always agree on the untyped definition."""
+        if is_untyped_type_label is not None:
+            return is_untyped_type_label(value)
         s = str(value).strip()
         if not s or s.lower() in {"unknown", "nan", "none"}:
             return True
@@ -1407,6 +1426,15 @@ class ComparisonAnalyzer:
         if not drop_mask.any():
             return df
         dropped = df[drop_mask].copy()
+        # Side flag shared with the pathfinding records
+        # (data_details/untyped_dropped_records.csv) so both file formats
+        # carry the same schema.
+        if untyped_side is not None:
+            dropped["untyped_side"] = [
+                untyped_side(bool(p), bool(q))
+                for p, q in zip(untyped_pre[drop_mask],
+                                untyped_post[drop_mask])
+            ]
         # The loader paths may have added these provenance columns already
         # (connection_type/connection_info branches pre-fill them) —
         # overwrite instead of insert so the drop never raises on a
@@ -1908,6 +1936,11 @@ class ComparisonAnalyzer:
             separate_hemispheres=self.parameters.separate_hemispheres,
             symmetry_analysis=self.parameters.symmetry_analysis,
             keep_only_hemisphere_conserved_connections=self.parameters.keep_only_hemisphere_conserved_connections,
+            # The delegated run must NOT pre-filter with dataset-native
+            # labels: the comparison-level drop_untyped runs AFTER
+            # standardized cross-dataset labels are resolved (post
+            # label-mapping), which is the later, authoritative timing.
+            drop_untyped=False,
         )
 
         fnc.InitializeNeuronInfo()

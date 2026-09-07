@@ -645,6 +645,18 @@ DEFAULT_SETTING_SPECS = {
                 "mapping) needs no bodyId exports, which can run to multiple "
                 "GB per run (bodyId connMatrix CSVs, raw path lists).",
     },
+    "drop_untyped": {
+        "label": "Drop Untyped Neurons",
+        "group": "pathfinding_output",
+        "kind": "bool",
+        "hint": "Neuron-label filter shared by Complete Paths, Shortest "
+                "Paths, and Cross-Dataset Comparison: remove edges touching "
+                "untyped neurons (empty / Unknown / bodyId-fallback labels). "
+                "Dropped rows are exported (data_details/"
+                "untyped_dropped_records.csv per pathfinding run; "
+                "comparison_results/untyped_dropped_records.csv for "
+                "comparison runs) and counted in user_warning_notes.txt.",
+    },
     "replay_paths": {
         "label": "Replay Paths (single enumeration)",
         "group": "pathfinding_output",
@@ -685,10 +697,11 @@ DEFAULT_SETTING_SPECS = {
         "min": 0,
         "max": 100000000,
         "step": 1000,
-        "hint": "Path budget for StrongestFirst enumeration (bodyId level): "
-                "when the search exceeds it, ALL paths above the achieved "
-                "strength cutoff (tau) are kept and tau is reported. "
-                "0 = auto (StrongestFirst: 1M budget).",
+        "hint": "Path-output budget for StrongestFirst enumeration (bodyId "
+                "level): when the search exceeds it, ALL paths above the "
+                "achieved strength cutoff (tau) are kept and tau is "
+                "reported. Filters the emitted paths only — the graph is "
+                "not trimmed. 0 = auto (StrongestFirst: 1M budget).",
     },
     "graph_edge_limit_bodyid": {
         "label": "Edge Budget",
@@ -697,11 +710,14 @@ DEFAULT_SETTING_SPECS = {
         "min": 0,
         "max": 100000000,
         "step": 100000,
-        "hint": "After the lossless prunes, discovery cones exceeding this "
-                "many bodyId edges are floored just above the N-th strongest "
-                "edge's weight (w0 = w1 + 1) — exactly equivalent to raising "
-                "the threshold; the applied floor is reported as "
-                "edge_weight_floor. 0 = off.",
+        "hint": "Graph filter ('all' path mode only): after the lossless "
+                "prunes, discovery cones exceeding this many bodyId edges "
+                "are floored just above the N-th strongest edge's weight "
+                "(w0 = w1 + 1) — exactly equivalent to raising the "
+                "threshold; the applied floor is reported as "
+                "edge_weight_floor. Distinct from the drawing-only "
+                "Visualization Edge Limit. 0 = off. Shortest mode is "
+                "never floored.",
     },
     "showfig_analysis": {
         "label": "Show Figure (Analysis Tabs)",

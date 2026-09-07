@@ -38,7 +38,9 @@ source-target pairs are needed.
 ## Depth cap and shortest-path guarantee
 
 - **Max Intermediate Layers = 0** means direct connections only.
-- For a positive value `M`, paths are capped at `M + 1` hops. Increase `M`
+- For a positive value `M`, paths are capped at `M + 1` hops. The tab
+  default is **5** (deeper than the Complete Paths default of 2), because
+  shortest-path searches typically target deeper routes. Increase `M`
   when a query needs deeper intermediate layers; a high value such as 99 is
   effectively unlimited for practical connectome queries.
 - Backward discovery continues for each target until its enrolled source
@@ -54,8 +56,14 @@ source-target pairs are needed.
 
 ## Why there is no algorithm selector
 
-Shortest enumeration is a backward-BFS distance pass plus a guided DFS over
-the shortest-path DAG — polynomial in the graph size per pair. The
+Shortest enumeration runs through
+`FastGraph.find_paths_shortest_strongest_first`: a per-target reverse BFS
+outlines the min-hop DAG, a maximin bottleneck DP annotates every branch
+with the best achievable strength, and tied shortest paths are emitted
+best-first in strength order with a k-way merge across targets —
+polynomial in the graph size per pair. (The
+`find_paths_shortest_backward` exporter also exists in FastGraph, but the
+pipeline does not call it.) The
 branching^depth explosion that makes Find All Paths expensive (it explores
 non-shortest branches) does not exist here, but the *total* number of
 min-hop paths can still grow quickly at depth: tied routes multiply at
@@ -85,7 +93,25 @@ value, including 1M defaults:
 
 The tab disables the Edge Budget input in shortest mode; API callers
 passing `graph_edge_limit_bodyid` get the full un-floored graph here.
-The **Max Paths (BodyId)** input is the knob that bounds this mode.
+The **Max Paths (BodyId)** input is the knob that bounds this mode —
+shortest mode can therefore be tau-bounded by the StrongestFirst path
+budget, but is never Edge-Budget-floored.
+
+## Drop Untyped Neurons
+
+Checked by default in the Output Options. A neuron-label filter shared
+with Complete Paths and Cross-Dataset Comparison
+(`utils.label_utils.is_untyped_type_label`): edges touching untyped
+labels — empty, Unknown/None/NaN sentinels (case-insensitive), or the
+all-digit bodyId fallback — are removed after label enrichment and before
+the graph is built, so an untyped neuron can never be an intermediate
+node of a returned path or visualization. An untyped source/target can
+remain enrolled in `source_neurons.csv` / `target_neurons.csv` while its
+incident edges are removed. Dropped rows are exported to
+`data_details/untyped_dropped_records.csv` (only when something was
+dropped) and the counts are appended to `user_warning_notes.txt`. This is
+a label filter — distinct from the Edge Budget, Max Paths and the
+Visualization Edge Limit.
 
 ## Visualization Edge Limit
 

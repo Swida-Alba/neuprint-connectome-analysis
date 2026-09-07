@@ -177,6 +177,8 @@ fc = FindNeuronConnection(
     max_interlayer=4,                # Maximum intermediate layers
     keyword_in_path_to_remove=['None'],  # Exclude these types from paths
     pathfinding='StrongestFirst',  # Built-in 'all'-mode algorithm (bounded by Max Paths with a reported tau)
+    drop_untyped=True,             # Neuron-label filter: drop edges touching
+                                   #   untyped neurons before the graph is built
     
     # Performance options
     skip_bodyId=True,                # Skip bodyId-level for speed
@@ -512,9 +514,22 @@ min_ratio = min_traversal_probability * 0.3
 | --------------------------- | ------------------------------ | --------------- | ----------------- |
 | `max_interlayer`            | Maximum intermediate layers    | 1 (API) / 2 (UI) | 1-6             |
 | `pathfinding`               | Algorithm choice               | `'StrongestFirst'` | See table below   |
+| `drop_untyped`              | Neuron-label filter: drop edges touching untyped neurons (empty / Unknown / NaN / bodyId-fallback labels) before the graph is built | `True`          | `False` to keep   |
 | `show_top_n_paths`          | Limit output paths (-1 = all)  | -1              | 100-1000          |
 | `keyword_in_path_to_remove` | Exclude paths with these types | `[]`            | `['None', 'APL']` |
 | `skip_bodyId`               | Skip bodyId-level analysis     | `False`         | `True` for speed  |
+
+**Filter distinctions** (these knobs bound different things):
+
+- **Min Synapse Count** = the threshold.
+- **Edge Budget** (`graph_edge_limit_bodyid`) = graph-level floor — 'all'
+  mode only, exactly equivalent to raising the threshold (shortest mode is
+  never floored).
+- **Max Paths (BodyId)** (`max_paths_bodyid`) = path-output budget (keeps
+  everything above a reported tau).
+- **Drop Untyped Neurons** (`drop_untyped`) = neuron-label filter.
+- **Visualization Edge Limit** (`edgeN_limit`) = drawing-only cap — never
+  changes fetching, the graph, or path outputs.
 
 **Algorithm Selection:**
 
@@ -732,6 +747,7 @@ sourceNeurons=['MBON01', 'MBON03', 'KC.*']
 | --------------------------- | ----------------------------------------------------------- | --------------- |
 | `max_interlayer`            | Maximum intermediate layers                                 | 1               |
 | `pathfinding`               | Algorithm: `'StrongestFirst'` (built-in), `'MemoizedDFS'`, `'Bidirectional'`, `'DP'`, etc. | `'StrongestFirst'` |
+| `drop_untyped`              | Drop edges touching untyped neurons (neuron-label filter)   | `True`          |
 | `show_top_n_paths`          | Limit output paths (-1 = all)                               | -1              |
 | `keyword_in_path_to_remove` | Exclude paths containing these types                        | `[]`            |
 

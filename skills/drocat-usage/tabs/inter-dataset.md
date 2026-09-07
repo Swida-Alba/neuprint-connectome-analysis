@@ -44,6 +44,7 @@ params = ComparisonParameters(
     keep_only_hemisphere_conserved_connections=False,
     symmetry_analysis=False,
     find_reciprocal=False,
+    drop_untyped=True,                  # Drop Untyped Neurons (Advanced Settings); see Notes
 )
 # optional: params = ComparisonParameters(..., overall_mapping_json="/path/to/mapping.json")
 
@@ -69,6 +70,20 @@ python skills/drocat-usage/scripts/run_direct.py \
 - `comparison_mode="path"` uses the pathfinding engine (FindAllPath/FindShortestPath);
   `comparison_mode="edge"` preserves strong direct edges. The `path_mode` selects
   per-pair minimum-hop vs all-paths behavior.
+- **Drop Untyped Neurons** (`drop_untyped=True`, checkbox in Advanced Settings):
+  the shared predicate `utils.label_utils.is_untyped_type_label` (empty label,
+  Unknown/None/NaN sentinel, all-digit bodyId-fallback label), applied by the
+  analyzer AFTER standardized cross-dataset label mapping. The delegated
+  per-dataset pathfinding runs execute with `drop_untyped=False`, so only the
+  comparison-level filter fires and no per-dataset `data_details/` records are
+  written. Dropped rows land in `comparison_results/untyped_dropped_records.csv`
+  with an `untyped_side` column (`pre` / `post` / `pre+post`); counts are
+  appended to `user_warning_notes.txt` only when rows were dropped.
+- Each per-dataset threshold folder carries the threshold/bottleneck provenance
+  block (requested vs applied threshold, `applied_threshold_source`,
+  StrongestFirst budget/tau, Edge Budget, `strongest_retained_bottleneck` (W*),
+  `paths_complete`) in `parameters.txt`, `all_attributes.json`, and
+  `data_details/parameters.csv`.
 - Use `auto_type_mapping=True` (and `overall_mapping_json`) when type names differ
   between datasets.
 - Use `parallel=True` with a bounded `max_workers` for many datasets; start with

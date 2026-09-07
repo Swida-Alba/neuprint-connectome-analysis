@@ -134,16 +134,19 @@ def create_find_shortest_tab():
                 max_paths = number_input(
                     "Max Paths (BodyId)", get_user_default("max_paths_bodyid"),
                     0, 100000000,
-                    hint="Path budget for the StrongestFirst min-hop enumeration: "
-                         "when the search exceeds it, ALL min-hop paths above the "
-                         "achieved strength cutoff (tau) are kept and tau is "
-                         "reported. 0 = auto (1M budget).",
+                    hint="Path-output budget for the StrongestFirst min-hop "
+                         "enumeration: when the search exceeds it, ALL min-hop "
+                         "paths above the achieved strength cutoff (tau) are "
+                         "kept and tau is reported. Filters the emitted PATHS "
+                         "only — the graph is not trimmed. 0 = auto (1M budget).",
                 )
                 edge_limit = number_input(
                     "Visualization Edge Limit", get_user_default("edgeN_limit"), 10, 5000,
-                    hint="Maximum edges drawn per visualization (network / Sankey / heatmap, "
-                         "including the network_early preview). Limits memory usage for highly "
-                         "connected neurons.",
+                    hint="Drawing-only cap: at most this many unique edges are "
+                         "rendered per visualization (network / Sankey / heatmap). "
+                         "It never changes fetching, the graph, or the path "
+                         "output; a single complete path may still exceed it to "
+                         "stay intact.",
                 )
             find_reciprocal = checkbox_input(
                 "Find Reciprocal Connections", False,
@@ -185,6 +188,15 @@ def create_find_shortest_tab():
                 show_fig = checkbox_input(
                     "Show Figure", get_user_default("showfig_analysis"),
                     hint="Open the interactive HTML visualization automatically after completion.",
+                )
+                drop_untyped = checkbox_input(
+                    "Drop Untyped Neurons", get_user_default("drop_untyped"),
+                    hint="Neuron-label filter (shared with Cross-Dataset "
+                         "Comparison): remove edges touching untyped neurons "
+                         "(empty / Unknown / bodyId-fallback type labels) "
+                         "BEFORE the path graph is built. Dropped rows: "
+                         "data_details/untyped_dropped_records.csv; counts "
+                         "in user_warning_notes.txt.",
                 )
 
         with ui.card().classes("w-full drocat-card").props('id="card-findshortest-hemisphere"'):
@@ -381,6 +393,7 @@ def create_find_shortest_tab():
             "custom_target_name": custom_target_name.value or '',
             "keyword_in_path_to_remove": keywords,
             "cache_only": cache_only.value,
+            "drop_untyped": drop_untyped.value,
             "saveas": saveas.value.strip() or "",
             "separate_hemispheres": separate_hemi.value,
             "hemisphere_filter": hemi_filter.value,

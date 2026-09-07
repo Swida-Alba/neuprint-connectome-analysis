@@ -108,8 +108,16 @@ This algorithm performs a simultaneous Breadth-First Search (BFS) from both the 
     *   Expands "layers" of nodes from sources (Forward) and targets (Backward).
     *   Finds the intersection of these layers at the midpoint (e.g., for length 4, intersects Forward Layer 2 and Backward Layer 2).
     *   Reconstructs paths by backtracking from the intersection nodes.
-*   **Best Use Case**: Finding **shortest paths** or all paths of a specific length in shallow graphs.
-*   **Pros**: Guarantees finding shortest paths first.
+*   **Best Use Case**: Shallow graphs where shortest-first *emission order*
+    is wanted. It is **not** what the Shortest Paths tab runs — that tab
+    uses the target-rooted StrongestFirst enumerator
+    `find_paths_shortest_strongest_first` (per-target reverse BFS,
+    maximin bottleneck DP, best-first strength-ordered emission, k-way
+    merge across targets), not Bidirectional, and not the
+    `find_paths_shortest_backward` exporter (which exists in FastGraph but
+    the pipeline does not call it).
+*   **Pros**: Emits shortest paths first (an ordering property — the
+    returned path set is identical to every other complete enumerator).
 *   **Cons**: High memory usage for dense graphs as it stores full layers (measured 452 MB at 4 layers, 1.1 GB at 5).
 
 ### 2. Backward Reachability (DP)
@@ -174,9 +182,16 @@ The same memoized DFS started from the targets on the reversed graph.
 | **Memoized DFS (bwd)** | `DFS` | `find_paths_memoized_dfs` (backward) | **Deep paths, few targets** | O(L·E + P·L) | O(L·E) |
 | **Meet-in-the-middle** | `MeetInMiddle` | `find_paths_meet_in_the_middle` | Shallow; safe mid-ground | O(b^{L/2}·L + P·L) | O(b^{L/2}·L) |
 | **Backward DP** | `DP` | `find_paths_backward_dp` | Robust, no reverse copy | O(L·E + P·L) | O(L·V) |
-| **Bidirectional BFS** | `Bidirectional` | `find_paths_bidirectional_bfs` | Shortest Paths | O(L·E + P·L) | **O(L·(V+E))** |
+| **Bidirectional BFS** | `Bidirectional` | `find_paths_bidirectional_bfs` | Shortest-first order (API only; the Shortest Paths tab uses target-rooted StrongestFirst) | O(L·E + P·L) | **O(L·(V+E))** |
 
 *L = cutoff (max path length), E = edges, V = nodes, b = branching factor, P = number of found paths.*
+
+**Shortest Paths tab (FindShortestPath):** the tab enumerates through
+`find_paths_shortest_strongest_first` — target-rooted StrongestFirst with
+a maximin bottleneck DP over the per-target reverse BFS DAG and
+best-first strength-ordered emission merged across targets. Its output can
+be tau-bounded by `max_paths_bodyid`, and the Edge Budget never applies
+(shortest mode is never floored).
 
 ## Measured Evaluation (2026-08)
 
@@ -218,7 +233,9 @@ Key findings:
 the fastest complete enumerator; StrongestFirst is now the pipeline
 algorithm (bounded output with a reported τ), with MemoizedDFS kept for
 unbounded complete runs via the API. Use `DFS` for deep paths with few
-targets, `MeetInMiddle` for shallow queries, `Bidirectional` only for
-shortest-first output with memory to spare.
+targets, `MeetInMiddle` for shallow queries, and `Bidirectional` only for
+shortest-first *ordering* with memory to spare — minimum-hop semantics in
+the UI come from the Shortest Paths tab's target-rooted StrongestFirst
+enumerator, not from Bidirectional.
 
 

@@ -15,6 +15,12 @@ cone fits the cap), the lossless prune **iterates to a fixpoint**, the
 shortest mode runs **StrongestFirst with a path budget**
 (`find_paths_shortest_strongest_first`, Shortest-tab Max Paths field),
 and the comprehensive re-query mode deduplicates cross-layer pairs.
+2026-09-07 revision: every run writes an **applied-threshold provenance
+block** (`applied_threshold` / `applied_threshold_source` /
+`tau_canonical` / … — §4c) to its run metadata, and the
+**Drop Untyped Neurons** filter (`drop_untyped`, default on) runs in
+the shared pipeline for both modes after enrichment and before graph
+construction.
 See [PATHFINDING_PIPELINE.md](PATHFINDING_PIPELINE.md) for the
 end-to-end report.
 Companion plans: `plan-cross-dataset-pathfinding-optimization.md`
@@ -54,6 +60,16 @@ threshold** — never as a blind trim — and the run reports which raised
 threshold it corresponds to. τ is data-dependent (not user-chosen);
 users who want a specific τ raise the threshold or the budget.
 
+**The five knobs, and what each one actually bounds:**
+
+| knob | bounds | kind |
+|---|---|---|
+| Min Synapse Count (`min_synapse_num`) | the graph | threshold — edges below it never enter the graph |
+| Edge Budget (`graph_edge_limit_bodyid`) | the graph | lossy weight floor (floor w0 above the landing tier w1), 'all' mode only — exactly equivalent to raising the threshold; shortest mode is never floored |
+| Max Paths (BodyId) (`max_paths_bodyid`) | the path list | StrongestFirst output budget, both modes — the graph is not trimmed |
+| Drop Untyped Neurons (`drop_untyped`) | neuron labels | filter — rows touching an untyped label are dropped after enrichment, before the graph is built (both modes) |
+| Visualization Edge Limit (`edgeN_limit`) | the drawing | drawing-only cap on unique edges rendered per HTML view — never changes fetching, the graph, or path outputs; a single complete path may exceed it to stay intact |
+
 ## 2. Pipeline layers (where each mechanism runs)
 
 Everything happens at the **bodyId level**; type-mapped outputs are
@@ -64,7 +80,18 @@ effect"; see TYPE_AGGREGATION_AND_BODYID_DISCOVERY.md).
 1. **Discovery** (Phase 1): layer tables fetched from the
    threshold-filtered connection cache — cones are nested across
    thresholds (cone(t=10) ⊆ cone(t=3)).
-2. **Lossless hop-budget pruning** (`prune_layers_hop_budget`): drops
+2. **Untyped-neuron filter** (`drop_untyped=True`, both modes): after
+   label enrichment and before graph construction, connection rows
+   whose pre- or post-side label is untyped (empty, an
+   Unknown/None/NaN sentinel, or all-digit —
+   `utils.label_utils.is_untyped_type_label`) are dropped, so an
+   untyped neuron can never be an intermediate node of a returned
+   path. Drops are exported to
+   `data_details/untyped_dropped_records.csv` (with `untyped_side`)
+   and an `[untyped dropped]` note only when rows were dropped; the
+   flag is part of the FindAllPath graph-cache key
+   (`_findallpath_cache_key`).
+3. **Lossless hop-budget pruning** (`prune_layers_hop_budget`): drops
    edges with `dist_S(u) + 1 + dist_T(v) > max_interlayer + 1` — they
    cannot lie on any admissible path. Lossless by proof; measured
    39–77% cone reduction on real queries. The pass **iterates on the
@@ -72,17 +99,17 @@ effect"; see TYPE_AGGREGATION_AND_BODYID_DISCOVERY.md).
    still lossless — every admissible path survives every pass — and
    strictly tighter than a single pass, since distances recomputed on
    the pruned graph can only grow.
-3. **Dead-end node pruning**: nodes that cannot reach any target
+4. **Dead-end node pruning**: nodes that cannot reach any target
    (post-pruning) are removed. Also lossless. Both passes report a
    **strongest-retained bottleneck** — the widest-path maximin value
    W\* = max over source→target paths of the min edge weight — which is
    *identical* before and after the passes (that is what lossless
    means), and is printed with the note *"top paths unchanged"*.
-4. **StrongestFirst enumeration** (`find_paths_strongest_first`): A*-style
+5. **StrongestFirst enumeration** (`find_paths_strongest_first`): A*-style
    best-first on the prefix bound `min(running bottleneck,
    W[remaining][node])`. Emits complete intact paths in descending
    bottleneck order; stops at the budget and drains ties at τ.
-5. **Enrichment / type-path derivation / saves / visualization**: unchanged
+6. **Enrichment / type-path derivation / saves / visualization**: unchanged
    downstream stages; per-threshold enrichment denominators are computed
    exactly as before.
 
@@ -181,6 +208,49 @@ single weight tier, or a budget below the distinct-weight support)
 revert with an honest note instead of returning an empty graph.
 Shortest mode is never floored.
 
+## 4c. Applied-threshold provenance (2026-09-07)
+
+Every pathfinding run — BOTH modes; shortest was previously never
+re-stamped — writes a provenance block to `parameters.txt`,
+`all_attributes.json`, AND `data_details/parameters.csv` after
+enumeration, computed by `applied_threshold_provenance()` (in
+`src/coana.py`) and finalized by `_finalize_threshold_provenance` +
+`_write_run_metadata`:
+
+| field | meaning |
+|---|---|
+| `requested_threshold` | the user-entered Min Synapse Count before any budget effect |
+| `applied_threshold` | the canonical minimal threshold reproducing the materialized set when a lossy budget bit; the requested threshold otherwise |
+| `applied_threshold_source` | `requested` \| `strongest_first_budget` \| `edge_budget` \| `strongest_first_budget+edge_budget` |
+| `strongest_first_budget` | the effective path budget (0/auto → 1,000,000) |
+| `strongest_first_budget_bitten` | whether the budget actually bit |
+| `strongest_first_tau` | the landing τ (collapse bound); for a complete run, the natural weakest emitted-path bottleneck |
+| `tau_canonical` | the minimal equivalent threshold: `w2+1` when the bite leaves a gap `[w2+1, τ]`, else the landing/natural τ |
+| `strongest_dropped_bottleneck` | w2 — the strongest path NOT emitted after a bite |
+| `edge_budget` / `edge_budget_applied` | the cap and whether the floor fired |
+| `edge_budget_landing` (w1) / `edge_weight_floor` (w0) | the tier that determined the floor and the floor itself |
+| `strongest_retained_bottleneck` | W\* — the widest-path ceiling after lossless pruning (§4b) |
+| `paths_complete` | true exactly when no lossy budget affected the output |
+
+**Semantics.** τ (`strongest_first_tau`) is a **landing/collapse**
+bound; `tau_canonical` / `applied_threshold` is the **minimal
+equivalent threshold** when a gap exists below it. For a
+complete/unbounded run `applied_threshold` is simply the requested
+threshold (the natural τ is reported separately) and
+`paths_complete = true`; when a lossy budget affects the output,
+`applied_threshold` is the minimal threshold reproducing the
+materialized set and `applied_threshold_source` names the contributing
+mechanism(s). The bottleneck is the minimum edge weight along a path,
+so a budgeted output is a **strength-bounded path set** — never an
+arbitrary first-N truncation. `parameters.txt` keeps the
+backward-compatible alias lines `applied_tau (min path bottleneck)` and
+`edge_weight_floor`. Replay folders materialized by
+`_replay_output_folder_for_threshold` (`minsyn_{t}`) and the
+Cross-Dataset per-dataset threshold folders carry the same block.
+Shortest mode may take the StrongestFirst budget but **never** the Edge
+Budget floor. A `[combined threshold]` note is appended to
+`user_warning_notes.txt` when BOTH budgets affected a run.
+
 ## 5. API reference
 
 - `FastGraph.find_paths_strongest_first(sources, targets, cutoff,
@@ -193,7 +263,9 @@ Shortest mode is never floored.
   shortest-path DAG with a per-target maximin DP; per-target streams are
   k-way merged and the global budget drains ties at τ. A bitten run is
   exactly "all min-hop paths with bottleneck ≥ τ"; unbitten runs equal
-  `find_paths_shortest_backward` as a set. `stats` receives `emitted`,
+  `find_paths_shortest_backward` (a separate enumerator that exists in
+  the codebase but is **not** called by the pipeline) as a set.
+  `stats` receives `emitted`,
   `tau`, `budget_bitten`, `strongest_dropped`, `per_target`.
 - `FastGraph._widest_path_backward(targets, cutoff)` — delegates to
   `strongest_core.widest_path_backward(adj, targets, cutoff)`.
@@ -224,11 +296,27 @@ Shortest mode is never floored.
 - `ComparisonParameters.graph_edge_limit_bodyid` — the **Edge Budget**
   (default 1M in the UI; `None`/0 = off for API callers). Lossy floor,
   'all' mode only.
-- Run metadata: `all_attributes.json` and `parameters.txt` record
-  `strongest_first_cutoff` (budget τ or natural τ),
-  `strongest_first_budget_bitten`, `edge_weight_floor`,
-  `edge_budget_landing`, `applied_tau`, and the `graph_pruning_record`
-  (lossless passes + the floor).
+- `FindNeuronConnection.drop_untyped` (default `True`) — the
+  neuron-label filter applied in `_find_paths_core` for both modes
+  after enrichment and before graph build (see §2 layer 2); shared
+  predicate `utils.label_utils.is_untyped_type_label`; drops recorded
+  in `data_details/untyped_dropped_records.csv` (+ `untyped_side`);
+  part of the FindAllPath graph-cache key (`_findallpath_cache_key`).
+  Cross-Dataset Comparison delegates to the same predicate but filters
+  post label-mapping (`ComparisonAnalyzer._drop_untyped_neurons`;
+  the per-dataset runs use `drop_untyped=False`).
+- Run metadata: `all_attributes.json`, `parameters.txt`, and
+  `data_details/parameters.csv` record the applied-threshold
+  provenance block (§4c: `requested_threshold`, `applied_threshold`,
+  `applied_threshold_source`, `strongest_first_budget`,
+  `strongest_first_budget_bitten`, `strongest_first_tau`,
+  `tau_canonical`, `strongest_dropped_bottleneck`, `edge_budget`,
+  `edge_budget_applied`, `edge_budget_landing`, `edge_weight_floor`,
+  `strongest_retained_bottleneck`, `paths_complete`) plus
+  `strongest_first_cutoff` (budget τ or natural τ) and the
+  `graph_pruning_record`
+  (lossless passes + the floor); `parameters.txt` keeps the alias
+  lines `applied_tau (min path bottleneck)` and `edge_weight_floor`.
 - `ComparisonAnalyzer._path_taus[(dataset, threshold)]` — per-run τ for
   the sensitivity export; `_path_run_meta[(dataset, threshold)]` adds
   `applied_folder`, `edge_weight_floor`, `skipped`, `duplicate_of`.

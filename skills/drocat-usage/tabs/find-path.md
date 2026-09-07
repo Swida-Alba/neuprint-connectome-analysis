@@ -28,15 +28,16 @@ fc = FindNeuronConnection(
     max_interlayer=2,
     filter_by="bodyId",               # or "type"
     pathfinding="StrongestFirst",     # built-in default; DP/MemoizedDFS/DFS = unbounded complete runs (API)
-    max_paths_bodyid=0,               # auto -> internal 1,000,000 path budget (tau reported when it bites)
-    graph_edge_limit_bodyid=0,        # Edge Budget off; set ~1_000_000 to cap the discovery cone
+    max_paths_bodyid=0,               # Max Paths: path-output budget; auto -> internal 1,000,000 (tau reported when it bites)
+    graph_edge_limit_bodyid=0,        # Edge Budget: graph-level floor, 'all' mode only; 0 = off; ~1_000_000 prunes the cone
     visualize_before_reconstruct=False,
     search_columns="auto",              # "auto" | "type" | "instance" | "bodyId"
     network_layout="distributed",
     use_cache=True,
-    edgeN_limit=500,
+    edgeN_limit=500,                  # Visualization Edge Limit: drawing-only cap per HTML view
     output_format="csv",              # or "xlsx"
     skip_bodyId=True,                 # faster type-level first pass
+    drop_untyped=True,                # Drop Untyped Neurons: label filter; see Notes
     showfig=False,
     custom_source_name="",
     custom_target_name="",
@@ -77,6 +78,15 @@ python skills/drocat-usage/scripts/run_direct.py \
 
 - CSV/XLSX type-level (`path_type`) and bodyId-level (`path_bodyId`) path tables,
   path summaries, and optional network/heatmap HTML.
+- Canonical visualization names inside the run folder, under both
+  `visualization/` and `bodyId_visualization/`: `Network_<run>.html`,
+  `Heatmap_<run>.html`, `Sankey_<run>.html`, and
+  `visualization_data/<run>_data_*.csv`; early previews keep `network_early/`
+  and `network_early_bodyId/`. When the drawing cap trims, companion CSVs
+  (`type_paths_visualized.csv`, `bodyId_paths_visualized.csv`) record what was
+  rendered.
+- Threshold/bottleneck provenance is written to `parameters.txt`,
+  `all_attributes.json`, and `data_details/parameters.csv` (see Notes).
 - Use `visualize_before_reconstruct=False` (the UI default) for headless runs and
   hand off to PlotPath for the interactive network.
 
@@ -84,6 +94,33 @@ python skills/drocat-usage/scripts/run_direct.py \
 
 - `max_interlayer=0` means "no limit" only when a source/target set is marked as
   all neurons; otherwise limit hops, then increase after a smaller run completes.
+- **Drop Untyped Neurons** (`drop_untyped=True`, checked by default; configurable
+  in Settings → Default Settings → Pathfinding & Output): drops edges touching
+  untyped neurons (empty label, Unknown/None/NaN sentinel, or all-digit
+  bodyId-fallback label; shared predicate
+  `utils.label_utils.is_untyped_type_label`) after label enrichment and before
+  graph construction, so untyped neurons never appear as intermediate nodes of
+  returned paths or visualizations. Dropped rows go to
+  `data_details/untyped_dropped_records.csv` (written only when rows were
+  dropped); counts are appended to `user_warning_notes.txt`. `drop_untyped` is
+  part of the FindAllPath graph-cache key.
+- Filter roles: Min Synapse Count = threshold; Edge Budget
+  (`graph_edge_limit_bodyid`) = graph-level floor, `'all'` mode only; Max Paths
+  (`max_paths_bodyid`) = path-output budget (both modes); Drop Untyped =
+  neuron-label filter; Visualization Edge Limit (`edgeN_limit`) = drawing-only
+  cap on unique edges rendered per HTML view — it never changes fetch/graph/paths,
+  and a single complete path may exceed it to stay intact; type- and
+  bodyId-level visualizations share the same cap.
+- Every run writes a threshold/bottleneck provenance block to `parameters.txt`,
+  `all_attributes.json`, and `data_details/parameters.csv`: `requested_threshold`,
+  `applied_threshold`, `applied_threshold_source` ('requested' |
+  'strongest_first_budget' | 'edge_budget' | 'strongest_first_budget+edge_budget'),
+  `strongest_first_budget` (auto 1,000,000) / `strongest_first_budget_bitten`,
+  `strongest_first_tau` / `tau_canonical`, `strongest_dropped_bottleneck`,
+  `edge_budget` / `edge_budget_applied` / `edge_budget_landing`,
+  `edge_weight_floor`, `strongest_retained_bottleneck` (W*), and
+  `paths_complete`. `parameters.txt` keeps the legacy `applied_tau` /
+  `edge_weight_floor` alias lines.
 - Empty `sourceNeurons`/`targetNeurons` have special meaning in the backend; state
   the intended scope before using them.
 - Keep the UI closed and `showfig=False` until the output is validated.

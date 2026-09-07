@@ -89,6 +89,16 @@
     <li><b>Cache Only (Offline)</b>: no server contact; requires caches.</li>
     <li><b>Auto Type Mapping</b>: map equivalent type names across datasets.</li>
     <li><b>Parallel Processing / Max Workers</b>: tune speed vs API load.</li>
+    <li><b>Drop Untyped Neurons</b>: removes edges touching untyped neurons
+      (empty / Unknown / NaN / all-digit bodyId-fallback labels) using the
+      SAME shared predicate as the pathfinding tabs
+      (<code>utils.label_utils.is_untyped_type_label</code>), applied AFTER
+      the standardized cross-dataset labels are resolved (post
+      label-mapping). Comparison-level records land in
+      <code>comparison_results/untyped_dropped_records.csv</code>, while each
+      per-dataset pathfinding run records its own
+      <code>data_details/untyped_dropped_records.csv</code>; counts are
+      appended to <code>user_warning_notes.txt</code>.</li>
     <li><b>Hemisphere analysis</b>: L/R separation, symmetry, conserved
       edges, reciprocal graphs.</li>
   </ul>

@@ -1552,8 +1552,10 @@ class TestFindShortestPathPipeline:
 
     def test_target_layer_caps_longer_source_target_pair(
             self, monkeypatch, tmp_path):
-        """Backward discovery must not retain a farther source for a target
-        already found at a shallower layer."""
+        """Per-pair shortest contract (audit F-CORR-01 fix): a target
+        reached by one source at 2 hops and by another source at 3 hops
+        must return BOTH pairs' minimum-hop paths. The former nearest-source
+        cap suppressed the farther source's own shortest route."""
         import coana
 
         edges = [
@@ -1576,9 +1578,22 @@ class TestFindShortestPathPipeline:
             fc.allpath_folder, "data_details", "connection_info_bodyId.csv"
         )
         bodyid = pl.read_csv(bodyid_csv)
+        # The union of both pairs' shortest-DAG edges survives discovery.
         assert set(zip(bodyid["bodyId_pre"], bodyid["bodyId_post"])) == {
-            ("S", "A"), ("A", "T")
+            ("S", "A"), ("A", "T"),
+            ("S2", "B"), ("B", "C"), ("C", "T"),
         }
+        # ...and the bodyId path table carries BOTH pairs' min-hop paths.
+        paths_csv = os.path.join(
+            fc.allpath_folder, "src_to_tgt_allpaths_bodyId_paths.csv"
+        )
+        paths = pl.read_csv(paths_csv)
+        path_strs = {str(row) for row in paths.iter_rows()}
+        assert any("S->A->T" in s for s in path_strs), path_strs
+        assert any("S2->B->C->T" in s for s in path_strs), path_strs
+        # no non-shortest alternative made it into the output
+        assert not any("S2->B->C->T" in s and "S->A->T" in s
+                       for s in path_strs)
 
     def test_shortest_depth_cap_is_target_rooted_and_warns_scope(
             self, monkeypatch, tmp_path):
@@ -1919,11 +1934,17 @@ class TestGroupAndUntypedDerivation:
             self, monkeypatch, tmp_path):
         """An untyped intermediate neuron keeps its identity in the type
         output: it is labeled by its bodyId and its hops stay real edges of
-        the type table (no silent elimination)."""
+        the type table (no silent elimination).
+
+        drop_untyped is disabled here: this test pins the LABEL-DERIVATION
+        behavior in isolation. The default-on drop_untyped filter removes
+        such edges before the graph — see
+        tests/core/test_drop_untyped_pathfinding.py."""
         edges = [("S", "U", 5), ("U", "T", 5)]
         fc, _, _ = _make_pipeline_fc(
             monkeypatch, tmp_path, edges, max_interlayer=1,
             source_ids=("S",), target_ids=("T",), untyped={"U"})
+        fc.drop_untyped = False
         fc.FindAllPath()
 
         path_csv = os.path.join(fc.allpath_folder, "src_to_tgt_allpaths_type.csv")
@@ -1941,13 +1962,17 @@ class TestGroupAndUntypedDerivation:
         """Real neuron tables store untyped labels as float NaN (not None).
         The label resolution must treat NaN — and the literals 'nan'/'None'
         — as missing; otherwise untyped neurons project to the bogus type
-        'nan' and every type path through them is silently dropped."""
+        'nan' and every type path through them is silently dropped.
+
+        drop_untyped is disabled to pin the label derivation itself (the
+        default-on filter removes these edges before the graph)."""
         edges = [("S", "U", 5), ("U", "T", 5)]
         fc, _, _ = _make_pipeline_fc(
             monkeypatch, tmp_path, edges, max_interlayer=1,
             source_ids=("S",), target_ids=("T",), untyped={"U", "T"})
         # emulate the real neuron table: untyped cells are float NaN
         fc.target_df.loc[fc.target_df['bodyId'] == 'T', 'type'] = float('nan')
+        fc.drop_untyped = False
         fc.FindAllPath()
 
         path_csv = os.path.join(fc.allpath_folder, "src_to_tgt_allpaths_type.csv")
@@ -1959,13 +1984,17 @@ class TestGroupAndUntypedDerivation:
     def test_untyped_intermediate_survives_group_derivation(
             self, monkeypatch, tmp_path):
         """An untyped, ungrouped intermediate neuron becomes its own group
-        (bodyId label) instead of being eliminated from the group output."""
+        (bodyId label) instead of being eliminated from the group output.
+
+        drop_untyped is disabled to pin the GROUP derivation in isolation
+        (the default-on filter removes these edges before the graph)."""
         edges = [("S", "U", 5), ("U", "T", 5)]
         groups = {"S": "GA", "T": "GC"}   # U has no group and no type
         fc, _, _ = _make_pipeline_fc(
             monkeypatch, tmp_path, edges, max_interlayer=1,
             source_ids=("S",), target_ids=("T",), custom_groups=groups,
             untyped={"U"})
+        fc.drop_untyped = False
         fc.FindAllPath()
         assert self._group_csv_paths(fc) == {"GA->U->GC"}
 

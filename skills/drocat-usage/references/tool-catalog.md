@@ -46,13 +46,15 @@ fc = FindNeuronConnection(
     min_synapse_num=3,
     max_interlayer=2,
     pathfinding="StrongestFirst",  # built-in default; DP/MemoizedDFS/DFS = unbounded complete runs (API)
-    max_paths_bodyid=0,            # auto -> internal 1,000,000 path budget (tau reported when it bites)
+    max_paths_bodyid=0,            # Max Paths: path-output budget; auto -> internal 1,000,000 (tau reported when it bites)
+    graph_edge_limit_bodyid=0,     # Edge Budget: graph-level floor; 0 = off
     filter_by="bodyId",
     skip_bodyId=True,              # faster type-level first pass
+    drop_untyped=True,             # Drop Untyped Neurons: label filter applied before graph build
     keyword_in_path_to_remove=["None"],
     use_cache=True,
     output_format="csv",
-    edgeN_limit=500,
+    edgeN_limit=500,               # Visualization Edge Limit: drawing-only cap per HTML view
     showfig=False,
 )
 fc.InitializeNeuronInfo()
@@ -63,6 +65,18 @@ Use `FindPath()` for a single path strategy only when the user asks for it.
 `FindAllPath(forward_only=True)` is the usual reproducible first pass. Increase
 `max_interlayer` only after a smaller run completes; path counts can grow
 rapidly.
+
+Every pathfinding run writes a threshold/bottleneck provenance block
+(`requested_threshold`, `applied_threshold`, `applied_threshold_source`,
+StrongestFirst budget/tau, Edge Budget floor, `strongest_retained_bottleneck`
+(W*), `paths_complete`) to `parameters.txt`, `all_attributes.json`, and
+`data_details/parameters.csv`; with `drop_untyped=True` (the default) dropped
+rows go to `data_details/untyped_dropped_records.csv`, counts to
+`user_warning_notes.txt`. Visualization output uses the canonical names
+`Network_<run>.html`, `Heatmap_<run>.html`, `Sankey_<run>.html`, plus
+`visualization_data/` CSVs, inside both `visualization/` and
+`bodyId_visualization/` (early previews: `network_early/`,
+`network_early_bodyId/`).
 
 ## Visualizations
 
@@ -151,6 +165,7 @@ params = ComparisonParameters(
     comparison_mode="path",     # use "edge" to preserve strong direct edges
     top_edges=500,
     skip_bodyId=True,
+    drop_untyped=True,          # Drop Untyped Neurons: applied post label-mapping
     output_folder="/absolute/output/comparison",
 )
 analyzer = ComparisonAnalyzer(params, verbose=True)
@@ -161,7 +176,11 @@ analyzer.export_results()
 
 Use `cache_only=True` for deliberately offline/deprecated datasets only after
 checking local cache coverage. Use a `LabelMapper` when names differ between
-datasets.
+datasets. `drop_untyped=True` (the default) drops edges touching untyped
+neurons AFTER standardized cross-dataset label mapping; dropped rows land in
+`comparison_results/untyped_dropped_records.csv` (counts appended to
+`user_warning_notes.txt`), and each per-dataset threshold folder carries the
+threshold/bottleneck provenance block.
 
 ### Connectivity profiles — `ConnectivityProfiling.py`
 
