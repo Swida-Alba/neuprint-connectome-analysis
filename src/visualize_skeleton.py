@@ -223,6 +223,10 @@ VNC_MESH_LEGEND_RANK = 200_000_001
 # used by static exports) and additionally tags traces so the exported
 # interactive HTML can embed a collapsible type -> neuron legend panel.
 LEGEND_MODES = ('single', 'type', 'tree', 'layer')
+# Plotly 6.4.0's native ``config.doubleClickDelay`` default is 300 ms. The
+# tree panel owns its row events, so keep its manual detector in sync with
+# Plotly rather than using a more permissive, platform-specific window.
+TREE_DOUBLE_CLICK_INTERVAL_MS = 300
 
 
 def _configure_roi_mesh_traces(mesh_traces, roi_name, legend_rank=None):
@@ -3615,7 +3619,7 @@ class VisualizeSkeleton:
         with meshes pinned last.
         """
         baked = {'meshRankBase': ROI_MESH_LEGEND_RANK_BASE,
-                 'doubleClickMs': 700}
+                 'doubleClickMs': TREE_DOUBLE_CLICK_INTERVAL_MS}
         panel_html = '<div id="drocat-legend-tree" style="display:none"></div>'
         style_html = (
             '<style>'
@@ -3649,6 +3653,7 @@ class VisualizeSkeleton:
             'justify-content:space-between;opacity:.8;padding:0 2px 3px;}'
             '.drocat-lt-title{font-weight:600;font-size:11px;}'
             '.drocat-lt-header .drocat-lt-eye{cursor:pointer;font-size:11px;}'
+            '.drocat-lt-help{opacity:.62;padding:0 2px 4px;font-size:10px;}'
             '.drocat-lt-items.drocat-lt-scroll{max-height:224px;'
             'overflow-y:auto;overflow-x:hidden;}'
             '.drocat-lt-section{font-weight:600;opacity:.65;'
@@ -3694,8 +3699,8 @@ class VisualizeSkeleton:
 
   var lastRowClick = null;
   function isDoubleClick(indices) {
-    /* Manual double-click detection with a window longer than the OS
-       default, so slower double-clicks still isolate. */
+    /* Match Plotly's native doubleClickDelay for the tree's manual row
+       detector. */
     var now = Date.now();
     var key = indices.join(',');
     var hit = lastRowClick && lastRowClick.key === key &&
@@ -3921,8 +3926,8 @@ class VisualizeSkeleton:
       Plotly.restyle(gd, {visible: !on}, eyeIndices);
       sync();
     });
-    /* Two clicks on the row within doubleClickMs isolate it (show only
-       its traces); a later double-click restores all traces. */
+    /* A second click on the same row within doubleClickMs isolates it (show
+       only its traces); a later double-click restores all traces. */
     row.addEventListener('click', function() {
       if (isDoubleClick(eyeIndices)) { isolate(eyeIndices); }
     });
@@ -3970,10 +3975,15 @@ class VisualizeSkeleton:
     header.appendChild(makeEl('span', 'drocat-lt-title', 'Legend'));
     masterEyeEl = makeEl('span', 'drocat-lt-eye');
     masterEyeEl.setAttribute('title',
-      'Show/hide all (double-click a row to isolate it)');
+      'Show/hide all. Double-click window: ' + CONFIG.doubleClickMs +
+      ' ms; repeat on the isolated row to restore all.');
     masterEyeEl.addEventListener('click', toggleAll);
     header.appendChild(masterEyeEl);
     panel.appendChild(header);
+    var help = makeEl('div', 'drocat-lt-help',
+      'Double-click window: under ' + CONFIG.doubleClickMs + ' ms');
+    help.title = 'A second click on the same row within this interval isolates it.';
+    panel.appendChild(help);
 
     model.groupOrder.forEach(function(name) {
       var g = model.groups[name];
