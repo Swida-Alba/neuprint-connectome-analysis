@@ -17,9 +17,9 @@ from visualization_options import (  # noqa: E402
 )
 
 
-def test_homolog_visualization_defaults_to_template_brain():
+def test_homolog_visualization_defaults_to_native_brain():
     finder = HomologFinder(verbose=False)
-    assert finder.visualization_settings["brain_mesh"] == "template"
+    assert finder.visualization_settings["brain_mesh"] == "native"
 
 
 def test_homolog_visualization_settings_override_renderer_defaults():

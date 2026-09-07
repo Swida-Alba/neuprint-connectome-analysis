@@ -42,32 +42,44 @@ def test_cross_dataset_mapper_preserves_explicit_release_tokens(tmp_path):
 
     assert mapper._normalize_dataset_name("male-cns:v0.9") == "male-cns:v0.9"
     assert mapper._normalize_dataset_name("banc_v888") == "banc_v888"
-    # Releases remain distinct dataset identities, but Male-CNS releases
-    # share the Male-CNS type namespace, FAFB releases share the FAFB
-    # namespace, and BANC releases share the BANC namespace.
-    assert mapper._get_type_mapping_key("male-cns:v0.9") == "male-cns:v1.0"
-    assert mapper._get_type_mapping_key("banc_v888") == "banc_v626"
+    # §version control: releases are per-release mapping namespaces —
+    # male-cns:v0.9 keeps its own namespace instead of silently borrowing
+    # the v1.0 crosswalk, and banc_v888 resolves against its own neuron
+    # tables, never through banc_v626.
+    assert mapper._get_type_mapping_key("male-cns:v0.9") == "male-cns:v0.9"
+    assert mapper._get_type_mapping_key("banc_v888") == "banc_v888"
+
+    # v1.0 <-> banc_v888 pairs still resolve hermetically from the temp
+    # table's type <-> flywireType columns.
     assert mapper.get_mapped_type(
-        "MeVPLo2", "male-cns:v0.9", "flywire_FAFB_v783"
+        "MeVPLo2", "male-cns:v1.0", "banc_v888"
     ) == "MTe07"
     assert mapper.get_mapped_type(
-        "MeVPLo2", "male-cns:v0.9", "banc_v888"
-    ) == "MTe07"
-    assert mapper.get_mapped_type(
-        "MTe07", "banc_v888", "male-cns:v0.9"
+        "MTe07", "banc_v888", "male-cns:v1.0"
     ) == "MeVPLo2"
     assert mapper.get_canonical_type("MTe07", "banc_v888") == "MeVPLo2"
-    assert mapper._unsupported_dataset_warnings == set()
+
+    # v0.9 borrows nothing: no resolution through the v1.0 namespace, and
+    # the unsupported-release warning fires exactly for it.
+    assert mapper.get_mapped_type(
+        "MeVPLo2", "male-cns:v0.9", "flywire_FAFB_v783"
+    ) is None
+    assert mapper._unsupported_dataset_warnings == {"male-cns:v0.9"}
 
     resolved = mapper.resolve_type_across_datasets(
         "MeVPLo2",
-        ["male-cns:v0.9", "banc_v888"],
-        source_dataset="male-cns:v0.9",
+        ["male-cns:v1.0", "banc_v888"],
+        source_dataset="male-cns:v1.0",
     )
     assert resolved == {
-        "male-cns:v0.9": "MeVPLo2",
+        "male-cns:v1.0": "MeVPLo2",
         "banc_v888": "MTe07",
     }
+    assert mapper.resolve_type_across_datasets(
+        "MeVPLo2",
+        ["male-cns:v0.9"],
+        source_dataset="male-cns:v1.0",
+    ) == {"male-cns:v0.9": None}
 
 
 def test_mapper_legends_keep_both_colliding_releases():

@@ -1439,18 +1439,19 @@ class CrossDatasetTypeMapper:
         """Return the crosswalk namespace used for *dataset*.
 
         Dataset identifiers remain release-specific for data access, cache
-        paths, labels, and legends.  Type names use a broader schema
-        namespace, however:
+        paths, labels, and legends.  Type-name namespaces follow §version
+        control:
 
-        * Male-CNS v0.9 and v1.0 use the Male-CNS ``type`` namespace.
-        * FAFB releases share the FlyWire ``flywireType`` crosswalk that the
-          v1.0 neuron table stores under the ``flywire_FAFB_v783`` mapping
-          key.
-        * BANC releases draw on the same crosswalk column, but BANC renames
-          types independently through its ``Alternative Cell Type(s)``
-          column, so its resolved names live under the ``banc_v626``
+        * Releases are per-release mapping namespaces: male-cns:v0.9 keeps
+          its own (empty) namespace instead of silently resolving through
+          the v1.0 crosswalk, and each BANC release resolves against its
+          own neuron tables — a banc_v888 selection can never land v626
+          names ("via banc v626") or pool the other release's bodyIds.
+        * Other male-cns releases share the ``male-cns:v1.0`` namespace.
+        * FAFB releases share the FlyWire ``flywireType`` crosswalk that
+          the v1.0 neuron table stores under the ``flywire_FAFB_v783``
           mapping key (legacy ``flywire_BANC_*`` identifiers normalize
-          into the same namespace).
+          into their ``banc_*`` release namespace).
 
         Keeping this translation separate prevents a release collision from
         either losing a valid mapping or renaming one release into another.
