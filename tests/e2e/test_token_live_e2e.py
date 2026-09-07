@@ -45,11 +45,33 @@ def _network_available() -> bool:
         return False
 
 
+def _config_local_token_registered() -> bool:
+    """Whether config_local.json exists and registers a NeuPrint token.
+
+    The whole module asserts against the developer-registered token; on a
+    fresh clone (untracked config_local.json) it must SKIP, not error.
+    """
+    path = PROJECT_ROOT / "config_local.json"
+    if not path.exists():
+        return False
+    try:
+        import json
+        config = json.loads(path.read_text(encoding="utf-8-sig"))
+        return bool(config.get("tokens", {}).get("neuprint"))
+    except Exception:
+        return False
+
+
 pytestmark = [
     pytest.mark.e2e,
     pytest.mark.skipif(
         not _network_available(),
         reason="NeuPrint server unreachable (network required for this e2e)",
+    ),
+    pytest.mark.skipif(
+        not _config_local_token_registered(),
+        reason="config_local.json with a registered NeuPrint token not "
+               "available locally (untracked developer config)",
     ),
 ]
 
@@ -174,7 +196,8 @@ class TestTokenChainAgainstLiveServer:
 
         manager = TokenManager(project_root=str(PROJECT_ROOT))
         cave_token = manager.tokens.get("CAVE_TOKEN")
-        assert cave_token, "config_local.json must register a CAVE token"
+        if not cave_token:
+            pytest.skip("config_local.json registers no CAVE token locally")
 
         def forbidden(*args, **kwargs):
             raise AssertionError("CAVE resolution must not touch the network")

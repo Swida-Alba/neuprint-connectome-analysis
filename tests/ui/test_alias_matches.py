@@ -30,10 +30,14 @@ REQUIRED_INDEXES = [
     )
 ]
 
+CROSSWALK_TABLE = (REPO_ROOT / 'datasets' / 'banc_v626' /
+                   'banc_v626_allneurons_neuron_df.csv')
+
 pytestmark = pytest.mark.skipif(
-    not all(p.exists() for p in REQUIRED_INDEXES),
+    not all(p.exists() for p in REQUIRED_INDEXES)
+    or not CROSSWALK_TABLE.exists(),
     reason='cached neuron indexes (male-cns v1.0 / FAFB v783 / BANC v626) '
-           'not available locally',
+           'or the banc_v626 crosswalk table not available locally',
 )
 
 
