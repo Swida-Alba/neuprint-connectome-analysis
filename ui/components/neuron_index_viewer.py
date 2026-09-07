@@ -210,8 +210,18 @@ def _render_index(
     query_label: str = "Current query",
     defer_apply: bool = False,
     apply_holder: dict | None = None,
+    cross_mapping_mode: dict | None = None,
 ) -> None:
-    """Render the current dataset's index or its cache-missing state."""
+    """Render the current dataset's index or its cache-missing state.
+
+    ``cross_mapping_mode`` is the dialog header's mode holder
+    (``{"enabled": bool, "refresh": callable}``): when enabled, the search
+    also maps the query into the other cached datasets — a collapsed
+    cross-dataset expansion renders above the results alongside the native
+    rows. The rendered viewer registers its footer refresh under
+    ``"refresh"`` so the header toggle can re-evaluate the panel without
+    re-running the query.
+    """
     content.clear()
     if header_meta is not None:
         header_meta.clear()
@@ -436,6 +446,27 @@ def _render_index(
             ).style("min-width: 120px")
 
         filter_operator.set_enabled(False)
+
+        # Cross-dataset search panel: always rendered on a zero-hit query,
+        # and — collapsed, with a summary line — above the results while the
+        # dialog header's "Cross-dataset type mapping" mode is enabled.
+        # Content is strictly informational — other-dataset rows are never
+        # merged into this table or selection.
+        with ui.element("section").classes(
+            "w-full drocat-neuron-alias-panel"
+        ) as alias_section:
+            alias_container = ui.element("div").classes("w-full")
+        alias_section.set_visibility(False)
+        # Generation counter for the alias scan: every new query or hidden
+        # panel voids the result of a scan still running in the background,
+        # so a stale scan can never overwrite newer UI state. The last
+        # completed scan is cached per query, so paging and display changes
+        # never re-run the mapper.
+        alias_scan = {
+            "generation": 0,
+            "cache": {"key": None, "matches": None},
+            "expanded": False,
+        }
 
         initial = query_neuron_index(index, page_size=50)
         match_columns = [
@@ -1364,7 +1395,7 @@ def _render_index(
                             'drocat-neuron-selected-row': props.selected,
                           }"
                         >
-                          <q-td auto-width style="width: 48px; min-width: 48px;">
+                          <q-td auto-width class="drocat-neuron-select-cell" style="width: 48px; min-width: 48px;">
                             <q-checkbox v-model="props.selected" dense />
                           </q-td>
                           <q-td
@@ -1445,19 +1476,15 @@ def _render_index(
                     )
 
         state = {"page": initial.page, "page_size": 50}
-
-        # Expanded cross-dataset search panel: shown only when the local
-        # query returns zero rows. Content is strictly informational —
-        # other-dataset rows are never merged into this table or selection.
-        with ui.element("section").classes(
-            "w-full drocat-neuron-alias-panel"
-        ) as alias_section:
-            alias_container = ui.element("div").classes("w-full")
-        alias_section.set_visibility(False)
-        # Generation counter for the zero-hit alias scan: every new query or
-        # hidden panel voids the result of a scan still running in the
-        # background, so a stale scan can never overwrite newer UI state.
-        alias_scan = {"generation": 0}
+        # Total of the most recent query. The cross-dataset mode toggle
+        # re-evaluates only the results footer with it — the table query
+        # itself does not change when the mode flips.
+        last_result_total = {"value": 0}
+        # (column, value) pairs of the most recent query's match groups.
+        # They feed the value-driven mapper fallback: non-type entries
+        # (a cell_type value, for example) translate to other datasets'
+        # types through the local neurons carrying them.
+        last_matched_values: List[tuple] = []
 
         def _hide_alias_panel() -> None:
             """Hide the panel and void any alias scan still in flight."""
@@ -1473,8 +1500,8 @@ def _render_index(
             """
             try:
                 csv_text = build_matches_csv(
-                    dataset, str(search_input.value or "").strip()
-                )
+                    dataset, str(search_input.value or "").strip(),
+                    matched_values=list(last_matched_values))
             except Exception:
                 csv_text = ""
             if not csv_text:
@@ -1579,21 +1606,36 @@ def _render_index(
                         ui.spinner(type="hourglass", size="lg")
 
         def render_alias_matches() -> None:
-            """Zero-hit panel: instant status, mapper scan in the background.
+            """Cross-dataset panel: instant status, mapper scan off-loop.
 
-            The auto type mapper initializes lazily and its first scan can
-            take a while, so the panel shows an explicit "no matches here,
-            checking other datasets" status immediately and the scan runs in
-            a daemon thread. The generation counter voids results superseded
-            by a newer query or a hidden panel.
+            A zero-hit query renders the panel expanded (it is the only
+            content there is); with hits, the cross-dataset mode renders the
+            same scan as a collapsed expansion above the results. The auto
+            type mapper initializes lazily and its first scan can take a
+            while, so the panel shows an explicit status immediately and the
+            scan runs in a daemon thread. The generation counter voids
+            results superseded by a newer query or a hidden panel; the last
+            completed scan is cached per query so paging and display changes
+            never re-run it.
             """
             query_text = str(search_input.value or "").strip()
+            zero_hit = last_result_total["value"] == 0
+            matched_pairs = list(last_matched_values)
             alias_scan["generation"] += 1
             generation = alias_scan["generation"]
+
+            cache_key = (
+                dataset,
+                query_text,
+                tuple(sorted((c.casefold(), v.casefold())
+                             for c, v in matched_pairs)),
+            )
 
             def _apply(matches) -> None:
                 native = (matches or {}).get("native", [])
                 mapped = (matches or {}).get("mapped", [])
+                value_blocks = (matches or {}).get("value_mapped", [])
+                guidance = (matches or {}).get("guidance", [])
                 native_useful = any(
                     entry.get("types") or entry.get("labels") for entry in native
                 )
@@ -1601,28 +1643,102 @@ def _render_index(
                     entry["outcome"] == "matched" and entry["candidates"]
                     for entry in mapped
                 )
-                if not (native_useful or mapped_useful):
+                value_useful = any(
+                    entry.get("types") or entry.get("labels")
+                    for entry in value_blocks
+                )
+                if not (native_useful or mapped_useful or value_useful):
                     # The scan finished without a single counterpart anywhere;
-                    # keep the zero-hit state explicit instead of hiding it.
-                    _render_alias_status(
-                        f"No matches for '{query_text}' in {dataset}, and the "
-                        "other cached datasets have no cross-dataset "
-                        "counterparts either.",
-                        busy=False,
+                    # keep the state explicit instead of hiding it.
+                    guidance_note = (
+                        " For datasets without an automatic mapping, track "
+                        "them in the Cross-Dataset tab's type mapping panel "
+                        "(download their metadata first)."
+                        if guidance else ""
                     )
+                    if zero_hit:
+                        _render_alias_status(
+                            f"No matches for '{query_text}' in {dataset}, and the "
+                            "other cached datasets have no cross-dataset "
+                            f"counterparts either.{guidance_note}",
+                            busy=False,
+                        )
+                    else:
+                        _render_alias_status(
+                            f"No cross-dataset counterparts for '{query_text}' "
+                            f"in the other cached datasets.{guidance_note}",
+                            busy=False,
+                        )
                     return
+                # Datasets with something to show drive the collapsed
+                # expansion's caption and the closing "no counterpart" line.
+                matched_datasets = {
+                    entry["dataset"]
+                    for entry in mapped
+                    if entry["outcome"] == "matched" and entry["candidates"]
+                }
+                matched_datasets.update(
+                    entry["dataset"]
+                    for entry in native
+                    if entry.get("types") or entry.get("labels")
+                )
+                matched_datasets.update(
+                    entry["dataset"] for entry in value_blocks
+                )
+                # A cached re-render can follow a hidden panel (mapped-type
+                # view exit) — visibility is the section's, not the cache's.
+                alias_section.set_visibility(True)
                 alias_container.clear()
                 with alias_container:
-                    with ui.row().classes("w-full items-center gap-2 flex-wrap"):
-                        ui.icon("travel_explore", color="warning").classes("text-lg")
-                        ui.label(
-                            "No rows here. Cross-dataset matches — informational "
-                            "only, please double check."
-                        ).classes("text-subtitle2 font-bold")
-                        ui.button(
-                            "Export matched entries (CSV)",
-                            icon="download",
-                        ).props("flat dense").on_click(_export_matches_csv)
+                    if not zero_hit:
+                        def _remember_expansion(event) -> None:
+                            alias_scan["expanded"] = bool(event.value)
+
+                        # Several cached versions can share one abbreviation
+                        # (banc_v626 + banc_v888); the caption lists each
+                        # abbreviation once.
+                        caption_abbrevs: List[str] = []
+                        for matched_dataset in sorted(matched_datasets):
+                            abbrev = dataset_abbrev(matched_dataset)
+                            if abbrev not in caption_abbrevs:
+                                caption_abbrevs.append(abbrev)
+                        co_expansion = ui.expansion(
+                            f"Cross-dataset type mapping for '{query_text}'",
+                            caption=(
+                                "matched in "
+                                + ", ".join(caption_abbrevs)
+                                + " — informational only, please double check"
+                            ),
+                            icon="travel_explore",
+                            value=bool(alias_scan["expanded"]),
+                            on_value_change=_remember_expansion,
+                        ).props("dense").classes("w-full drocat-neuron-alias-expansion")
+                        slot = co_expansion
+                    else:
+                        slot = alias_container
+                    with slot:
+                        if zero_hit:
+                            with ui.row().classes(
+                                "w-full items-center gap-2 flex-wrap"
+                            ):
+                                ui.icon("travel_explore", color="warning").classes(
+                                    "text-lg")
+                                ui.label(
+                                    "No rows here. Cross-dataset matches — "
+                                    "informational only, please double check."
+                                ).classes("text-subtitle2 font-bold")
+                                ui.button(
+                                    "Export matched entries (CSV)",
+                                    icon="download",
+                                ).props("flat dense").on_click(_export_matches_csv)
+                        else:
+                            with ui.row().classes(
+                                "w-full items-center gap-2 flex-wrap"
+                            ):
+                                ui.button(
+                                    "Export matched entries (CSV)",
+                                    icon="download",
+                                ).props("flat dense").on_click(_export_matches_csv)
 
                     def _annotation_text(ann) -> str:
                         if not ann:
@@ -1637,191 +1753,252 @@ def _render_index(
                                     "please double check)")
                         return f"— here: {ann['kind']} {', '.join(ann['targets'])}"
 
-                    if native_useful:
-                        with ui.row().classes("w-full items-center gap-2 flex-wrap"):
-                            ui.label(
-                                "Type-name matches in other datasets "
-                                "(name-similar — not necessarily the same type):"
-                            ).classes("text-caption font-bold drocat-muted")
-                        # One shared grid for every dataset block: the badge, the
-                        # action buttons, and the detail text each keep their own
-                        # column, so the same items align vertically across rows.
-                        with ui.element("div").classes(
-                            "w-full drocat-neuron-alias-grid"
-                        ):
-                            for entry in native:
-                                if not (entry.get("types") or entry.get("labels")):
-                                    continue
-                                mapped_names = entry.get("mapped_type_names", [])
-                                ui.badge(entry["dataset"]).props("outline").classes(
-                                    "drocat-neuron-alias-col-badge"
-                                )
-                                # The button sits beside its dataset badge so it
-                                # always names the block it expands. The mapped
-                                # type count rides on the tooltip to keep the
-                                # button compact.
-                                if mapped_names:
-                                    ui.button(
-                                        "Mapped types",
-                                        icon="table_view",
-                                    ).props("flat dense").tooltip(
-                                        f"Show these {len(mapped_names)} mapped "
-                                        "types in the current dataset"
-                                    ).classes(
-                                        "drocat-neuron-alias-col-mapped"
-                                    ).on_click(
-                                        lambda _e=None, entry_ref=entry:
-                                        _enter_mapped_view(entry_ref)
-                                    )
-                                    with ui.button(
-                                        "Sankey", icon="multiple_stop"
-                                    ).props("flat dense").classes(
-                                        "drocat-neuron-alias-col-sankey"
-                                    ):
-                                        with ui.menu():
-                                            ui.menu_item(
-                                                "Type-level",
-                                                on_click=lambda _e=None,
-                                                ref=entry: (
-                                                    _view_mapping_visualization(
-                                                        "sankey", "type", ref)))
-                                            ui.menu_item(
-                                                "Linker view",
-                                                on_click=lambda _e=None,
-                                                ref=entry: (
-                                                    _view_mapping_visualization(
-                                                        "sankey", "linker", ref)))
-                                    with ui.button(
-                                        "Network", icon="account_tree"
-                                    ).props("flat dense").classes(
-                                        "drocat-neuron-alias-col-network"
-                                    ):
-                                        with ui.menu():
-                                            ui.menu_item(
-                                                "Type-level",
-                                                on_click=lambda _e=None,
-                                                ref=entry: (
-                                                    _view_mapping_visualization(
-                                                        "network", "type", ref)))
-                                            ui.menu_item(
-                                                "Linker view",
-                                                on_click=lambda _e=None,
-                                                ref=entry: (
-                                                    _view_mapping_visualization(
-                                                        "network", "linker", ref)))
+                    with slot:
+                        def _render_block(entry) -> None:
+                            """One dataset block: badge, action buttons, details."""
+                            if not (entry.get("types") or entry.get("labels")):
+                                return
+                            mapped_names = entry.get("mapped_type_names", [])
+                            if mapped_names:
+                                # Button rows center the small badge on
+                                # the flat dense buttons' axis (see the
+                                # -centered rule in the app CSS).
                                 with ui.element("div").classes(
-                                    "drocat-neuron-alias-col-details"
+                                    "drocat-neuron-alias-col-badge "
+                                    "drocat-neuron-alias-badge-centered"
                                 ):
-                                    for cand in entry.get("types", []):
-                                        text = (
-                                            f"'{cand['name']}' "
-                                            f"({cand['count']:,} neurons) "
-                                            + _annotation_text(cand.get("mapped"))
-                                        )
-                                        ui.label(text).classes("text-caption")
-                                    if entry.get("types_truncated"):
-                                        ui.label(
-                                            f"+{entry['types_truncated']} more types"
-                                        ).classes("text-caption drocat-muted")
-                                    for label in entry.get("labels", []):
-                                        ui.label(
-                                            f"label '{label['label']}' · "
-                                            f"{label['column']} "
-                                            f"({label['count']:,} neurons)"
-                                        ).classes("text-caption")
-                                        covered = [
-                                            f"'{t['name']}' ({t['count']:,}) "
-                                            + _annotation_text(t.get("mapped"))
-                                            for t in label.get("types", [])
-                                        ]
-                                        if covered:
-                                            ui.label(
-                                                "    types under this label: "
-                                                + "; ".join(covered)
-                                            ).classes("text-caption drocat-muted")
-                                        if label.get("types_truncated"):
-                                            ui.label(
-                                                f"    +{label['types_truncated']} "
-                                                "more types under this label"
-                                            ).classes("text-caption drocat-muted")
-                                    if entry.get("labels_truncated"):
-                                        ui.label(
-                                            f"+{entry['labels_truncated']} more labels"
-                                        ).classes("text-caption drocat-muted")
-
-                    if mapped_useful:
-                        with ui.row().classes("w-full items-center gap-2 flex-wrap"):
-                            ui.label(
-                                "Auto type mapping:"
-                            ).classes("text-caption font-bold drocat-muted")
-                        # Same shared-column idea as the block grid above, reduced
-                        # to badge + text so every dataset's text starts at the
-                        # same x position.
-                        with ui.element("div").classes(
-                            "w-full drocat-neuron-alias-grid "
-                            "drocat-neuron-alias-grid-mapped"
-                        ):
-                            for entry in mapped:
-                                if entry["outcome"] != "matched" or not entry["candidates"]:
-                                    continue
-                                ui.badge(
-                                    entry["dataset"]
-                                    + (" (this dataset)" if entry["is_selected"] else "")
-                                ).props("outline").classes(
+                                    ui.badge(entry["dataset"]).props(
+                                        "outline")
+                            else:
+                                ui.badge(entry["dataset"]).props(
+                                    "outline").classes(
                                     "drocat-neuron-alias-col-badge"
                                 )
-                                with ui.element("div").classes("min-w-0"):
-                                    for cand in entry["candidates"]:
-                                        text = f"'{cand['name']}' — {cand['kind']}"
-                                        if cand["kind"] == "same name":
-                                            text += (" (no metadata verification — "
-                                                     "please double check)")
-                                        if cand.get("aggregates"):
-                                            text += (
-                                                "; a match also covers: "
-                                                + ", ".join(cand["aggregates"])
-                                            )
-                                        if cand.get("count") is not None:
-                                            text += f" ({cand['count']:,} neurons)"
-                                        with ui.row().classes(
-                                            "items-center gap-2 flex-wrap"
-                                        ):
-                                            ui.label(text).classes("text-caption")
-                                            if entry["is_selected"]:
-                                                ui.button(
-                                                    f"Search '{cand['name']}' here",
-                                                    icon="search",
-                                                ).props("flat dense").on_click(
-                                                    lambda _e=None, name=cand["name"]:
-                                                    _search_local_alias(name)
-                                                )
+                            # The button sits beside its dataset badge so it
+                            # always names the block it expands. The mapped
+                            # type count rides on the tooltip to keep the
+                            # button compact.
+                            if mapped_names:
+                                ui.button(
+                                    "Mapped types",
+                                    icon="table_view",
+                                ).props("flat dense").tooltip(
+                                    f"Show these {len(mapped_names)} mapped "
+                                    "types in the current dataset"
+                                ).classes(
+                                    "drocat-neuron-alias-col-mapped"
+                                ).on_click(
+                                    lambda _e=None, entry_ref=entry:
+                                    _enter_mapped_view(entry_ref)
+                                )
+                                with ui.button(
+                                    "Sankey", icon="multiple_stop"
+                                ).props("flat dense").classes(
+                                    "drocat-neuron-alias-col-sankey"
+                                ):
+                                    with ui.menu():
+                                        ui.menu_item(
+                                            "Type-level",
+                                            on_click=lambda _e=None,
+                                            ref=entry: (
+                                                _view_mapping_visualization(
+                                                    "sankey", "type", ref)))
+                                        ui.menu_item(
+                                            "Linker view",
+                                            on_click=lambda _e=None,
+                                            ref=entry: (
+                                                _view_mapping_visualization(
+                                                    "sankey", "linker", ref)))
+                                with ui.button(
+                                    "Network", icon="account_tree"
+                                ).props("flat dense").classes(
+                                    "drocat-neuron-alias-col-network"
+                                ):
+                                    with ui.menu():
+                                        ui.menu_item(
+                                            "Type-level",
+                                            on_click=lambda _e=None,
+                                            ref=entry: (
+                                                _view_mapping_visualization(
+                                                    "network", "type", ref)))
+                                        ui.menu_item(
+                                            "Linker view",
+                                            on_click=lambda _e=None,
+                                            ref=entry: (
+                                                _view_mapping_visualization(
+                                                    "network", "linker", ref)))
+                            with ui.element("div").classes(
+                                "drocat-neuron-alias-col-details"
+                            ):
+                                for cand in entry.get("types", []):
+                                    text = (
+                                        f"'{cand['name']}' "
+                                        f"({cand['count']:,} neurons) "
+                                        + _annotation_text(cand.get("mapped"))
+                                    )
+                                    ui.label(text).classes("text-caption")
+                                if entry.get("types_truncated"):
+                                    ui.label(
+                                        f"+{entry['types_truncated']} more types"
+                                    ).classes("text-caption drocat-muted")
+                                for label in entry.get("labels", []):
+                                    ui.label(
+                                        f"label '{label['label']}' · "
+                                        f"{label['column']} "
+                                        f"({label['count']:,} neurons)"
+                                    ).classes("text-caption")
+                                    covered = [
+                                        f"'{t['name']}' ({t['count']:,}) "
+                                        + _annotation_text(t.get("mapped"))
+                                        for t in label.get("types", [])
+                                    ]
+                                    if covered:
+                                        ui.label(
+                                            "    types under this label: "
+                                            + "; ".join(covered)
+                                        ).classes(
+                                            "text-caption drocat-muted")
+                                    if label.get("types_truncated"):
+                                        ui.label(
+                                            f"    +{label['types_truncated']} "
+                                            "more types under this label"
+                                        ).classes("text-caption drocat-muted")
+                                if entry.get("labels_truncated"):
+                                    ui.label(
+                                        f"+{entry['labels_truncated']} more labels"
+                                    ).classes("text-caption drocat-muted")
 
-                    matched_datasets = {
-                        entry["dataset"]
-                        for entry in mapped
-                        if entry["outcome"] == "matched" and entry["candidates"]
-                    }
-                    matched_datasets.update(
-                        entry["dataset"]
-                        for entry in native
-                        if entry.get("types") or entry.get("labels")
-                    )
-                    unknown = [
-                        entry["dataset"]
-                        for entry in mapped
-                        if entry["dataset"] not in matched_datasets
-                    ]
-                    if unknown:
-                        ui.label(
-                            "No known counterpart in: " + ", ".join(unknown)
-                        ).classes("text-caption drocat-muted")
+                        if native_useful:
+                            with ui.row().classes(
+                                "w-full items-center gap-2 flex-wrap"):
+                                ui.label(
+                                    "Type-name matches in other datasets "
+                                    "(name-similar — not necessarily the same type):"
+                                ).classes("text-caption font-bold drocat-muted")
+                            # One shared grid for every dataset block: the badge, the
+                            # action buttons, and the detail text each keep their own
+                            # column, so the same items align vertically across rows.
+                            with ui.element("div").classes(
+                                "w-full drocat-neuron-alias-grid"
+                            ):
+                                for entry in native:
+                                    _render_block(entry)
+                        if value_useful:
+                            value_names = sorted({
+                                str(value)
+                                for _column, value in matched_pairs
+                            })
+                            with ui.row().classes(
+                                "w-full items-center gap-2 flex-wrap"):
+                                ui.label(
+                                    "Auto-mapped counterparts of the matched "
+                                    f"value(s) {', '.join(value_names)} "
+                                    "(via the type mapper — informational "
+                                    "only, please double check):"
+                                ).classes("text-caption font-bold drocat-muted")
+                            with ui.element("div").classes(
+                                "w-full drocat-neuron-alias-grid"
+                            ):
+                                for entry in value_blocks:
+                                    _render_block(entry)
+                        if guidance:
+                            unmapped = [
+                                f"{item['dataset']}"
+                                + ("" if item.get("cached")
+                                   else " (metadata not downloaded)")
+                                for item in guidance
+                            ]
+                            ui.label(
+                                "No automatic mapping for "
+                                + ", ".join(unmapped)
+                                + " — track them in the Cross-Dataset tab's "
+                                "type mapping panel."
+                            ).classes("text-caption drocat-muted")
+
+                        if mapped_useful:
+                            with ui.row().classes(
+                                "w-full items-center gap-2 flex-wrap"):
+                                ui.label(
+                                    "Auto type mapping:"
+                                ).classes("text-caption font-bold drocat-muted")
+                            # Same shared-column idea as the block grid above, reduced
+                            # to badge + text so every dataset's text starts at the
+                            # same x position.
+                            with ui.element("div").classes(
+                                "w-full drocat-neuron-alias-grid "
+                                "drocat-neuron-alias-grid-mapped"
+                            ):
+                                for entry in mapped:
+                                    if entry["outcome"] != "matched" or not entry["candidates"]:
+                                        continue
+                                    # The selected dataset's candidates carry
+                                    # "Search here" buttons: center the badge on
+                                    # that first row's axis like the native grid.
+                                    if entry["is_selected"]:
+                                        with ui.element("div").classes(
+                                            "drocat-neuron-alias-col-badge "
+                                            "drocat-neuron-alias-badge-centered"
+                                        ):
+                                            ui.badge(
+                                                entry["dataset"] + " (this dataset)"
+                                            ).props("outline")
+                                    else:
+                                        ui.badge(
+                                            entry["dataset"]
+                                        ).props("outline").classes(
+                                            "drocat-neuron-alias-col-badge"
+                                        )
+                                    with ui.element("div").classes("min-w-0"):
+                                        for cand in entry["candidates"]:
+                                            text = f"'{cand['name']}' — {cand['kind']}"
+                                            if cand["kind"] == "same name":
+                                                text += (" (no metadata verification — "
+                                                         "please double check)")
+                                            if cand.get("aggregates"):
+                                                text += (
+                                                    "; a match also covers: "
+                                                    + ", ".join(cand["aggregates"])
+                                                )
+                                            if cand.get("count") is not None:
+                                                text += f" ({cand['count']:,} neurons)"
+                                            with ui.row().classes(
+                                                "items-center gap-2 flex-wrap"
+                                            ):
+                                                ui.label(text).classes("text-caption")
+                                                if entry["is_selected"]:
+                                                    ui.button(
+                                                        f"Search '{cand['name']}' here",
+                                                        icon="search",
+                                                    ).props("flat dense").on_click(
+                                                        lambda _e=None, name=cand["name"]:
+                                                        _search_local_alias(name)
+                                                    )
+
+                        unknown = [
+                            entry["dataset"]
+                            for entry in mapped
+                            if entry["dataset"] not in matched_datasets
+                        ]
+                        if unknown:
+                            ui.label(
+                                "No known counterpart in: " + ", ".join(unknown)
+                            ).classes("text-caption drocat-muted")
+
+            # A completed scan is cached per query: paging and display-only
+            # refreshes re-render the stored result instead of re-running
+            # the mapper scan.
+            cached = alias_scan["cache"]
+            if cached["key"] == cache_key and cached["matches"] is not None:
+                _apply(cached["matches"])
+                return
 
             async def _scan_async() -> None:
                 # Heavy scan off the event loop; NiceGUI elements are only
                 # touched here, back on the loop, after the await.
                 try:
                     matches = await run.io_bound(
-                        collect_zero_hit_matches, dataset, query_text)
+                        collect_zero_hit_matches, dataset, query_text,
+                        matched_values=matched_pairs)
                 except Exception:
                     matches = None
                 if alias_scan["generation"] != generation:
@@ -1833,13 +2010,21 @@ def _render_index(
                         busy=False,
                     )
                 else:
+                    alias_scan["cache"]["key"] = cache_key
+                    alias_scan["cache"]["matches"] = matches
                     _apply(matches)
 
-            _render_alias_status(
-                f"No matches for '{query_text}' in {dataset}. Mapping other "
-                "datasets — initializing the auto type mapper…",
-                busy=True,
-            )
+            if zero_hit:
+                _render_alias_status(
+                    f"No matches for '{query_text}' in {dataset}. Mapping other "
+                    "datasets — initializing the auto type mapper…",
+                    busy=True,
+                )
+            else:
+                _render_alias_status(
+                    f"Checking the other cached datasets for '{query_text}'…",
+                    busy=True,
+                )
             # On the app loop (production), scan off-loop and render the
             # result back on the loop; without a running loop (direct /
             # test invocation) execute inline so results land
@@ -2067,6 +2252,14 @@ def _render_index(
             written = entry.get("matched_written") or (
                 str(search_input.value or "").strip()
             )
+            # Value-driven blocks come from a non-type column entry (e.g.
+            # cell_type · circadian_clock); the provenance origin names
+            # that column instead of the type column.
+            value_column = str(entry.get("value_source") or "").strip()
+            origin_prefix = (
+                f"{value_column} · '{written}'" if value_column
+                else f"type · '{written}'"
+            )
             provenance: Dict[str, List[Dict[str, Any]]] = {}
             column_texts: Dict[str, List[str]] = {
                 "__map_foreign": [], "__map_origin": [],
@@ -2115,7 +2308,7 @@ def _render_index(
 
             provenance_pairs: set = set()
             _collect(entry.get("types_all") or entry.get("types", []),
-                     f"type · '{written}'")
+                     origin_prefix)
             for label in (entry.get("labels_all")
                           or entry.get("labels", [])):
                 # provenance must cover the FULL covered list (covered_all)
@@ -2348,6 +2541,21 @@ def _render_index(
                             f"{e['foreign_text']}: {e['source_text']}{gran}")
                     row["__map_bridge"] = "\n".join(hover_lines)
         match_groups_all[:] = list(result.match_groups)
+        last_matched_values.clear()
+        for group in result.match_groups:
+            if group.get("match_role") == "secondary":
+                continue
+            column = str(group.get("match_column_key") or "").strip()
+            value = str(group.get("match_value") or "").strip()
+            if not column or not value:
+                continue
+            key = (column.casefold(), value.casefold())
+            if key in {(c.casefold(), v.casefold())
+                       for c, v in last_matched_values}:
+                continue
+            last_matched_values.append((column, value))
+            if len(last_matched_values) >= 8:
+                break
         current_group_body_ids.clear()
         current_group_body_ids.update({
             str(key): tuple(values)
@@ -2394,6 +2602,7 @@ def _render_index(
             page_info.text = "0 matching rows"
         page_info.update()
         no_results.set_visibility(result.total == 0 and not mapped_view.get("active"))
+        last_result_total["value"] = result.total
         if mapped_view.get("active"):
             # Mapped-type view: the warning banner replaces the alias panel.
             _hide_alias_panel()
@@ -2412,6 +2621,16 @@ def _render_index(
             )
             page_info.update()
         elif result.total == 0:
+            render_alias_matches()
+            mapped_warning_section.set_visibility(False)
+        elif (
+            cross_mapping_mode is not None
+            and cross_mapping_mode.get("enabled")
+            and _effective_search_text(search_input.value)
+        ):
+            # Cross-dataset type mapping mode: the native rows stay, and the
+            # cross-dataset scan co-displays as a collapsed expansion above
+            # the results.
             render_alias_matches()
             mapped_warning_section.set_visibility(False)
         else:
@@ -2442,6 +2661,31 @@ def _render_index(
         _deliver_mapping_visualization(
             html_text, f"mapping_{kind}_{variant}_{foreign}_{stamp}.html",
             label)
+
+    def refresh_result_panels() -> None:
+        """Re-evaluate only the results footer (cross-dataset panel/warnings).
+
+        The header's cross-dataset mode toggle uses this: the table query is
+        unchanged, so flipping the mode must not re-run it. A mapped-type
+        view stays exactly as it is — the mode only takes effect once the
+        view is exited.
+        """
+        if mapped_view.get("active"):
+            return
+        mapped_warning_section.set_visibility(False)
+        if last_result_total["value"] == 0:
+            render_alias_matches()
+        elif (
+            cross_mapping_mode is not None
+            and cross_mapping_mode.get("enabled")
+            and _effective_search_text(search_input.value)
+        ):
+            render_alias_matches()
+        else:
+            _hide_alias_panel()
+
+    if cross_mapping_mode is not None:
+        cross_mapping_mode["refresh"] = refresh_result_panels
 
     def reset_and_refresh(_event=None):
         # Any query change leaves the mapped-type view: the expansion panel
@@ -2583,6 +2827,29 @@ def create_neuron_index_viewer_link(
         finally:
             dialog.close()
 
+    # Cross-dataset type mapping mode: when enabled, the viewer's search also
+    # maps the query into the other cached datasets. The holder survives
+    # dataset switches; the rendered viewer registers its footer refresh
+    # under "refresh" so toggling re-evaluates the cross-dataset panel
+    # without re-running the table query.
+    cross_mapping_mode: dict = {"enabled": False, "refresh": None}
+
+    def _paint_cross_toggle() -> None:
+        cross_toggle.props(
+            "color=primary" if cross_mapping_mode["enabled"] else "color=grey-7")
+
+    def _toggle_cross_mapping() -> None:
+        cross_mapping_mode["enabled"] = not cross_mapping_mode["enabled"]
+        _paint_cross_toggle()
+        refresh_footer = cross_mapping_mode.get("refresh")
+        if refresh_footer is not None:
+            try:
+                refresh_footer()
+            except Exception:
+                # A stale viewer registration (content re-rendered since)
+                # must never break the toggle itself.
+                pass
+
     with dialog:
         with ui.card().classes(
             "w-[min(98vw,1800px)] max-w-none drocat-neuron-viewer-card"
@@ -2597,6 +2864,20 @@ def create_neuron_index_viewer_link(
                     header_meta = ui.row().classes(
                         "items-center gap-2 flex-wrap min-w-0 drocat-neuron-header-meta"
                     )
+                # Cross-dataset mode toggle sits left of OK: enabled, the
+                # search co-displays its cross-dataset matches (collapsed)
+                # with the native rows.
+                cross_toggle = ui.button(
+                    "Cross-dataset type mapping",
+                    icon="travel_explore",
+                    on_click=_toggle_cross_mapping,
+                ).props("outline dense no-caps color=grey-7").classes(
+                    "drocat-neuron-cross-mapping-toggle"
+                ).tooltip(
+                    "Type mapping mode: the search also maps the query into "
+                    "the other cached datasets (auto mapping + name "
+                    "similarity — informational only, please double check)."
+                )
                 # OK finishes the selection and exits the panel; the 'x' is a
                 # secondary dismiss. Both commit any deferred (pending) selection.
                 ui.button(
@@ -2667,6 +2948,7 @@ def create_neuron_index_viewer_link(
             query_label=query_label,
             defer_apply=defer_apply,
             apply_holder=_apply_holder,
+            cross_mapping_mode=cross_mapping_mode,
         )
 
     link = ui.button(label, icon="search", on_click=open_viewer).props(

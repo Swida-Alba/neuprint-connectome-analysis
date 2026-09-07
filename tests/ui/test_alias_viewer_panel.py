@@ -108,6 +108,46 @@ def viewer_client():
         clear_neuron_index_cache()
 
 
+@pytest.fixture
+def mode_viewer_client():
+    """Viewer rendered with the dialog's cross-dataset mode enabled.
+
+    Yields (client, search input, mode holder); the test flips
+    ``mode['enabled']`` and calls ``mode['refresh']()`` to simulate the
+    header toggle.
+    """
+    from nicegui import Client, ui
+    from nicegui.page import page
+
+    clear_neuron_index_cache()
+    from comparison.cross_dataset_type_mapper import get_type_mapper
+
+    assert get_type_mapper().load() is True
+
+    mode = {'enabled': True, 'refresh': None}
+    client = Client(page('/alias-panel-mode-test'))
+    with client:
+        content = ui.element('div')
+        viewer_mod._render_index(
+            content, 'male-cns:v1.0', cross_mapping_mode=mode)
+    inputs = [e for e in client.elements.values() if isinstance(e, ui.input)]
+    assert inputs, 'viewer search input not found'
+    try:
+        yield client, inputs[0], mode
+    finally:
+        clear_neuron_index_cache()
+
+
+def _alias_expansion(client):
+    """The collapsed co-display expansion, when present."""
+    for element in client.elements.values():
+        if type(element).__name__ != 'Expansion':
+            continue
+        if 'Cross-dataset type mapping for' in str(element.text or ''):
+            return element
+    return None
+
+
 def test_zero_hit_query_reveals_alias_panel(viewer_client):
     client, search = viewer_client
     search.set_value('APDN3')  # no male-cns neuron carries this name
@@ -401,6 +441,43 @@ def test_mapped_view_survives_display_controls(viewer_client):
     assert any('Mapped-type view' in t for t in texts)
 
 
+def test_mapped_view_match_panel_selection(viewer_client, monkeypatch):
+    """Inside the mapped-type view the Match details rows (one per mapped
+    type) must be selectable: the checkbox state mirrors the persistent
+    selection, and clearing it clears the row again."""
+    from types import SimpleNamespace
+
+    from nicegui import ui as nicegui_ui
+
+    client, search = viewer_client
+    scripts = []
+    monkeypatch.setattr(nicegui_ui, 'run_javascript', scripts.append)
+    search.set_value('circadian')
+    _wait_for_labels(
+        client, lambda t: any('Mapped types' in x for x in t))
+    assert _click_button(client, 'Mapped types')
+
+    match_table = next(
+        element for element in client.elements.values()
+        if type(element).__name__ == 'Table'
+        and element._props['columns'][0]['name'] == 'match_column'
+    )
+    rows = match_table._props['rows']
+    assert rows, 'mapped view must list the mapped types in Match details'
+
+    toggle = next(
+        listener for listener in match_table._event_listeners.values()
+        if listener.type == 'matchSelectionToggle'
+    )
+    row = rows[0]
+    toggle.handler(SimpleNamespace(args={'row': row, 'selected': True}))
+    assert row in match_table.selected
+
+    toggle.handler(SimpleNamespace(args={'row': row, 'selected': False}))
+    assert row not in match_table.selected
+
+
+
 def test_mapping_visualization_variants_download_not_saved(
         viewer_client, tmp_path, monkeypatch):
     """All four mapping artifacts (sankey/network x type-level/linker) are
@@ -494,3 +571,168 @@ def test_mapping_visualization_variants_download_not_saved(
     assert dn1a, sorted(by_type)
     assert dn1a[foreign_idx] == 'DN1a'
     assert dn1a[header.index('matched column(s)')] == "cell_type · circadian_clock"
+
+
+def test_cross_mapping_mode_codisplays_collapsed_with_hits(mode_viewer_client):
+    """With the header mode enabled, a search WITH local hits co-displays
+    its cross-dataset matches as a collapsed expansion above the results;
+    the native rows stay untouched."""
+    client, search, mode = mode_viewer_client
+    search.set_value('aMe12')  # male-cns has aMe12 rows
+
+    texts = _wait_for_labels(
+        client, lambda t: any(
+            'Cross-dataset type mapping for' in x
+            or 'No cross-dataset counterparts' in x
+            for x in t))
+    assert any('Cross-dataset type mapping for' in t for t in texts), texts
+
+    expansion = _alias_expansion(client)
+    assert expansion is not None
+    # collapsed by default, with the matched datasets in the caption
+    assert expansion.value is False
+    assert 'matched in' in str(expansion._props.get('caption') or '')
+
+    # the native result table is unaffected
+    table = _table(client)
+    body_ids = [str(r.get('bodyId', '')) for r in table.rows]
+    assert body_ids and all(b for b in body_ids)
+
+
+def test_cross_mapping_mode_toggle_off_on_and_scan_cache(mode_viewer_client,
+                                                         monkeypatch):
+    """Toggling the mode off hides the panel and on restores it without
+    re-running the scan; only a new query rescans."""
+    calls = []
+    real_collect = viewer_mod.collect_zero_hit_matches
+
+    def counting(*args, **kwargs):
+        calls.append(args[1] if len(args) > 1 else kwargs.get('search'))
+        return real_collect(*args, **kwargs)
+
+    monkeypatch.setattr(viewer_mod, 'collect_zero_hit_matches', counting)
+
+    client, search, mode = mode_viewer_client
+    search.set_value('aMe12')
+    _wait_for_labels(
+        client, lambda t: any('Cross-dataset type mapping for' in x
+                              for x in t))
+    assert len(calls) == 1, calls
+
+    # display-only footer re-evaluation (toggle off): panel hides, no rescan
+    mode['enabled'] = False
+    mode['refresh']()
+    assert 'hidden' in _alias_section(client).classes
+    assert len(calls) == 1, calls
+
+    # toggle back on: the cached scan re-renders the expansion instantly
+    mode['enabled'] = True
+    mode['refresh']()
+    assert _alias_expansion(client) is not None
+    assert len(calls) == 1, calls
+
+    # a new query rescans
+    search.set_value('aMe1')
+    _wait_for_labels(
+        client, lambda t: any(
+            ('Cross-dataset type mapping for' in x)
+            != any('aMe12' in y for y in [x])
+            for x in t))
+    assert len(calls) == 2, calls
+
+
+def test_cross_mapping_mode_kept_out_of_mapped_view(mode_viewer_client):
+    """Toggling the mode while a mapped-type view is active changes
+    nothing in that view; exiting re-renders the co-display."""
+    client, search, mode = mode_viewer_client
+    search.set_value('circadian')  # zero local hits
+    _wait_for_labels(client, lambda t: any('Mapped types' in x for x in t))
+    assert _click_button(client, 'Mapped types')
+    section = _alias_section(client)
+    assert 'hidden' in section.classes
+
+    # mode flips while the mapped view is active: view untouched
+    mode['enabled'] = True
+    mode['refresh']()
+    texts = _labels(client)
+    assert any('Mapped-type view' in t and 'FAFB' in t for t in texts)
+    assert 'hidden' in section.classes
+    table = _table(client)
+    assert any(str(c.get('name', '')).startswith('__map_')
+               for c in table.columns)
+
+    # exiting the mapped view returns to the zero-hit flow for this query
+    # (zero-hit rendering takes precedence over the co-display expansion)
+    assert _click_button(client, 'Back to normal search')
+    texts = _wait_for_labels(
+        client, lambda t: any('Mapped types' in x for x in t))
+    assert 'hidden' not in _alias_section(client).classes
+    assert any('Mapped types' in t for t in texts)
+
+
+def test_value_mapped_fallback_resolves_non_type_entries():
+    """A matched non-type column value (FAFB cell_type circadian_clock)
+    whose literal string appears in no other dataset still yields
+    mapper-driven counterpart types: the collector returns native-shaped
+    blocks, the enricher fills the mapped-view type set, and the zero-hit
+    aggregator carries tier + guidance."""
+    from ui.neuron_index import (
+        clear_neuron_index_cache,
+        collect_value_mapped_matches,
+        collect_zero_hit_matches,
+        enrich_native_type_matches,
+    )
+    from comparison.cross_dataset_type_mapper import get_type_mapper
+
+    clear_neuron_index_cache()
+    try:
+        assert get_type_mapper().load() is True
+
+        blocks, guidance = collect_value_mapped_matches(
+            'flywire_FAFB_v783', [('cell_type', 'circadian_clock')])
+        datasets = {block['dataset'] for block in blocks}
+        assert {'male-cns:v1.0', 'banc_v888'} <= datasets
+        # every other cached dataset without counterparts is guided
+        for item in guidance:
+            assert item['dataset'] not in datasets
+            assert isinstance(item['cached'], bool)
+
+        enrich_native_type_matches(blocks, 'flywire_FAFB_v783')
+        mcns = next(block for block in blocks
+                    if block['dataset'] == 'male-cns:v1.0')
+        assert mcns['value_source'] == 'cell_type'
+        assert mcns['mapped_type_names']  # mapped-view search set
+        assert mcns['types_all'][0]['mapped']  # per-type annotation
+
+        result = collect_zero_hit_matches(
+            'flywire_FAFB_v783', 'circadian_clock',
+            matched_values=[('cell_type', 'circadian_clock')])
+        assert result['value_mapped'] and result['guidance']
+        # empty pairs (zero-hit queries have no match groups) stay inert
+        assert collect_value_mapped_matches('flywire_FAFB_v783', []) == ([], [])
+    finally:
+        clear_neuron_index_cache()
+
+
+def test_value_mapped_tier_renders_in_co_display(mode_viewer_client):
+    """With the mode on, a search whose match lands in a non-type column
+    (male-cns class) shows the auto-mapped counterparts tier naming the
+    matched value and the datasets that carry mapped types."""
+    client, search, mode = mode_viewer_client
+    search.set_value('olfactory')  # male-cns class value, 2639 neurons
+
+    texts = _wait_for_labels(
+        client,
+        lambda t: any('Auto-mapped counterparts of the matched value' in x
+                      for x in t),
+        timeout_seconds=90,
+    )
+    assert any("matched value(s) olfactory" in t for t in texts)
+    # the native tier may or may not fire for the same query; the
+    # value tier's dataset badges are the load-bearing assertion
+    badges = [
+        str(getattr(el, 'text', '') or '')
+        for el in client.elements.values()
+        if type(el).__name__ == 'Badge'
+    ]
+    assert any('FAFB' in badge or 'banc' in badge for badge in badges), badges

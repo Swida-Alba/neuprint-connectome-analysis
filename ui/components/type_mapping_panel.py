@@ -260,10 +260,10 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
             ui.button("Sankey (linker)",
                       on_click=lambda: _deliver_flows(
                           src, tgt, flows, pools, "sankey", "linker", stamp))
-            ui.button("Network",
+            ui.button("Network (type-level)",
                       on_click=lambda: _deliver_flows(
                           src, tgt, flows, pools, "network", "type", stamp))
-            ui.button("Linker paths",
+            ui.button("Network (linker)",
                       on_click=lambda: _deliver_flows(
                           src, tgt, flows, pools, "network", "linker", stamp))
             ui.button("Export bridges (CSV)",

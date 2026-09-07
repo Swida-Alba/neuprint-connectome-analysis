@@ -231,6 +231,41 @@ class TestNeuronIndexData:
         focused = query_neuron_index(index, search="aMe", page=6, page_size=10)
         assert focused.rows[0]["bodyId"] == "1050"
 
+    def test_every_query_mode_resolves_match_groups_to_themselves(
+        self, isolated_index_root
+    ):
+        """Match-panel selection reads match_group_related to remember a
+        clicked group; groups without primary/secondary relations must
+        still resolve to themselves (never an empty tuple) in EVERY query
+        mode — the presorted global-search path, the general matcher, the
+        scoped column search, and the mapped-type view."""
+        from ui.neuron_index import load_cached_neuron_index, query_neuron_index
+
+        dataset, _, _ = _write_index(isolated_index_root)
+        index = load_cached_neuron_index(dataset, enrich=False)
+
+        queries = {
+            "global search": dict(search="aMe"),
+            "scoped search": dict(search="aMe", search_column="type"),
+            "column filter": dict(
+                filter_column="type", filter_text="aMe"),
+            "mapped view": dict(types_include=["aMe10", "aMe12"]),
+        }
+        for label, kwargs in queries.items():
+            result = query_neuron_index(index, page_size=10, **kwargs)
+            groups = [
+                str(group["__match_group_key"]) for group in result.match_groups
+            ]
+            assert groups, label
+            for key in groups:
+                related = result.match_group_related.get(key)
+                assert related, (
+                    f"{label}: match group {key!r} resolves to an empty "
+                    "related tuple, so the match panel cannot select it"
+                )
+                assert key in related
+                assert key in result.match_group_primary.get(key, ())
+
     def test_global_search_returns_prefixes_then_substring_matches(
         self, isolated_index_root
     ):
@@ -942,6 +977,129 @@ class TestNeuronIndexViewer:
             if listener.type == "click"
         )
         listener.handler(SimpleNamespace())
+
+    def test_full_table_select_all_aligns_with_row_checkboxes(
+        self, isolated_index_root, monkeypatch
+    ):
+        """The header select-all cell and the per-row checkbox cell share one
+        geometry class, so the browser's centered-th vs left-td defaults
+        cannot drift the two checkbox columns apart."""
+        import ui.app as app_module
+
+        assert ".drocat-neuron-select-cell" in app_module.DROCAT_CSS
+        rule = (
+            app_module.DROCAT_CSS
+            .split(".drocat-neuron-select-cell", 1)[1]
+            .split("}", 1)[0]
+        )
+        assert "text-align: center" in rule
+
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.components.neuron_index_viewer as viewer
+        from ui.components.neuron_index_viewer import (
+            create_neuron_index_viewer_link,
+        )
+
+        dataset, _, _ = _write_index(isolated_index_root)
+        monkeypatch.setattr(viewer, "PROJECT_ROOT", isolated_index_root)
+
+        client = Client(page("/neuron-index-viewer-select-align"))
+        with client:
+            link = create_neuron_index_viewer_link(lambda: dataset)
+        self._click(link)
+
+        full_table = next(
+            element for element in client.elements.values()
+            if type(element).__name__ == "Table"
+            and any(
+                column.get("name") == "bodyId"
+                for column in element._props["columns"]
+            )
+        )
+        header_slot = full_table.slots["header"].template or ""
+        body_slot = full_table.slots["body"].template or ""
+        assert '<q-th auto-width class="drocat-neuron-select-cell"' in header_slot
+        assert '<q-td auto-width class="drocat-neuron-select-cell"' in body_slot
+
+    def test_cross_mapping_toggle_sits_left_of_ok_and_drives_the_panel(
+        self, isolated_index_root, monkeypatch
+    ):
+        """The dialog header carries a 'Cross-dataset type mapping' toggle
+        left of OK. Enabled, a search with hits shows the cross-dataset
+        footer; disabled, the footer hides again."""
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.components.neuron_index_viewer as viewer
+        from ui.components.neuron_index_viewer import (
+            create_neuron_index_viewer_link,
+        )
+
+        dataset, _, _ = _write_index(isolated_index_root)
+        monkeypatch.setattr(viewer, "PROJECT_ROOT", isolated_index_root)
+        monkeypatch.setattr(viewer.ui, "run_javascript", lambda *a, **k: None)
+
+        client = Client(page("/neuron-index-viewer-cross-toggle"))
+        with client:
+            link = create_neuron_index_viewer_link(lambda: dataset)
+        self._click(link)
+
+        buttons = [
+            element for element in client.elements.values()
+            if type(element).__name__ == "Button"
+        ]
+        toggle = next(
+            element for element in buttons
+            if element.text == "Cross-dataset type mapping"
+        )
+        ok_button = next(
+            element for element in buttons if element.text == "OK"
+        )
+        # creation order puts the toggle immediately left of OK
+        all_ids = [element.id for element in buttons]
+        assert all_ids.index(toggle.id) < all_ids.index(ok_button.id)
+
+        search_input = next(
+            element
+            for element in client.elements.values()
+            if getattr(element, "_props", {}).get("label")
+            == "Search identities & taxonomy"
+        )
+        listener = next(iter(search_input._event_listeners.values()))
+        search_input._handle_event({
+            "listener_id": listener.id,
+            "args": "aMe",
+        })
+
+        alias_section = next(
+            element
+            for element in client.elements.values()
+            if "drocat-neuron-alias-panel" in getattr(element, "_classes", set())
+        )
+        assert "hidden" in alias_section.classes
+
+        def _click_toggle():
+            click_listener = next(
+                click_listener
+                for click_listener in toggle._event_listeners.values()
+                if click_listener.type == "click"
+            )
+            click_listener.handler(SimpleNamespace())
+
+        # enabled: with hits, the footer renders (this isolated index has no
+        # other cached datasets, so the explicit no-counterpart status shows)
+        _click_toggle()
+        assert toggle._props.get("color") == "primary"
+        assert "hidden" not in alias_section.classes
+        assert any(
+            "No cross-dataset counterparts for 'aMe'" in getattr(el, "text", "")
+            for el in client.elements.values()
+        )
+
+        # disabled again: the footer hides
+        _click_toggle()
+        assert toggle._props.get("color") == "grey-7"
+        assert "hidden" in alias_section.classes
 
     def test_link_opens_rendered_cached_index(self, isolated_index_root, monkeypatch):
         from nicegui import Client

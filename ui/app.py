@@ -630,6 +630,15 @@ html, body {
 .drocat-neuron-alias-col-mapped { grid-column: 2; }
 .drocat-neuron-alias-col-sankey { grid-column: 3; }
 .drocat-neuron-alias-col-network { grid-column: 4; }
+/* Button rows center the dataset badge on the Mapped types / Sankey /
+   Network buttons' axis: the grid top-aligns items, and the bare badge
+   (18px) sat visibly above the taller flat dense buttons (32px at the
+   app's font size, hence the em-based min-height). */
+.drocat-neuron-alias-badge-centered {
+    display: flex;
+    align-items: center;
+    min-height: 2.2857em;
+}
 .drocat-neuron-alias-col-details {
     grid-column: 5;
     min-width: 0;
@@ -712,6 +721,15 @@ html, body {
     min-width: 36px;
     padding-left: 7px !important;
     padding-right: 3px !important;
+    text-align: center;
+}
+/* Full-table selection column: the header select-all and the per-row
+   checkboxes share one geometry. The th would otherwise inherit the
+   browser's centered-text default while the td left-aligns, so the two
+   checkbox columns drift apart. */
+.drocat-neuron-select-cell {
+    padding-left: 9px !important;
+    padding-right: 9px !important;
     text-align: center;
 }
 .drocat-neuron-match-secondary-arrow {

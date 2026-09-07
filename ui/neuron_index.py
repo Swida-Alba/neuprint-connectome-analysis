@@ -2061,7 +2061,10 @@ def query_neuron_index(
                 group_body_ids[key] = []
                 group_member_sets[key] = set()
                 group_body_id_sets[key] = set()
-                group_related_sets[key] = set()
+                # Self-included like the presorted path: a group with no
+                # primary/secondary relations must still resolve to itself,
+                # otherwise match-panel selection cannot remember it.
+                group_related_sets[key] = {key}
                 group_primary_sets[key] = set()
                 group_order[key] = candidate_order
             elif candidate_order < group_order[key]:
@@ -2692,6 +2695,13 @@ NATIVE_TYPE_MATCH_CAP = 16
 NATIVE_LABEL_MATCH_CAP = 8
 NATIVE_LABEL_TYPES_CAP = 8
 
+# Caps for the value-driven mapper fallback: how many matched (column,
+# value) pairs, local types, and displayed foreign types per dataset one
+# lookup may consume.
+VALUE_MATCH_PAIR_CAP = 8
+VALUE_MATCH_TYPE_CAP = 64
+VALUE_MATCH_FOREIGN_CAP = 24
+
 # Column names (normalized: casefold, non-alphanumerics removed) that carry
 # taxonomy labels in the shipped dataset indexes.
 _NATIVE_LABEL_COLUMNS = {
@@ -3278,8 +3288,9 @@ def collect_zero_hit_matches(
     dataset: str,
     search: str,
     datasets: Optional[List[str]] = None,
+    matched_values: Optional[List[tuple]] = None,
 ) -> Dict[str, Any]:
-    """Both expansion tiers for a zero-hit viewer search.
+    """Expansion tiers for a viewer search's cross-dataset panel.
 
     ``native``: mapper-free, name-similar type and taxonomy-label matches
     from the other datasets' cached indexes (see
@@ -3289,7 +3300,17 @@ def collect_zero_hit_matches(
     ``mapped``: the auto-type-mapping alias candidates for the query itself
     (see :func:`collect_alias_matches`).
 
-    Both tiers are strictly informational.
+    ``value_mapped``: mapper-driven counterparts of the search's OWN
+    matched values (see :func:`collect_value_mapped_matches`) — only
+    computed when ``matched_values`` (the ``(column, value)`` pairs of
+    the current search's match groups) is supplied.  This is the fallback
+    for non-type column entries (a ``cell_type`` value, for example)
+    whose literal string appears nowhere in the other datasets.
+
+    ``guidance``: datasets checked alongside ``value_mapped`` that have no
+    automatic mapping (cached but unmapped, or metadata not downloaded).
+
+    All tiers are strictly informational.
     """
     if datasets is None:
         datasets = datasets_with_cached_indexes()
@@ -3302,7 +3323,171 @@ def collect_zero_hit_matches(
         mapped = collect_alias_matches(dataset, search, datasets)
     except Exception:
         mapped = []
-    return {"native": native, "mapped": mapped}
+    value_mapped: List[Dict[str, Any]] = []
+    guidance: List[Dict[str, Any]] = []
+    if matched_values:
+        try:
+            value_mapped, guidance = collect_value_mapped_matches(
+                dataset, matched_values, datasets)
+        except Exception:
+            value_mapped, guidance = [], []
+        try:
+            enrich_native_type_matches(value_mapped, dataset)
+        except Exception:
+            pass
+    return {
+        "native": native,
+        "mapped": mapped,
+        "value_mapped": value_mapped,
+        "guidance": guidance,
+    }
+
+
+def collect_value_mapped_matches(
+    dataset: str,
+    matched_values: List[tuple],
+    datasets: Optional[List[str]] = None,
+) -> tuple:
+    """Mapper-driven counterparts of the current search's matched values.
+
+    ``matched_values`` carries ``(column, value)`` pairs from the
+    viewer's match groups — entries of non-type columns (a ``cell_type``
+    or ``class`` value, for example) that are dataset-specific: their
+    literal string appears in no other dataset, so the name-similar scan
+    and the query-alias lookup both come up empty.  The local neurons
+    carrying those values contribute their ``type`` names, and the
+    cross-dataset type mapper resolves those into every other cached
+    dataset's types (BANC v888, male-cns:v1.0, and FAFB carry default
+    mappings).
+
+    Returns ``(blocks, guidance)``.  ``blocks`` are native-tier-shaped
+    entries (dataset, types, types_all, ...) so the viewer renders them
+    beside the name-similar tier and the mapped-type view, provenance,
+    and CSV reuse them unchanged; run them through
+    :func:`enrich_native_type_matches` for the mapped annotations.
+    ``guidance`` lists the remaining datasets as ``{'dataset', 'cached'}``
+    — no automatic mapping exists for them, so the viewer points the user
+    at the Cross-Dataset tab's type mapping panel (and, when not cached,
+    at downloading the metadata first).
+    """
+    import polars as pl
+
+    pairs: List[tuple] = []
+    seen_pairs = set()
+    for column, value in (matched_values or []):
+        column = str(column or "").strip()
+        value = str(value or "").strip()
+        if not column or not value:
+            continue
+        if re.sub(r"[^a-z0-9]", "", column.casefold()) == "bodyid":
+            continue  # bodyIds are dataset-specific by definition
+        key = (column.casefold(), value.casefold())
+        if key in seen_pairs:
+            continue
+        seen_pairs.add(key)
+        pairs.append((column, value))
+        if len(pairs) >= VALUE_MATCH_PAIR_CAP:
+            break
+    if not pairs:
+        return [], []
+
+    index = _load_alias_index(dataset)
+    if index is None or "type" not in index.frame.columns:
+        return [], []
+    frame = index.frame
+
+    # The matched values identify a local neuron set; its type names are
+    # what the type mapper can translate.
+    local_types: Dict[str, int] = {}
+    for column, value in pairs:
+        if column not in frame.columns:
+            continue
+        column_expr = (
+            pl.col(column).cast(pl.Utf8, strict=False)
+            .fill_null("").str.strip_chars()
+        )
+        rows = frame.filter(column_expr == value)
+        if rows.is_empty():
+            continue
+        for row in rows.group_by("type").len().to_dicts():
+            name = str(row["type"] or "").strip()
+            if name:
+                local_types[name] = local_types.get(name, 0) + int(row["len"])
+    if not local_types:
+        return [], []
+    ranked = sorted(local_types.items(),
+                    key=lambda item: (-item[1], item[0].casefold()))
+    local_types = dict(ranked[:VALUE_MATCH_TYPE_CAP])
+
+    if datasets is None:
+        datasets = datasets_with_cached_indexes()
+
+    try:
+        from comparison.cross_dataset_type_mapper import get_type_mapper
+
+        mapper = get_type_mapper()
+    except Exception:
+        mapper = None
+
+    blocks: List[Dict[str, Any]] = []
+    mapped_datasets: List[str] = []
+    for ds in datasets:
+        if ds == dataset:
+            continue
+        foreign: Dict[str, set] = {}
+        if mapper is not None:
+            for local_type in local_types:
+                try:
+                    res = mapper.get_alias_candidates(local_type, [ds])
+                    info = res.get(ds) or {}
+                    if info.get("outcome") == "matched":
+                        for cand in info.get("candidates") or []:
+                            name = str(cand.get("name") or "").strip()
+                            if name:
+                                foreign.setdefault(name, set()).add(local_type)
+                except Exception:
+                    pass
+                try:
+                    chains = mapper.get_type_bridges(local_type, dataset, ds)
+                    for chain in chains or []:
+                        end = str((chain[-1] or {}).get("value") or "").strip()
+                        if end:
+                            foreign.setdefault(end, set()).add(local_type)
+                except Exception:
+                    pass
+        if not foreign:
+            continue
+        names = sorted(foreign, key=lambda name: (name.casefold(), name))
+        foreign_index = _load_alias_index(ds)
+        types_all = [
+            {
+                "name": name,
+                "count": count_type_in_index(foreign_index, name) or 0,
+                "exact": False,
+                "matched_written": name,
+            }
+            for name in names
+        ]
+        blocks.append({
+            "dataset": ds,
+            "is_selected": False,
+            "types": types_all[:VALUE_MATCH_FOREIGN_CAP],
+            "types_all": types_all,
+            "types_truncated": max(0, len(types_all) - VALUE_MATCH_FOREIGN_CAP),
+            "labels": [],
+            "labels_all": [],
+            "labels_truncated": 0,
+            "matched_written": pairs[0][1],
+            "value_source": pairs[0][0],
+        })
+        mapped_datasets.append(ds)
+
+    guidance = [
+        {"dataset": ds, "cached": neuron_index_path(ds).is_file()}
+        for ds in datasets
+        if ds != dataset and ds not in mapped_datasets
+    ]
+    return blocks, guidance
 
 
 def _bridge_cells(bridges_by_target, selected_dataset: str,
@@ -3346,6 +3531,7 @@ def build_matches_csv(
     dataset: str,
     search: str,
     datasets: Optional[List[str]] = None,
+    matched_values: Optional[List[tuple]] = None,
 ) -> str:
     """Build the CSV text of every matched entry for a zero-hit search.
 
@@ -3367,6 +3553,14 @@ def build_matches_csv(
         datasets = datasets_with_cached_indexes()
     native = collect_native_type_matches(dataset, search, datasets, uncapped=True)
     enrich_native_type_matches(native, dataset)
+    if matched_values:
+        try:
+            value_blocks, _guidance = collect_value_mapped_matches(
+                dataset, matched_values, datasets)
+            enrich_native_type_matches(value_blocks, dataset)
+            native = native + value_blocks
+        except Exception:
+            pass
     try:
         mapped = collect_alias_matches(dataset, search, datasets)
     except Exception:
@@ -3407,7 +3601,8 @@ def build_matches_csv(
             cells = _bridge_cells(
                 cand.get("bridges_by_target"), dataset,
                 entry["dataset"], cand["name"])
-            _row("type", "type", cand["name"], cand["name"],
+            _row("type", entry.get("value_source") or "type",
+                 cand["name"], cand["name"],
                  cand["count"], cand.get("mapped"),
                  cand.get("map_used", ""), cells)
         for label in (entry.get("labels_all") or entry.get("labels", [])):

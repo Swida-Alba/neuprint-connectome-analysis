@@ -177,8 +177,9 @@ def test_global_search_composes_the_selection(panel_client):
         and 'bidirectional' in label
         for label in labels)
     # artifact + CSV actions of the per-pair card are present
-    for action in ('Sankey (type-level)', 'Sankey (linker)', 'Network',
-                   'Linker paths', 'Export bridges (CSV)'):
+    for action in ('Sankey (type-level)', 'Sankey (linker)',
+                   'Network (type-level)', 'Network (linker)',
+                   'Export bridges (CSV)'):
         assert any(action in str(getattr(b, 'text', ''))
                    for b in _buttons(client)), action
     # the confirmed search is recorded in the panel's OWN history store —

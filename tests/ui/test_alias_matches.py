@@ -251,7 +251,11 @@ def test_zero_hit_matches_merges_native_and_mapped_tiers():
     from ui.neuron_index import collect_zero_hit_matches
 
     result = collect_zero_hit_matches(MCNS, 'DN3')
-    assert set(result.keys()) == {'native', 'mapped'}
+    # value_mapped/guidance stay empty without matched_values (zero-hit
+    # queries carry no match groups to derive them from)
+    assert set(result.keys()) == {'native', 'mapped', 'value_mapped',
+                                  'guidance'}
+    assert result['value_mapped'] == [] and result['guidance'] == []
     assert any(e['types'] for e in result['native'])
     # the mapper knows nothing about DN3: the mapped tier stays empty while
     # the native tier still delivers.
