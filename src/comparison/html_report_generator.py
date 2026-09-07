@@ -3747,9 +3747,10 @@ def _generate_path_presence_table(analyzer, data: pd.DataFrame, dataset_names: L
         badge = 'badge-success' if count == len(available) else 'badge-warning' if count > 1 else 'badge-danger'
 
         # §3: path length = hop count (nodes - 1); prefer the hop-weight
-        # list length, fall back to the key's arrow count.
+        # list length (max across datasets), fall back to the key's arrow
+        # count.
         _norm = _normalize_path_key(key)
-        _hop_hits = [hop_by_norm.get(_norm)]
+        _hop_hits = list(hop_by_norm.get(_norm, {}).values())
         if any(_hop_hits):
             length = max(len(h) for h in _hop_hits if h)
         else:

@@ -6138,9 +6138,22 @@ class VisualizeSkeleton:
                 continue
             if 'bodyId' not in frame.columns:
                 continue
-            keys = frame['bodyId'].map(
-                lambda v: str(int(v)) if pd.notna(v) and str(v).replace(
-                    '.0', '').isdigit() else str(v))
+
+            def _body_id_key(v):
+                # Collapse int-like bodyIds ('123', 123, '123.0') to the
+                # plain int string; anything else (incl. dotted versions
+                # like '10.0.5') passes through unchanged instead of
+                # crashing int().
+                s = str(v)
+                if not pd.notna(v):
+                    return s
+                if s.isdigit():
+                    return str(int(s))
+                if s.endswith('.0') and s[:-2].isdigit():
+                    return s[:-2]
+                return s
+
+            keys = frame['bodyId'].map(_body_id_key)
             rows = frame[keys.isin(wanted)]
             if rows.empty:
                 continue
@@ -6482,8 +6495,12 @@ class VisualizeSkeleton:
                         env_token = os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS')
 
                     def _token_rejected(exc) -> bool:
+                        # Word-boundary match: a '401' inside a port,
+                        # coordinate, or bodyId must not read as a rejected
+                        # token.
                         text = str(exc)
-                        return '401' in text or 'Unauthorized' in text
+                        return bool(re.search(
+                            r'\b401\b|\bUnauthorized\b', text))
 
                     if self.token:
                         try:

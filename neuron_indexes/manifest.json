@@ -15,8 +15,48 @@
       "rows": 188508,
       "search_bytes": 6057124,
       "source": "banc_v888_allneurons_neuron_df.csv"
+    },
+    "flywire_FAFB_v783": {
+      "dataset": "flywire_FAFB_v783",
+      "folder": "flywire_FAFB_v783",
+      "index_bytes": 6997669,
+      "rows": 139255,
+      "search_bytes": 3681830,
+      "source": "flywire_FAFB_v783_allneurons_neuron_df.csv"
+    },
+    "hemibrain_v1_2_1": {
+      "dataset": "hemibrain_v1_2_1",
+      "folder": "hemibrain_v1_2_1",
+      "index_bytes": 3749596,
+      "rows": 186061,
+      "search_bytes": 2290581,
+      "source": "hemibrain_v1_2_1_allneurons_neuron_df.csv"
+    },
+    "male-cns_v0_9": {
+      "dataset": "male-cns_v0_9",
+      "folder": "male-cns_v0_9",
+      "index_bytes": 8766073,
+      "rows": 176571,
+      "search_bytes": 4028319,
+      "source": "male-cns_v0_9_allneurons_neuron_df.csv"
+    },
+    "male-cns_v1_0": {
+      "dataset": "male-cns_v1_0",
+      "folder": "male-cns_v1_0",
+      "index_bytes": 9199627,
+      "rows": 176422,
+      "search_bytes": 4020754,
+      "source": "male-cns_v1_0_allneurons_neuron_df.csv"
+    },
+    "manc_v1_2_3": {
+      "dataset": "manc_v1_2_3",
+      "folder": "manc_v1_2_3",
+      "index_bytes": 4779580,
+      "rows": 102158,
+      "search_bytes": 1662503,
+      "source": "manc_v1_2_3_allneurons_neuron_df.csv"
     }
   },
-  "generated_utc": "2026-09-05T17:30:45Z",
+  "generated_utc": "2026-09-07T13:05:41Z",
   "index_dir": "neuron_indexes"
 }
