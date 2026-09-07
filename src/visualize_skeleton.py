@@ -1521,6 +1521,14 @@ def normalize_brain_mesh(value) -> str:
     return _BRAIN_MESH_LEGACY.get(v, v)
 
 
+TRANSFORMED_ROI_CACHE_MARKER = '.drocat_tx_cache_v2'
+"""Marker file inside cache/<ds>/meshes_transformed/<TARGET>/ marking the
+directory as current-pipeline output (the FAFB tilt is baked into the
+transformed ROI meshes). Directories without the marker predate the tilt
+baking; their entries are ignored on load so they are re-fetched and
+rewritten lazily."""
+
+
 def dataset_render_space(dataset: str) -> str:
     """Template-mode render space of a dataset's visualization scene.
 
@@ -1848,8 +1856,9 @@ class VisualizeSkeleton:
     brain_mesh : str, default='none'
         Brain/VNC envelope mesh. Options:
         - 'none': No envelope (only ROIs in mesh_roi)
-        - 'template': Dataset's native template (fast, no H5 transforms needed)
-        - 'whole': Standard brain mesh (may require H5 transform download)
+        - 'native': Dataset's own template outline (fast, no H5 transforms)
+        - 'FAFB'/'BANC'/'male-cns': the whole scene rendered in that
+          template's coordinates, with its outline
     
     legend_mode : str, default='layer'
         Controls how neurons appear in the legend. Options:
@@ -2561,10 +2570,13 @@ class VisualizeSkeleton:
 
     mirror_on_contralateral: bool = False
     '''
-    Whether to mirror neurons and ROIs to the contralateral hemisphere.
-    True: Mirror neurons and ROIs (e.g. 'ME(R)' -> 'ME(L)') to the other side.
-          Useful for visualizing the full brain structure from hemibrain data.
-    False: Only show the original data (default).
+    Disabled: accepted for script compatibility, ignored.
+
+    Contralateral mirroring (appending mirrored twins, e.g.
+    'ME(R)' -> 'ME(L)') was retired with the brain-mesh selection rework:
+    the ROI half was keyed on the retired 'template'/'whole' tokens, so
+    enabling it produced neurons mirrored without their ROI twins. True
+    now renders the original data only.
     '''
 
     skeleton_mesh_simplification: float = None
@@ -6598,13 +6610,7 @@ class VisualizeSkeleton:
             # distance to scale in sphere/cone/tetrahedron modes.
             self._vprint("\033[33m⚠️  Warning: synapse_size='real' is not supported in scatter mode; using pixel size 1.\033[0m", level='simple')
             self.synapse_size = 1
-        # elif self.synapse_mode in ['sphere', 'cone', 'tetrahedron']:
-        #     # Only check size limit if synapse_size is a number (not 'real')
-        #     # For these modes, synapse_size is a multiplier, so small values (e.g. 1.0) are valid
-        #     if isinstance(self.synapse_size, (int, float)) and self.synapse_size < 20 and self.brain_mesh != 'whole':
-        #         self.synapse_size = 20
-        #         self._vprint('\033[33mSynapse size is too small (< 20) for sphere, cone, or tetrahedron mode, automatically reset to 20\033[0m', level='full')
-            
+
         if self.mesh_roi == None:
             self.mesh_roi = []
         
@@ -11569,29 +11575,28 @@ class VisualizeSkeleton:
                         tqdm.write(
                             f'  🐞 raised in {frame.filename}:{frame.lineno} '
                             f'({frame.name})')
-                    if self._dataset_needs_transform() and not self._check_and_download_transforms():
+                    # One retry, then disable the mesh: only built-in affine
+                    # transforms remain (the interactive H5-download path was
+                    # retired with brain_mesh='whole').
+                    try:
+                        neuron_vols = self._xform_neurons_safe(
+                            neuron_vols,
+                            source=template_info['source'],
+                            target=template_info['target'],
+                            layer_label=f"Layer {i} ({layer_name}, retry)",
+                            progress_bar=layer_pbar,
+                            compact_progress=True,
+                        )
+                    except Exception as retry_e:
+                        tqdm.write(f'  ⚠️  Transformation still failed, setting brain_mesh to "none"')
+                        if self.verbose:
+                            import traceback
+                            frame = traceback.extract_tb(
+                                retry_e.__traceback__)[-1]
+                            tqdm.write(
+                                f'  🐞 raised in {frame.filename}:'
+                                f'{frame.lineno} ({frame.name})')
                         self.brain_mesh = 'none'
-                    else:
-                        # Retry transformation after download
-                        try:
-                            neuron_vols = self._xform_neurons_safe(
-                                neuron_vols,
-                                source=template_info['source'],
-                                target=template_info['target'],
-                                layer_label=f"Layer {i} ({layer_name}, retry)",
-                                progress_bar=layer_pbar,
-                                compact_progress=True,
-                            )
-                        except Exception as retry_e:
-                            tqdm.write(f'  ⚠️  Transformation still failed, setting brain_mesh to "none"')
-                            if self.verbose:
-                                import traceback
-                                frame = traceback.extract_tb(
-                                    retry_e.__traceback__)[-1]
-                                tqdm.write(
-                                    f'  🐞 raised in {frame.filename}:'
-                                    f'{frame.lineno} ({frame.name})')
-                            self.brain_mesh = 'none'
             
             # Apply FAFB tilt correction if using template mode
             # This corrects the left-right tilt in the FLYWIRE template mesh
@@ -11608,29 +11613,6 @@ class VisualizeSkeleton:
             # Ensure iterable after potential transforms (navis may return TreeNeuron)
             if neuron_vols is not None and not isinstance(neuron_vols, (list, navis.NeuronList)):
                 neuron_vols = navis.NeuronList([neuron_vols])
-
-            # Mirror neurons if requested
-            if self.mirror_on_contralateral:
-                try:
-                    template = None
-                    if self.brain_mesh == 'native':
-                         if 'hemibrain' in self.dataset or 'optic-lobe' in self.dataset:
-                             template = 'JRCFIB2018F'
-                         elif 'male-cns' in self.dataset:
-                             template = 'JRCFIB2022M'
-                    
-                    if template:
-                        layer_pbar.set_postfix_str(f"{layer_name} (mirroring...)")
-                        # navis.mirror_brain prints its own progress bar; keep
-                        # the shared layer bar as the single progress row.
-                        with self._suppress_output():
-                            mirrored = navis.mirror_brain(neuron_vols, template, mirror_axis='x')
-                        if isinstance(neuron_vols, navis.NeuronList):
-                            neuron_vols = neuron_vols + mirrored
-                        else:
-                            neuron_vols = navis.NeuronList([neuron_vols, mirrored])
-                except Exception as e:
-                    tqdm.write(f'  ⚠️ Mirror failed for layer {i}: {e}')
 
             # Simplify individual neurons if requested (and not merging).
             # Fine NeuPrint meshes have already been built from raw skeletons
@@ -15215,33 +15197,18 @@ class VisualizeSkeleton:
             '(offline affine transform).', level='full')
 
     def _dataset_needs_transform(self):
-        """Check if current dataset needs H5 transforms that require file downloads.
-        
+        """Whether the current scene needs H5 transform downloads.
+
         Returns
         -------
         bool
-            True if H5 transforms requiring file downloads are needed,
-            False if only built-in affine transforms are needed
-            
-        Notes
-        -----
-        H5 transforms required (need ~13GB download):
-        - hemibrain with brain_mesh='whole': JRCFIB2018Fraw → JRC2018F path includes H5transform
-        - FlyWire/FAFB with brain_mesh='whole': FAFB → JRC2018F path includes H5transform
-        
-        Only affine transforms (built-in, no download):
-        - hemibrain with brain_mesh='template': JRCFIB2018Fraw → JRCFIB2018F
-        - male-cns: JRCFIB2022Mraw → JRCFIB2022M
-        - manc: MANCraw → MANC
-        - optic-lobe: JRCFIB2022Mraw → JRCFIB2022M
-        
-        No transforms at all:
-        - FlyWire/FAFB with brain_mesh='template': Native FLYWIRE template (identity transform)
+            Always False: the JRC2018F scene-transform mode
+            (brain_mesh='whole', the only consumer of H5 transform
+            downloads) was retired with the native/BANC/FAFB/male-cns
+            selection rename. Every remaining path uses built-in affine
+            transforms (hemibrain/optic-lobe/male-cns/manc) or no
+            transform at all (FAFB/FLYWIRE and BANC native scenes).
         """
-        # The JRC2018F scene-transform mode (brain_mesh='whole', the only
-        # consumer of H5 transform downloads) was retired with the
-        # native/banc/fafb/mcns outline rename: every remaining path uses
-        # built-in affine transforms or no transform at all.
         return False
     
     def _fafb_tilt_applies(self) -> bool:
@@ -16115,167 +16082,7 @@ class VisualizeSkeleton:
             return False
             
         return True
-    
-    def _check_and_download_transforms(self):
-        """Check if flybrains transforms exist locally, prompt user before downloading.
-        
-        Brain transforms are large files (multiple files, ~10GB total uncompressed). 
-        This method checks if the required transforms exist locally before attempting 
-        to download them, and prompts the user for confirmation.
-        
-        Transforms are stored in the default flybrains data directory:
-        ~/flybrain-data/
-        
-        Returns
-        -------
-        bool
-            True if transforms are available (already exist or successfully downloaded),
-            False otherwise.
-        
-        References:
-        - flybrains package: https://github.com/navis-org/navis-flybrains
-        - JRC2018F brain template: https://www.janelia.org/open-science/jrc-2018-brain-templates
-        """
-        if not self.verbose:
-            return False
 
-        try:
-            import flybrains
-            
-            # Get the transform directory from attribute or use default
-            transforms_dir = os.path.expanduser(self.transforms_dir)
-            
-            # Set environment variable if custom path is specified
-            if self.transforms_dir != '~/flybrain-data':
-                os.environ['FLYBRAINS_DATA'] = transforms_dir
-                self._vprint(f'Using custom transform directory: {transforms_dir}', level='full')
-            
-            # Get dataset-specific template info
-            template_info = self._get_template_info()
-            source = template_info['source']
-            target = template_info['target']
-            
-            # ANSI color codes
-            YELLOW = '\033[93m'
-            RESET = '\033[0m'
-            
-            # Check if the transformation path exists by attempting to find bridging path
-            try:
-                path = navis.transforms.registry.find_bridging_path(source, target)
-                self._vprint(f'✓ Brain transforms already available', level='full')
-                self._vprint(f'  Location: {YELLOW}{transforms_dir}{RESET}', level='full')
-                self._vprint(f'  Transform path: {" -> ".join([str(p) for p in path])}', level='full')
-                return True
-            except (ValueError, KeyError):
-                # Transform path not found, need to download
-                pass
-            
-            # ANSI color codes
-            YELLOW = '\033[93m'
-            RESET = '\033[0m'
-            
-            # Prompt user for download confirmation
-            self._vprint('\\n' + '='*70)
-            self._vprint('⚠️  Brain Transformation Required')
-            self._vprint('='*70)
-            self._vprint(f'To use brain_mesh="whole" for {self.dataset}, you need brain transforms.')
-            self._vprint(f'Transform path needed: {source} → JRCFIB2018F → JRCFIB2018Fum → {target}')
-            self._vprint('')
-            self._vprint('⚠️  IMPORTANT: flybrains downloads ALL JRC transforms as a bundle:')
-            self._vprint('   • JRC2018F_JRCFIB2018F.h5   (~1.29 GB)  ← YOU NEED THIS for hemibrain/optic-lobe')
-            self._vprint('   • JRC2018F_FAFB.h5          (~580 MB)   (enables FAFB dataset support)')
-            self._vprint('   • JRC2018F_JFRC2013.h5      (~1.39 GB)  (enables JFRC2013 template)')
-            self._vprint('   • JRC2018F_FCWB.h5          (~1.29 GB)  (enables FCWB template)')
-            self._vprint('   • JRC2018U_JRC2018F.h5      (~717 MB)   (enables unisex template)')
-            self._vprint('   • JRC2018U_JRC2018M.h5      (~1.10 GB)  (enables male template)')
-            self._vprint('   • JRC2018F_JFRC2010.h5      (~1.65 GB)  (enables legacy template)')
-            self._vprint('   • JRCFIB2022M_JRC2018M.h5   (~2.12 GB)  (enables male CNS registration)')
-            self._vprint('')
-            self._vprint('   Total download: ~10 GB (but only ~1.3 GB used for your dataset)')
-            self._vprint('   Download time: ~1-2 hours (cannot download individual files)')
-            self._vprint('   Why all files? The flybrains package bundles all transforms together.')
-            self._vprint('')
-            self._vprint('The transforms will be cached in:')
-            self._vprint(f'  {YELLOW}{transforms_dir}/{RESET}')
-            
-            # Save transform path info to file
-            info_file = os.path.join(self.output_dir, 'brain_transforms_info.txt')
-            os.makedirs(self.output_dir, exist_ok=True)
-            with open(info_file, 'w', encoding='utf-8') as f:
-                f.write('Brain Transforms Information\\n')
-                f.write('='*70 + '\\n\\n')
-                f.write(f'Dataset: {self.dataset}\\n')
-                f.write(f'Transform path: {source} → JRCFIB2018F → JRCFIB2018Fum → {target}\\n\\n')
-                f.write('Storage Location:\\n')
-                f.write(f'  {transforms_dir}/\\n\\n')
-                f.write('Transform Files (8 files, ~10 GB total):\\n')
-                f.write('  • JRC2018F_JRCFIB2018F.h5   (~1.29 GB)\\n')
-                f.write('  • JRC2018F_FAFB.h5          (~580 MB)\\n')
-                f.write('  • JRC2018F_JFRC2013.h5      (~1.39 GB)\\n')
-                f.write('  • JRC2018F_FCWB.h5          (~1.29 GB)\\n')
-                f.write('  • JRC2018U_JRC2018F.h5      (~717 MB)\\n')
-                f.write('  • JRC2018U_JRC2018M.h5      (~1.10 GB)\\n')
-                f.write('  • JRC2018F_JFRC2010.h5      (~1.65 GB)\\n')
-                f.write('  • JRCFIB2022M_JRC2018M.h5   (~2.12 GB)\\n\\n')
-                f.write('To change the storage location:\\n')
-                f.write('  1. Set transforms_dir attribute when creating VisualizeSkeleton\\n')
-                f.write('  2. Set FLYBRAINS_DATA environment variable before importing flybrains\\n')
-                f.write('  3. Or manually move files to the new location\\n\\n')
-                f.write('More information:\\n')
-                f.write('  https://github.com/navis-org/navis-flybrains\\n')
-            self._vprint(f'\\n📄 Transform info saved to: {info_file}')
-            self._vprint('')
-            self._vprint('💡 Note: The flybrains.download_jrc_transforms() function downloads')
-            self._vprint('   ALL 8 files as a bundle with no selective download option.')
-            self._vprint('   This is by design in the flybrains library to provide complete')
-            self._vprint('   cross-dataset registration capabilities.')
-            self._vprint('')
-            self._vprint('For more information, see:')
-            self._vprint('  https://github.com/navis-org/navis-flybrains')
-            self._vprint('='*70)
-            
-            response = input('Download all transforms now? [y/N]: ').strip().lower()
-            
-            if response in ['y', 'yes']:
-                self._vprint('\\n📥 Downloading brain transforms...')
-                self._vprint('This may take several minutes depending on your connection.')
-                flybrains.download_jrc_transforms()
-                
-                # Re-register transforms after download
-                self._vprint('📝 Registering downloaded transforms...')
-                flybrains.register_transforms()
-                
-                # Verify the transform path is now available
-                try:
-                    path = navis.transforms.registry.find_bridging_path(source, target)
-                    self._vprint(f'✓ Transforms downloaded and registered successfully!')
-                    self._vprint(f'  Location: {YELLOW}{transforms_dir}{RESET}')
-                    self._vprint(f'  Transform path: {" -> ".join([str(p) for p in path])}')
-                    
-                    # Update the saved info file with success status
-                    info_file = os.path.join(self.output_dir, 'brain_transforms_info.txt')
-                    with open(info_file, 'a', encoding='utf-8') as f:
-                        f.write(f'\\nDownload Status: SUCCESS\\n')
-                        f.write(f'Downloaded at: {pd.Timestamp.now()}\\n')
-                    return True
-                except (ValueError, KeyError) as e:
-                    self._vprint(f'⚠️  Transforms downloaded but bridging path not found: {e}')
-                    self._vprint(f'   This may indicate the transforms do not include {source} → {target}')
-                    return False
-            else:
-                self._vprint('\\n⚠️  Download cancelled. Setting brain_mesh to "none".')
-                return False
-                
-        except ImportError:
-            self._vprint('\\n⚠️  flybrains package not installed.')
-            self._vprint('   Install it with: pip install navis[flybrains]')
-            self._vprint('   Setting brain_mesh to "none".')
-            return False
-        except Exception as e:
-            self._vprint(f'\\n⚠️  Error checking brain transforms: {e}')
-            self._vprint('   Setting brain_mesh to "none".')
-            return False
-    
     def plot_mesh(self):
         """Plot ROI meshes and brain meshes.
         
@@ -16290,9 +16097,11 @@ class VisualizeSkeleton:
         
         Brain mesh options (dataset-aware):
         - 'none': Only plot ROI meshes specified in mesh_roi parameter
-        - 'template': Plot native EM template mesh (JRCFIB2018F, MANC, or JRCFIB2022M)
-        - 'banc'/'fafb'/'mcns': that template's outline, bridged into the
-          scene's render space (outline only — neurons never move)
+        - 'native': the dataset's own template outline (JRCFIB2018F, MANC,
+          JRCFIB2022M, FLYWIRE, or BANC)
+        - 'FAFB'/'BANC'/'male-cns': the whole scene (neurons, synapses,
+          ROIs, and that template's outline) rendered in the selected
+          template's coordinates
         
         Behavior with mesh_roi=[]:
         - When mesh_roi is an empty list [], no ROI meshes are plotted
@@ -16318,21 +16127,7 @@ class VisualizeSkeleton:
         if not has_roi_meshes and not has_brain_mesh and not has_vnc_mesh:
             return
         
-        # For FAFB with brain_mesh='whole' and mesh_roi specified
-        # ROI transforms from male-cns (JRCFIB2022Mraw) to JRC2018F require elastix which is problematic
         is_flywire = is_flywire_dataset(self.dataset) and not is_banc_dataset(self.dataset)
-        if is_flywire and self.brain_mesh == 'whole' and has_roi_meshes:
-            # Always skip ROI meshes in whole mode for FAFB/FlyWire to avoid elastix dependency
-            self._vprint('')
-            self._vprint('⚠️  WARNING: ROI mesh transformation is not supported in "whole" mode for FAFB.', level='simple')
-            self._vprint('   ROI meshes (mesh_roi) will be skipped.', level='simple')
-            self._vprint('', level='simple')
-            self._vprint('   📌 Recommendation:', level='simple')
-            self._vprint('   Use brain_mesh="template" instead. This mode supports ROI meshes natively.', level='simple')
-            self._vprint('')
-            # Clear mesh_roi to skip ROI plotting but continue with brain mesh
-            self.mesh_roi = []
-            has_roi_meshes = False
         
         # Ensure available_rois.json exists (generate if missing)
         # This checks cache first, and if missing, fetches from API or scans local meshes
@@ -16414,8 +16209,13 @@ class VisualizeSkeleton:
                 target_space = 'FLYWIRE' if is_flywire else 'BANC'
                 transformed_cache_dir = os.path.join(self._get_cache_path('meshes_transformed'), target_space)
                 transformed_mesh_file = self._get_mesh_file_path(transformed_cache_dir, roi)
-                
-                if os.path.exists(transformed_mesh_file):
+
+                # A markerless directory predates the tilt baking: ignore
+                # its entries so they are re-fetched and rewritten with the
+                # tilt included.
+                if os.path.exists(transformed_mesh_file) and os.path.exists(
+                        os.path.join(transformed_cache_dir,
+                                     TRANSFORMED_ROI_CACHE_MARKER)):
                     # Load pre-transformed mesh - no further transform needed
                     mesh_file = transformed_mesh_file
                     source_info = f"Transformed Cache ({target_space})"
@@ -16519,15 +16319,6 @@ class VisualizeSkeleton:
                         os.makedirs(mesh_dir, exist_ok=True)
                         mesh.to_json(mesh_file)
                         self._vprint(f'✓ Downloaded and cached "{roi}" mesh to {mesh_file}', level='full')
-                        
-                        # Transform if needed (Hemibrain specific)
-                        if self.brain_mesh in ['whole', 'template']:
-                            template_info = self._get_template_info()
-                            self._vprint(f'Transforming brain region {roi}...', end='', level='full')
-                            with self._suppress_output():
-                                mesh = navis.xform_brain(mesh, source=template_info['source'], target=template_info['target'])
-                            # Note: We don't save the transformed mesh back to cache here to keep cache pure?
-                            # Actually previous code didn't save transformed.
                     except Exception as e:
                         self._vprint(f'⚠️  Failed to download "{roi}" mesh: {e}', level='full')
             
@@ -16591,6 +16382,20 @@ class VisualizeSkeleton:
                                     transformed_mesh_file = os.path.join(transformed_cache_dir, self._roi_to_filename(roi))
                                     try:
                                         mesh.to_json(transformed_mesh_file)
+                                        # Mark the directory as
+                                        # current-pipeline output so caches
+                                        # written before the tilt baking are
+                                        # ignored on load.
+                                        marker_path = os.path.join(
+                                            transformed_cache_dir,
+                                            TRANSFORMED_ROI_CACHE_MARKER)
+                                        if not os.path.exists(marker_path):
+                                            with open(
+                                                    marker_path, 'w',
+                                                    encoding='utf-8') as mf:
+                                                mf.write(
+                                                    'v2: FAFB tilt baked '
+                                                    'into transformed ROIs\n')
                                         self._vprint(f'  💾 Cached transformed ROI to {transformed_mesh_file}', level='full')
                                     except Exception as cache_e:
                                         self._vprint(f'  ⚠️ Failed to cache transformed ROI: {cache_e}', level='full')
@@ -16655,43 +16460,9 @@ class VisualizeSkeleton:
                     except Exception as e:
                         self._vprint(f' (export collection failed: {e})', end='', level='full')
 
-                    # Apply FAFB tilt correction if using template mode
-                    # This corrects the left-right tilt in the FLYWIRE template mesh
-                    if is_flywire and self.brain_mesh == 'template':
-                        mesh = self._apply_fafb_tilt_correction(mesh)
-
                     roiunits.append(mesh)
                     roi_names.append(roi)
                     roi_colors.append(color)
-
-                    # Mirror logic: SKIP if FlyWire
-                    if not is_flywire:
-                        contralateral_roi = roi.replace('(R)', '(L)')
-                        should_mirror = (
-                            self.mirror_on_contralateral and 
-                            roi.endswith('(R)') and 
-                            contralateral_roi not in final_mesh_roi
-                        )
-                        
-                        if should_mirror:
-                            try:
-                                template = None
-                                if self.brain_mesh == 'whole':
-                                    template_info = self._get_template_info()
-                                    template = template_info['target']
-                                elif self.brain_mesh == 'template':
-                                    if 'hemibrain' in self.dataset or 'optic-lobe' in self.dataset:
-                                        template = 'JRCFIB2018F'
-                                    elif 'male-cns' in self.dataset:
-                                        template = 'JRCFIB2022M'
-                                
-                                if template:
-                                    mirrored_mesh = navis.mirror_brain(mesh, template, mirror_axis='x')
-                                    roiunits.append(mirrored_mesh)
-                                    roi_names.append(contralateral_roi)
-                                    roi_colors.append(color)
-                            except Exception as e:
-                                self._vprint(f' (mirror failed: {e})', end='', level='full')
 
                 except Exception as e:
                     self._vprint(f'⚠️  Failed to load mesh {roi}: {e}', level='full')

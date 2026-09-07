@@ -27,6 +27,7 @@ import plotly.graph_objects as go  # noqa: E402
 
 import visualize_skeleton as vs_module  # noqa: E402
 from visualize_skeleton import (  # noqa: E402
+    TRANSFORMED_ROI_CACHE_MARKER,
     VisualizeSkeleton,
     _apply_consistent_crop,
     _apply_consistent_crop_standalone,
@@ -3133,18 +3134,18 @@ class TestPlotMesh:
         assert vis.plot_mesh() == 0
         assert len(vis.fig_3d.data) >= 1
 
-    def test_hemibrain_template_transform_mirror_and_brain(
+    def test_hemibrain_native_transform_and_brain(
             self, tmp_path, monkeypatch):
         write_roi_mesh_json(tmp_path, 'hemibrain:v1.2.1')
         monkeypatch.setattr(
             navis, 'xform_brain',
             lambda m, source=None, target=None, **kw: m)
         vis = make_mesh_vis(tmp_path, mesh_roi=['AL(R)'],
-                            mirror_on_contralateral=True,
                             brain_mesh='native')
         vis._get_template_info = lambda: fake_template_info()
         assert vis.plot_mesh() == 0
-        # ROI trace + brain mesh trace at minimum
+        # ROI trace + brain mesh trace at minimum (contralateral mirroring
+        # is disabled: no mirrored '(L)' twin is appended).
         names = [getattr(t, 'name', '') for t in vis.fig_3d.data]
         assert any('JRCFIB2018F' in n for n in names)
         roles = [m.metadata.get('export_role') for m in vis.exportable_meshes]
@@ -3175,6 +3176,10 @@ class TestPlotMesh:
     def test_flywire_transformed_cache_hit_with_tilt(self, tmp_path):
         write_roi_mesh_json(tmp_path, 'flywire', roi='AL(R)',
                             subdir='meshes_transformed/FLYWIRE')
+        # Current-pipeline marker: without it the entry would be treated
+        # as a pre-tilt cache and ignored.
+        (tmp_path / 'cache' / 'flywire' / 'meshes_transformed' / 'FLYWIRE' /
+         TRANSFORMED_ROI_CACHE_MARKER).write_text('v2\n')
         vis = make_mesh_vis(tmp_path, dataset='flywire', mesh_roi=['AL(R)'],
                             brain_mesh='native',
                             FAFB_template_correction=True)
@@ -3183,6 +3188,31 @@ class TestPlotMesh:
         assert vis.plot_mesh() == 0
         roles = [m.metadata.get('export_role') for m in vis.exportable_meshes]
         assert roles.count('roi') == 1 and 'brain' in roles
+
+    def test_flywire_stale_transformed_cache_ignored(
+            self, tmp_path, monkeypatch):
+        # A markerless transformed-cache dir predates the tilt baking: the
+        # entry is ignored, and the raw cache entry is re-transformed and
+        # rewritten with the marker in place.
+        write_roi_mesh_json(tmp_path, 'flywire', roi='AL(R)')
+        write_roi_mesh_json(tmp_path, 'flywire', roi='AL(R)',
+                            subdir='meshes_transformed/FLYWIRE')
+        calls = []
+        monkeypatch.setattr(
+            navis, 'xform_brain',
+            lambda m, source=None, target=None, **kw:
+                calls.append((source, target)) or m)
+        vis = make_mesh_vis(tmp_path, dataset='flywire', mesh_roi=['AL(R)'],
+                            brain_mesh='native')
+        vis._get_template_info = lambda: fake_template_info(
+            'FLYWIRE (native FAFB coordinates)', 'FLYWIRE', 'FLYWIRE')
+        assert vis.plot_mesh() == 0
+        roles = [m.metadata.get('export_role') for m in vis.exportable_meshes]
+        assert roles.count('roi') == 1
+        assert calls == [('JRCFIB2022Mraw', 'FLYWIRE')]
+        cache_dir = (tmp_path / 'cache' / 'flywire' /
+                     'meshes_transformed' / 'FLYWIRE')
+        assert (cache_dir / TRANSFORMED_ROI_CACHE_MARKER).exists()
 
     def test_flywire_raw_cache_roi_gets_transformed_and_cached(
             self, tmp_path, monkeypatch):
