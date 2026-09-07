@@ -874,9 +874,11 @@ text_report = analyzer.generate_report()
 
 The analysis compares all datasets at the SAME threshold (horizontal
 comparison). Synapse-count conventions differ strongly between datasets —
-the median number of synapses per neuron spans ~6x (BANC v626 ≈ 52 post,
-FAFB v783 ≈ 308 post, male-cns v1.0 ≈ 340 post / 490 pre+post) — so "BANC
-≥ 3" and "FAFB ≥ 3" do NOT cut the connectomes at comparable sparsities.
+the median number of synapses per neuron spans ~7x (BANC v626 ≈ 45 post,
+BANC v888 ≈ 55 post, FAFB v783 ≈ 308 post, male-cns v1.0 ≈ 334 post / 490
+pre+post; BANC re-measured on the refreshed 2026-09-04 tables) — so "BANC
+≥ 3" and "FAFB ≥ 3" still do not cut the connectomes at comparable
+sparsities, even though the refreshed BANC tables are much denser.
 This section gives a rough, whole-dataset alignment; per-query alignment
 is computed automatically in every run (see below).
 
@@ -887,10 +889,14 @@ is computed automatically in every run (see below).
 dataset's total neuron count. Unweighted — edge presence only, synapse
 counts (weights) ignored.
 
-Caveats:
+Caveats (re-baselined 2026-09-07 on the refreshed 2026-09-04 BANC
+bucket tables — banc_v626 8,671,709 pairs / 185,165 neurons,
+banc_v888 8,691,309 pairs / 188,508 neurons; pair weight = max across
+ROI rows; denominators are each dataset's bundled neuron-index rows):
 
-- BANC local downloads are pre-truncated at weight ≥ 3 (thresholds 1–2 are
-  no-ops on the pair counts).
+- BANC local downloads remain pre-truncated at weight ≥ 3 (thresholds 1–2
+  are no-ops on the pair counts), but the refreshed tables are far denser
+  than the 2026-08 downloads (v888: 8.69M vs the old 3.04M pairs).
 - male-cns numbers come from the ~98% coverage connection cache.
 - Whole-dataset values are a rough hint only. Real matching is
   query-specific — a given query's best-aligned thresholds can differ from
@@ -901,23 +907,32 @@ Caveats:
 
 | t | BANC v626 | BANC v888 | FAFB v783 | male-cns v1.0 |
 |---|---|---|---|---|
-| 3 | 23.2 | 19.2 | 47.3 | 60.5 |
-| 5 | 12.2 | 9.7 | 26.8 | 35.9 |
-| 8 | 6.5 | 5.0 | 15.0 | 20.9 |
-| 10 | 4.8 | 3.6 | 11.2 | 15.9 |
+| 3 | 46.8 | 46.1 | 47.3 | 60.2 |
+| 5 | 13.4 | 13.4 | 26.8 | 35.6 |
+| 8 | 5.7 | 5.8 | 15.0 | 20.7 |
+| 10 | 4.0 | 4.1 | 11.2 | 15.7 |
 
-Best threshold matches under the pairs-per-neuron criterion:
+Pre-refresh values, for runs against old caches (2026-08 downloads):
+BANC v626/v888 @3 were 23.2 / 19.2 — i.e. the refresh roughly DOUBLED
+BANC's τ=3 density and moved it to parity with FAFB.
+
+Best threshold matches under the pairs-per-neuron criterion (integer
+grid, refreshed tables):
 
 | anchor | → FAFB | → male-cns |
 |---|---|---|
-| BANC v888 @3 (19.2) | **7** (17.8) | **8–9** (20.9 / 18.1) |
-| BANC v626 @3 (23.2) | 6 | 7–8 |
-| BANC v888 @5 (9.7) | 11 | 15 |
-| BANC v626 @5 (12.2) | 9–10 | 12 |
+| BANC @3 (46.1–46.8) | **3** (47.3) | **5** (35.6) |
+| BANC @5 (13.4) | **8** (15.0) | **8** (20.7) |
+| BANC @8 (5.7–5.8) | 10–15 (11.2 / 6.3) | 10–15 (15.7 / 9.1) |
+| BANC @10 (4.0–4.1) | 15 (6.3) | 15 (9.1) |
 
-Rule of thumb: **FAFB threshold ≈ 2.2–2.3x BANC, male-cns ≈ 2.8–3x BANC.**
-BANC has the lowest edge density at every threshold; FAFB and male-cns sit
-at an analogous scale (within ~1.5x of each other).
+Rule of thumb (refreshed tables): at **τ = 3, BANC and FAFB are directly
+comparable** (46–47 pairs/neuron; male-cns ≈ 1.3x BANC); from **τ ≥ 5**
+the classic multipliers re-emerge and grow with τ — FAFB ≈ 2x BANC at τ=5
+rising to ≈ 2.7–2.8x at τ=10, male-cns ≈ 2.7x at τ=5 rising to ≈ 3.8–3.9x
+at τ=10. The old single rule ("FAFB ≈ 2.2–2.3x BANC, male-cns ≈ 2.8–3x
+BANC at every threshold"; "BANC lowest at every threshold") no longer
+holds under τ = 3.
 
 ### Where the per-query alignment comes from
 
