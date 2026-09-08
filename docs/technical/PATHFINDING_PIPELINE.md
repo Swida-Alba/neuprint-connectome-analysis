@@ -255,8 +255,11 @@ path ranking). Identical for both modes.
 After enumeration, every run (BOTH modes — shortest was previously
 never re-stamped) writes the **applied-threshold provenance block** to
 `parameters.txt`, `all_attributes.json`, AND `data_details/parameters.csv`
-(computed by `applied_threshold_provenance()`; finalized by
-`_finalize_threshold_provenance` + `_write_run_metadata`):
+(computed by the shared `applied_threshold_provenance()` in
+`src/utils/threshold_state.py` — also delegated to by
+`ComparisonAnalyzer._applied_state_for` for the cross-dataset
+summary rows; finalized by `_finalize_threshold_provenance` +
+`_write_run_metadata`):
 `requested_threshold`, `applied_threshold`, `applied_threshold_source`
 (`requested` | `strongest_first_budget` | `edge_budget` |
 `strongest_first_budget+edge_budget`), `strongest_first_budget`
@@ -719,7 +722,7 @@ conflate them:
 
 | Concern | Location |
 | --- | --- |
-| Pipeline orchestration, pruning, budget-fit, untyped filter, provenance | `src/coana.py` (`_find_paths_core`, `_graph_edge_frames`, `prune_layers_hop_budget`, `_hop_budget_pass_once`, `fit_edge_budget`, `apply_edge_budget_floor`, `_discover_shortest_backward`, `drop_untyped`, `applied_threshold_provenance`, `_finalize_threshold_provenance`, `_write_run_metadata`) |
+| Pipeline orchestration, pruning, budget-fit, untyped filter, provenance | `src/coana.py` (`_find_paths_core`, `_graph_edge_frames`, `prune_layers_hop_budget`, `_hop_budget_pass_once`, `fit_edge_budget`, `apply_edge_budget_floor`, `_discover_shortest_backward`, `drop_untyped`, `_finalize_threshold_provenance`, `_write_run_metadata`); shared formula `applied_threshold_provenance` in `src/utils/threshold_state.py` (re-exported by coana, delegated to by the comparison analyzer) |
 | Untyped predicate | `src/utils/label_utils.py` (`is_untyped_type_label`; also delegated to by `ComparisonAnalyzer._is_untyped_type_value`) |
 | Graph + enumerators | `vispath-subproject/src/vispath_pkg/fast_graph_core.py` (`find_paths_strongest_first`, `find_paths_shortest_strongest_first` — the pipeline's shortest-mode enumerator; `find_paths_shortest_backward` exists but is not called by the pipeline; complete enumerators); shared core `strongest_core.py` |
 | UI | `ui/tabs/find_path.py`, `ui/tabs/find_shortest.py` (Max Paths and Drop Untyped Neurons fields), `ui/config.py` DEFAULTS, `ui/runner.py` TOOL_REGISTRY |

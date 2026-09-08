@@ -18,8 +18,105 @@ import pytest
 
 import coana
 from coana import applied_threshold_provenance
+from utils.threshold_state import applied_threshold_provenance as shared
 
 from tests.core.test_pathfinding import _make_pipeline_fc
+
+
+def test_coana_reexports_shared_formula():
+    """The canonical formula lives in utils.threshold_state; the coana
+    import path is a re-export of the SAME object (single source)."""
+    assert coana.applied_threshold_provenance is shared
+
+
+# ---------------------------------------------------------------------------
+# ComparisonAnalyzer delegation (Phase B.1 residue fix)
+# ---------------------------------------------------------------------------
+
+def _analyzer_with_meta(meta, key_threshold=3):
+    from comparison.comparison_analyzer import ComparisonAnalyzer
+
+    analyzer = object.__new__(ComparisonAnalyzer)
+    analyzer._path_run_meta = {("banc_v888", key_threshold): meta}
+    return analyzer
+
+
+def test_analyzer_floor_only_run_reports_natural_tau_not_asked():
+    """The reported residue: a floored-but-unbitten run's materialized set
+    is a complete run at the natural tau (>= w0), not at the asked
+    threshold. The old local formula returned max(asked, floor); the
+    shared formula matches the folder's parameters.txt."""
+    analyzer = _analyzer_with_meta({
+        "tau": 9.0, "tau_canonical": None,
+        "strongest_dropped_bottleneck": None,
+        "budget_bitten": False, "paths_complete": True,
+        "skipped": False, "duplicate_of": None,
+        "applied_folder": 3, "edge_weight_floor": 6.0,
+    })
+    applied, pruned, floor, source = analyzer._applied_state_for(
+        "banc_v888", 3)
+    assert applied == 9            # natural tau, not max(3, 6) == 6
+    assert pruned is True
+    assert floor == 6.0
+    assert source == "edge_budget"
+
+
+def test_analyzer_source_names_bite_and_floor():
+    analyzer = _analyzer_with_meta({
+        "tau": 14.0, "tau_canonical": 12,
+        "strongest_dropped_bottleneck": 11.0,
+        "budget_bitten": True, "paths_complete": False,
+        "skipped": False, "duplicate_of": None,
+        "applied_folder": 3, "edge_weight_floor": 6.0,
+    })
+    applied, _pruned, _floor, source = analyzer._applied_state_for(
+        "banc_v888", 3)
+    assert applied == 12
+    assert source == "strongest_first_budget+edge_budget"
+
+
+def test_analyzer_complete_run_source_is_requested():
+    analyzer = _analyzer_with_meta({
+        "tau": 5.0, "tau_canonical": 5,
+        "strongest_dropped_bottleneck": None,
+        "budget_bitten": False, "paths_complete": True,
+        "skipped": False, "duplicate_of": None,
+        "applied_folder": 3, "edge_weight_floor": None,
+    })
+    applied, pruned, floor, source = analyzer._applied_state_for(
+        "banc_v888", 3)
+    assert applied == 3
+    assert pruned is False and floor is None
+    assert source == "requested"
+
+
+def test_analyzer_bare_bite_source_is_strongest_first_budget():
+    analyzer = _analyzer_with_meta({
+        "tau": 12.0, "tau_canonical": 8,
+        "strongest_dropped_bottleneck": 7.0,
+        "budget_bitten": True, "paths_complete": False,
+        "skipped": False, "duplicate_of": None,
+        "applied_folder": 3, "edge_weight_floor": None,
+    })
+    applied, pruned, floor, source = analyzer._applied_state_for(
+        "banc_v888", 3)
+    assert applied == 8
+    assert pruned is False
+    assert source == "strongest_first_budget"
+
+
+def test_analyzer_skipped_row_without_canonical_uses_folder():
+    analyzer = _analyzer_with_meta({
+        "tau": 25.0, "tau_canonical": None,
+        "strongest_dropped_bottleneck": None,
+        "budget_bitten": True, "paths_complete": False,
+        "skipped": True, "duplicate_of": 10,
+        "applied_folder": 24, "edge_weight_floor": None,
+    }, key_threshold=20)
+    applied, _pruned, _floor, source = analyzer._applied_state_for(
+        "banc_v888", 20)
+    assert applied == 24  # the applied folder, never the landing tau
+    assert source == "strongest_first_budget"
 
 
 # ---------------------------------------------------------------------------

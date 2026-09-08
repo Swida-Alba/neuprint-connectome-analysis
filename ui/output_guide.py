@@ -17,6 +17,7 @@ the setting (used by tests and scripts for determinism).
 
 import fnmatch
 import html
+import json
 import os
 import re
 from datetime import datetime
@@ -255,9 +256,10 @@ COLUMN_GLOSSARY = {
                             "run (the lossless-pruned cone exceeded the "
                             "cap).", "boolean"),
     "edge_budget_landing": ("w1 — the edge-weight tier that determined the "
-                            "Edge Budget landing: the first tier that would "
-                            "exceed the budget. The floor w0 sits just below "
-                            "it (w0 = w1 + 1 conceptually).", "number"),
+                            "Edge Budget landing: the strongest tier whose "
+                            "admission would exceed the budget. The floor "
+                            "w0 lands just above it (w0 = w1 + 1 "
+                            "conceptually).", "number"),
     "drop_untyped": ("Neuron-label filter: when True, edges touching untyped "
                      "neurons (empty / Unknown / NaN / bodyId-fallback type "
                      "labels — the shared predicate in utils.label_utils) "
@@ -742,7 +744,8 @@ _PATHFINDING_EXPLANATION = [
             "sets: the StrongestFirst enumerator emits intact paths in "
             "descending bottleneck order, so a budgeted result is exactly "
             "'all intact paths with bottleneck >= tau', never an arbitrary "
-            "first-N truncation.",
+            "first-N truncation. The This-run column shows the value this "
+            "run actually produced (— = the mechanism did not apply).",
         ],
         "table": [
             ["Name", "Key", "Meaning"],
@@ -774,6 +777,47 @@ _PATHFINDING_EXPLANATION = [
              "True when the Edge Budget floor fired (the only lossy graph "
              "stage)."],
         ],
+        "values_column": True,
+        "pipeline": None,
+    },
+    {
+        "heading": "How the thresholds relate",
+        "paragraphs": [
+            "Once the run is known the pruning levels form a strict chain: "
+            "w0 <= w2 < tau_canonical <= tau <= W*. The Edge Budget acts on "
+            "the GRAPH — it raises the effective threshold to w0, one tier "
+            "above the landing tier w1 (the strongest tier whose admission "
+            "would exceed the budget) — while the StrongestFirst budget "
+            "acts on the OUTPUT — it bounds the emitted paths at the "
+            "landing tau and excludes everything weaker than w2. "
+            "applied_threshold collapses both mechanisms into the single "
+            "number that matters for interpretation.",
+            "Read applied_threshold as the EQUIVALENT Min Synapse Count: a "
+            "complete run at that threshold produces exactly this path "
+            "set. tau alone is only the landing/collapse bound — when the "
+            "budget bite leaves a gap in the bottleneck distribution, "
+            "every threshold in [w2+1, tau] yields the identical set and "
+            "w2+1 (tau_canonical) is the minimal one.",
+        ],
+        "table": [
+            ["Run state", "applied_threshold", "tau", "Reading"],
+            ["Complete (no budget bit)", "requested_threshold",
+             "natural weakest emitted bottleneck (= tau_canonical)",
+             "Every Min Synapse Count up to tau yields this identical "
+             "set."],
+            ["StrongestFirst budget bit", "w2 + 1 (= tau_canonical)",
+             "landing bound of the drained tie group",
+             "The strongest excluded path is w2; every threshold in "
+             "[w2+1, tau] gives the same set."],
+            ["Edge Budget floor only ('all' mode)", "natural tau (>= w0)",
+             "natural weakest emitted bottleneck",
+             "The graph was floored at w0 first; flooring cannot inflate "
+             "hop distances — it only removes weak routes."],
+            ["Both budgets", "w2 + 1 (= tau_canonical)", "landing bound",
+             "The floor raised the graph threshold first; the bite then "
+             "bounded the output."],
+        ],
+        "values_column": False,
         "pipeline": None,
     },
     {
@@ -1538,6 +1582,8 @@ def assemble_run_content(run_folder: Path, tool_name: str,
         "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "params": params,
         "explanation": spec.get("explanation"),
+        "applied": _read_applied_state(run_folder),
+        "applied_by_dataset": _read_applied_thresholds_by_dataset(run_folder),
         "entries": entries,
         "metrics": metrics,
         "leftovers": leftovers,
@@ -1556,6 +1602,192 @@ def _read_warnings(run_folder: Path) -> Optional[str]:
         except OSError:
             pass
     return None
+
+
+# Applied-threshold / bottleneck provenance keys the pathfinding backend
+# writes (all_attributes.json + parameters.txt). The run guide surfaces
+# them so the reader sees the ACTUAL pruning level without opening the
+# raw files.
+_PROVENANCE_KEYS = (
+    "requested_threshold",
+    "applied_threshold",
+    "applied_threshold_source",
+    "strongest_first_budget",
+    "strongest_first_budget_bitten",
+    "strongest_first_tau",
+    "tau_canonical",
+    "strongest_dropped_bottleneck",
+    "edge_budget",
+    "edge_budget_applied",
+    "edge_budget_landing",
+    "edge_weight_floor",
+    "strongest_retained_bottleneck",
+    "paths_complete",
+)
+
+# parameters.txt alias lines (pre-provenance readers) -> canonical keys
+_PARAMETERS_ALIASES = {
+    "applied_tau (min path bottleneck)": "strongest_first_tau",
+    "applied_tau": "strongest_first_tau",
+}
+
+
+def _coerce_provenance_value(text: str):
+    """Coerce a parameters.txt value string to int/float/bool when possible."""
+    s = text.strip()
+    if s.lower() in ("not applied", "not reached", "n/a"):
+        return None
+    if s.lower() in ("true", "false"):
+        return s.lower() == "true"
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    try:
+        return float(s)
+    except ValueError:
+        return s
+
+
+def _read_applied_state(run_folder: Path) -> Optional[dict]:
+    """Read this run's applied-threshold provenance.
+
+    Primary source: ``all_attributes.json`` (machine-readable, written by
+    the post-enumeration re-stamp). Fallback: the ``key: value`` lines of
+    ``parameters.txt`` (including the legacy ``applied_tau`` alias) so
+    guides regenerated for older post-fix runs still show the values.
+    Returns None for runs without provenance (other tools, pre-fix runs).
+    """
+    attrs_path = run_folder / "all_attributes.json"
+    if attrs_path.exists():
+        try:
+            attrs = json.loads(attrs_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            attrs = None
+        if isinstance(attrs, dict) and "applied_threshold" in attrs:
+            return {key: attrs[key] for key in _PROVENANCE_KEYS
+                    if key in attrs}
+
+    params_path = run_folder / "parameters.txt"
+    if params_path.exists():
+        try:
+            state = {}
+            for line in params_path.read_text(
+                    encoding="utf-8", errors="replace").splitlines():
+                if ":" not in line:
+                    continue
+                key, _, value = line.partition(":")
+                key = key.strip()
+                value = _coerce_provenance_value(value)
+                if key in _PROVENANCE_KEYS:
+                    state[key] = value
+                elif key in _PARAMETERS_ALIASES:
+                    state.setdefault(_PARAMETERS_ALIASES[key], value)
+            if "applied_threshold" in state:
+                return state
+        except OSError:
+            pass
+    return None
+
+
+def _read_applied_thresholds_by_dataset(run_folder: Path) -> Optional[dict]:
+    """Per-dataset asked -> applied threshold states for comparison runs
+    (effective_thresholds.json, written when a tau collapse occurred)."""
+    banner_path = run_folder / "effective_thresholds.json"
+    if not banner_path.exists():
+        return None
+    try:
+        payload = json.loads(banner_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    datasets = payload.get("datasets") if isinstance(payload, dict) else None
+    return datasets or None
+
+
+def _format_applied_value(value) -> str:
+    """Compact display for a provenance value (— when it did not apply)."""
+    if value is None:
+        return "—"
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+def _this_run_value(applied: Optional[dict], key: str) -> Optional[object]:
+    """Map a vocabulary-table key onto this run's provenance value."""
+    if applied is None:
+        return None
+    if key == "pruned":
+        # the run-state name for the vocabulary row 'pruned'
+        return applied.get("edge_budget_applied")
+    return applied.get(key)
+
+
+# Applied-threshold block: the value rows shown under Run parameters,
+# ordered so the pruning story reads top-down (what was asked -> what the
+# budgets did -> what to believe).
+_APPLIED_ROWS = (
+    ("requested threshold (Min Synapse Count as entered)",
+     "requested_threshold"),
+    ("applied threshold (equivalent Min Synapse Count)", "applied_threshold"),
+    ("source", "applied_threshold_source"),
+    ("tau (StrongestFirst landing / natural bottleneck)",
+     "strongest_first_tau"),
+    ("tau_canonical (minimal equivalent threshold)", "tau_canonical"),
+    ("w2 (strongest dropped path bottleneck)",
+     "strongest_dropped_bottleneck"),
+    ("w0 (Edge Budget floor)", "edge_weight_floor"),
+    ("w1 (Edge Budget landing tier)", "edge_budget_landing"),
+    ("W* (strongest retained path bottleneck)",
+     "strongest_retained_bottleneck"),
+    ("paths_complete", "paths_complete"),
+)
+
+
+def _applied_headline(applied: dict) -> str:
+    """One-sentence reading of this run's pruning level."""
+    source = applied.get("applied_threshold_source")
+    applied_threshold = applied.get("applied_threshold")
+    if source in (None, "requested"):
+        tau = applied.get("strongest_first_tau")
+        head = ("No budget bit: the output is the complete path set at "
+                f"Min Synapse Count = "
+                f"{_format_applied_value(applied.get('requested_threshold'))}.")
+        if tau is not None:
+            head += (f" The natural tau (weakest emitted-path bottleneck) "
+                     f"is {_format_applied_value(tau)} — every Min Synapse "
+                     "Count up to it yields this identical set.")
+        return head
+    return (f"Applied threshold = {_format_applied_value(applied_threshold)} "
+            f"(source: {source}) — the materialized output is EXACTLY a "
+            "complete run at Min Synapse Count = "
+            f"{_format_applied_value(applied_threshold)}. Raise Max Paths "
+            "(BodyId) / the Edge Budget, or lower Min Synapse Count, to "
+            "enumerate weaker paths.")
+
+
+def _format_dataset_threshold_banner(by_dataset: dict) -> list:
+    """Per-dataset asked -> applied lines for comparison runs."""
+    lines = []
+    for ds, info in sorted(by_dataset.items()):
+        if not isinstance(info, dict):
+            continue
+        asked = ", ".join(str(t) for t in info.get("input") or [])
+        effective = ", ".join(str(t) for t in info.get("effective") or [])
+        collapsed = info.get("applied_folder") or {}
+        collapse_txt = ""
+        if collapsed:
+            collapse_txt = " (collapsed: " + ", ".join(
+                f"{t}->{applied}" for t, applied in sorted(
+                    collapsed.items(), key=lambda kv: str(kv[0]))) + ")"
+        tau = info.get("tau")
+        tau_txt = f", tau {_format_applied_value(tau)}" \
+            if tau is not None else ""
+        lines.append(f"  {ds}: asked [{asked}] -> applied [{effective}]"
+                     f"{collapse_txt}{tau_txt}")
+    return lines
 
 
 def _key_params(params: dict) -> list:
@@ -1582,7 +1814,7 @@ def _key_params(params: dict) -> list:
 # Renderers
 # =============================================================================
 
-def _render_explanation_txt(sections) -> list:
+def _render_explanation_txt(sections, applied=None) -> list:
     """Plain-text rendering of the pathfinding explanation block."""
     lines = []
     for section in sections:
@@ -1593,14 +1825,36 @@ def _render_explanation_txt(sections) -> list:
             lines.append(f"  -> {step}")
         table = section.get("table")
         if table:
+            rows = [list(row) for row in table]
+            if section.get("values_column") and applied:
+                rows[0].append("This run")
+                for row in rows[1:]:
+                    row.append(_format_applied_value(
+                        _this_run_value(applied, str(row[1]))))
             width = max(
                 sum(len(str(cell)) for cell in row) + 3 * (len(row) - 1)
-                for row in table)
-            for idx, row in enumerate(table):
+                for row in rows)
+            for idx, row in enumerate(rows):
                 lines.append("  " + " | ".join(str(cell) for cell in row))
                 if idx == 0:
                     lines.append("  " + "-" * width)
         lines.append("")
+    return lines
+
+
+def _render_applied_txt(applied, by_dataset) -> list:
+    """Plain-text rendering of the applied-threshold block."""
+    lines = []
+    if applied:
+        lines.append(_applied_headline(applied))
+        lines.append("")
+        for label, key in _APPLIED_ROWS:
+            lines.append(
+                f"  {label}: {_format_applied_value(applied.get(key))}")
+    if by_dataset:
+        lines.append("")
+        lines.append("  Per-dataset asked -> applied thresholds:")
+        lines.extend(_format_dataset_threshold_banner(by_dataset))
     return lines
 
 
@@ -1626,10 +1880,18 @@ def render_txt(content: dict) -> str:
             lines.append(f"  {key}: {value}")
         lines.append("")
 
+    if content.get("applied") or content.get("applied_by_dataset"):
+        lines.append("APPLIED THRESHOLD (THIS RUN)")
+        lines.append("-" * 72)
+        lines.extend(_render_applied_txt(
+            content.get("applied"), content.get("applied_by_dataset")))
+        lines.append("")
+
     if content.get("explanation"):
         lines.append("PATHFINDING MODEL")
         lines.append("-" * 72)
-        lines.extend(_render_explanation_txt(content["explanation"]))
+        lines.extend(_render_explanation_txt(
+            content["explanation"], applied=content.get("applied")))
         lines.append("")
 
     lines.append("WARNINGS & NOTES")
@@ -1680,7 +1942,7 @@ def render_txt(content: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _render_explanation_markdown(sections) -> list:
+def _render_explanation_markdown(sections, applied=None) -> list:
     """Markdown rendering of the pathfinding explanation block."""
     md = []
     for section in sections:
@@ -1697,14 +1959,42 @@ def _render_explanation_markdown(sections) -> list:
             md.append("")
         table = section.get("table")
         if table:
-            header = table[0]
+            rows = [list(row) for row in table]
+            if section.get("values_column") and applied:
+                rows[0].append("This run")
+                for row in rows[1:]:
+                    row.append(_format_applied_value(
+                        _this_run_value(applied, str(row[1]))))
+            header = rows[0]
             md.append("| " + " | ".join(str(c) for c in header) + " |")
             md.append("|" + "|".join([" --- "] * len(header)) + "|")
-            for row in table[1:]:
+            for row in rows[1:]:
                 cells = [
                     str(c).replace("|", "\\|") for c in row]
                 md.append("| " + " | ".join(cells) + " |")
             md.append("")
+    return md
+
+
+def _render_applied_markdown(applied, by_dataset) -> list:
+    """Markdown rendering of the applied-threshold block."""
+    md = []
+    if applied:
+        md.append(_applied_headline(applied))
+        md.append("")
+        md.append("| Parameter | Value |")
+        md.append("| --- | --- |")
+        for label, key in _APPLIED_ROWS:
+            value = _format_applied_value(applied.get(key)).replace(
+                "|", "\\|")
+            md.append(f"| {label} | {value} |")
+        md.append("")
+    if by_dataset:
+        md.append("Per-dataset asked -> applied thresholds:")
+        md.append("")
+        md.extend(f"    {line.strip()}"
+                  for line in _format_dataset_threshold_banner(by_dataset))
+        md.append("")
     return md
 
 
@@ -1729,10 +2019,17 @@ def render_markdown(content: dict) -> str:
             md.append(f"| `{key}` | `{value}` |")
         md.append("")
 
+    if content.get("applied") or content.get("applied_by_dataset"):
+        md.append("## Applied threshold (this run)")
+        md.append("")
+        md.extend(_render_applied_markdown(
+            content.get("applied"), content.get("applied_by_dataset")))
+
     if content.get("explanation"):
         md.append("## Pathfinding model")
         md.append("")
-        md.extend(_render_explanation_markdown(content["explanation"]))
+        md.extend(_render_explanation_markdown(
+            content["explanation"], applied=content.get("applied")))
 
     md.append("## Warnings & notes")
     md.append("")
@@ -1865,7 +2162,53 @@ def render_html(content: dict) -> str:
                          f"<td><code>{_html_escape(value)}</code></td></tr>")
         parts.append("</table></div>")
 
+    applied = content.get("applied")
+    by_dataset = content.get("applied_by_dataset")
+    if applied or by_dataset:
+        parts.append("<h2>Applied threshold (this run)</h2>")
+        parts.append('<div class="card">')
+        if applied:
+            parts.append(
+                f"<p><strong>{_html_escape(_applied_headline(applied))}"
+                "</strong></p>")
+            parts.append("<table><tr><th>Parameter</th><th>Value</th></tr>")
+            for label, key in _APPLIED_ROWS:
+                parts.append(
+                    f"<tr><td>{_html_escape(label)}</td><td>"
+                    f"<code>{_html_escape(_format_applied_value(applied.get(key)))}"
+                    "</code></td></tr>")
+            parts.append("</table>")
+        if by_dataset:
+            parts.append("<p class=\"small\">Per-dataset asked &rarr; "
+                         "applied thresholds:</p>")
+            parts.append("<table><tr><th>Dataset</th>"
+                         "<th>Asked &rarr; applied</th></tr>")
+            for ds, info in sorted(by_dataset.items()):
+                if not isinstance(info, dict):
+                    continue
+                asked = ", ".join(str(t) for t in info.get("input") or [])
+                effective = ", ".join(
+                    str(t) for t in info.get("effective") or [])
+                collapsed = info.get("applied_folder") or {}
+                collapse_txt = ""
+                if collapsed:
+                    collapse_txt = " (collapsed: " + ", ".join(
+                        f"{t}\u2192{applied_t}" for t, applied_t in sorted(
+                            collapsed.items(), key=lambda kv: str(kv[0]))) \
+                        + ")"
+                tau = info.get("tau")
+                tau_txt = f", tau {_format_applied_value(tau)}" \
+                    if tau is not None else ""
+                parts.append(
+                    f"<tr><td><code>{_html_escape(ds)}</code></td><td>"
+                    f"[{_html_escape(asked)}] &rarr; "
+                    f"[{_html_escape(effective)}]{_html_escape(collapse_txt)}"
+                    f"{_html_escape(tau_txt)}</td></tr>")
+            parts.append("</table>")
+        parts.append("</div>")
+
     if content.get("explanation"):
+        applied_state = content.get("applied")
         parts.append("<h2>Pathfinding model</h2>")
         for section in content["explanation"]:
             parts.append('<div class="card">')
@@ -1882,11 +2225,17 @@ def render_html(content: dict) -> str:
                              + "</div>")
             table = section.get("table")
             if table:
+                rows = [list(row) for row in table]
+                if section.get("values_column") and applied_state:
+                    rows[0].append("This run")
+                    for row in rows[1:]:
+                        row.append(_format_applied_value(
+                            _this_run_value(applied_state, str(row[1]))))
                 parts.append("<table><tr>"
                              + "".join(f"<th>{_html_escape(c)}</th>"
-                                       for c in table[0])
+                                       for c in rows[0])
                              + "</tr>")
-                for row in table[1:]:
+                for row in rows[1:]:
                     parts.append("<tr>"
                                  + "".join(f"<td>{_html_escape(c)}</td>"
                                            for c in row)

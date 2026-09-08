@@ -75,9 +75,10 @@ def test_applied_state_floored_complete_applies_floor():
         "paths_complete": True, "skipped": False, "duplicate_of": None,
         "applied_folder": 3, "edge_weight_floor": 151.0,
     })
-    applied, pruned, floor = a._applied_state_for("banc_v888", 3)
+    applied, pruned, floor, source = a._applied_state_for("banc_v888", 3)
     assert applied == 151  # W5: the floor IS the applied threshold
     assert pruned is True and floor == 151.0
+    assert source == "edge_budget"
 
 
 def test_applied_state_floored_bitten_keeps_canonical():
@@ -86,7 +87,7 @@ def test_applied_state_floored_bitten_keeps_canonical():
         "paths_complete": False, "skipped": False, "duplicate_of": None,
         "applied_folder": 3, "edge_weight_floor": 35.0,
     })
-    applied, _pruned, _floor = a._applied_state_for("banc_v888", 3)
+    applied, _pruned, _floor, _source = a._applied_state_for("banc_v888", 3)
     assert applied == 39  # canonical >= floor: unchanged
 
 
@@ -96,7 +97,7 @@ def test_applied_state_unfloored_unchanged():
         "paths_complete": False, "skipped": False, "duplicate_of": None,
         "applied_folder": 10, "edge_weight_floor": None,
     }, key_threshold=10)
-    applied, _pruned, _floor = a._applied_state_for("banc_v888", 10)
+    applied, _pruned, _floor, _source = a._applied_state_for("banc_v888", 10)
     assert applied == 24
 
 

@@ -213,8 +213,10 @@ Shortest mode is never floored.
 Every pathfinding run — BOTH modes; shortest was previously never
 re-stamped — writes a provenance block to `parameters.txt`,
 `all_attributes.json`, AND `data_details/parameters.csv` after
-enumeration, computed by `applied_threshold_provenance()` (in
-`src/coana.py`) and finalized by `_finalize_threshold_provenance` +
+enumeration, computed by `applied_threshold_provenance()` (shared in
+`src/utils/threshold_state.py`; re-exported by `src/coana.py` and
+delegated to by `ComparisonAnalyzer._applied_state_for`) and
+finalized by `_finalize_threshold_provenance` +
 `_write_run_metadata`:
 
 | field | meaning |

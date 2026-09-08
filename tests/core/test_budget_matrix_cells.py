@@ -186,7 +186,7 @@ def test_applied_state_skipped_row_without_canonical_uses_folder():
         "paths_complete": False, "skipped": True, "duplicate_of": 10,
         "applied_folder": 24, "edge_weight_floor": None,
     }}
-    applied, _pruned, _floor = a._applied_state_for("banc_v888", 20)
+    applied, _pruned, _floor, _source = a._applied_state_for("banc_v888", 20)
     assert applied == 24
 
 

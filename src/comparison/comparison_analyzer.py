@@ -51,6 +51,11 @@ except ImportError:  # pragma: no cover - direct package imports
         is_untyped_type_label = None
         untyped_side = None
 
+try:
+    from utils.threshold_state import applied_threshold_provenance
+except ImportError:  # pragma: no cover - direct package imports
+    from src.utils.threshold_state import applied_threshold_provenance
+
 
 def _escape_cypher_string_fallback(value):
     """Inline escape fallback (only used when src.utils.api_utils is unavailable)."""
@@ -1267,16 +1272,24 @@ class ComparisonAnalyzer:
 
     def _applied_state_for(self, dataset: str, threshold: int):
         """F5/F6 + canonical tau: (applied_threshold, pruned,
-        edge_weight_floor) for one (dataset, threshold) from the run
-        meta.
+        edge_weight_floor, applied_threshold_source) for one (dataset,
+        threshold) from the run meta.
 
-        applied_threshold is the CANONICAL (minimal) threshold that
-        reproduces this run's output: w2 + 1 for a budget-bitten run
-        (w2 = strongest dropped path bottleneck; the gap (w2, tau]
-        contains no paths, so every threshold in [w2+1, tau] yields the
-        identical set), else the asked threshold for complete runs (the
-        natural tau is reported alongside). ``pruned`` is True only when
-        the Edge-Budget floor (the sole lossy stage) fired for that run.
+        Delegates to the shared canonical formula
+        (``utils.threshold_state.applied_threshold_provenance`` — the same
+        one the per-dataset folders' parameters.txt reports), so summary
+        rows and folders can never diverge:
+
+        - applied_threshold is the CANONICAL (minimal) threshold that
+          reproduces this run's output: w2 + 1 for a budget-bitten run
+          (w2 = strongest dropped path bottleneck; the gap (w2, tau]
+          contains no paths, so every threshold in [w2+1, tau] yields the
+          identical set), the natural tau for a floored-but-unbitten run
+          (a lossy floor RAISES the effective cutoff — at least w0), and
+          the asked threshold for complete runs.
+        - ``applied_threshold_source`` names the contributing
+          mechanism(s): 'requested' | 'strongest_first_budget' |
+          'edge_budget' | 'strongest_first_budget+edge_budget'.
         """
         meta = self._path_run_meta.get((dataset, threshold)) or {}
         floor = meta.get('edge_weight_floor')
@@ -1284,25 +1297,34 @@ class ComparisonAnalyzer:
         canonical = meta.get('tau_canonical')
         complete = bool(meta.get('paths_complete', True))
         applied_folder = meta.get('applied_folder')
-        if tau is not None and not complete:
-            if canonical is not None:
-                applied = canonical
-            elif meta.get('skipped') and applied_folder is not None:
-                # Collapsed row with missing canonical bookkeeping: the
-                # applied folder IS the materialized equivalent threshold
-                # — never fall back to the bare landing tau here.
-                applied = applied_folder
-            else:
-                applied = tau
-        else:
+
+        if tau is not None and not complete and canonical is None \
+                and meta.get('skipped') and applied_folder is not None:
+            # Collapsed row with missing canonical bookkeeping: the
+            # applied folder IS the materialized equivalent threshold —
+            # never fall back to the bare landing tau here.
+            return (applied_folder, floor is not None, floor,
+                    'strongest_first_budget')
+
+        prov = applied_threshold_provenance(
+            requested_threshold=threshold,
+            strongest_first_tau=tau,
+            strongest_first_budget_bitten=(
+                bool(meta.get('budget_bitten', False)) or not complete),
+            strongest_dropped_bottleneck=meta.get(
+                'strongest_dropped_bottleneck'),
+            tau_canonical=canonical,
+            edge_weight_floor=floor,
+            edge_budget_landing=meta.get('edge_budget_landing'),
+            edge_budget=meta.get('edge_budget'),
+        )
+        applied = prov['applied_threshold']
+        if applied is None:
+            # Degenerate meta (no tau / no floor): fall back to the asked
+            # threshold rather than reporting None.
             applied = threshold
-        # W5: a lossy Edge-Budget floor RAISES the run's effective
-        # cutoff — a floored complete run is exactly a complete run at
-        # w0, so the applied threshold is at least the floor (the asked
-        # threshold stays visible as the requested value).
-        if floor is not None:
-            applied = max(applied, floor)
-        return applied, (floor is not None), floor
+        return applied, prov['edge_budget_applied'], floor, \
+            prov['applied_threshold_source']
 
     def _export_effective_threshold_banner(self):
         """F6: persist the asked -> applied threshold collapse for the
@@ -3988,7 +4010,8 @@ class ComparisonAnalyzer:
                 # asked threshold for complete runs); tau is the budget
                 # landing (the collapse bound — every threshold in
                 # [applied, tau] yields this identical set).
-                applied, pruned, floor = self._applied_state_for(dataset, threshold)
+                applied, pruned, floor, applied_source = \
+                    self._applied_state_for(dataset, threshold)
                 dropped = (self._path_run_meta.get(
                     (dataset, threshold), {}) or {}).get(
                     'strongest_dropped_bottleneck')
@@ -3997,6 +4020,7 @@ class ComparisonAnalyzer:
                     'dataset': dataset,
                     'threshold': threshold,
                     'applied_threshold': applied,
+                    'applied_threshold_source': applied_source,
                     'tau': tau,
                     'strongest_dropped': dropped,
                     'paths_complete': paths_complete,
@@ -4499,10 +4523,12 @@ class ComparisonAnalyzer:
             for threshold in self.parameters.thresholds:
                 df = self.raw_results.get(dataset, {}).get(threshold, pd.DataFrame())
                 # F6: asked vs applied threshold + run state on every row.
-                applied, pruned, floor = self._applied_state_for(dataset, threshold)
+                applied, pruned, floor, applied_source = \
+                    self._applied_state_for(dataset, threshold)
                 run_meta = self._path_run_meta.get((dataset, threshold), {})
                 applied_state = {
                     'applied_threshold': applied,
+                    'applied_threshold_source': applied_source,
                     'tau': run_meta.get('tau'),
                     'paths_complete': bool(run_meta.get('paths_complete', True)),
                     'skipped': bool(run_meta.get('skipped', False)),
@@ -4659,7 +4685,8 @@ class ComparisonAnalyzer:
         for dataset in dataset_names:
             safe_name = self.parameters._sanitize_name(dataset)
             for t in thresholds:
-                applied, pruned, floor = self._applied_state_for(dataset, t)
+                applied, pruned, floor, _applied_source = \
+                    self._applied_state_for(dataset, t)
                 col = f'applied_{safe_name}_t{t}'
                 pruned_col = f'pruned_{safe_name}_t{t}'
                 if col not in presence_df.columns:

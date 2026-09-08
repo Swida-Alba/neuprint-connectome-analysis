@@ -6,6 +6,8 @@ in every output format, that the new file patterns match the artifacts the
 backend now writes, and that the glossary documents the new metadata keys.
 """
 
+import json
+
 from pathlib import Path
 
 import ui.output_guide as og
@@ -130,3 +132,146 @@ def test_inter_dataset_nested_outputs_point_to_explanation():
                          if e["pattern"] == "dataset_data/**")
     assert "pathfinding" in dataset_entry["description"]
     assert spec.get("explanation")
+
+
+# ---------------------------------------------------------------------------
+# Applied threshold / bottleneck values in the exported guide
+# ---------------------------------------------------------------------------
+
+_PROVENANCE = {
+    "requested_threshold": 3,
+    "applied_threshold": 8,
+    "applied_threshold_source": "strongest_first_budget",
+    "strongest_first_budget": 1000000,
+    "strongest_first_budget_bitten": True,
+    "strongest_first_tau": 12.0,
+    "tau_canonical": 8,
+    "strongest_dropped_bottleneck": 7.0,
+    "edge_budget": 1000000,
+    "edge_budget_applied": False,
+    "edge_budget_landing": None,
+    "edge_weight_floor": None,
+    "strongest_retained_bottleneck": 15.0,
+    "paths_complete": False,
+}
+
+
+def _add_provenance(run, provenance=None, use_json=True):
+    provenance = provenance or dict(_PROVENANCE)
+    if use_json:
+        (run / "all_attributes.json").write_text(
+            json.dumps(provenance), encoding="utf-8")
+    else:
+        lines = ["Parameters for processing src to tgt:"]
+        for key, value in provenance.items():
+            if value is None:
+                value = "not applied" if "floor" in key else "not reached"
+            lines.append(f"{key}: {value}")
+        (run / "parameters.txt").write_text("\n".join(lines) + "\n",
+                                            encoding="utf-8")
+
+
+def test_applied_state_read_from_all_attributes(tmp_path):
+    run = _make_run_folder(tmp_path)
+    _add_provenance(run)
+    state = og._read_applied_state(run)
+    assert state["applied_threshold"] == 8
+    assert state["strongest_first_tau"] == 12.0
+    assert state["paths_complete"] is False
+
+
+def test_applied_state_fallback_parses_parameters_txt(tmp_path):
+    run = _make_run_folder(tmp_path)
+    _add_provenance(run, use_json=False)
+    state = og._read_applied_state(run)
+    assert state["applied_threshold"] == 8
+    # the legacy 'applied_tau (min path bottleneck)' alias maps to tau
+    assert state["strongest_first_tau"] == 12.0
+    assert state["edge_weight_floor"] is None
+    assert state["paths_complete"] is False
+
+
+def test_applied_block_renders_under_parameters_in_all_formats(tmp_path):
+    run = _make_run_folder(tmp_path)
+    _add_provenance(run)
+    content = og.assemble_run_content(run, "find_shortest", {})
+
+    assert content["applied"]["applied_threshold"] == 8
+    headline = og._applied_headline(content["applied"])
+    assert "EXACTLY a complete run at Min Synapse Count = 8" in headline
+    assert "strongest_first_budget" in headline
+
+    html = og.render_html(content)
+    assert "Applied threshold (this run)" in html
+    assert "EXACTLY a complete run at Min Synapse Count = 8" in html
+    assert "<code>12</code>" in html          # tau row
+
+    md = og.render_markdown(content)
+    assert "## Applied threshold (this run)" in md
+    assert "applied threshold (equivalent Min Synapse Count)" in md
+    assert "w0 (Edge Budget floor)" in md
+
+    txt = og.render_txt(content)
+    assert "APPLIED THRESHOLD (THIS RUN)" in txt
+    assert "EXACTLY a complete run at Min Synapse Count = 8" in txt
+    assert "w2 (strongest dropped path bottleneck): 7" in txt
+
+
+def test_vocabulary_table_shows_this_run_values(tmp_path):
+    run = _make_run_folder(tmp_path)
+    _add_provenance(run)
+    content = og.assemble_run_content(run, "find_path", {})
+
+    html = og.render_html(content)
+    assert "<th>This run</th>" in html
+    # tau row shows this run's landing tau; w2 row shows the dropped value
+    assert "<td>StrongestFirst landing" in html
+    assert "<code>7</code>" in html
+    # 'pruned' maps onto edge_budget_applied for the run state
+    assert "<code>False</code>" in html
+
+    txt = og.render_txt(content)
+    assert "This run" in txt
+    md = og.render_markdown(content)
+    assert "| This run |" in md
+
+
+def test_no_provenance_omits_applied_block(tmp_path):
+    run = _make_run_folder(tmp_path)  # parameters.txt lacks applied_threshold
+    content = og.assemble_run_content(run, "find_path", {})
+    assert content["applied"] is None
+    assert content["applied_by_dataset"] is None
+
+    html = og.render_html(content)
+    assert "Applied threshold (this run)" not in html
+    assert "<th>This run</th>" not in html
+    assert "Pathfinding model" in html  # model section still renders
+
+
+def test_by_dataset_banner_renders_for_comparison_runs(tmp_path):
+    run = tmp_path / "cross-dataset_TEST"
+    run.mkdir()
+    (run / "effective_thresholds.json").write_text(json.dumps({
+        "banner": ["hemibrain: asked [1, 3, 5] -> applied [1, 9] (τ=9)"],
+        "datasets": {
+            "hemibrain:v1.2.1": {
+                "input": [1, 3, 5],
+                "effective": [1, 9],
+                "skipped": [3, 5],
+                "applied_folder": {"3": 9, "5": 9},
+                "tau": 9.0,
+            },
+        },
+    }), encoding="utf-8")
+    content = og.assemble_run_content(run, "inter_dataset", {})
+
+    assert content["applied_by_dataset"]["hemibrain:v1.2.1"]["tau"] == 9.0
+    html = og.render_html(content)
+    assert "Per-dataset" in html
+    assert "hemibrain:v1.2.1" in html
+    assert "3\u21929" in html  # collapsed 3 -> 9 with a literal arrow
+
+    txt = og.render_txt(content)
+    assert "asked [1, 3, 5] -> applied [1, 9]" in txt
+    md = og.render_markdown(content)
+    assert "3->9" in md
