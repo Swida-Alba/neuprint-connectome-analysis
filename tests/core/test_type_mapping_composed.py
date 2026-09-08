@@ -132,22 +132,29 @@ def test_bridges_csv_contract():
         ('T2, X', 'T3'): {'source_body_ids': [1, 2],
                           'target_body_ids': [3, 4, 5],
                           'source_coverage': 'covered 2 of 2 (100.0%)',
-                          'target_coverage': 'covered 2 of 3 (66.7%)'}})
+                          'target_coverage': 'covered 2 of 3 (66.7%)',
+                          'source_type_body_ids': ['900', '901'],
+                          'target_type_body_ids': ['400', '401', '402']}})
     lines = text.strip().splitlines()
     assert lines[0] == (
         'source_dataset,source_entry,matched_column,source_type,'
         'target_dataset,target_type,relationship,source_neurons,'
         'target_neurons,bridge,bridge_columns,mapping_origin,'
         'source_pool,source_total,target_pool,target_total,'
+        'source_body_ids,target_body_ids,'
         'pool_coverage,pool_coverage_basis')
     # linker-bearing row: explicit endpoints, matched entry + column
     assert lines[1].startswith(
         'male-cns:v1.0,T1,type,T1,flywire_FAFB_v783,T1,1-to-1,4,4,')
     assert 'flywireType' in lines[1] and ',mapped,' in lines[1]
     # bare same-name row: no linker columns, same-name origin, pool
-    # coverage filled (quoting handles the comma in the type name)
+    # coverage + FULL per-type bodyId populations filled (quoting handles
+    # the comma in the type name)
     assert '"T2, X"' in lines[2] and 'same name' in lines[2]
     assert 'source covered 2 of 2 (100.0%); target covered 2 of 3 (66.7%)' in lines[2]
+    assert '900; 901' in lines[2] and '400; 401; 402' in lines[2]
+    # a pool without the per-type keys leaves the bodyId cells empty
+    assert lines[1].endswith(',,')
     assert build_bridges_csv([]) is None
 
 
@@ -190,7 +197,7 @@ def test_combined_bridges_csv_uniform_width():
         headers.add(tuple(rows[0]))
         widths.update(len(r) for r in rows)
     assert len(headers) == 1
-    assert widths == {18}
+    assert widths == {20}
     assert headers.pop()[:2] == ('source_dataset', 'source_entry')
 
 

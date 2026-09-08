@@ -279,7 +279,11 @@ maps the four states to `FB: 1,655 of 1,683 (98.3%)` / `FB: all 1,683` /
 `FB: not measured` / `not pooled` so a subset, a tautological full
 population, and an unmeasurable side can never look alike. Panel text
 and CSV output make clear that these are coverage counts, not
-bodyId-to-bodyId pairings.
+bodyId-to-bodyId pairings. The pool also carries `source_type_body_ids`
+/ `target_type_body_ids` — the FULL population of each mapped type in
+its own dataset (sorted, independent of the linker-filtered subsets),
+exported as the mapping CSV's `source_body_ids` / `target_body_ids`
+columns; listed per type per side, never paired across datasets.
 
 ## 7. Visualization contract
 
@@ -363,7 +367,11 @@ bodyId-to-bodyId pairings.
   value); `relationship` is derived 1-to-1/1-to-N per source type; the
   numeric pool/total columns make coverage machine-readable while
   `pool_coverage` stays the human-readable `source covered …; target
-  …` field.  The export never represents bodyId pairings.
+  …` field.  `source_body_ids` / `target_body_ids` carry the FULL
+  per-type populations (every bodyId of the mapped type in its own
+  dataset, ';'-joined — user 2026-09-09): listed per type per side,
+  never a bodyId-to-bodyId pairing.  The export never represents bodyId
+  pairings.
 
 ## 8. Testing matrix
 

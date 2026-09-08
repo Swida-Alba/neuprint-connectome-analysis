@@ -2845,6 +2845,10 @@ def pool_bridge_body_ids(source_dataset: str, target_dataset: str,
       numbers: ``"linker rows"`` (measured subset), ``"full population"``
       (unconstrained side), ``"release relation participants"``, or
       ``"unmeasured"`` (coverage index unavailable);
+    * ``source_type_body_ids`` / ``target_type_body_ids`` — the FULL
+      population of each mapped type in its own dataset (sorted; NOT the
+      linker-filtered pool subset, and never a cross-dataset bodyId
+      pairing);
     * ``granularity`` (``"n to m"``) and ``coverage_basis``.
     """
     import polars as pl
@@ -3025,6 +3029,16 @@ def pool_bridge_body_ids(source_dataset: str, target_dataset: str,
             return "unmeasured"
         return "full population"
 
+    # The FULL per-type populations (user 2026-09-09): every bodyId of the
+    # mapped source/target type in its own dataset — independent per side,
+    # never a cross-dataset bodyId pairing.  Unlike the pools above these
+    # are not filtered by linker evidence; empty when the side's coverage
+    # index is unavailable.
+    source_type_body_ids = sorted(_type_body_id_set(
+        loaded.get(source_dataset), source_type))
+    target_type_body_ids = sorted(_type_body_id_set(
+        loaded.get(target_dataset), foreign_type))
+
     return {
         "per_linker": per_linker,
         "source_body_ids": source_pool,
@@ -3040,6 +3054,9 @@ def pool_bridge_body_ids(source_dataset: str, target_dataset: str,
         "source_type_total": source_total,
         "target_pool_size": len(target_pool),
         "target_type_total": target_total,
+        # Full per-type populations for the mapping CSV export.
+        "source_type_body_ids": source_type_body_ids,
+        "target_type_body_ids": target_type_body_ids,
         "source_basis": _side_basis(had_source_linker, source_dataset),
         "target_basis": _side_basis(had_target_linker, target_dataset),
         "coverage_basis": "independent endpoint pools; no bodyId pairing",

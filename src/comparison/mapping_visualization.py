@@ -2059,12 +2059,15 @@ def build_bridges_csv(flows, *, pools=None) -> Optional[str]:
     One row per (source type, target type) pair with EXPLICIT endpoints —
     ``source_dataset``/``target_dataset`` so the all-pairs export is
     self-contained — plus the matched source entry and its column, the
-    rendered preferred bridge and its standardized linker columns, and
-    machine-readable per-side pool coverage (independent endpoints; no
-    bodyId-to-bodyId pairing is implied).  The column set is fixed, so
-    per-pair and all-pairs files share one header and the old union-of-
-    bridge-columns concatenation hack is gone.  Uniform field counts,
-    proper quoting.  Returns None when there is nothing to export.
+    rendered preferred bridge and its standardized linker columns,
+    machine-readable per-side pool coverage, and the FULL per-type
+    bodyId populations (``source_body_ids`` / ``target_body_ids``: every
+    bodyId of the mapped type in its OWN dataset, ';'-joined — listed
+    per type, never paired across datasets).  The column set is fixed,
+    so per-pair and all-pairs files share one header and the old
+    union-of-bridge-columns concatenation hack is gone.  Uniform field
+    counts, proper quoting.  Returns None when there is nothing to
+    export.
     """
     import csv as _csv
     import io
@@ -2086,6 +2089,7 @@ def build_bridges_csv(flows, *, pools=None) -> Optional[str]:
         "source_neurons", "target_neurons",
         "bridge", "bridge_columns", "mapping_origin",
         "source_pool", "source_total", "target_pool", "target_total",
+        "source_body_ids", "target_body_ids",
         "pool_coverage", "pool_coverage_basis",
     ]
     targets_by_source: Dict[str, set] = {}
@@ -2152,6 +2156,11 @@ def build_bridges_csv(flows, *, pools=None) -> Optional[str]:
             source_total if source_total is not None else "",
             pool.get("target_pool_size", ""),
             target_total if target_total is not None else "",
+            # FULL per-type populations (user 2026-09-09): every bodyId of
+            # the mapped type in its OWN dataset — never a cross-dataset
+            # bodyId pairing.
+            "; ".join(pool.get("source_type_body_ids") or []),
+            "; ".join(pool.get("target_type_body_ids") or []),
             pool_coverage,
             pool.get("coverage_basis") or "",
         ])

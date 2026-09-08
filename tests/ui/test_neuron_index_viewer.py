@@ -2680,6 +2680,45 @@ class TestBridgeBodyIdPooling:
         assert chain_is_supported(bare, "bt:v1.0")
 
 
+    def test_full_per_type_body_ids_independent_of_pool_subset(
+            self, isolated_index_root, tmp_path):
+        """The mapping CSV's per-type bodyId lists are the FULL endpoint
+        type populations (user 2026-09-09) — not the linker-filtered pool
+        subsets, and never a cross-dataset pairing.  An unmeasured side
+        has none."""
+        from ui.neuron_index import pool_bridge_body_ids
+
+        source = self._index(tmp_path, "pop_s:v1.0", {
+            "bodyId": ["1", "2", "3", "9"],
+            "type": ["A", "A", "A", "B"],
+            "bridge": ["W", "W", "W", "W"],
+        })
+        target = self._index(tmp_path, "pop_t:v1.0", {
+            "bodyId": ["11", "12", "13"], "type": ["B", "B", "B"],
+        })
+        pool = pool_bridge_body_ids(
+            "pop_s:v1.0", "pop_t:v1.0", [{
+                "column": "bridge", "value": "W",
+                "home": "pop_s:v1.0", "kind": "linker",
+            }], "A", "B",
+            indexes={"pop_s:v1.0": source, "pop_t:v1.0": target})
+        # pool subset: only rows carrying the linker value
+        assert pool["source_body_ids"] == ["1", "2", "3"]
+        # per-type list: the FULL type population, sorted
+        assert pool["source_type_body_ids"] == ["1", "2", "3"]
+        assert pool["target_type_body_ids"] == ["11", "12", "13"]
+
+        # the target's coverage index is unavailable: no population list
+        pool_unmeasured = pool_bridge_body_ids(
+            "pop_s:v1.0", "missing:v1.0", [{
+                "column": "bridge", "value": "W",
+                "home": "pop_s:v1.0", "kind": "linker",
+            }], "A", "B",
+            indexes={"pop_s:v1.0": source})
+        assert pool_unmeasured["source_type_body_ids"] == ["1", "2", "3"]
+        assert pool_unmeasured["target_type_body_ids"] == []
+
+
 def test_mapped_csv_extras_dedupe_and_via_note():
     """mapped_csv_extras: bridge-<column> cells per standardized linker,
     deduped values, via-note on indirect (hub) linkers, empty for
