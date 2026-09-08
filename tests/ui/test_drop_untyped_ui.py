@@ -101,3 +101,20 @@ def test_inter_dataset_hint_mentions_shared_predicate_and_locations():
     assert "comparison_results/" in source
     assert "data_details/" in source
     assert '"drop_untyped": drop_untyped.value' in source
+
+
+def test_inter_dataset_threshold_editor_uses_query_rows_in_core_parameters():
+    """The cross-dataset editor exposes complete query rows, not schedules."""
+    source = open("ui/tabs/inter_dataset.py", encoding="utf-8").read()
+    assert 'section_header("Threshold Mode", "tune")' in source
+    assert '("standard", "Standard")' in source
+    assert '("combinations", "Custom combination")' in source
+    assert '"outline no-caps"' in source
+    assert '"min-height: 3rem; font-size: 1.05rem; font-weight: 700;"' in source
+    assert 'icon="delete_outline"' in source
+    assert "Custom combination requires at least two selected" in source
+    assert '"threshold_mode": threshold_mode' in source
+    assert '"threshold_dataset_order": list(datasets)' in source
+    assert '"threshold_combinations": threshold_combinations' in source
+    assert "each row is one query" in source
+    assert "per-dataset threshold" not in source

@@ -43,6 +43,11 @@ try:
 except ImportError:  # pragma: no cover - direct package imports
     from utils.naming_utils import canonical_dataset_name
 
+try:
+    from ..flywire_ids import is_local_connectome_dataset
+except ImportError:  # pragma: no cover - direct package imports
+    from flywire_ids import is_local_connectome_dataset
+
 
 # ============================================================================
 # Connectivity Status Classification
@@ -2358,7 +2363,7 @@ class ConnectivityProfiler:
         Ensure connection data is available for a dataset.
         
         This method checks if the required connection cache files exist for
-        building connectivity profiles. For local datasets (FlyWire/FAFB/BANC),
+        building connectivity profiles. For FAFB and standalone BANC local releases,
         it checks the datasets/ folder for merged_connections files.
         
         Args:
@@ -2379,8 +2384,7 @@ class ConnectivityProfiler:
             DataNotAvailableError: Connection data not found for 'some_new_dataset'.
             Please run: python src/build_connection_cache.py some_new_dataset
         """
-        dataset_lower = dataset.lower()
-        is_local = any(x in dataset_lower for x in ['flywire', 'fafb', 'banc'])
+        is_local = is_local_connectome_dataset(dataset)
         
         if is_local:
             # Check for local connection files
@@ -2455,8 +2459,7 @@ class ConnectivityProfiler:
         
         status = {}
         for dataset in datasets:
-            dataset_lower = dataset.lower()
-            is_local = any(x in dataset_lower for x in ['flywire', 'fafb', 'banc'])
+            is_local = is_local_connectome_dataset(dataset)
             
             try:
                 available = self.ensure_data_available(dataset, raise_on_missing=False)
@@ -2542,9 +2545,9 @@ class ConnectivityProfiler:
         if dataset in self._clients:
             return self._clients[dataset]
         
-        # Check if dataset is local (FlyWire/FAFB/BANC)
-        dataset_lower = dataset.lower()
-        if 'flywire' in dataset_lower or 'fafb' in dataset_lower or 'banc' in dataset_lower:
+        # FAFB and standalone BANC use local release tables and no NeuPrint
+        # client.  Keep the source decision centralized.
+        if is_local_connectome_dataset(dataset):
             # Local dataset - no client needed
             self._clients[dataset] = None
             return None
@@ -2585,7 +2588,7 @@ class ConnectivityProfiler:
         """
         Join type information from neuron_df to connection DataFrame.
         
-        This is needed for FlyWire/FAFB/BANC datasets where merged_connections
+        This is needed for FAFB/BANC local releases where merged_connections
         files don't include type columns. Type info must be looked up from
         the neuron_df file.
         
@@ -3694,14 +3697,13 @@ class ConnectivityProfiler:
             self._data_availability_cache[dataset] = True
         
         # Query connections - ALWAYS try local cache first (much faster)
-        # Local cache includes: FlyWire/FAFB/BANC datasets AND NeuPrint datasets
+        # Local cache includes: FAFB/BANC local releases AND NeuPrint datasets
         # with pre-built connection cache from FNC.build_connection_cache()
         upstream_df, downstream_df = self._query_connections_local(neuron, dataset)
         
         # Fall back to NeuPrint API only if local data not available
         if upstream_df.empty and downstream_df.empty:
-            dataset_lower = dataset.lower()
-            if 'flywire' not in dataset_lower and 'fafb' not in dataset_lower and 'banc' not in dataset_lower:
+            if not is_local_connectome_dataset(dataset):
                 # Try NeuPrint API as fallback
                 upstream_df, downstream_df = self._query_connections_neuprint(neuron, dataset)
         
@@ -3870,8 +3872,7 @@ class ConnectivityProfiler:
         
         # If no local data, try NeuPrint as fallback (for non-local datasets)
         if upstream_df.empty and downstream_df.empty:
-            dataset_lower = dataset.lower()
-            if 'flywire' not in dataset_lower and 'fafb' not in dataset_lower and 'banc' not in dataset_lower:
+            if not is_local_connectome_dataset(dataset):
                 upstream_df, downstream_df = self._query_connections_neuprint(neuron, dataset)
         
         if upstream_df.empty and downstream_df.empty:
@@ -3979,9 +3980,7 @@ class ConnectivityProfiler:
         Returns:
             List of bodyIds
         """
-        dataset_lower = dataset.lower()
-        
-        if 'flywire' in dataset_lower or 'fafb' in dataset_lower or 'banc' in dataset_lower:
+        if is_local_connectome_dataset(dataset):
             # Local dataset - resolve the query with the shared prioritized
             # column search used by the connection tabs (bodyId -> type ->
             # instance -> other *Type fields such as cell_type -> taxonomy).
@@ -4034,7 +4033,7 @@ class ConnectivityProfiler:
                 return []
     
     def _load_local_neuron_frame(self, dataset: str) -> Optional[pd.DataFrame]:
-        """Load (and memoize) the local neuron table for a FlyWire dataset.
+        """Load (and memoize) the local neuron table for FAFB or BANC.
 
         The frame is cached per file path and mtime so repeated type
         lookups (one per query item) do not re-read the full table.
@@ -4126,9 +4125,7 @@ class ConnectivityProfiler:
     
     def _load_all_types(self, dataset: str) -> List[str]:
         """Load the full sorted list of neuron types for a dataset."""
-        dataset_lower = dataset.lower()
-        
-        if 'flywire' in dataset_lower or 'fafb' in dataset_lower or 'banc' in dataset_lower:
+        if is_local_connectome_dataset(dataset):
             # Local dataset - load neurons file
             src_dir = Path(__file__).parent.parent
             project_root = src_dir.parent
@@ -4199,9 +4196,7 @@ class ConnectivityProfiler:
         Returns:
             Type name as string, or None if not found
         """
-        dataset_lower = dataset.lower()
-        
-        if 'flywire' in dataset_lower or 'fafb' in dataset_lower or 'banc' in dataset_lower:
+        if is_local_connectome_dataset(dataset):
             # Local dataset - load neurons file
             src_dir = Path(__file__).parent.parent
             project_root = src_dir.parent
@@ -4291,9 +4286,7 @@ class ConnectivityProfiler:
             return {}
         
         result_map = {}
-        dataset_lower = dataset.lower()
-        
-        if 'flywire' in dataset_lower or 'fafb' in dataset_lower or 'banc' in dataset_lower:
+        if is_local_connectome_dataset(dataset):
             # Local dataset - load neurons file once
             src_dir = Path(__file__).parent.parent
             project_root = src_dir.parent
@@ -4409,9 +4402,7 @@ class ConnectivityProfiler:
         dataset has no local table (NeuPrint falls back to the single-column
         lookup in ``get_bodyids_for_type``).
         """
-        dataset_lower = dataset.lower()
-        if not ('flywire' in dataset_lower or 'fafb' in dataset_lower
-                or 'banc' in dataset_lower):
+        if not is_local_connectome_dataset(dataset):
             return {}
 
         df = self._load_local_neuron_frame(dataset)
@@ -4738,9 +4729,11 @@ class ConnectivityProfiler:
             >>> print(f"Found {len(types)} types: {types[:10]}...")
         """
         dataset_lower = dataset.lower()
-        
-        # Check if local dataset (FlyWire/FAFB/BANC/optic-lobe/male-cns)
-        is_local = any(x in dataset_lower for x in ['flywire', 'fafb', 'banc', 'optic', 'male'])
+
+        # Optic-lobe/male-cns retain their legacy local-table behavior; FAFB
+        # and BANC are resolved by the shared exact-release predicate.
+        is_local = is_local_connectome_dataset(dataset) or any(
+            x in dataset_lower for x in ['optic', 'male'])
         
         if is_local:
             return self._get_local_dataset_types(dataset)

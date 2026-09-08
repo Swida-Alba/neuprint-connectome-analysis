@@ -917,8 +917,8 @@ This ensures lines that rank well in both algorithms appear first.
 | ------------------- | -------- | ----------------------- |
 | `hemibrain:v1.2.1`  | NeuPrint | Hemibrain connectome    |
 | `male-cns:v0.9`     | NeuPrint | Male CNS (brain + VNC)  |
-| `flywire_FAFB_v783` | FlyWire  | FlyWire FAFB full brain |
-| `banc_v626` | FlyWire  | FlyWire BANC VNC        |
+| `flywire_FAFB_v783` | FAFB     | FAFB full brain         |
+| `banc_v626` | BANC     | Standalone BANC brain + nerve cord |
 | `vnc:v0.5`          | NeuPrint | VNC (older version)     |
 | `manc:v1.2.1`       | NeuPrint | MANC dataset            |
 

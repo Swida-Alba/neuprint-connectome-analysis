@@ -7,7 +7,7 @@ user's output directory, named:
     {tool}_{dataset_abbreviation}_{detail}_{timestamp}
 
 Examples:
-    find-paths-complete_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_183000
+    find-paths-complete_MCNS_aMe12_to_aMe10_L2w3_20260801_183000
     finddirect_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_183005
     profiling_MCNS_aMe12_aMe10_aMe9_20260801_183010
     homologs_MCNS_to_HEMI_aMe12_20260801_183015
@@ -50,7 +50,11 @@ _DATASET_VERSION_SUFFIX_RE = re.compile(
 # prefix; the legacy spellings stay accepted as aliases everywhere a
 # dataset name enters the app.
 _BANC_LEGACY_NAME_RE = re.compile(
-    r"^(?:flywire[_-]?)?banc(?:[_-](v\d+(?:[._]\d+)*))?$",
+    # Keep the hidden NeuPrint spelling ``banc:v888`` intact; only legacy
+    # FlyWire-prefixed colon forms (and canonical underscore forms) are
+    # local-release identifiers that should fold into a cache namespace.
+    r"^(?:(?:flywire[_-]?)banc(?:[_:-](v\d+(?:[._]\d+)*))?|"
+    r"banc(?:_(v\d+(?:[._]\d+)*))?)$",
     re.IGNORECASE,
 )
 
@@ -63,13 +67,13 @@ def canonical_dataset_name(dataset) -> str:
     default BANC release ``banc_v626`` — the same pin the cross-dataset type
     mapper applies — so the unversioned alias can never straddle the two
     BANC releases (v626 and v888 are distinct datasets with distinct id
-    spaces).  Every other identifier — including NeuPrint colon forms and
-    the FAFB release — passes through unchanged.
+    spaces).  Every other identifier — including the hidden NeuPrint
+    ``banc:v888`` colon form and the FAFB release — passes through unchanged.
     """
     text = str(dataset or "").strip()
     match = _BANC_LEGACY_NAME_RE.match(text)
     if match:
-        version = match.group(1)
+        version = next((group for group in match.groups() if group), None)
         return f"banc_{version.lower()}" if version else "banc_v626"
     return text
 

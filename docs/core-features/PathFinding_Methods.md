@@ -90,6 +90,32 @@ Emits complete intact paths **strongest-first** under a path budget
     the graph. This restores cone nesting under any future ratio
     predicate and makes ratios comparable across thresholds.
 
+### Threshold and bottleneck provenance
+
+Every Complete Paths and Shortest Paths run writes a provenance block to
+`parameters.txt`, `all_attributes.json`, and `data_details/parameters.csv`.
+`requested_threshold` is the entered Min Synapse Count; `applied_threshold`
+is the canonical equivalent threshold for the materialized path set. It is
+the requested value for a complete run, `w2 + 1` when the StrongestFirst path
+budget bites, and includes the Edge Budget floor when that graph budget fires.
+`applied_threshold_source` identifies the mechanism (`requested`,
+`strongest_first_budget`, `edge_budget`, or both).
+
+The block also reports `strongest_first_budget` and its bite flag, `tau` /
+`strongest_first_tau` (the StrongestFirst landing or natural weakest emitted
+bottleneck), `tau_canonical`, `w2` /
+`strongest_dropped_bottleneck`, `w0` / `edge_weight_floor`, `w1` /
+`edge_budget_landing`, `W*` / `strongest_retained_bottleneck`, and
+`paths_complete`. A path bottleneck is the minimum edge weight along that
+path. Shortest mode may be bounded by the StrongestFirst path budget but is
+never floored by the Edge Budget.
+
+The **Drop Untyped Neurons** option is checked by default in both pathfinding
+tabs. It removes edges touching empty, Unknown/None/NaN, or numeric
+bodyId-fallback labels after enrichment and before graph construction, and
+writes dropped rows to `data_details/untyped_dropped_records.csv` when there
+are any.
+
 ## Complete enumerators (API / benchmark reference)
 
 The enumerators below are **no longer selectable in the UI**
@@ -237,5 +263,4 @@ targets, `MeetInMiddle` for shallow queries, and `Bidirectional` only for
 shortest-first *ordering* with memory to spare — minimum-hop semantics in
 the UI come from the Shortest Paths tab's target-rooted StrongestFirst
 enumerator, not from Bidirectional.
-
 

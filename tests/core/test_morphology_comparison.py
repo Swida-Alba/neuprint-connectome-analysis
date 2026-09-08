@@ -328,7 +328,7 @@ def test_fetch_offline_never_calls_api(vector_setup, monkeypatch):
 
 
 def test_flywire_fetch_uses_bundle_loader(monkeypatch, tmp_path):
-    """FlyWire/FAFB datasets resolve missing skeletons through the shared
+    """FAFB resolves missing skeletons through the shared
     bundle/CAVE loader, never the NeuPrint batch fetch."""
     ids = [1, 2, 3]
     X = np.zeros((3, DIM))
@@ -584,7 +584,7 @@ def test_completion_marker_printed(vector_setup, capsys):
 
 # ------------------------------------------------------- BANC vector fetch
 def test_banc_missing_vectors_route_to_public_swc_chain(monkeypatch):
-    """BANC must never enter the FlyWire/CAVE fetch machinery: the vector
+    """BANC must never enter the FAFB/CAVE fetch machinery: the vector
     cache's missing bodies resolve through the shared batch fetch, whose
     BANC branch uses the official public-bucket SWCs (fetch_banc_swc).
 

@@ -92,10 +92,34 @@ value, including 1M defaults:
   reported distance.
 
 The tab disables the Edge Budget input in shortest mode; API callers
-passing `graph_edge_limit_bodyid` get the full un-floored graph here.
+passing `graph_edge_limit_bodyid` still get the full un-floored graph here
+because the setting is ignored.
 The **Max Paths (BodyId)** input is the knob that bounds this mode —
 shortest mode can therefore be tau-bounded by the StrongestFirst path
 budget, but is never Edge-Budget-floored.
+
+## Applied threshold and bottleneck provenance
+
+The exported parameters distinguish the requested Min Synapse Count from the
+cutoff that describes the materialized output. In every run,
+`applied_threshold` is the canonical equivalent threshold and
+`applied_threshold_source` identifies whether it came from the request or a
+budget. The related values are:
+
+| Value | Meaning |
+| --- | --- |
+| `requested_threshold` | Min Synapse Count entered by the user. |
+| `applied_threshold` / `tau_canonical` | Minimal threshold that reproduces the output. When the StrongestFirst budget bites, this is `w2 + 1`; in an unbitten run it is the requested threshold. |
+| `strongest_first_budget`, `strongest_first_budget_bitten` | Effective Max Paths (BodyId) budget and whether it was reached. |
+| `tau` / `strongest_first_tau` | StrongestFirst landing/collapse bound; the weakest retained bottleneck at the budget boundary, not always the minimal applied threshold. |
+| `w2` / `strongest_dropped_bottleneck` | Strongest path bottleneck omitted by the budget. The interval `[w2 + 1, tau]` yields the same path set. |
+| `W*` / `strongest_retained_bottleneck` | Widest-path ceiling after lossless pruning. |
+| `edge_budget`, `w0`, `w1` | Shortest mode never applies this graph budget: `edge_budget` is not applied and `edge_weight_floor`/`edge_budget_landing` remain empty. These values are active only in Complete Paths. |
+| `paths_complete` | Whether all shortest paths within the explored graph/depth bound were emitted; `false` means the StrongestFirst path budget bounded the output. |
+
+The same provenance block is written to `parameters.txt`,
+`all_attributes.json`, and `data_details/parameters.csv`, and is shown in the
+exported `_UserGuide_please_read_me` files.
 
 ## Drop Untyped Neurons
 
@@ -159,7 +183,7 @@ API callers get identical behavior.
 Same layout as Find All Paths (see the Complete Paths guide):
 
 ```
-{output_dir}/find-paths-shortest_MCNS_aMe12_to_PPL101_L1w3r0p0_20260815_142717/
+{output_dir}/find-paths-shortest_MCNS_aMe12_to_PPL101_L1w3_20260815_142717/
   aMe12_to_PPL101_allpaths_type.csv  # shortest paths (same columns as Find All Paths)
   source_neurons.csv, target_neurons.csv  # enrollment/status details
   all_attributes.json

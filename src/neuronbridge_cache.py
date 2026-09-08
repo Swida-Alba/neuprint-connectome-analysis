@@ -26,9 +26,9 @@ from typing import Any, Iterable, Optional
 import pandas as pd
 
 try:
-    from .flywire_ids import is_flywire_dataset, normalize_flywire_body_id
+    from .flywire_ids import is_local_connectome_dataset, normalize_flywire_body_id
 except ImportError:
-    from flywire_ids import is_flywire_dataset, normalize_flywire_body_id
+    from flywire_ids import is_local_connectome_dataset, normalize_flywire_body_id
 
 
 PARQUET_CACHE_VERSION = 1
@@ -215,7 +215,7 @@ class NeuronBridgeParquetCache:
             frame["bodyId"] = ""
         frame["bodyId"] = [
             normalize_flywire_body_id(value, field="bodyId")
-            if is_flywire_dataset(dataset)
+            if is_local_connectome_dataset(dataset)
             else str(value)
             for value, dataset in zip(frame["bodyId"], frame["dataset"])
         ]

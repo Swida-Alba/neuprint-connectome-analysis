@@ -15,8 +15,8 @@ Use the exact identifiers below. Version suffixes are significant.
 | `banc_v888` | Public BANC bucket (auto-prepared) | no token; neuron metadata + connections auto-download on first use; manual Codex files remain an offline fallback |
 | `banc_v626` | Public BANC bucket (auto-prepared) | legacy BANC release; same public-bucket preparation |
 
-Validate local FlyWire file layout with the repository's integration guides
-before running a large query; BANC validity is checked by
+Validate local FAFB file layout with the repository's integration guides
+before running a large query; standalone BANC validity is checked by
 `BANC_file_converter.ensure_banc_data` (bucket preparation or local files).
 Do not substitute a similarly named dataset silently.
 
@@ -87,7 +87,7 @@ user confirms that it can be removed.
 - `use_cache=True` is the default for repeat work.
 - `cache_only=True` prevents remote fallback and should be used only when cache
   coverage is known.
-- FlyWire/BANC local files and NeuPrint caches are different resources; one does
+- FAFB, standalone BANC, and NeuPrint caches are different resources; one does
   not replace the other.
 - A missing token and a missing local file are different failures. Report which
   one occurred.

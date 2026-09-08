@@ -18,8 +18,8 @@ defines this completion contract.
 
 ## 🆕 Recent Updates (January 2026) - V4.4.0
 
-### 🚀 Local FAFB/BANC Dataset Support (RECOMMENDED)
-- **Local-first architecture**: Store FlyWire datasets locally for 10-100x faster access
+### 🚀 Local FAFB + Standalone BANC Dataset Support (RECOMMENDED)
+- **Local-first architecture**: Store FAFB locally and prepare BANC from its own public release bucket for 10-100x faster access
 - **Mixed mode**: Seamlessly combines local cache + API fallback  
 - **Zero API latency**: Instant queries for cached neurons
 - **Automatic caching**: Build your cache once, reuse forever
@@ -55,7 +55,7 @@ defines this completion contract.
 - **📖 [NeuronBridge Integration Guide](./core-features/NeuronBridge_Guide.md)** - Complete guide with examples
   - Bidirectional search: EM body ID → LM driver lines, and vice versa
   - CDS and PPPM matching with combined ranking
-  - Multi-dataset support (hemibrain, male-cns, FlyWire FAFB/BANC)
+  - Multi-dataset support (hemibrain, male-cns, FAFB, standalone BANC)
   - Batch processing with automatic result aggregation
   - Image download integration with FlyLight
   - **Specificity/Selectivity Analysis**: Use `NeuronBridge_Colabel.py` for detailed line analysis
@@ -90,7 +90,7 @@ defines this completion contract.
 - **✨ [Homolog Finding Guide](./core-features/HomologFinding_Guide.md)** - Find homologous neurons across datasets using connectivity profiles
 - **✨ [Cross-Dataset Comparison Guide](./core-features/CrossDatasetComparison_Guide.md)** - Compare connectivity across hemibrain, male-cns, FlyWire, and more
 - **✨ [Connectivity Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)** - Verify neuron types using connectivity fingerprints
-- **[BANC Integration](./BANC_INTEGRATION.md)** - Added support for BANC dataset (FlyWire-based).
+- **[BANC Integration](./BANC_INTEGRATION.md)** - Standalone BANC public-release support (no FlyWire/CAVE dependency).
 - **[Visualization Guides](visualizations/README.md)** - Visualization docs and update summaries.
 - **[VisualizePath Updates Nov 2025](./visualizations/VisualizePath_Updates_Nov2025.md)** - Detailed guide on connection matrix support and new features.
 - **[vispath-subproject README](../vispath-subproject/README.md)** - Corrected data format documentation
@@ -174,7 +174,7 @@ Advanced technical documentation:
 - **[Troubleshooting](./TROUBLESHOOTING.md)**: Common issues and solutions
 - **[Output Files Reference](./OUTPUT_FILES.md)**: Detailed explanation of all generated files
 - **[FlyWire-FAFB Integration](./FAFB_INTEGRATION.md)**: Setup guide for FAFB dataset
-- **[FlyWire-BANC Integration](./BANC_INTEGRATION.md)**: Setup guide for BANC dataset
+- **[BANC Integration](./BANC_INTEGRATION.md)**: Setup guide for the standalone BANC public release
 
 ### Visualization Guides
 - **[Heatmap Guide](./visualizations/Heatmap_Guide.md)**: Complete heatmap documentation

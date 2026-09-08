@@ -59,6 +59,9 @@ Thumbs.db
 # Local planning docs (next-version plans, not committed)
 _plan/
 
+# Local audit reports and machine-readable audit artifacts
+docs/audits/
+
 # Temporary files
 *.tmp
 *.bak

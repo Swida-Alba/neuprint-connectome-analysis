@@ -1709,8 +1709,8 @@ class TestSimplificationPipeline:
 
 class TestFlywireIsolation:
     """The shared simplify + compress pipeline must never leak into the
-    FlyWire/FAFB/BANC workflow: no re-leveling of meshes, no simplified raw
-    skeletons, no .swc.zst skeleton artifacts from FlyWire fetches."""
+    FAFB/BANC local-release workflow: no re-leveling of meshes, no simplified raw
+    skeletons, no .swc.zst skeleton artifacts from FAFB fetches."""
 
     def test_relevel_never_touches_meshes(self, tmp_path, monkeypatch):
         mesh = cube_mesh()
@@ -2083,7 +2083,7 @@ class TestRoiProfileFirst:
 
 
 class TestFlyWireNblast:
-    """NBLAST on FlyWire datasets: FAFB has real skeleton sources (the
+    """NBLAST on FAFB: it has real skeleton sources (the
     healed skeleton bundle + CAVE fallback), so NBLAST is not blanket-
     blocked; dotprops prefer the bundle's skeletons over the local mesh
     pickle cache."""
@@ -2613,7 +2613,7 @@ class TestFafbBundleLocalSources:
 
     def test_download_all_skeletons_disabled_for_fafb(self, tmp_path,
                                                       monkeypatch):
-        """Download All Skeletons is disabled for FlyWire datasets: the
+        """Download All Skeletons is disabled for FAFB: the
         call raises the explicit manual-download instruction (mirroring the
         file converter) instead of fetching meshes."""
         self._write_bundle(tmp_path, [2, 3])

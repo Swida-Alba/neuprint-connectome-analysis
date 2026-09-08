@@ -1333,7 +1333,8 @@ try:
         body_id_to_api_int,
         dataset_folder,
         is_banc_dataset,
-        is_flywire_dataset,
+        is_fafb_dataset,
+        is_local_connectome_dataset,
         normalize_flywire_body_id,
         normalize_flywire_body_ids,
         normalize_flywire_id_columns,
@@ -1344,7 +1345,8 @@ except ImportError:
         body_id_to_api_int,
         dataset_folder,
         is_banc_dataset,
-        is_flywire_dataset,
+        is_fafb_dataset,
+        is_local_connectome_dataset,
         normalize_flywire_body_id,
         normalize_flywire_body_ids,
         normalize_flywire_id_columns,
@@ -1451,6 +1453,7 @@ class FindNeuronConnection:
         self._min_synapse_excluded = False
         self._depth_cap_reached = False
         self._shortest_backward_active = False
+        self._pathfinding_filters_disabled = False
         self._shortest_scope_limited = False
         self._shortest_bodyid_pairs_may_be_missing = False
         self._shortest_target_hop_limits = {}
@@ -2526,7 +2529,7 @@ class FindNeuronConnection:
         if not self.use_cache:
             self.force_API_fetching = True
             self._vprint(
-                "use_cache=False: FlyWire is in online-only mode; "
+                "use_cache=False: FAFB is in online-only mode; "
                 "local connection/index caches will not be used.",
                 level='simple',
             )
@@ -2599,10 +2602,8 @@ class FindNeuronConnection:
         ever route them into the NeuPrint or FlyWire machinery — whether
         the caller left the 'neuprint' default or explicitly passed
         'neuprint'/'banc'.  Other values are rejected.  The BANC check
-        runs FIRST: ``is_flywire_dataset`` deliberately includes BANC
-        ("FAFB and BANC are both FlyWire datasets"), and without the
-        ordering a default-'neuprint' BANC init flipped to 'flywire' —
-        the mislabel behind audit defects BANC-09 #1–#3.
+        runs FIRST: BANC is normalized to its standalone public-bucket client;
+        only FAFB is auto-detected as the FlyWire/Codex-backed client.
         """
         if is_banc_dataset(self.dataset):
             if self.client_type not in ('neuprint', 'banc'):
@@ -2616,7 +2617,7 @@ class FindNeuronConnection:
                 self._vprint(f"Auto-detected client_type='banc' from dataset '{self.dataset}'", level='full')
             return
 
-        if self.client_type == 'neuprint' and is_flywire_dataset(self.dataset):
+        if self.client_type == 'neuprint' and is_fafb_dataset(self.dataset):
             self.client_type = 'flywire'
             self._vprint(f"Auto-detected client_type='flywire' from dataset '{self.dataset}'", level='full')
 
@@ -2753,7 +2754,7 @@ class FindNeuronConnection:
     '''flywire client adapter (deprecated)'''
 
     version: int | None = None
-    '''Materialization version for FlyWire (e.g. 783). If None, uses default/latest.'''
+    '''Materialization version for FAFB (e.g. 783). If None, uses default/latest.'''
     
     force_API_fetching: bool = False
     '''
@@ -2761,7 +2762,7 @@ class FindNeuronConnection:
     This fetches connection data directly from the CAVE API instead of local files.
     When False (default), use local data from datasets/ folder via file converter.
     ``use_cache=False`` also forces the online-only CAVE path and does not read
-    or write DROCAT/FlyWire cache files.
+    or write DROCAT/FAFB cache files.
     Note: BANC currently does not support force_API_fetching due to API access restrictions.
     '''
     
@@ -2812,23 +2813,31 @@ class FindNeuronConnection:
     
     min_ratio: float = 0.0
     '''
-    minimum connection ratio (weight/post) to be considered as connection\n
-    connection ratio is calculated as w_ij / W_j\n
-    where w_ij is the number of synapses from neuron i to neuron j and W_j is the total number of post-synaptic sites of neuron j\n
-    This is the direct ratio without the 0.3 scaling factor used in traversal_probability
+    Minimum connection ratio (weight/post) for APIs that explicitly apply
+    ratio filtering, such as direct connection queries.  In the shared
+    FindAllPath/FindShortestPath pipeline this value is retained for
+    compatibility and exported as a readout definition; it does not filter
+    the pathfinding graph.  The ratio is calculated as w_ij / W_j, where w_ij
+    is the number of synapses from neuron i to neuron j and W_j is the total
+    number of post-synaptic sites of neuron j.
     '''
     
     min_traversal_probability: float = 0.0
     '''
-    minimum traversal probability to be considered as connection\n
-    traversal probability is calculated as \n
-    max{1, w_ij / (W_j*0.3)}\n
-    where w_ij is the number of synapses from neuron i to neuron j and W_j is the total number of post-synaptic sites of neuron j
+    Minimum traversal probability for APIs that explicitly apply probability
+    filtering, such as direct connection queries.  In the shared
+    FindAllPath/FindShortestPath pipeline this value is retained for
+    compatibility and exported as a readout definition; it does not filter
+    the pathfinding graph.  The readout is ratio / 0.3, capped at 1.0.
     '''
     
     filter_by: str = 'bodyId'
     '''
-    Level at which to apply min_synapse_num, min_ratio, and min_traversal_probability filters\n
+    Level at which to apply the active connection filters.  The shared
+    FindAllPath/FindShortestPath pipeline applies only min_synapse_num here;
+    min_ratio and min_traversal_probability remain readout columns there.
+    Direct and legacy connection APIs may still use the ratio/probability
+    filters.\n
     - 'bodyId': Filter at individual neuron (bodyId) level (default)\n
     - 'type': Filter at aggregated type-to-type level after grouping connections by type\n
     When 'type' is used, connections between neurons of the same type are merged first,\n
@@ -3322,7 +3331,7 @@ class FindNeuronConnection:
         # _query_connection_db previously recomputed it (cast + unique over
         # the FULL DB) on every fetch call.
         self._conn_db_pre_id_cache = None
-        # Local FAFB/FlyWire connection table: (mtime, DataFrame), so layer
+        # Local FAFB connection table: (mtime, DataFrame), so layer
         # fetches stop re-reading the multi-million-row CSV each time.
         self._fafb_local_conn_cache = None
         self._banc_local_conn_cache = None
@@ -3334,11 +3343,9 @@ class FindNeuronConnection:
         
         self._vprint('Initializing...', level='full')
 
-        # Normalize client_type from the dataset.  BANC lands on its own
-        # standalone 'banc' source, parallel to 'flywire' and 'neuprint'
-        # (integration plan §I) — the legacy flywire auto-detect that used
-        # to flip BANC to 'flywire' lives inside _normalize_client_type,
-        # BANC-first, so it can never mislabel a BANC dataset again.
+        # Normalize client_type from the dataset. BANC lands on its own
+        # standalone 'banc' source, parallel to 'flywire' and 'neuprint',
+        # and can never be mislabeled as FAFB/FlyWire.
         self._normalize_client_type()
 
         # Auto-detect version from dataset if not provided
@@ -3350,9 +3357,8 @@ class FindNeuronConnection:
                 self.version = int(match.group(1))
                 self._vprint(f"Auto-detected version={self.version} from dataset '{self.dataset}'", level='full')
         
-        # Prepare the local data source: FlyWire (FAFB) from local files or
-        # CAVE; BANC from its standalone public-bucket fetch (no auth, no
-        # server — neither FlyWire nor NeuPrint).
+        # Prepare the local data source: FAFB from local files or CAVE; BANC
+        # from its standalone public-bucket fetch (no auth, no server).
         if is_banc_dataset(self.dataset):
             self._prepare_banc_data()
         elif self.client_type == 'flywire':
@@ -3615,10 +3621,8 @@ class FindNeuronConnection:
         the instance fields / defaults when not supplied.
         '''
         if self.client_type in ('flywire', 'banc'):
-            # Nothing to download: FlyWire uses local files or the CAVE
-            # API, and BANC's bucket-prepared tables are complete by
-            # construction (it has no ROI data, so the ROI-count check
-            # below could never pass anyway).
+            # Nothing to download: FAFB uses local files or the CAVE API,
+            # and BANC's bucket-prepared tables are complete by construction.
             return
         
         # In cache-only mode, skip download attempts
@@ -3694,7 +3698,7 @@ class FindNeuronConnection:
         index_folder = os.path.join(self.script_path, 'neuron_indexes', dataset_safe)
         datasets_folder = (
             resolve_flywire_dataset_dir(self.script_path, self.dataset)
-            if is_flywire_dataset(self.dataset)
+            if is_local_connectome_dataset(self.dataset)
             else Path(self.script_path) / 'datasets' / dataset_safe
         )
         datasets_folder = Path(datasets_folder) if datasets_folder is not None else (
@@ -4165,7 +4169,13 @@ class FindNeuronConnection:
         search_path = self._get_neuron_search_cache_path()
         try:
             source_columns = metadata_columns(source)
-            expected_columns = list(dict.fromkeys((*source_columns, *OPERATIONAL_COLUMNS)))
+            # ``read_metadata_projection`` always materializes these two
+            # identity columns, even when a provider's table omits them.  The
+            # expected schema must include them too; otherwise every future
+            # instance re-detects the same index as stale and rebuilds it.
+            expected_columns = list(dict.fromkeys((
+                *source_columns, 'type', 'instance', *OPERATIONAL_COLUMNS
+            )))
             expected_order = ordered_projection_columns(expected_columns)
             existing_order = []
             index_mtime = 0
@@ -4201,7 +4211,17 @@ class FindNeuronConnection:
         try:
             old = self._read_neuron_index_disk()
             frame = read_metadata_projection(source)
+            # A blank body ID cannot be addressed by the index and would
+            # collapse unrelated malformed rows into one key.  Ignore such
+            # source rows before the uniqueness check; valid future releases
+            # may contain placeholder rows alongside real neurons.
+            frame = frame.filter(
+                pl.col('bodyId').cast(pl.Utf8, strict=False)
+                .fill_null('').str.strip_chars() != ''
+            )
             frame = frame.unique(subset=['bodyId'], keep='first')
+            if frame.height == 0:
+                raise ValueError('metadata projection has no usable bodyIds')
 
             # Preserve cache state and any labels obtained from the API when
             # the freshly pulled table leaves a field blank.
@@ -4514,7 +4534,7 @@ class FindNeuronConnection:
                     self._conn_df_cache = pl.from_pandas(self._conn_df_cache)
                 except Exception:
                     pass
-            if is_flywire_dataset(self.dataset) and hasattr(
+            if is_local_connectome_dataset(self.dataset) and hasattr(
                 self._conn_df_cache, 'with_columns'
             ):
                 self._conn_df_cache = self._conn_df_cache.with_columns([
@@ -4540,7 +4560,7 @@ class FindNeuronConnection:
             dataset_safe = dataset_folder(self.dataset)
             dataset_dir = (
                 resolve_flywire_dataset_dir(self.script_path, self.dataset)
-                if is_flywire_dataset(self.dataset)
+                if is_local_connectome_dataset(self.dataset)
                 else Path(self.script_path) / 'datasets' / dataset_safe
             )
 
@@ -4663,7 +4683,7 @@ class FindNeuronConnection:
                         lazy_frames.append(
                             self._scan_connection_cache_file(
                                 path,
-                                normalize_ids=is_flywire_dataset(self.dataset),
+                                normalize_ids=is_local_connectome_dataset(self.dataset),
                             )
                         )
                     except Exception as exc:
@@ -4745,7 +4765,7 @@ class FindNeuronConnection:
                 ids = (
                     self._scan_connection_cache_file(
                         path,
-                        normalize_ids=is_flywire_dataset(self.dataset),
+                        normalize_ids=is_local_connectome_dataset(self.dataset),
                     )
                     .select('bodyId_pre')
                     .filter(pl.col('bodyId_pre').is_not_null())
@@ -5009,7 +5029,7 @@ class FindNeuronConnection:
             # batch files can be consolidated even when their schemas differ.
             lazy_frames = [
                 self._scan_connection_cache_file(
-                    f, normalize_ids=is_flywire_dataset(self.dataset)
+                    f, normalize_ids=is_local_connectome_dataset(self.dataset)
                 )
                 for f in all_files
             ]
@@ -5183,7 +5203,7 @@ class FindNeuronConnection:
                 if file_size_mb > 1:
                     self._vprint(f'  ⏳ Loading neuron index ({file_size_mb:.1f} MB)...', level='full')
                 df = self._read_neuron_index_disk()
-                if is_flywire_dataset(self.dataset):
+                if is_local_connectome_dataset(self.dataset):
                     normalize_flywire_id_columns(df, ['bodyId'])
                 
                 if file_size_mb > 1:
@@ -5537,7 +5557,7 @@ class FindNeuronConnection:
         # the large pulled CSV during every fetch/update call.
         upstream_ids = set(
             normalize_flywire_body_ids(upstream_bodyIds)
-            if is_flywire_dataset(self.dataset)
+            if is_local_connectome_dataset(self.dataset)
             else [str(body_id) for body_id in upstream_bodyIds]
         )
         if (
@@ -5557,7 +5577,7 @@ class FindNeuronConnection:
         # Keep the old fallback for those entries, but only fetch missing IDs.
         if missing_ids:
             dataset_safe = dataset_folder(self.dataset)
-            if is_flywire_dataset(self.dataset):
+            if is_local_connectome_dataset(self.dataset):
                 dataset_dir = resolve_flywire_dataset_dir(
                     self.script_path, self.dataset
                 )
@@ -5579,7 +5599,7 @@ class FindNeuronConnection:
             self._vprint(f'  ⏳ Loading neuron metadata for {len(missing_ids):,} neurons...', level='full')
             if dataset_path is not None:
                 ndf_complete = self._load_local_neuron_df(
-                    dataset_path, is_flywire_dataset(self.dataset)
+                    dataset_path, is_local_connectome_dataset(self.dataset)
                 )
                 extra = ndf_complete[
                     ndf_complete['bodyId'].astype(str).isin(missing_ids)
@@ -5606,7 +5626,7 @@ class FindNeuronConnection:
                                 list(missing_ids),
                                 columns=['bodyId', 'type', 'instance', 'post'],
                             )
-                            if is_flywire_dataset(self.dataset)
+                            if is_local_connectome_dataset(self.dataset)
                             else self._fetch_neurons_batched(list(missing_ids))
                         )
                         extra = ndf[['bodyId', 'type', 'instance', 'post']].copy()
@@ -5626,7 +5646,7 @@ class FindNeuronConnection:
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         bodyids_str = (
             normalize_flywire_body_ids(upstream_bodyIds)
-            if is_flywire_dataset(self.dataset)
+            if is_local_connectome_dataset(self.dataset)
             else [str(body_id) for body_id in upstream_bodyIds]
         )
         bodyids_set = set(bodyids_str)
@@ -5762,7 +5782,7 @@ class FindNeuronConnection:
 
         bodyids_str = (
             normalize_flywire_body_ids(bodyids)
-            if is_flywire_dataset(self.dataset)
+            if is_local_connectome_dataset(self.dataset)
             else [str(x) for x in bodyids]
         )
         bodyids_set = set(bodyids_str)
@@ -5787,7 +5807,7 @@ class FindNeuronConnection:
         # IDs absent from the compact index.
         if missing_ids:
             dataset_safe = dataset_folder(self.dataset)
-            if is_flywire_dataset(self.dataset):
+            if is_local_connectome_dataset(self.dataset):
                 dataset_dir = resolve_flywire_dataset_dir(
                     self.script_path, self.dataset
                 )
@@ -5808,7 +5828,7 @@ class FindNeuronConnection:
             )
             if dataset_path is not None:
                 ndf_complete = self._load_local_neuron_df(
-                    dataset_path, is_flywire_dataset(self.dataset)
+                    dataset_path, is_local_connectome_dataset(self.dataset)
                 )
             else:
                 ndf_complete = pd.DataFrame(columns=['bodyId', 'type', 'instance', 'post'])
@@ -5930,7 +5950,7 @@ class FindNeuronConnection:
                     conn_df['bodyId_pre'].tolist()
                     + conn_df['bodyId_post'].tolist()
                 )
-                if is_flywire_dataset(self.dataset) else
+                if is_local_connectome_dataset(self.dataset) else
                 [str(body_id) for body_id in
                  conn_df['bodyId_pre'].tolist()
                  + conn_df['bodyId_post'].tolist()]
@@ -5938,7 +5958,7 @@ class FindNeuronConnection:
         )
         
         neuron_info = self._build_neuron_info_frame(
-            all_bodyids, is_flywire_dataset(self.dataset)
+            all_bodyids, is_local_connectome_dataset(self.dataset)
         )
         # Same primary-NT pick order as inside _build_neuron_info_frame
         nt_col_to_use = next(
@@ -6056,7 +6076,7 @@ class FindNeuronConnection:
             )
             neuron_df = self._ensure_hemisphere_columns(neuron_df)
         else:
-            # Check for dataset in subfolder (common for FlyWire/FAFB)
+            # Check for dataset in subfolder (common for local FAFB/BANC releases)
             if dataset_path is not None and not os.path.exists(dataset_path):
                 # Fallback for legacy or different naming
                 subfolder_path = os.path.join(
@@ -6169,14 +6189,14 @@ class FindNeuronConnection:
                     conn_pl['bodyId_pre'].to_list()
                     + conn_pl['bodyId_post'].to_list()
                 )
-                if is_flywire_dataset(self.dataset) else
+                if is_local_connectome_dataset(self.dataset) else
                 [str(body_id) for body_id in
                  conn_pl['bodyId_pre'].to_list()
                  + conn_pl['bodyId_post'].to_list()]
             )
         )
         neuron_info = self._build_neuron_info_frame(
-            all_bodyids, is_flywire_dataset(self.dataset)
+            all_bodyids, is_local_connectome_dataset(self.dataset)
         )
         nt_col_to_use = next(
             (col for col in ('nt_type', 'consensusNt', 'predictedNt')
@@ -6484,7 +6504,7 @@ class FindNeuronConnection:
         if not bodyIds:
             return pd.DataFrame()
 
-        if is_flywire_dataset(self.dataset):
+        if is_local_connectome_dataset(self.dataset):
             bodyIds = normalize_flywire_body_ids(bodyIds)
 
         # Ensure hemisphere info available when separating hemispheres
@@ -6637,7 +6657,7 @@ class FindNeuronConnection:
         --------
         pd.DataFrame : Neuron information dataframe
         '''
-        is_flywire = is_flywire_dataset(self.dataset)
+        is_flywire = is_local_connectome_dataset(self.dataset)
 
         # ``use_cache=False`` is online-only.  Do not inspect converted
         # neuron tables; use the dataset API below instead.
@@ -6761,7 +6781,7 @@ class FindNeuronConnection:
                 if col not in columns:
                     columns.append(col)
 
-        is_flywire = is_flywire_dataset(self.dataset)
+        is_flywire = is_local_connectome_dataset(self.dataset)
 
         # In online-only mode type resolution must also come from the API.
         # CAVEDataFetcher searches the public annotation/tag table; a legacy
@@ -6918,9 +6938,18 @@ class FindNeuronConnection:
     
     def _get_cave_fetcher(self):
         '''
-        Get or create a persistent CAVEDataFetcher instance.
+        Get or create a persistent FAFB CAVEDataFetcher instance.
         Reuses existing fetcher to avoid reconnecting to CAVE server repeatedly.
+
+        BANC is a standalone public-release source and has no CAVE fallback.
+        Keep this guard at the adapter boundary so a future caller cannot
+        accidentally turn a BANC connection request into a FAFB query.
         '''
+        if is_banc_dataset(self.dataset):
+            raise RuntimeError(
+                f"BANC dataset '{self.dataset}' does not use CAVE; "
+                "use its locally prepared public-release tables instead."
+            )
         if self._cave_fetcher is None:
             from cave_data_fetcher import CAVEDataFetcher
             
@@ -6935,7 +6964,7 @@ class FindNeuronConnection:
     def _fetch_connections_with_cave_api(self, upstream_bodyIds, downstream_bodyIds=None,
                                          min_weight=None, min_traversal_prob=None, min_conn_ratio=None):
         '''
-        Fetch connections using CAVE API for FAFB/FlyWire datasets.
+        Fetch connections using the CAVE API for FAFB datasets.
         Results are cached in API_cache/ only when ``use_cache=True``; with
         ``use_cache=False`` they remain in memory for the current run.
         
@@ -6956,6 +6985,11 @@ class FindNeuronConnection:
         --------
         pd.DataFrame : Connection table filtered by specified criteria
         '''
+        if is_banc_dataset(self.dataset):
+            raise RuntimeError(
+                f"BANC dataset '{self.dataset}' has no CAVE connection path; "
+                "use its locally prepared public-release tables."
+            )
         if min_weight is None:
             min_weight = self.min_synapse_num
         if min_traversal_prob is None:
@@ -6963,7 +6997,7 @@ class FindNeuronConnection:
         if min_conn_ratio is None:
             min_conn_ratio = self.min_ratio
 
-        if is_flywire_dataset(self.dataset):
+        if is_local_connectome_dataset(self.dataset):
             upstream_bodyIds = normalize_flywire_body_ids(upstream_bodyIds)
             if downstream_bodyIds is not None:
                 downstream_bodyIds = normalize_flywire_body_ids(downstream_bodyIds)
@@ -7486,8 +7520,42 @@ class FindNeuronConnection:
         if not downstream_bodyIds:
             return self._empty_path_connection_frame()
 
-        if is_flywire_dataset(self.dataset):
-            # A cache-enabled FlyWire installation may have a complete local
+        if is_banc_dataset(self.dataset):
+            # BANC incoming rows come from its own per-version merged table;
+            # never ask FAFB's converter or CAVE for them.
+            if self.use_cache:
+                dataset_safe = dataset_folder(self.dataset)
+                data_dir = resolve_flywire_dataset_dir(
+                    self.script_path, self.dataset)
+                candidates = []
+                if data_dir is not None:
+                    candidates.extend([
+                        data_dir / f'{data_dir.name}_merged_connections.parquet',
+                        data_dir / f'{dataset_safe}_merged_connections.parquet',
+                    ])
+                merged_path = next((path for path in candidates if path.exists()), None)
+                if merged_path is not None:
+                    try:
+                        full_conn = pd.read_parquet(merged_path)
+                        for column in ('bodyId_pre', 'bodyId_post'):
+                            if column in full_conn.columns:
+                                full_conn[column] = full_conn[column].astype(str)
+                        return full_conn[
+                            full_conn['bodyId_post'].isin(downstream_bodyIds)
+                        ].copy()
+                    except Exception as exc:
+                        self._vprint(
+                            f'  ⚠️ Local BANC incoming lookup failed: {exc}',
+                            level='full')
+            raise RuntimeError(
+                f'BANC incoming connections require the locally prepared '
+                f'tables for {self.dataset} (run '
+                f'BANC_file_converter.ensure_banc_data); there is no CAVE '
+                f'connectivity fallback for BANC.'
+            )
+
+        if is_fafb_dataset(self.dataset):
+            # A cache-enabled FAFB installation may have a complete local
             # merged table even when the requested post IDs are not in the
             # connection cache yet. Prefer it before contacting CAVE.
             if self.use_cache:
@@ -7517,19 +7585,6 @@ class FindNeuronConnection:
                         f'  ⚠️ Local FlyWire incoming lookup failed: {exc}',
                         level='full',
                     )
-
-            if is_banc_dataset(self.dataset):
-                # BANC connections live only in the locally prepared merged
-                # table; there is no CAVE connectivity fallback (the BANC
-                # datastack has no synapse view), so an attempt would just
-                # silently return nothing. Raise so the caller's warning-note
-                # machinery reports the real cause.
-                raise RuntimeError(
-                    f'BANC incoming connections require the locally prepared '
-                    f'tables for {self.dataset} '
-                    f'(run BANC_file_converter.ensure_banc_data); there is '
-                    f'no CAVE connectivity fallback for BANC.'
-                )
 
             fetcher = self._get_cave_fetcher()
             incoming = fetcher.fetch_connections(
@@ -7875,7 +7930,7 @@ class FindNeuronConnection:
         # is intentionally cache-enabled only: no-cache FlyWire runs
         # are routed through CAVE above and must not inspect local
         # merged-connection tables.
-        if self.use_cache and is_flywire_dataset(self.dataset):
+        if self.use_cache and is_fafb_dataset(self.dataset):
             try:
                 import fafb_utils
                 project_root = os.path.dirname(os.path.dirname(__file__))
@@ -7972,7 +8027,7 @@ class FindNeuronConnection:
                 self._vprint("  Skipping the online fetch: BANC has no NeuPrint connectivity API.", level='full')
                 return None
             # Check if we should enforce local-only for FAFB/FlyWire
-            if is_flywire_dataset(self.dataset):
+            if is_local_connectome_dataset(self.dataset):
                 self._vprint(f"\n  ⚠️  Local connection data not found for dataset '{self.dataset}'.", level='full')
                 self._vprint("  Please download the synapse table from: https://codex.flywire.ai/api/download?dataset=fafb", level='full')
                 self._vprint(f"  Save the file to: datasets/{self.dataset.replace(':', '_')}", level='full') 
@@ -8158,8 +8213,8 @@ class FindNeuronConnection:
         Fetch connections with v4.0 pair-level caching.
         Queries unified database first, only fetches missing neurons from API.
         
-        When force_API_fetching=True for FAFB/FlyWire, or when
-        use_cache=False:
+        When force_API_fetching=True for FAFB, or when use_cache=False in an
+        online-only FAFB run:
         - Uses CAVE API instead of local files
         - Caches API results in API_cache/ only when caching is enabled
         
@@ -8188,15 +8243,15 @@ class FindNeuronConnection:
         if min_conn_ratio is None:
             min_conn_ratio = self.min_ratio
 
-        if is_flywire_dataset(self.dataset):
+        if is_local_connectome_dataset(self.dataset):
             upstream_bodyIds = normalize_flywire_body_ids(upstream_bodyIds)
             if downstream_bodyIds is not None:
                 downstream_bodyIds = normalize_flywire_body_ids(downstream_bodyIds)
 
-        # Check if we should use CAVE API (force_API_fetching for FAFB/FlyWire)
+        # Check if we should use CAVE API (force_API_fetching for FAFB)
         use_cave_api = (
             (self.force_API_fetching or not self.use_cache)
-            and is_flywire_dataset(self.dataset)
+            and is_local_connectome_dataset(self.dataset)
             and not is_banc_dataset(self.dataset)
         )
 
@@ -8248,7 +8303,7 @@ class FindNeuronConnection:
                     uncached_upstream, downstream_bodyIds
                 )
                 if fetched is None:
-                    # Local connection data absent for a FAFB/FlyWire dataset
+                    # Local connection data absent for a FAFB/BANC release
                     return pd.DataFrame()
                 api_conn = fetched
 
@@ -8366,7 +8421,7 @@ class FindNeuronConnection:
         # once at the boundary.
         use_cave_api = (
             (self.force_API_fetching or not self.use_cache)
-            and is_flywire_dataset(self.dataset)
+            and is_local_connectome_dataset(self.dataset)
             and not is_banc_dataset(self.dataset)
         )
         if use_cave_api:
@@ -8402,7 +8457,7 @@ class FindNeuronConnection:
                     uncached_upstream, downstream_bodyIds
                 )
                 if fetched is None:
-                    # Local connection data absent for a FAFB/FlyWire dataset
+                    # Local connection data absent for a FAFB/BANC release
                     return self._empty_path_connection_frame_polars()
                 api_conn = fetched
                 if self.use_cache:
@@ -8602,7 +8657,7 @@ class FindNeuronConnection:
     def _fetch_flywire_incoming_weights_online(
         self, post_bodyIds, min_weight: int = 1
     ) -> pd.DataFrame:
-        """Fetch FlyWire incoming weights directly from CAVE.
+        """Fetch FAFB incoming weights directly from CAVE.
 
         This helper intentionally has no local-table or API-cache fallback.
         It is used only by online-only runs to keep ratio denominators on the
@@ -8689,7 +8744,7 @@ class FindNeuronConnection:
         # ``connections.parquet`` left by an older run.
         db_path = self._get_connection_db_path() if self.use_cache else ''
 
-        # Online-only FAFB/FlyWire runs fetch the denominator from CAVE.  They
+        # Online-only FAFB runs fetch the denominator from CAVE. They
         # must not inspect the converted local connection table or a stale
         # repository-relative connections.parquet.
         if self.client_type == 'flywire' and not self.use_cache:
@@ -8751,13 +8806,13 @@ class FindNeuronConnection:
             except Exception as e:
                 self._vprint(f'     ⚠️ Error querying connection DB: {e}', level='full')
         
-        # FlyWire/FAFB and BANC have no NeuPrint default client. If local
+        # FAFB and BANC have no NeuPrint default client. If local
         # data was not available, return a correctly typed empty result
         # rather than trying the NeuPrint fallback and producing a
         # misleading client error.
         if self.client_type in ('flywire', 'banc'):
             self._vprint(
-                '     ⚠️ Local FlyWire data unavailable for incoming weights',
+                '     ⚠️ Local FAFB/BANC data unavailable for incoming weights',
                 level='full',
             )
             return pd.DataFrame(
@@ -9305,7 +9360,7 @@ class FindNeuronConnection:
         dataset_safe = dataset_folder(self.dataset)
         dataset_dir = (
             resolve_flywire_dataset_dir(self.script_path, self.dataset)
-            if is_flywire_dataset(self.dataset)
+            if is_local_connectome_dataset(self.dataset)
             else Path(self.script_path) / 'datasets' / dataset_safe
         )
         dataset_dir = Path(dataset_dir) if dataset_dir is not None else (
@@ -9541,7 +9596,7 @@ class FindNeuronConnection:
                                 resolve_flywire_dataset_dir(
                                     self.script_path, self.dataset
                                 )
-                                if is_flywire_dataset(self.dataset)
+                                if is_local_connectome_dataset(self.dataset)
                                 else Path(self.script_path) / 'datasets' / dataset_safe
                             )
                             parquet_path = os.path.join(
@@ -9558,12 +9613,12 @@ class FindNeuronConnection:
                             elif os.path.exists(csv_path):
                                 ndf = self._read_csv(
                                     csv_path,
-                                    index_col=None if is_flywire_dataset(self.dataset) else 0,
+                                    index_col=None if is_local_connectome_dataset(self.dataset) else 0,
                                     dtype={'bodyId': 'string'}
-                                    if is_flywire_dataset(self.dataset) else None,
+                                    if is_local_connectome_dataset(self.dataset) else None,
                                     low_memory=False,
                                 )
-                            if ndf is not None and is_flywire_dataset(self.dataset):
+                            if ndf is not None and is_local_connectome_dataset(self.dataset):
                                 normalize_flywire_id_columns(ndf, ['bodyId'])
                         
                         if ndf is not None and 'type' in ndf.columns:
@@ -9933,7 +9988,7 @@ class FindNeuronConnection:
         if not upstream_bodyIds:
             return pd.DataFrame()
 
-        if is_flywire_dataset(self.dataset):
+        if is_local_connectome_dataset(self.dataset):
             upstream_bodyIds = normalize_flywire_body_ids(upstream_bodyIds)
             if downstream_bodyIds is not None:
                 downstream_bodyIds = normalize_flywire_body_ids(downstream_bodyIds)
@@ -9942,11 +9997,11 @@ class FindNeuronConnection:
             if status_callback is not None:
                 status_callback(msg)
         
-        # For FlyWire/FAFB, cache-enabled pulls use the converted local table.
-        # An online-only call must use CAVE instead and must never enter this
-        # local-table branch.
-        if is_flywire_dataset(self.dataset):
-            if not self.use_cache:
+        # FAFB cache-enabled pulls use the converted local table. BANC always
+        # uses its own converted public-release table, even when the caller
+        # disables the persistent cache: BANC has no CAVE fallback.
+        if is_local_connectome_dataset(self.dataset):
+            if not self.use_cache and is_fafb_dataset(self.dataset):
                 fetcher = self._get_cave_fetcher()
                 result = fetcher.fetch_connections(
                     [body_id_to_api_int(body_id) for body_id in upstream_bodyIds],
@@ -10007,7 +10062,20 @@ class FindNeuronConnection:
                     return result
             except Exception as e:
                 # Re-raise to let caller handle/log the error properly
-                raise RuntimeError(f"Bulk fetch error for FlyWire/FAFB: {type(e).__name__}: {e}") from e
+                source_name = 'BANC' if is_banc_dataset(self.dataset) else 'FAFB'
+                raise RuntimeError(
+                    f"Bulk fetch error for {source_name}: "
+                    f"{type(e).__name__}: {e}"
+                ) from e
+
+            # A local-release request must never fall through to the
+            # NeuPrint branch when its prepared table is absent.  In
+            # particular, BANC has no NeuPrint or CAVE fallback.
+            source_name = 'BANC' if is_banc_dataset(self.dataset) else 'FAFB'
+            raise RuntimeError(
+                f"Bulk fetch requires the prepared {source_name} local "
+                f"release table for {self.dataset}."
+            )
         
         # For NeuPrint: Direct API call without caching overhead
         # This is used by build_connection_cache which handles caching separately.
@@ -10165,7 +10233,7 @@ class FindNeuronConnection:
         # Try parquet first, then CSV
         dataset_dir = (
             resolve_flywire_dataset_dir(self.script_path, self.dataset)
-            if is_flywire_dataset(self.dataset)
+            if is_local_connectome_dataset(self.dataset)
             else Path(self.script_path) / 'datasets' / dataset_safe
         )
         if dataset_dir is None:
@@ -10192,14 +10260,14 @@ class FindNeuronConnection:
         if parquet_path is not None:
             try:
                 ndf = pd.read_parquet(parquet_path)
-                if is_flywire_dataset(self.dataset):
+                if is_local_connectome_dataset(self.dataset):
                     normalize_flywire_id_columns(ndf, ['bodyId'])
             except Exception:
                 pass
 
         if ndf is None and csv_path is not None:
             try:
-                if is_flywire_dataset(self.dataset):
+                if is_local_connectome_dataset(self.dataset):
                     ndf = self._read_csv(
                         csv_path, dtype={'bodyId': 'string'}, low_memory=False
                     )
@@ -10212,7 +10280,7 @@ class FindNeuronConnection:
         if ndf is not None and 'bodyId' in ndf.columns:
             return (
                 normalize_flywire_body_ids(ndf['bodyId'].tolist())
-                if is_flywire_dataset(self.dataset) else
+                if is_local_connectome_dataset(self.dataset) else
                 [str(x) for x in ndf['bodyId'].unique().tolist()]
             )
         
@@ -12658,7 +12726,8 @@ class FindNeuronConnection:
         # --- other operations that may tilt the outputs ---
         # Config-derived notes are written only when an output-affecting limit
         # was applied. The synapse-count cutoff is intentionally omitted;
-        # ratio and traversal-probability thresholds remain explicit below.
+        # ratio and traversal probability are readout columns in pathfinding,
+        # not active filtering thresholds.
         if getattr(self, 'edgeN_limit', 0) and getattr(self, '_edgeN_limit_reached', False):
             notes.append(
                 f'- [visualization edge limit] edgeN_limit={self.edgeN_limit}: '
@@ -12679,16 +12748,20 @@ class FindNeuronConnection:
                 'run at that threshold; see parameters.txt / '
                 'all_attributes.json for the full provenance block.'
             )
-        if getattr(self, 'min_ratio', 0) > 0:
-            notes.append(
-                f'- [threshold] min_ratio={self.min_ratio}: connections below this '
-                f'weight/post ratio were excluded.'
-            )
-        if getattr(self, 'min_traversal_probability', 0) > 0:
-            notes.append(
-                f'- [threshold] min_traversal_probability={self.min_traversal_probability}: '
-                f'paths below this traversal probability were excluded.'
-            )
+        if not getattr(self, '_pathfinding_filters_disabled', False):
+            # Direct connection/type-level runs still support these filters;
+            # preserve their warning notes. Complete/Shortest Paths set the
+            # flag below because ratio/probability are readout columns there.
+            if getattr(self, 'min_ratio', 0) > 0:
+                notes.append(
+                    f'- [threshold] min_ratio={self.min_ratio}: connections below this '
+                    f'weight/post ratio were excluded.'
+                )
+            if getattr(self, 'min_traversal_probability', 0) > 0:
+                notes.append(
+                    f'- [threshold] min_traversal_probability={self.min_traversal_probability}: '
+                    f'paths below this traversal probability were excluded.'
+                )
         keywords = getattr(self, 'keyword_in_path_to_remove', None) or []
         if isinstance(keywords, str):
             keywords = [keywords]
@@ -12870,8 +12943,6 @@ class FindNeuronConnection:
         param_suffix = (
             f"L{self.max_interlayer}"
             f"w{self.min_synapse_num}"
-            f"r{_format_decimal_for_folder(self.min_ratio)}"
-            f"p{_format_decimal_for_folder(self.min_traversal_probability)}"
             f"_{timestamp}"
         )
         
@@ -13431,7 +13502,7 @@ class FindNeuronConnection:
             f"{dataset_clean}_allneurons_neuron_df.csv"
         )
 
-        if is_flywire_dataset(self.dataset):
+        if is_local_connectome_dataset(self.dataset):
             dataset_dir = resolve_flywire_dataset_dir(
                 self.script_path, self.dataset
             )
@@ -13448,7 +13519,7 @@ class FindNeuronConnection:
                 (str(path) for path in candidates if path.exists()), None
             )
         
-        # Check for subdirectory structure (common for FlyWire/FAFB)
+        # Check for subdirectory structure (common for local FAFB/BANC releases)
         if dataset_path is not None and not os.path.exists(dataset_path):
             # Try exact match in subdirectory
             dataset_path_subdir = os.path.join(
@@ -13474,7 +13545,7 @@ class FindNeuronConnection:
         )
         if use_local_dataset:
             self._vprint(f'   Using local dataset: {os.path.basename(dataset_path)}', level='full')
-            if is_flywire_dataset(self.dataset):
+            if is_local_connectome_dataset(self.dataset):
                 if str(dataset_path).lower().endswith('.parquet'):
                     ndf_complete = pd.read_parquet(dataset_path)
                 else:
@@ -13486,8 +13557,8 @@ class FindNeuronConnection:
             else:
                 ndf_complete = self._read_csv(dataset_path, header=0, index_col=0, low_memory=False)
         else:
-            if is_flywire_dataset(self.dataset):
-                self._vprint(f'   ⚠️  Local dataset not found for FlyWire/FAFB. Skipping interlayer info fetch (NeuPrint API not supported for this dataset).', level='full')
+            if is_local_connectome_dataset(self.dataset):
+                self._vprint(f'   ⚠️  Local FAFB/BANC dataset not found. Skipping interlayer info fetch (NeuPrint API not supported for this dataset).', level='full')
                 ndf_complete = pd.DataFrame()
             else:
                 self._vprint(f'   Local dataset not found, will use API calls', level='full')
@@ -13917,6 +13988,8 @@ class FindNeuronConnection:
         (``_find_paths_core``) with ``path_mode='all'``. See
         ``FindShortestPath`` for the shortest-only variant that reuses the
         exact same pipeline (discovery, enrichment, outputs, visualization).
+        Connection-ratio and traversal-probability settings are retained as
+        readout definitions and do not filter this pathfinding graph.
         '''
         return self._find_paths_core(
             path_mode='all',
@@ -13933,9 +14006,10 @@ class FindNeuronConnection:
         Find ONLY the shortest paths between source and target neurons.
 
         For every reachable (source, target) pair the minimum hop-count
-        paths under the search criteria (min synapse count / connection
-        ratio / traversal probability) are returned — all tied shortest
-        paths, each once.
+        paths under the Min Synapse Count graph threshold are returned — all
+        tied shortest paths, each once. Connection ratio and traversal
+        probability remain readout columns in pathfinding and do not filter
+        the graph.
 
         Differences from FindAllPath (the rest of the pipeline is shared):
 
@@ -13965,11 +14039,12 @@ class FindNeuronConnection:
           unnecessary. The StrongestFirst path budget may bite here (the
           run reports its tau), but the Edge Budget floor never applies —
           the shortest mode is never floored.
-        - BodyId edge limit: OFF by default in shortest mode (0 = no
-          trimming). Trimming keeps pair reachability but not shortest
-          distances, so enabling it can inflate reported distances (noted
-          in user_warning_notes). Set ``graph_edge_limit_bodyid > 0`` to
-          opt in.
+        - BodyId Edge Budget: ignored in shortest mode.  The shortest-path
+          graph is never floored, even when ``graph_edge_limit_bodyid > 0``
+          is supplied for API compatibility, because trimming can remove the
+          only shortest route and inflate reported distances.  In ``all``
+          mode the same setting is a lossy graph budget and is reported as
+          ``edge_budget`` / ``edge_weight_floor`` in the provenance block.
 
         Parameters mirror FindAllPath: find_bodyId_path, forward_only,
         exclude_searched_neurons (deprecated alias of forward_only),
@@ -14030,13 +14105,23 @@ class FindNeuronConnection:
             'threshold': self.min_synapse_num,
             'tau': tau,
             'budget_bitten': bool(budget_bitten),
+            'strongest_first_budget': int(
+                self.max_paths_bodyid if self.max_paths_bodyid else 1000000),
             'tau_canonical': getattr(self, 'tau_canonical', None),
             'strongest_dropped_bottleneck': getattr(
                 self, 'strongest_dropped_bottleneck', None),
+            'edge_budget': getattr(self, 'edge_budget', None),
+            'edge_budget_applied': bool(
+                getattr(self, 'edge_budget_applied', False)),
+            'edge_budget_landing': getattr(self, 'edge_budget_landing', None),
             # Fix D: the Edge-Budget floor applied at t0 — replayed slices
             # inherit it (every captured path already has bottleneck >=
             # the floor, so slices at any t >= t0 inherit it too).
             'edge_weight_floor': getattr(self, 'edge_weight_floor', None),
+            'strongest_retained_bottleneck': getattr(
+                self, 'strongest_retained_bottleneck', None),
+            'graph_pruning_record': dict(
+                getattr(self, 'graph_pruning_record', {}) or {}),
         }
 
     def _replay_decode_paths(self, capture, surviving_indices):
@@ -14286,6 +14371,20 @@ class FindNeuronConnection:
                     self, 'strongest_first_budget_bitten', False)),
                 'paths_complete': not getattr(
                     self, 'strongest_first_budget_bitten', False),
+                'strongest_first_budget': int(
+                    self.max_paths_bodyid if self.max_paths_bodyid else 1000000),
+                'strongest_first_budget_bitten': bool(getattr(
+                    self, 'strongest_first_budget_bitten', False)),
+                'edge_budget': getattr(self, 'edge_budget', None),
+                'edge_budget_applied': bool(getattr(
+                    self, 'edge_budget_applied', False)),
+                'edge_budget_landing': getattr(
+                    self, 'edge_budget_landing', None),
+                'edge_weight_floor': getattr(self, 'edge_weight_floor', None),
+                'strongest_retained_bottleneck': getattr(
+                    self, 'strongest_retained_bottleneck', None),
+                'graph_pruning_record': dict(
+                    getattr(self, 'graph_pruning_record', {}) or {}),
                 'replayed': False,
             }
         }
@@ -14332,8 +14431,15 @@ class FindNeuronConnection:
             self.strongest_first_cutoff = tau
             self.strongest_first_budget_bitten = (
                 not paths_complete and t0_bitten)
-            self.tau_canonical = int(tau) if tau is not None else None
-            self.strongest_dropped_bottleneck = None
+            self.tau_canonical = (
+                int(capture.get('tau_canonical'))
+                if (not paths_complete and capture.get('tau_canonical') is not None)
+                else (int(tau) if tau is not None else None)
+            )
+            self.strongest_dropped_bottleneck = (
+                capture.get('strongest_dropped_bottleneck')
+                if not paths_complete else None
+            )
             # Per-slice note freshness: the t0 enumeration appended its own
             # [path budget] note (landing tau of the ENUMERATION); this
             # folder's slice has its own threshold state — rewrite the
@@ -14392,14 +14498,27 @@ class FindNeuronConnection:
             return {
                 'tau': tau,
                 'budget_bitten': not paths_complete and t0_bitten,
+                'strongest_first_budget': capture.get(
+                    'strongest_first_budget',
+                    self.max_paths_bodyid if self.max_paths_bodyid else 1000000),
+                'strongest_first_budget_bitten': (
+                    not paths_complete and t0_bitten),
                 'paths_complete': paths_complete,
                 'replayed': True,
                 'skipped': False,
                 'duplicate_of': None,
                 'applied_folder': int(t),
                 'tau_canonical': self.tau_canonical,
-                'strongest_dropped_bottleneck': None,
+                'strongest_dropped_bottleneck': self.strongest_dropped_bottleneck,
+                'edge_budget': capture.get('edge_budget'),
+                'edge_budget_applied': bool(capture.get(
+                    'edge_budget_applied', False)),
+                'edge_budget_landing': capture.get('edge_budget_landing'),
                 'edge_weight_floor': capture.get('edge_weight_floor'),
+                'strongest_retained_bottleneck': capture.get(
+                    'strongest_retained_bottleneck'),
+                'graph_pruning_record': dict(
+                    capture.get('graph_pruning_record') or {}),
             }
         
         # F5 (tau-folder discipline): folders exist only for REAL
@@ -14440,6 +14559,10 @@ class FindNeuronConnection:
                     'tau': eff_tau,
                     'tau_canonical': canon_int,
                     'budget_bitten': t0_bitten,
+                    'strongest_first_budget': capture.get(
+                        'strongest_first_budget',
+                        self.max_paths_bodyid if self.max_paths_bodyid else 1000000),
+                    'strongest_first_budget_bitten': bool(t0_bitten),
                     'paths_complete': False,
                     'replayed': True,
                     'skipped': True,
@@ -14447,7 +14570,15 @@ class FindNeuronConnection:
                     'applied_folder': canon_int,
                     'strongest_dropped_bottleneck': capture.get(
                         'strongest_dropped_bottleneck'),
+                    'edge_budget': capture.get('edge_budget'),
+                    'edge_budget_applied': bool(capture.get(
+                        'edge_budget_applied', False)),
+                    'edge_budget_landing': capture.get('edge_budget_landing'),
                     'edge_weight_floor': capture.get('edge_weight_floor'),
+                    'strongest_retained_bottleneck': capture.get(
+                        'strongest_retained_bottleneck'),
+                    'graph_pruning_record': dict(
+                        capture.get('graph_pruning_record') or {}),
                 }
                 continue
             results[t] = _materialize_threshold(t)
@@ -14460,6 +14591,10 @@ class FindNeuronConnection:
                 'tau': eff_tau,
                 'tau_canonical': canon_int,
                 'budget_bitten': t0_bitten,
+                'strongest_first_budget': capture.get(
+                    'strongest_first_budget',
+                    self.max_paths_bodyid if self.max_paths_bodyid else 1000000),
+                'strongest_first_budget_bitten': bool(t0_bitten),
                 'paths_complete': False,
                 'replayed': True,
                 'skipped': True,
@@ -14467,7 +14602,15 @@ class FindNeuronConnection:
                 'applied_folder': canon_int,
                 'strongest_dropped_bottleneck': capture.get(
                     'strongest_dropped_bottleneck'),
+                'edge_budget': capture.get('edge_budget'),
+                'edge_budget_applied': bool(capture.get(
+                    'edge_budget_applied', False)),
+                'edge_budget_landing': capture.get('edge_budget_landing'),
                 'edge_weight_floor': capture.get('edge_weight_floor'),
+                'strongest_retained_bottleneck': capture.get(
+                    'strongest_retained_bottleneck'),
+                'graph_pruning_record': dict(
+                    capture.get('graph_pruning_record') or {}),
             }
             shutil.rmtree(t0_folder, ignore_errors=True)
             self._vprint(
@@ -14497,6 +14640,7 @@ class FindNeuronConnection:
         
         # Reset status columns if they exist (to allow sequential calls)
         self._reset_temp_columns()
+        self._pathfinding_filters_disabled = True
         backward_shortest = path_mode == 'shortest'
         self._shortest_backward_active = backward_shortest
         # Record run-relevant knobs early so all_attributes.json (written
@@ -14574,8 +14718,9 @@ class FindNeuronConnection:
                 '⚠️  max_interlayer >= 4: the path count grows combinatorially '
                 '(branching^depth) — reconstruction can take hours and produce '
                 'billions of paths. For large graphs consider raising Min Synapse '
-                'Count / Min Connection Ratio / Min Traversal Prob., and/or '
-                'tightening the Graph Edge Limit (Limit Graph Edges). Minimizing '
+                'Count, lowering the StrongestFirst path budget, and/or '
+                'tightening the Edge Budget. The ratio and probability columns '
+                'are readouts only. Minimizing '
                 'the source/target sets, or batching them into smaller queries, '
                 'also cuts the path count dramatically.',
                 level='always',
@@ -14593,8 +14738,6 @@ class FindNeuronConnection:
         depth_label = f'L{self.max_interlayer}'
         folder_prefix = 'find-paths-shortest' if path_mode == 'shortest' else 'find-paths-complete'
         param_suffix = f"_{depth_label}w{self.min_synapse_num}"
-        param_suffix += f"r{_format_decimal_for_folder(self.min_ratio)}"
-        param_suffix += f"p{_format_decimal_for_folder(self.min_traversal_probability)}"
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         param_suffix += f"_{timestamp}"
         
@@ -14630,7 +14773,7 @@ class FindNeuronConnection:
         # FlyWire identifiers are canonicalized losslessly before any graph
         # membership or join operation.  The legacy NeuPrint path keeps its
         # existing string conversion semantics.
-        if is_flywire_dataset(self.dataset):
+        if is_local_connectome_dataset(self.dataset):
             normalize_flywire_id_columns(
                 self.source_df, ['bodyId']
             )
@@ -17262,7 +17405,7 @@ class FindNeuronConnection:
                 f"{dataset_clean}_allneurons_neuron_df.csv"
             )
 
-            if is_flywire_dataset(self.dataset):
+            if is_local_connectome_dataset(self.dataset):
                 dataset_dir = resolve_flywire_dataset_dir(
                     self.script_path, self.dataset
                 )
@@ -17279,7 +17422,7 @@ class FindNeuronConnection:
                     (str(path) for path in candidates if path.exists()), None
                 )
             
-            # Check for subdirectory structure (common for FlyWire/FAFB)
+            # Check for subdirectory structure (common for local FAFB/BANC releases)
             if dataset_path is not None and not os.path.exists(dataset_path):
                 # Try exact match in subdirectory
                 dataset_path_subdir = os.path.join(
@@ -17307,7 +17450,7 @@ class FindNeuronConnection:
             
             if use_local_dataset:
                 self._vprint(f'   Using local dataset: {os.path.basename(dataset_path)}', level='full')
-                if is_flywire_dataset(self.dataset):
+                if is_local_connectome_dataset(self.dataset):
                     if str(dataset_path).lower().endswith('.parquet'):
                         ndf_complete = pd.read_parquet(dataset_path)
                     else:
@@ -17319,8 +17462,8 @@ class FindNeuronConnection:
                 else:
                     ndf_complete = self._read_csv(dataset_path, header=0, index_col=0, low_memory=False)
             else:
-                if is_flywire_dataset(self.dataset):
-                    self._vprint(f'   ⚠️  Local dataset not found for FlyWire/FAFB. Skipping interlayer info fetch.', level='full')
+                if is_local_connectome_dataset(self.dataset):
+                    self._vprint(f'   ⚠️  Local FAFB/BANC dataset not found. Skipping interlayer info fetch.', level='full')
                     ndf_complete = pd.DataFrame()
                 else:
                     self._vprint(f'   Local dataset not found, will use API calls', level='full')
@@ -17817,7 +17960,10 @@ class FindNeuronConnection:
 
     def _is_symmetric_dataset(self) -> bool:
         dataset = str(self.dataset).lower()
-        return any(key in dataset for key in ['male-cns', 'manc', 'flywire_fafb', 'flywire_banc', 'fafb', 'banc'])
+        return (
+            any(key in dataset for key in ['male-cns', 'manc'])
+            or is_local_connectome_dataset(self.dataset)
+        )
 
     def _extract_hemi_from_label(self, label: str):
         base = label.split('(')[0].strip() if '(' in label else label

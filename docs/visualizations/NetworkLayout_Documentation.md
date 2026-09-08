@@ -162,12 +162,17 @@ Applied in both methods:
 Both layout options generate the same output files with different node positions:
 
 **FindPath()**:
-- `Network_type_snp{N}.html`
-- `Network_bodyId_snp{N}.html`
+- `visualization/Network_<run>.html`
+- `bodyId_visualization/Network_<run>.html`
 
 **FindAllPath()**:
-- `Network_type_allpaths_snp{N}.html`
-- `Network_bodyId_allpaths_snp{N}.html`
+- `visualization/Network_<run>.html`
+- `bodyId_visualization/Network_<run>.html`
+
+The run-folder name carries the parameters and timestamp. Type-level and
+bodyId-level artifacts intentionally share the same filename format; the
+containing folder identifies the level. Early previews are written under
+`network_early/` and `network_early_bodyId/`.
 
 ## Comparison Example
 

@@ -141,10 +141,32 @@
     flooring (a threshold raise) preserves pair <i>reachability</i> but not
     <i>shortest distance</i> — a dropped weak edge can silently inflate a
     reported distance. The tab disables the Edge Budget input in shortest
-    mode; API callers passing <code>graph_edge_limit_bodyid</code> get the
-    full un-floored graph here. The <b>Max Paths (BodyId)</b> input is the
+    mode; API callers passing <code>graph_edge_limit_bodyid</code> still get
+    the full un-floored graph here because the setting is ignored. The <b>Max Paths (BodyId)</b> input is the
     knob that bounds this mode.
   </div>
+
+  <h2>Applied threshold &amp; bottleneck provenance</h2>
+  <p>The exported parameters distinguish the requested Min Synapse Count
+    from the cutoff that describes the materialized output. In every run,
+    <code>applied_threshold</code> is the canonical equivalent threshold;
+    <code>applied_threshold_source</code> identifies whether it came from the
+    request or a budget. The related values are:</p>
+  <table>
+    <tr><th>Value</th><th>Meaning</th></tr>
+    <tr><td><code>requested_threshold</code></td><td>The Min Synapse Count entered by the user.</td></tr>
+    <tr><td><code>applied_threshold</code> / <code>tau_canonical</code></td><td>The minimal threshold that reproduces the output. When the StrongestFirst budget bites, this is <code>w2 + 1</code>; in an unbitten run it is the requested threshold.</td></tr>
+    <tr><td><code>strongest_first_budget</code> and <code>strongest_first_budget_bitten</code></td><td>The effective Max Paths (BodyId) budget and whether it was reached.</td></tr>
+    <tr><td><code>tau</code> / <code>strongest_first_tau</code></td><td>The StrongestFirst landing/collapse bound; it is the weakest retained bottleneck at the budget boundary, not always the minimal applied threshold.</td></tr>
+    <tr><td><code>w2</code> / <code>strongest_dropped_bottleneck</code></td><td>The strongest path bottleneck omitted by the budget. The interval <code>[w2 + 1, tau]</code> yields the same path set.</td></tr>
+    <tr><td><code>W*</code> / <code>strongest_retained_bottleneck</code></td><td>The widest-path ceiling after lossless pruning.</td></tr>
+    <tr><td><code>edge_budget</code>, <code>w0</code>, <code>w1</code></td><td>Shortest mode never applies this graph budget: <code>edge_budget</code> is reported as not applied and <code>edge_weight_floor</code>/<code>edge_budget_landing</code> remain empty. These values are active only in Complete Paths.</td></tr>
+    <tr><td><code>paths_complete</code></td><td>Whether all shortest paths within the explored graph/depth bound were emitted; false means the StrongestFirst path budget bounded the output.</td></tr>
+  </table>
+  <p>The same provenance block is written to <code>parameters.txt</code>,
+    <code>all_attributes.json</code>, and
+    <code>data_details/parameters.csv</code>, and is shown in the exported
+    <code>_UserGuide_please_read_me</code> files.</p>
 
   <h2>BodyId enrollment</h2>
   <p>When type-level output is used, several exact bodyId pairs can collapse
@@ -169,7 +191,7 @@
 
   <h2>Output</h2>
   <p>Same layout as Find All Paths (see the Complete Paths guide):</p>
-  <pre><code>{output_dir}/find-paths-shortest_MCNS_aMe12_to_PPL101_L1w3r0p0_20260815_142717/
+  <pre><code>{output_dir}/find-paths-shortest_MCNS_aMe12_to_PPL101_L1w3_20260815_142717/
   aMe12_to_PPL101_allpaths_type.csv  # shortest paths (same columns)
   source_neurons.csv, target_neurons.csv  # enrollment/status details
   all_attributes.json

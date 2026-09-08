@@ -512,11 +512,13 @@ def test_auto_mapping_with_fake_mapper(monkeypatch):
 class _FakeTypeMapper:
     def __init__(self):
         self.exported_paths = []
+        self.mapping_calls = []
 
     def _detect_type_source(self, t):
         return DS1 if t in ('Src', 'NoMap') else None
 
     def get_mapped_type(self, t, src_ds, dst_ds):
+        self.mapping_calls.append((t, src_ds, dst_ds))
         return 'SrcMapped' if t == 'Src' else None
 
     def export_mapping(self, path, **kwargs):
@@ -538,6 +540,18 @@ def test_resolve_neurons_with_auto_mapping():
     # no mapper -> passthrough
     p2 = _basic()
     assert p2._resolve_neurons_with_auto_mapping(['Src'], DS2) == ['Src']
+
+
+def test_explicit_source_release_wins_over_auto_detection():
+    p = _basic()
+    p.source_dataset = 'male-cns:v0.9'
+    mapper = _FakeTypeMapper()
+    p._auto_type_mapper = mapper
+
+    assert p._resolve_neurons_with_auto_mapping(['Src'], DS2) == ['SrcMapped']
+    assert mapper.mapping_calls == [
+        ('Src', 'male-cns:v0.9', DS2),
+    ]
 
 
 def test_print_neuron_mapping_summary(capsys):
@@ -577,5 +591,142 @@ def test_get_auto_type_mapper_and_export(tmp_path):
     default_path = p.export_auto_mapping()
     assert default_path == os.path.join(p.full_output_path,
                                         'auto_type_mapping.csv')
+
+
+# ---------------------------------------------------------------------------
+# Row-wise threshold query contract
+# ---------------------------------------------------------------------------
+
+def test_standard_thresholds_are_query_rows_and_jobs_are_deduplicated():
+    p = _basic(thresholds=[5, 3, 5])
+
+    assert [q["id"] for q in p.get_threshold_queries()] == [
+        "threshold_3", "threshold_5"
+    ]
+    assert all(q["thresholds"] == {DS1: int(q["thresholds"][DS1]),
+                                    DS2: int(q["thresholds"][DS2])}
+               for q in p.get_threshold_queries())
+    assert p.get_unique_threshold_jobs() == [(DS1, 3), (DS1, 5),
+                                             (DS2, 3), (DS2, 5)]
+
+
+def test_combination_rows_preserve_identity_and_derive_raw_schedule():
+    p = _basic(
+        thresholds=[],
+        threshold_mode="combinations",
+        threshold_dataset_order=[DS2, DS1],
+        threshold_combinations=[
+            {"id": "q-low", "label": "Low", "thresholds": {DS2: 7, DS1: 3}},
+            {"id": "q-high", "label": "High", "thresholds": {DS2: 7, DS1: 9}},
+        ],
+    )
+
+    queries = p.get_threshold_queries()
+    assert [(q["id"], q["label"]) for q in queries] == [
+        ("q-low", "Low"), ("q-high", "High")
+    ]
+    assert p.thresholds == [3, 7, 9]
+    assert p.get_thresholds_for_dataset(DS1) == [3, 9]
+    assert p.get_thresholds_for_dataset(DS2) == [7]
+    assert p.get_unique_threshold_jobs() == [(DS2, 7), (DS1, 3), (DS1, 9)]
+
+    restored = ComparisonParameters.from_dict(p.to_dict())
+    assert restored.threshold_mode == "combinations"
+    assert restored.threshold_dataset_order == [DS2, DS1]
+    assert [q["id"] for q in restored.get_threshold_queries()] == [
+        "q-low", "q-high"
+    ]
+
+
+def test_combination_mode_requires_at_least_two_datasets():
+    with pytest.raises(ValueError, match="at least two selected datasets"):
+        _basic(
+            datasets=[DS1],
+            thresholds=[],
+            threshold_mode="combinations",
+            threshold_combinations=[
+                {"id": "q", "thresholds": {DS1: 3}},
+            ],
+        )
+
+
+@pytest.mark.parametrize("rows, message", [
+    ([{"id": "q", "thresholds": {DS1: 3}}], "missing"),
+    ([{"id": "q", "thresholds": {DS1: 3, DS2: 5, "other": 1}}], "unknown"),
+    ([{"id": "q", "thresholds": {DS1: 3, DS2: 5}},
+      {"id": "q", "thresholds": {DS1: 4, DS2: 6}}], "duplicate id"),
+    ([{"id": "q1", "thresholds": {DS1: 3, DS2: 5}},
+      {"id": "q2", "thresholds": {DS1: 3, DS2: 5}}], "duplicate threshold"),
+])
+def test_combination_rows_validate_complete_unique_queries(rows, message):
+    with pytest.raises(ValueError, match=message):
+        _basic(
+            thresholds=[],
+            threshold_mode="combinations",
+            threshold_combinations=rows,
+        )
+
+
+def test_from_dict_migrates_equal_length_legacy_threshold_lists():
+    """Old serialized per-dataset lists become explicit query rows once."""
+    legacy = {
+        "datasets": [DS1, DS2],
+        "source_neurons": ["Src"],
+        "target_neurons": ["Tgt"],
+        "thresholds": [3, 5, 7, 9],
+        "dataset_thresholds": {
+            DS1: [3, 5],
+            DS2: [7, 9],
+        },
+        "output_folder": "",
+        "auto_type_mapping": False,
+        "verbose": False,
+    }
+
+    with pytest.warns(UserWarning, match="Migrated legacy"):
+        restored = ComparisonParameters.from_dict(legacy)
+
+    assert restored.threshold_mode == "combinations"
+    assert restored.dataset_thresholds is None
+    assert restored.threshold_dataset_order == [DS1, DS2]
+    assert restored.get_threshold_queries() == [
+        {
+            "id": "combo_001",
+            "label": "Combination 1",
+            "thresholds": {DS1: 3, DS2: 7},
+            "dataset_order": [DS1, DS2],
+        },
+        {
+            "id": "combo_002",
+            "label": "Combination 2",
+            "thresholds": {DS1: 5, DS2: 9},
+            "dataset_order": [DS1, DS2],
+        },
+    ]
+
+
+def test_from_dict_migrates_one_dataset_legacy_schedule_to_standard():
+    legacy = {
+        "datasets": [DS1],
+        "dataset_thresholds": {DS1: [3, 5]},
+        "verbose": False,
+    }
+
+    with pytest.warns(UserWarning, match="standard thresholds"):
+        restored = ComparisonParameters.from_dict(legacy)
+
+    assert restored.threshold_mode == "standard"
+    assert restored.thresholds == [3, 5]
+    assert restored.threshold_combinations is None
+
+
+def test_from_dict_rejects_unequal_legacy_threshold_lists():
+    legacy = {
+        "datasets": [DS1, DS2],
+        "dataset_thresholds": {DS1: [3, 5], DS2: [7]},
+        "verbose": False,
+    }
+    with pytest.raises(ValueError, match="unequal lengths"):
+        ComparisonParameters.from_dict(legacy)
 
 # --- PARAMS-APPEND-DONE ---

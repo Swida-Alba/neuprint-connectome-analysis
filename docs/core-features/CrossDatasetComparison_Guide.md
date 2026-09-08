@@ -76,7 +76,8 @@ Cross-dataset comparison analyzes the same neural circuit query across multiple 
 ### Datasets Supported
 
 - **NeuPrint datasets**: `hemibrain:v1.2.1`, `male-cns:v0.9`, `optic-lobe:v1.0.1`, etc.
-- **FlyWire datasets**: `flywire_FAFB_v783`, `banc_v626` (local parquet files)
+- **FAFB**: `flywire_FAFB_v783` (local parquet files)
+- **Standalone BANC**: `banc_v626` / `banc_v888` (public-release parquet files)
 
 ---
 
@@ -483,6 +484,8 @@ All outputs are saved to a timestamped folder: `comparison_results_YYYYMMDD_HHMM
 comparison_results_20251127_155513/
 ├── comparison_report.html          # Interactive HTML report
 ├── vis_summary.pdf                 # PDF summary of visualizations
+├── parameters.json                  # comparison settings + provenance contract
+├── effective_thresholds.json        # requested → applied notice per dataset
 │
 ├── comparison_results/             # CSV data files
 │   ├── edge_presence_matrix.csv    # Unified edge presence (all thresholds)
@@ -496,6 +499,13 @@ comparison_results_20251127_155513/
 │   ├── path_presence_matrix_minsyn_5.csv
 │   ├── path_presence_matrix_minsyn_10.csv
 │   ├── unified_edge_comparison.csv # Full comparison table
+│   ├── unified_summary.csv         # metrics + threshold provenance per run
+│   ├── threshold_sensitivity.csv   # threshold changes + provenance
+│   ├── pathfinding_provenance.csv  # provenance; query_id in combination mode
+│   ├── threshold_combinations.csv  # canonical query/dataset manifest
+│   ├── edge_presence_matrix_query_<query_id>.csv
+│   ├── path_presence_matrix_query_<query_id>.csv
+│   ├── untyped_dropped_records.csv # rows removed by Drop Untyped, if any
 │   ├── conserved_strong_connections_minsyn_*.csv
 │   └── ...
 │
@@ -511,8 +521,10 @@ comparison_results_20251127_155513/
 │   │   └── ratio_heatmap_*.png
 │   ├── by_probability/
 │   │   └── traversal_prob_heatmap_*.png
+│   ├── edge_heatmap_query_<query_id>.png  # Custom combination rows
+│   ├── path_heatmap_query_<query_id>.png
 │   └── visualization_data/
-│       └── *.json                  # Raw data for recreating plots
+│       └── *.csv                   # Raw data for recreating plots
 │
 ├── comparison_results/             # Comparison analysis outputs
 │   ├── neuron_counts_summary.csv   # Total neuron counts per dataset
@@ -533,6 +545,19 @@ comparison_results_20251127_155513/
     ├── network_threshold_3.html
     └── ...
 ```
+
+Combination-mode similarity exports are written under
+`similarity_matrices/` as `similarity_query_<query_id>.csv` plus the combined
+`similarity_by_query.csv`. These files are joined by `query_id`; no advanced
+comparison is keyed by the sorted union of raw threshold values.
+
+The combination `comparison_report.html` uses the same full report sections as
+Standard mode: summary charts, applied-threshold/bottleneck provenance,
+similarity tables, query-keyed networks, edge/path matrices, conservation,
+overlap, and statistics. Every section iterates every query row. Ratio and
+traversal-probability filtering is disabled for pathfinding comparisons, so
+those `by_ratio/` and `by_probability/` folders are not emitted for this
+report.
 
 ### CSV File Descriptions
 
@@ -664,6 +689,56 @@ For a path A → B → C, the minimum weight is:
 min_weight = min(weight(A→B), weight(B→C))
 ```
 This represents the "bottleneck" of signal transmission along the path.
+
+### Pathfinding threshold and bottleneck provenance
+
+The path-based comparison records both the requested Min Synapse Count and
+the threshold that describes the materialized output. `requested_threshold`
+is the user input. `applied_threshold` is the canonical equivalent threshold:
+it is the requested value for a complete run, `w2 + 1` after a StrongestFirst
+budget bite, and includes the Edge Budget floor when that graph budget fires.
+`applied_threshold_source` identifies whether the requested threshold,
+StrongestFirst budget, Edge Budget, or both determined the result.
+
+The related values are:
+
+- `tau` / `strongest_first_tau`: the StrongestFirst landing/collapse bound;
+  for an unbitten run it is the natural weakest emitted-path bottleneck.
+- `strongest_first_budget`: the effective path-output budget; `0`/empty uses
+  the internal 1,000,000-path auto budget, and
+  `strongest_first_budget_bitten` says whether it was reached.
+- `w0` / `edge_weight_floor`: the Edge Budget graph floor, and `w1` /
+  `edge_budget_landing`: the tier that determined that floor. This applies in
+  `all` mode only; Shortest Paths never applies the Edge Budget floor.
+- `w2` / `strongest_dropped_bottleneck`: the strongest path excluded by a
+  StrongestFirst budget bite; `w2 + 1` is the minimal equivalent threshold.
+- `W*` / `strongest_retained_bottleneck`: the widest-path ceiling after
+  lossless pruning. A path bottleneck is the minimum edge weight on that path.
+
+`paths_complete` is false when a lossy budget affected the materialized path
+set. The complete per-run record is in
+`comparison_results/pathfinding_provenance.csv`; the same values are included
+in `threshold_sensitivity.csv`, `unified_summary.csv`, each delegated
+`dataset_data/.../minsyn_N/parameters.txt` and `all_attributes.json`, and the
+root `effective_thresholds.json` notice.
+
+In Custom combination mode, `threshold_combinations.csv` is the
+canonical query/dataset join: it adds `query_id`, the requested cell, and the
+dataset-specific applied/budget/bottleneck values. A raw dataset/threshold run
+may be reused by several query rows, so use the query ID when interpreting
+comparison tables and dropped-neuron warnings.
+
+### Drop Untyped Neurons
+
+The Advanced Settings **Drop Untyped Neurons** option is checked by default.
+The shared predicate treats empty labels, `Unknown`/`None`/`NaN` sentinels, and
+numeric bodyId-fallback labels as untyped. Comparison first resolves the
+standardized cross-dataset labels, then removes edges touching an untyped
+pre- or post-neuron before aggregation. Dropped rows are written once at
+`comparison_results/untyped_dropped_records.csv`, and counts are appended to
+`user_warning_notes.txt`; delegated per-dataset path folders intentionally
+retain their raw rows so the comparison-level filter is the single source of
+truth.
 
 ### Traversal Probability
 
@@ -821,12 +896,14 @@ If an edge appears at t=3 but disappears at t=5:
 4. Reduce `top_edges` to keep comparison report tables smaller (this does not trim pathfinding)
 5. Use smaller `max_interlayer`
 
-### FlyWire Dataset Not Found
+### FAFB/BANC Local Release Not Found
 
 **Solutions:**
-1. Ensure parquet files are in the correct location
-2. Check `datasets/flywire_FAFB_v783/` exists with proper structure
-3. See [FAFB Integration Guide](../FAFB_INTEGRATION.md)
+1. Ensure the selected release's parquet files are in the correct location
+2. Check `datasets/flywire_FAFB_v783/` or `datasets/banc_v626/`/`banc_v888/`
+   exists with the proper structure
+3. See [FAFB Integration Guide](../FAFB_INTEGRATION.md) or
+   [BANC Integration Guide](../BANC_INTEGRATION.md)
 
 ---
 
@@ -872,15 +949,17 @@ text_report = analyzer.generate_report()
 
 ## Threshold equivalence across datasets
 
-The analysis compares all datasets at the SAME threshold (horizontal
-comparison). Synapse-count conventions differ strongly between datasets —
+In Standard mode the analysis compares all datasets at the SAME threshold
+(horizontal comparison). Custom combination mode intentionally permits one
+requested threshold per dataset within a named query. Synapse-count conventions differ strongly between datasets —
 the median number of synapses per neuron spans ~7x (BANC v626 ≈ 45 post,
 BANC v888 ≈ 55 post, FAFB v783 ≈ 308 post, male-cns v1.0 ≈ 334 post / 490
 pre+post; BANC re-measured on the refreshed 2026-09-04 tables) — so "BANC
 ≥ 3" and "FAFB ≥ 3" still do not cut the connectomes at comparable
 sparsities, even though the refreshed BANC tables are much denser.
-This section gives a rough, whole-dataset alignment; per-query alignment
-is computed automatically in every run (see below).
+This section gives a rough, whole-dataset alignment; query rows remain the
+canonical comparison unit and the alignment files below are raw-run density
+diagnostics rather than replacements for a query row.
 
 ### Criterion
 
@@ -936,28 +1015,56 @@ holds under τ = 3.
 
 ### Where the per-query alignment comes from
 
-Every cross-dataset run exports threshold-alignment files (spec Feature C):
+Every cross-dataset run exports threshold-alignment files (spec Feature C).
+They describe the typed/raw threshold grid used for density diagnostics. In
+Custom combination mode they are explicitly marked with
+`threshold_scope=raw_run_schedule_diagnostic`; use the query manifest for
+the actual comparison rows:
 
 - `comparison_results/threshold_alignment_best_matches.csv` — a bisection
   prober over each dataset's lowest-threshold extract finds the
-  best-matching threshold in every other dataset for the CURRENT query
-  (extended range, not limited to the typed thresholds). Primary metric:
+  best-matching density threshold in every other dataset (extended range,
+  not limited to the typed thresholds). Primary metric:
   edge-count distance `|n_a − n_b| / max(n_a, n_b, 1)`; tolerance ≤ 0.10.
 - `comparison_results/threshold_alignment_matrix.csv` (+ heatmap) —
-  pairwise metrics over the typed thresholds only.
+  pairwise metrics over the typed/raw thresholds only; it is not a substitute
+  for the per-row advanced query map.
 - `comparison_results/edge_density_per_threshold.csv` and
   `comparison_visualizations/edge_density_threshold_curves.png` — the
   density curves behind the matching (absolute + per-neuron).
 
-### Per-dataset thresholds (vertical comparison)
+### Threshold query modes
 
-The Cross-Dataset tab ▸ Advanced Settings ▸ **Per-dataset thresholds**
-assigns each dataset its OWN ascending threshold list (e.g.
-BANC@{3,5}, FAFB@{7,11}, male-cns@{8,15}) so each runs at its
-density-equivalent sparsity. `thresholds` in the parameters remains the
-sorted union; horizontal tables simply have no cross-dataset content at
-thresholds not shared by ≥ 2 datasets — in vertical mode the alignment
-files above ARE the cross-dataset comparison.
+The Cross-Dataset tab's **Core Parameters** threshold editor has two modes:
+
+- **Standard**: enter `3, 5, 10`. Each chip becomes one
+  comparison query and the same requested threshold is applied to every
+  selected dataset.
+- **Custom combination**: requires at least two selected datasets. Each table
+  row is one complete query. Dataset names are the columns and every row must
+  contain one positive threshold in every selected-dataset column. For example:
+
+  | query | BANC | FAFB | male-cns |
+  |---|---:|---:|---:|
+  | `combo_001` | 3 | 7 | 8 |
+  | `combo_002` | 5 | 11 | 15 |
+
+  These rows intentionally replace the old Advanced Settings
+  **Per-dataset thresholds** schedule. They do not give each dataset an
+  independent list. The values' sorted union is only the deduplicated raw-run
+  schedule; comparison alignment and similarity are always computed from the
+  row's threshold map. Dataset columns therefore remain paired within a query,
+  even when two rows happen to reuse the same raw threshold.
+
+Every combination row receives a stable `query_id` and optional label. The
+comparison export `comparison_results/threshold_combinations.csv` is the
+canonical query/provenance manifest: join its `query_id`, `dataset`, and
+`requested_threshold` (with `threshold_scope=query_cell`) to
+`applied_threshold`, `tau`, StrongestFirst budget,
+Edge Budget (`w0`/`w1`), `w2`, `W*`, and `paths_complete`. The same query maps
+and run rows are available in `effective_thresholds.json`. This makes a
+budget-adjusted output auditable without mistaking the applied threshold for
+the value entered in the UI.
 
 ### Related run features
 
@@ -976,5 +1083,5 @@ files above ARE the cross-dataset comparison.
 
 - [Cache System Guide](CacheSystem_Guide.md) - Improve query performance
 - [Path Finding Documentation](FindAllPath_Documentation.md) - Understand path algorithms
-- [FlyWire Integration](../FAFB_INTEGRATION.md) - Set up FlyWire datasets
+- [FAFB Integration](../FAFB_INTEGRATION.md) - Set up FAFB datasets
 - [Example Script](../../archive/examples/comparison/Example_InterDatasetComparison.py) - Full working example

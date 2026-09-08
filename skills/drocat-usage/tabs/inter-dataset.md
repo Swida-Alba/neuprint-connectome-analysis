@@ -26,6 +26,15 @@ params = ComparisonParameters(
     path_mode="all",                     # "all" | "shortest"
     max_interlayer=2,
     thresholds=[1, 3, 5, 10],
+    threshold_mode="standard",          # default: same N in every dataset
+    # Custom combination mode uses complete query rows across at least two
+    # datasets, not independent schedules:
+    # threshold_mode="combinations",
+    # threshold_dataset_order=["hemibrain:v1.2.1", "male-cns:v0.9"],
+    # threshold_combinations=[
+    #   {"id": "combo_001", "thresholds":
+    #       {"hemibrain:v1.2.1": 3, "male-cns:v0.9": 8}},
+    # ],
     top_edges=500,
     graph_edge_limit_bodyid=0,          # Edge Budget off; set ~1_000_000 to cap the discovery cone
     edgeN_limit=500,
@@ -79,11 +88,50 @@ python skills/drocat-usage/scripts/run_direct.py \
   written. Dropped rows land in `comparison_results/untyped_dropped_records.csv`
   with an `untyped_side` column (`pre` / `post` / `pre+post`); counts are
   appended to `user_warning_notes.txt` only when rows were dropped.
+- **Threshold modes:** the Core Parameters editor defaults to Standard N-chip
+  thresholds, where each chip is applied to every selected dataset. Advanced
+  threshold combinations use dataset columns and query rows; each row must
+  have one threshold for every dataset. The row is the alignment/comparison
+  identity, while the sorted cell union is only a deduplicated raw-run
+  schedule. Raw `(dataset, threshold)` jobs shared by rows are reused.
 - Each per-dataset threshold folder carries the threshold/bottleneck provenance
   block (requested vs applied threshold, `applied_threshold_source`,
-  StrongestFirst budget/tau, Edge Budget, `strongest_retained_bottleneck` (W*),
-  `paths_complete`) in `parameters.txt`, `all_attributes.json`, and
-  `data_details/parameters.csv`.
+  StrongestFirst budget/bite/tau, `tau_canonical`, `w2`, Edge Budget `w0`/`w1`,
+  `strongest_retained_bottleneck` (W*), and `paths_complete`) in
+  `parameters.txt`, `all_attributes.json`, and `data_details/parameters.csv`.
+- The comparison root writes `effective_thresholds.json` for the UI notice and
+  `comparison_results/pathfinding_provenance.csv` with one complete row per
+  dataset/requested raw threshold. `threshold_scope` distinguishes scalar
+  rows from query cells. In that row, `applied_threshold` is the
+  canonical equivalent Min Synapse Count, `tau` is the StrongestFirst landing
+  bound, `w0`/`w1` are the Edge Budget floor/landing tier, `w2` is the strongest
+  dropped path bottleneck, and `W*` is the strongest retained bottleneck.
+- Combination runs additionally write
+  `comparison_results/threshold_combinations.csv`, one row per `query_id` and
+  dataset. It records the requested cell, applied threshold, source, tau,
+  StrongestFirst budget, Edge Budget `w0`/`w1`, `w2`, `W*`, and completeness;
+  use it as the join key for query-specific comparison exports.
+- `comparison_results/threshold_sensitivity.csv` and
+  `comparison_results/unified_summary.csv` carry the same provenance fields so
+  downstream analysis does not have to infer the applied threshold from edge
+  counts. In combination mode, sensitivity rows also carry `query_id` and
+  are query-cell diagnostics rather than adjacent-threshold retention rows.
+  Shortest mode reports the StrongestFirst budget state but never applies the
+  Edge Budget floor.
+- Combination-mode similarities are written under
+  `similarity_matrices/similarity_query_{query_id}.csv` and
+  `similarity_by_query.csv`; use the query ID and per-dataset threshold
+  columns rather than a scalar threshold union.
+- Combination-mode `comparison_report.html` uses the same full report shell as
+  Standard mode (summary charts, provenance, similarities, networks,
+  edge/path matrices, conservation, overlap, and statistics) and iterates
+  every query row. Query-specific matrix exports are named
+  `edge_presence_matrix_query_{query_id}.csv` and
+  `path_presence_matrix_query_{query_id}.csv` using a filesystem-safe slug.
+  The original query ID is retained inside the file and in the manifest.
+- Pathfinding comparisons do not apply ratio or traversal-probability
+  filtering; their comparison visualization exports therefore do not create
+  `by_ratio/` or `by_probability/` folders.
 - Use `auto_type_mapping=True` (and `overall_mapping_json`) when type names differ
   between datasets.
 - Use `parallel=True` with a bounded `max_workers` for many datasets; start with

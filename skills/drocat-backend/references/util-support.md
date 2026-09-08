@@ -33,11 +33,11 @@ from src.utils.flywire_readiness import (
     flywire_skeleton_readiness, require_flywire_skeleton_access,
     flywire_manual_skeleton_instruction, print_download_instructions,
 )
-from src.flywire_ids import is_flywire_dataset, is_banc_dataset
+from src.flywire_ids import is_fafb_dataset, is_banc_dataset
 ```
 
-Detects whether local FAFB/BANC files exist and whether the skeleton source is
-available. FlyWire FAFB/BANC need converted local files; a missing local file and
+Detects whether local FAFB files or standalone BANC release files exist and whether the skeleton source is
+available. FAFB needs converted local files; BANC uses its public release bucket and local prepared tables; a missing local file and
 a missing token are different failures.
 
 ## cache_manager (`src/core/cache_manager.py`)
@@ -68,7 +68,7 @@ Build the connection cache (used by the `candidate_source` `"profile"`/`"combine
 modes and by `use_cache`) and the connectivity-profile cache (used by
 profiling/similar tools).
 
-## FlyWire/FAFB conversion (`src/FAFB_file_converter.py`, `src/BANC_file_converter.py`)
+## FAFB/BANC release conversion (`src/FAFB_file_converter.py`, `src/BANC_file_converter.py`)
 
 Converts raw Codex downloads under `datasets/<dataset>/downloads/` to the
 `<dataset>_allneurons_neuron_df.parquet` + `<dataset>_merged_connections.parquet`

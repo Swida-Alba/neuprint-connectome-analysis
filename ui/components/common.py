@@ -22,6 +22,7 @@ import subprocess
 import weakref
 
 from src.utils.dataset_release_registry import get_release_recommendation
+from src.flywire_ids import is_banc_dataset, is_fafb_dataset
 
 from .. import group_history
 from ..config import (
@@ -370,7 +371,7 @@ def _dataset_label_parts(ds: str, service) -> List[str]:
     if normalized.startswith("banc"):
         src_tag = "[BANC]"
     elif normalized.startswith("flywire_"):
-        src_tag = "[FW]"
+        src_tag = "[FAFB]"
     else:
         src_tag = "[NP]"
     info = service._cache.get(ds)
@@ -405,7 +406,7 @@ def _refresh_local_dataset_flags(results, service) -> bool:
         if info.local_cache != local_cache:
             info.local_cache = local_cache
             changed = True
-        if info.source == "flywire" and info.available != local_prepared:
+        if info.source in {"flywire", "banc"} and info.available != local_prepared:
             info.available = local_prepared
             changed = True
         service._cache[info.name] = info
@@ -538,7 +539,7 @@ def dataset_selector(
     default: Optional[str] = None,
     datasets: Optional[List[str]] = None,
     on_change: Optional[Callable] = None,
-    hint: str = "NeuPrint: fetched from server with token. FlyWire: uses converted local files; CAVE token is only needed for CAVE API features.",
+    hint: str = "NeuPrint: fetched from server with token. FAFB: uses converted local files and optional CAVE access. BANC: uses its public release bucket; no CAVE token is needed.",
     allow_custom: bool = False,
     show_local_status: bool = True,
     disable_banc: bool = False,
@@ -608,7 +609,7 @@ def dataset_multi_selector(
         "Select one or more datasets. One dataset with multiple thresholds is "
         "also supported; "
         "multiple datasets enable cross-dataset comparison. Shows [NP]=NeuPrint, "
-        "[FW]=FlyWire, [BANC]=public BANC bucket, ✓ local / ☁ server status."
+        "[FAFB]=FAFB local release, [BANC]=public BANC bucket, ✓ local / ☁ server status."
     ),
     show_local_status: bool = True,
 ) -> ui.select:
@@ -2791,7 +2792,7 @@ def dataset_status_card() -> ui.card:
                     "Refresh", icon="refresh", color="primary"
                 ).props("flat dense").tooltip(
                     "Check local converted tables and server availability.\n"
-                    "NeuPrint server status requires a valid token; FlyWire uses local files."
+                    "NeuPrint server status requires a valid token; FAFB and BANC use local release files."
                 )
 
         ui.separator()
@@ -2818,7 +2819,7 @@ def dataset_status_card() -> ui.card:
                 if not results:
                     ui.label(
                         "No datasets found. NeuPrint status needs a token; "
-                        "FlyWire status needs the converted local tables."
+                        "FAFB/BANC status needs the converted local tables."
                     ).classes("text-caption drocat-warn")
                     return
 
@@ -2827,14 +2828,20 @@ def dataset_status_card() -> ui.card:
                     ui.badge(text, color=color).props("outline")
 
                 for name, info in results.items():
-                    # Trust the resolved source field (BANC is FlyWire-family);
-                    # the raw name only covers entries without one.
-                    is_flywire = (
-                        getattr(info, "source", "") == "flywire"
-                        or name.startswith("flywire_")
-                    )
-                    src_badge_text = "FlyWire" if is_flywire else "NeuPrint"
-                    src_badge_color = "purple" if is_flywire else "blue"
+                    # Trust the resolved source field.  BANC is a standalone
+                    # public release; it must never be rendered as FlyWire.
+                    source = str(getattr(info, "source", "") or "").lower()
+                    is_banc = source == "banc" or is_banc_dataset(name)
+                    is_fafb = source == "flywire" or is_fafb_dataset(name)
+                    if is_banc:
+                        src_badge_text = "BANC"
+                        src_badge_color = "orange"
+                    elif is_fafb:
+                        src_badge_text = "FAFB"
+                        src_badge_color = "purple"
+                    else:
+                        src_badge_text = "NeuPrint"
+                        src_badge_color = "blue"
 
                     with ui.row().classes("items-center gap-2 w-full drocat-status-row"):
                         if info.local_prepared:

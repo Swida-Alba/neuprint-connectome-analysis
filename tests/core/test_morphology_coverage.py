@@ -1026,7 +1026,7 @@ def test_load_flywire_skeletons_batch_respects_api_repaired(
     assert int(out[7].id) == 7          # cached CAVE-derived tree kept
 
 
-def test_load_flywire_skeletons_batch_cave_fallback(tmp_path, monkeypatch):
+def test_load_flywire_skeletons_batch_cave_fallback_for_fafb(tmp_path, monkeypatch):
     # No raw cache, no bundle: id 5 can only come from CAVE.
     def no_cache(ds, **k):
         raise FileNotFoundError("no cache")
@@ -1041,7 +1041,7 @@ def test_load_flywire_skeletons_batch_cave_fallback(tmp_path, monkeypatch):
                         lambda dataset, body_ids, project_root=None, log=None,
                         denoise_twigs=None: {5: tree})
     out = M.load_flywire_skeletons_batch(
-        "banc_v626", [5], project_root=str(tmp_path))
+        "flywire_FAFB_v783", [5], project_root=str(tmp_path))
     assert set(out) == {5} and out[5] is tree
 
 
@@ -1401,28 +1401,28 @@ def test_fetch_skeleton_on_demand_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(M, "_fetch_neuprint_skeleton", lambda ds, bid: None)
     assert M.fetch_skeleton_on_demand("hemibrain:v1.2.1", 6,
                                       project_root=str(tmp_path)) is None
-    # CAVE skeleton TypeError compatibility retry (banc-like dataset name);
-    # the dataset classifier is faked off so the legacy cave-skeleton branch
-    # (instead of the FlyWire mesh branch) is reachable.
+    # Standalone BANC fetches from its public SWC bucket and must never touch
+    # the FAFB CAVE skeleton compatibility seam.
+    import banc_public_data
     attempts = []
 
-    def flaky_cave(dataset, body_id, project_root=None, use_cache=True):
-        attempts.append(dict(project_root=project_root))
-        if len(attempts) == 1:
-            raise TypeError("unexpected keyword argument 'project_root'")
+    def fake_banc(dataset, body_id, **kwargs):
+        attempts.append((dataset, body_id, kwargs))
         return make_tree()
 
-    monkeypatch.undo()
-    monkeypatch.setattr(M, "is_flywire_dataset", lambda ds: False)
-    monkeypatch.setattr(M, "is_banc_dataset", lambda ds: False)
-    monkeypatch.setattr(M, "_fetch_cave_skeleton", flaky_cave)
+    monkeypatch.setattr(banc_public_data, "fetch_banc_swc", fake_banc)
+    monkeypatch.setattr(
+        M, "_fetch_cave_skeleton",
+        lambda *a, **k: pytest.fail("BANC must not call the FAFB CAVE seam"),
+    )
     monkeypatch.setattr(M, "cache_fetched_skeleton_vectors",
                         lambda *a, **k: None)
     neuron = M.fetch_skeleton_on_demand("banc:v1.0", 7,
                                         project_root=str(tmp_path))
-    assert neuron is not None and len(attempts) == 2
+    assert neuron is not None and len(attempts) == 1
+    assert attempts[0][0] == "banc:v1.0"
     # unsuccessful fetch returns None
-    monkeypatch.setattr(M, "_fetch_cave_skeleton",
+    monkeypatch.setattr(banc_public_data, "fetch_banc_swc",
                         lambda *a, **k: None)
     assert M.fetch_skeleton_on_demand("banc:v1.0", 8,
                                       project_root=str(tmp_path)) is None
@@ -1689,9 +1689,9 @@ def test_download_all_neuprint_batch_path(tmp_path, monkeypatch):
 
 
 def test_download_all_fafb_guard_and_mode_aliases(tmp_path, monkeypatch):
-    # BUG REPORTED / unreachable: the FlyWire bulk-download guard at
+    # BUG REPORTED / unreachable: the FAFB bulk-download guard at
     # morphology.py:3696 raises for every dataset where is_flywire_dataset()
-    # is True, and is_fafb_dataset() implies is_flywire_dataset(), so the
+    # is True, and FAFB's local-release predicate is separate from BANC, so the
     # FAFB healed-bundle counting block (~3795-3833) and the per-neuron
     # ``_fetch_one`` legacy worker loop (~3915-3991) can never execute in
     # production. They are therefore not exercised here; only the reachable
@@ -2566,5 +2566,3 @@ def test_type_query_multi_member_intra_rows(tmp_path, monkeypatch):
                          query=[1, 2, 3], saveas="run_intra")
     results = comparer.find_similar()
     assert not results.empty
-
-

@@ -235,7 +235,7 @@ Examples:
     # Build cache with custom parameters
     python build_connectivity_profile_cache.py hemibrain:v1.2.1 --top-k 15 --top-m 8
     
-    # Build cache for FlyWire/FAFB
+    # Build cache for FAFB (BANC is a separate public-release source)
     python build_connectivity_profile_cache.py flywire_FAFB_v783
     
     # Limit to first 100 neurons (for testing)

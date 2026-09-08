@@ -16,6 +16,7 @@ the setting (used by tests and scripts for determinism).
 """
 
 import fnmatch
+import csv
 import html
 import json
 import os
@@ -58,6 +59,9 @@ COLUMN_GLOSSARY = {
     "edge_key": ("Canonical edge identifier: 'source -> target'.", "text"),
     "group": ("Custom query group the neuron belongs to.", "text"),
     "dataset": ("Dataset the record comes from.", "text"),
+    "query_id": ("Stable identifier for one cross-dataset threshold query row.", "text"),
+    "query_label": ("Human-readable label for one cross-dataset threshold query row.", "text"),
+    "threshold_mode": ("Threshold query mode: standard same-threshold rows or explicit combinations.", "text"),
     "direction": ("Synaptic direction relative to the query: upstream or downstream.", "text"),
     "partner_type": ("Partner neuron type in a connectivity profile.", "text"),
     "neuron_type": ("Neuron type owning the profile row.", "text"),
@@ -263,8 +267,11 @@ COLUMN_GLOSSARY = {
     "drop_untyped": ("Neuron-label filter: when True, edges touching untyped "
                      "neurons (empty / Unknown / NaN / bodyId-fallback type "
                      "labels — the shared predicate in utils.label_utils) "
-                     "were removed before the path graph was built. Dropped "
-                     "rows are exported to untyped_dropped_records.csv.",
+                     "were removed. Single-dataset tabs apply it after label "
+                     "enrichment and before graph construction; cross-dataset "
+                     "comparison applies it after standardized labels and "
+                     "before aggregation. Dropped rows are exported to "
+                     "untyped_dropped_records.csv.",
                      "boolean"),
     "untyped_side": ("Which side of a dropped edge is untyped: 'pre', "
                      "'post', or 'pre+post'.", "text"),
@@ -282,6 +289,10 @@ COLUMN_GLOSSARY = {
                           "every path in the output has bottleneck >= this value "
                           "and the run is equivalent to a complete run at this "
                           "threshold. Empty when no floor was applied.", "number"),
+    "applied_folder": ("Folder containing the materialized output for this "
+                       "requested threshold. A skipped threshold aliases the "
+                       "real applied folder instead of creating duplicate "
+                       "output.", "integer"),
     "conservation": ("Number/fraction of datasets in which the edge is present.", "text"),
     "conserved_at_lowest": ("Edge present in every dataset at the lowest threshold.", "boolean"),
     "tau": ("StrongestFirst budget LANDING τ: the weakest kept path's "
@@ -303,8 +314,10 @@ COLUMN_GLOSSARY = {
                        "this threshold's real output. Collapsed thresholds have "
                        "no folder of their own — their frames alias this "
                        "folder's materialization (fresh τ denominators).", "integer"),
-    "max_paths_bodyid": ("Path budget for StrongestFirst enumeration (0 = unlimited "
-                         "or algorithm default).", "integer"),
+    "max_paths_bodyid": ("Path budget for StrongestFirst enumeration (0/empty "
+                         "uses the internal 1,000,000 auto budget; legacy "
+                         "unbounded enumerators require an explicit API "
+                         "algorithm).", "integer"),
     "jaccard_similarity": ("Jaccard similarity of the two datasets' edge sets: "
                             "$\\lvert E_1 \\cap E_2\\rvert / "
                             "\\lvert E_1 \\cup E_2\\rvert$.", "0-1"),
@@ -744,7 +757,7 @@ _PATHFINDING_EXPLANATION = [
             "sets: the StrongestFirst enumerator emits intact paths in "
             "descending bottleneck order, so a budgeted result is exactly "
             "'all intact paths with bottleneck >= τ', never an arbitrary "
-            "first-N truncation. The This-run column shows the value this "
+            "first-N truncation. The ‘This run’ column shows the value this "
             "run actually produced (— = the mechanism did not apply).",
         ],
         "table": [
@@ -862,14 +875,54 @@ _PATHFINDING_EXPLANATION = [
              "trimmed."],
             ["Drop Untyped Neurons", "neuron labels",
              "Removes edges touching untyped neurons (empty / Unknown / "
-             "NaN / bodyId-fallback labels — the shared predicate) before "
-             "the graph is built; dropped rows are exported to "
-             "untyped_dropped_records.csv and counted in "
+             "NaN / bodyId-fallback labels — the shared predicate). In the "
+             "single-dataset tabs this happens before graph construction; in "
+             "Cross-Dataset Comparison it happens after standardized labels "
+             "and before comparison aggregation. Dropped rows are exported "
+             "to untyped_dropped_records.csv and counted in "
              "user_warning_notes.txt."],
             ["Visualization Edge Limit", "drawing only",
              "Caps unique edges drawn per HTML view; fetched connections, "
              "the graph, and the path tables are unaffected."],
         ],
+        "pipeline": None,
+    },
+    {
+        "heading": "Cross-dataset threshold queries",
+        "paragraphs": [
+            "Cross-Dataset Comparison has two threshold modes. Standard "
+            "N-chip thresholds create one query per scalar N and apply the "
+            "same requested threshold to every dataset. Custom combination "
+            "mode creates one complete query row at a time: each row "
+            "contains one requested threshold for every dataset column. "
+            "Those rows are comparison identities; the union of their cell "
+            "values is only the deduplicated raw-run schedule.",
+            "For each query, use threshold_combinations.csv or the queries "
+            "block in effective_thresholds.json to join the requested "
+            "threshold with the dataset-specific applied threshold and its "
+            "bottleneck/budget provenance. Never compare a dataset column "
+            "from one query with a different query's column just because "
+            "their scalar threshold values match.",
+        ],
+        "table": [
+            ["Term", "Meaning in a cross-dataset query"],
+            ["requested threshold",
+             "The cell entered for this dataset in this query row."],
+            ["applied threshold",
+             "The canonical equivalent Min Synapse Count for that dataset's "
+             "materialized run; it may differ from the requested cell when a "
+             "budget changes the output."],
+            ["Edge Budget / w0 / w1",
+             "Graph-level cap, floor, and landing tier for this dataset's "
+             "query cell; the floor is never applied in Shortest Paths."],
+            ["StrongestFirst budget / tau / w2",
+             "Path-output budget, landing/collapse bound, and strongest "
+             "dropped bottleneck for this dataset's query cell."],
+            ["bottleneck / W*",
+             "A path's weakest edge; W* is the strongest retained path "
+             "bottleneck after lossless pruning."],
+        ],
+        "values_column": False,
         "pipeline": None,
     },
 ]
@@ -1151,13 +1204,27 @@ TOOL_GUIDE_SPECS = {
         "summary": "Connectivity pathways compared across multiple datasets.",
         "files": [
             {"pattern": "comparison_report.html",
-             "description": "Comprehensive interactive HTML report (summary "
-                            "statistics, per-dataset networks, Sankey "
-                            "comparisons, presence heatmaps)."},
+             "description": "Comprehensive interactive HTML report. Standard "
+                            "and Custom combination runs use the same report "
+                            "sections; Custom repeats every section for every "
+                            "query row with query-keyed networks, matrices, "
+                            "provenance, conservation, overlap and statistics."},
             {"pattern": "comparison_report.txt",
              "description": "Plain-text summary of the report."},
             {"pattern": "parameters.json",
-             "description": "JSON dump of all comparison parameters."},
+             "description": "JSON dump of all comparison parameters, plus "
+                             "the pathfinding provenance field list and the "
+                            "definitions of tau and applied_threshold. It "
+                            "also includes normalized threshold_queries with "
+                            "requested/applied thresholds and provenance in "
+                            "Custom combination mode."},
+            {"pattern": "effective_thresholds.json",
+             "description": "Threshold notice used by the UI and run guide. "
+                            "Always written for pathfinding comparisons; its "
+                            "runs rows contain requested and applied "
+                            "thresholds, source, tau, w0, w1, w2, W*, and "
+                            "paths_complete. In combination mode, queries "
+                            "preserve the row-wise dataset threshold map."},
             {"pattern": "label_map.json",
              "description": "Label mappings for source/target neurons across "
                             "datasets (incl. auto type mapping)."},
@@ -1182,27 +1249,48 @@ TOOL_GUIDE_SPECS = {
                             "column distinguishes crosswalk conflicts from "
                             "annotation-bridge ones."},
             {"pattern": "comparison_report_used_data/*.csv",
-             "description": "Aggregated metrics per dataset backing the "
-                            "report (avg_prob, avg_ratio, edge_count, "
-                            "total_weight, ratio_data_t{N})."},
+             "description": "Aggregated metrics backing the report. Standard "
+                            "files use threshold keys; Custom combination files "
+                            "use query_id/query_label and query-keyed tables. "
+                            "Ratio/probability backing files are not emitted "
+                            "for pathfinding comparisons."},
             {"pattern": "comparison_results/edge_presence_matrix*.csv",
              "description": "Edge presence across datasets (one file per "
-                            "threshold). Presence flags, weights, counts and "
-                            "conservation per edge.",
+                            "standard threshold or advanced query). Advanced "
+                            "filenames use edge_presence_matrix_query_<query_id> "
+                            "with a filesystem-safe query-ID slug "
+                            "(the manifest retains the original ID); rows "
+                            "include per-dataset requested thresholds. Presence flags, "
+                            "weights, counts and conservation per edge.",
              "columns": ["edge_key", "source", "target", "conserved_at_lowest"]},
             {"pattern": "comparison_results/edge_weight_comparison.csv",
-             "description": "Edge weights compared across all datasets."},
+             "description": "Edge weights compared across all datasets. "
+                            "Combination rows carry query_id/query_label and "
+                            "requested/applied threshold columns per dataset."},
             {"pattern": "comparison_results/path_presence_matrix*.csv",
-             "description": "Path presence across datasets."},
+             "description": "Path presence across datasets. Advanced filenames "
+                            "use path_presence_matrix_query_<query_id> with a "
+                            "filesystem-safe query-ID slug rather than "
+                            "a scalar threshold union; the manifest preserves "
+                            "the original query ID."},
             {"pattern": "comparison_results/unified_edge_comparison.csv",
              "description": "Combined edge data: per-dataset weight/presence "
-                            "columns for every edge.",
-             "columns": ["edge_key", "source", "target", "threshold",
-                         "conservation"]},
+                            "columns for every edge; combination rows also "
+                            "carry query_id and per-dataset threshold columns.",
+             "columns": ["query_id", "query_label", "edge_key", "source",
+                         "target", "threshold_mode", "conservation"]},
             {"pattern": "comparison_results/unified_summary.csv",
              "description": "Run summary of the unified comparison.",
              "preview": True,
-             "preview_title": "Unified comparison summary"},
+             "preview_title": "Unified comparison summary",
+             "columns": ["query_id", "query_label", "dataset", "threshold",
+                         "requested_threshold",
+                         "applied_threshold", "applied_threshold_source",
+                         "strongest_first_budget", "strongest_first_tau",
+                         "tau_canonical", "strongest_dropped_bottleneck",
+                         "edge_budget", "edge_budget_applied",
+                         "edge_budget_landing", "edge_weight_floor",
+                         "strongest_retained_bottleneck", "paths_complete"]},
             {"pattern": "comparison_results/unique_to_*.csv",
              "description": "Edges unique to one dataset."},
             {"pattern": "comparison_results/top_edges_comparison.csv",
@@ -1222,35 +1310,121 @@ TOOL_GUIDE_SPECS = {
             {"pattern": "comparison_results/motif_analysis.csv",
              "description": "Network motif analysis."},
             {"pattern": "comparison_results/threshold_sensitivity.csv",
-             "description": "Per-dataset edge counts per threshold with retention vs the previous threshold (unique source-target pairs). tau/paths_complete state whether a run was complete (τ = natural weakest-path bottleneck) or budget-bounded; skipped/duplicate_of mark Feature G τ-collapsed thresholds whose path set is identical to the duplicated run."},
+             "description": "Per-dataset edge counts per threshold with "
+                            "retention vs the previous threshold (unique "
+                            "source-target pairs). Includes the complete "
+                            "requested/applied threshold provenance: the "
+                            "StrongestFirst budget and bite, tau, tau_canonical, "
+                            "w2, the Edge Budget/w0/w1 state, W*, "
+                            "paths_complete, and skipped/duplicate_of. In "
+                            "combination mode rows are query-keyed with "
+                            "query_id/query_label; adjacent-threshold "
+                            "retention is intentionally blank because the "
+                            "query rows are not a monotone schedule.",
+             "columns": ["dataset", "threshold", "requested_threshold",
+                         "applied_threshold", "applied_threshold_source",
+                         "strongest_first_budget",
+                         "strongest_first_budget_bitten",
+                         "strongest_first_tau", "tau_canonical",
+                         "strongest_dropped_bottleneck", "edge_budget",
+                         "edge_budget_applied", "edge_budget_landing",
+                         "edge_weight_floor",
+                         "strongest_retained_bottleneck", "paths_complete",
+                         "skipped", "duplicate_of", "drop_untyped",
+                         "untyped_dropped_rows", "untyped_dropped_neurons"]},
+            {"pattern": "comparison_results/pathfinding_provenance.csv",
+             "description": "One complete provenance row per dataset and "
+                            "requested threshold. Use applied_threshold for "
+                            "the canonical equivalent Min Synapse Count; tau "
+                            "is the StrongestFirst landing/collapse bound; "
+                            "w0/w1 are the Edge Budget floor/landing; w2 is "
+                            "the strongest dropped bottleneck and W* the "
+                            "strongest retained bottleneck.",
+             "preview": True,
+             "preview_title": "Pathfinding threshold provenance",
+             "columns": ["dataset", "threshold", "threshold_scope",
+                         "requested_threshold",
+                         "applied_threshold", "applied_threshold_source",
+                         "strongest_first_budget",
+                         "strongest_first_budget_bitten",
+                         "strongest_first_tau", "tau", "tau_canonical",
+                         "strongest_dropped_bottleneck",
+                         "strongest_retained_bottleneck", "edge_budget",
+                         "edge_budget_applied", "edge_budget_landing",
+                         "edge_weight_floor", "paths_complete", "pruned",
+                         "skipped", "duplicate_of", "applied_folder",
+                         "path_mode", "comparison_mode", "drop_untyped"]},
+            {"pattern": "comparison_results/threshold_combinations.csv",
+             "description": "Canonical query manifest. One row per query ID "
+                            "and dataset, joining the requested threshold to "
+                            "the raw run's applied threshold, StrongestFirst "
+                            "budget/tau, Edge Budget/w0/w1, bottlenecks and "
+                            "paths_complete. In standard mode the rows are "
+                            "same-threshold queries; in advanced mode each "
+                            "row is an explicit threshold combination.",
+             "preview": True,
+             "preview_title": "Threshold query manifest",
+             "columns": ["query_id", "query_label", "threshold_mode",
+                         "threshold_scope",
+                         "dataset", "requested_threshold",
+                         "applied_threshold", "applied_threshold_source",
+                         "strongest_first_budget", "strongest_first_tau",
+                         "edge_budget", "edge_weight_floor",
+                         "strongest_dropped_bottleneck",
+                         "strongest_retained_bottleneck", "paths_complete"]},
+            {"pattern": "comparison_results/untyped_dropped_records.csv",
+             "description": "Rows removed by the comparison-level Drop "
+                            "Untyped Neurons filter after standardized labels "
+                            "were resolved. Delegated per-dataset pathfinding "
+                            "folders keep their raw rows; this is the single "
+             "comparison-level records file.",
+             "columns": ["dataset", "threshold", "untyped_side",
+                         "query_id", "query_label"]},
             {"pattern": "comparison_results/threshold_alignment_best_matches.csv",
              "description": "Feature C: per (dataset pair, anchor threshold) the "
-                            "best-matching threshold in the other dataset, found by a "
-                            "bisection prober over the whole-dataset edge-density curve "
-                            "(edge-count distance is primary; Jaccard/rank similarity "
-                            "at the matched point). Includes a global-best row."},
+                             "best-matching threshold in the other dataset, found by a "
+                             "bisection prober over the whole-dataset edge-density curve "
+                             "(edge-count distance is primary; Jaccard/rank similarity "
+                             "at the matched point). Includes a global-best row. "
+                             "In combination mode this is a raw-run schedule "
+                             "diagnostic; use threshold_combinations.csv for "
+                             "query comparisons."},
             {"pattern": "comparison_results/threshold_alignment_matrix.csv",
              "description": "Feature C: pairwise alignment metrics over the TYPED "
-                            "threshold grid points only (edge-count distance, Jaccard, "
-                            "rank similarity per dataset-pair/threshold-pair)."},
+                             "threshold grid points only (edge-count distance, Jaccard, "
+                             "rank similarity per dataset-pair/threshold-pair). "
+                             "Combination-mode rows are explicitly diagnostic, "
+                             "not scalar comparison identities."},
             {"pattern": "comparison_results/edge_density_per_threshold.csv",
              "description": "Feature D data: per dataset, distinct connection-pair "
-                            "counts (absolute and per-neuron) over the extended "
-                            "threshold grid used by the prober; typed thresholds are "
-                            "flagged. Rendered as edge_density_threshold_curves.png."},
+                             "counts (absolute and per-neuron) over the extended "
+                             "threshold grid used by the prober; typed thresholds are "
+                             "flagged. In combination mode, threshold_scope marks "
+                             "this as a raw-run schedule diagnostic. Rendered as "
+                             "edge_density_threshold_curves.png."},
             {"pattern": "comparison_results/path_count_comparison.csv",
-             "description": "Path-count comparison across datasets."},
+             "description": "Path-count comparison across datasets. "
+                            "Combination rows carry query_id/query_label and "
+                            "one requested threshold per dataset."},
             {"pattern": "comparison_visualizations/*.png",
              "description": "Static heatmaps and path-count plots per "
-                            "threshold."},
+                            "threshold. Custom combination plots use "
+                            "query_<query_id> stems for every query."},
             {"pattern": "comparison_visualizations/by_ratio/**",
-             "description": "Connection-ratio heatmaps (PNG + backing CSV)."},
+             "description": "Connection-ratio heatmaps (PNG + backing CSV) "
+                            "when enabled; not emitted for pathfinding "
+                            "comparisons."},
             {"pattern": "comparison_visualizations/by_probability/**",
-             "description": "Traversal-probability heatmaps (PNG + backing "
-                            "CSV)."},
+                            "description": "Traversal-probability heatmaps (PNG + backing "
+                            "CSV), when enabled; not emitted for pathfinding "
+                            "comparisons."},
             {"pattern": "comparison_visualizations/visualization_data/*.csv",
              "description": "CSVs backing the HTML report (edge overlap, key "
-                            "findings, overlap matrices, path counts)."},
+                            "findings, overlap matrices, path counts). Custom "
+                            "rows carry query_id/query_label and per-dataset "
+                            "requested/applied threshold columns; the scalar "
+                            "threshold field is blank rather than overloaded "
+                            "with a query ID."},
             {"pattern": "similarity_matrices/similarity_threshold_*.csv",
              "description": "Cross-dataset similarity rows per threshold.",
              "preview": True,
@@ -1262,6 +1436,21 @@ TOOL_GUIDE_SPECS = {
                  "unique_to_d2", "edge_rank_correlation", "cosine_similarity",
                  "path_rank_correlation", "spearman_rank_correlation",
                  "rv_coefficient", "threshold"]},
+            {"pattern": "similarity_matrices/similarity_query_*.csv",
+             "description": "Combination-mode similarity rows for one query. "
+                            "The filename uses a filesystem-safe query-ID slug, "
+                            "while the original query ID and per-dataset threshold "
+                            "columns are the comparison join key; the raw "
+                            "threshold union is not used here.",
+             "preview": True,
+             "preview_title": "Similarity per threshold query",
+             "columns": ["query_id", "query_label", "dataset_1", "dataset_2",
+                         "threshold_", "jaccard_similarity",
+                         "ruzicka_similarity", "pearson_correlation",
+                         "common_edges"]},
+            {"pattern": "similarity_matrices/similarity_by_query.csv",
+             "description": "Combined combination-mode similarity export; "
+                            "filter by query_id before comparing rows."},
             {"pattern": "conserved_reciprocal_graph/*.html",
              "description": "Network graph of hemisphere-conserved "
                             "reciprocal connections (when both options are "
@@ -1584,6 +1773,7 @@ def assemble_run_content(run_folder: Path, tool_name: str,
         "explanation": spec.get("explanation"),
         "applied": _read_applied_state(run_folder),
         "applied_by_dataset": _read_applied_thresholds_by_dataset(run_folder),
+        "threshold_queries": _read_threshold_query_manifest(run_folder),
         "entries": entries,
         "metrics": metrics,
         "leftovers": leftovers,
@@ -1691,8 +1881,112 @@ def _read_applied_state(run_folder: Path) -> Optional[dict]:
 
 
 def _read_applied_thresholds_by_dataset(run_folder: Path) -> Optional[dict]:
-    """Per-dataset asked -> applied threshold states for comparison runs
-    (effective_thresholds.json, written when a tau collapse occurred)."""
+    """Read per-dataset threshold provenance for comparison run guides.
+
+    ``effective_thresholds.json`` is the primary UI notice.  The CSV fallback
+    keeps regenerated guides informative when the notice was removed or when
+    a comparison was exported by an older build that only wrote the durable
+    provenance table.
+    """
+    banner_path = run_folder / "effective_thresholds.json"
+    if banner_path.exists():
+        try:
+            payload = json.loads(banner_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = None
+        datasets = payload.get("datasets") if isinstance(payload, dict) else None
+        if datasets:
+            return datasets
+
+    provenance_path = (run_folder / "comparison_results"
+                       / "pathfinding_provenance.csv")
+    if not provenance_path.exists():
+        return None
+    try:
+        grouped = {}
+        with provenance_path.open(newline="", encoding="utf-8") as handle:
+            for raw in csv.DictReader(handle):
+                dataset = raw.get("dataset")
+                if not dataset:
+                    continue
+                row = {
+                    key: _coerce_provenance_value(value)
+                    for key, value in raw.items()
+                    if key and key != "dataset"
+                }
+                threshold = row.get("threshold")
+                info = grouped.setdefault(dataset, {
+                    "input": [], "effective": [], "skipped": [],
+                    "applied_folder": {}, "runs": [],
+                })
+                if threshold is not None:
+                    info["input"].append(threshold)
+                applied = row.get("applied_threshold")
+                if applied is not None:
+                    info["effective"].append(applied)
+                if row.get("skipped"):
+                    info["skipped"].append(threshold)
+                    if row.get("applied_folder") is not None:
+                        info["applied_folder"][str(threshold)] = \
+                            row["applied_folder"]
+                tau = row.get("tau", row.get("strongest_first_tau"))
+                if tau is not None:
+                    info["tau"] = max(info.get("tau", tau), tau)
+                info["runs"].append(row)
+        for info in grouped.values():
+            info["input"] = sorted(set(info["input"]))
+            info["effective"] = sorted(set(info["effective"]))
+        return grouped or None
+    except (OSError, csv.Error, TypeError, ValueError):
+        return None
+
+
+def _read_threshold_query_manifest(run_folder: Path) -> Optional[dict]:
+    """Read the row-wise threshold-query identity for a comparison run.
+
+    The CSV is the durable source because it contains one dataset-specific
+    provenance row per query.  The JSON notice is the fallback for runs where
+    only the UI notice was retained.
+    """
+    manifest_path = (run_folder / "comparison_results"
+                     / "threshold_combinations.csv")
+    grouped = {}
+    dataset_order = []
+    mode = None
+    if manifest_path.exists():
+        try:
+            with manifest_path.open(newline="", encoding="utf-8") as handle:
+                for raw in csv.DictReader(handle):
+                    query_id = raw.get("query_id")
+                    dataset = raw.get("dataset")
+                    if not query_id or not dataset:
+                        continue
+                    mode = raw.get("threshold_mode") or mode
+                    if dataset not in dataset_order:
+                        dataset_order.append(dataset)
+                    query = grouped.setdefault(query_id, {
+                        "id": query_id,
+                        "label": raw.get("query_label") or query_id,
+                        "thresholds": {},
+                        "runs": [],
+                    })
+                    requested = _coerce_provenance_value(
+                        raw.get("requested_threshold", ""))
+                    query["thresholds"][dataset] = requested
+                    query["runs"].append({
+                        key: _coerce_provenance_value(value)
+                        for key, value in raw.items()
+                        if key not in ("query_id", "query_label")
+                    })
+            if grouped:
+                return {
+                    "mode": mode or "standard",
+                    "dataset_order": dataset_order,
+                    "queries": list(grouped.values()),
+                }
+        except (OSError, csv.Error, TypeError, ValueError):
+            pass
+
     banner_path = run_folder / "effective_thresholds.json"
     if not banner_path.exists():
         return None
@@ -1700,8 +1994,39 @@ def _read_applied_thresholds_by_dataset(run_folder: Path) -> Optional[dict]:
         payload = json.loads(banner_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    datasets = payload.get("datasets") if isinstance(payload, dict) else None
-    return datasets or None
+    if not isinstance(payload, dict):
+        return None
+    raw_queries = payload.get("queries") or payload.get("combinations")
+    if not raw_queries:
+        return None
+    queries = []
+    for raw_query in raw_queries:
+        if not isinstance(raw_query, dict):
+            continue
+        query_id = raw_query.get("id") or raw_query.get("query_id")
+        if not query_id:
+            continue
+        thresholds = (raw_query.get("requested_thresholds")
+                      or raw_query.get("thresholds")
+                      or raw_query.get("thresholds_by_dataset")
+                      or {})
+        queries.append({
+            "id": str(query_id),
+            "label": raw_query.get("label") or str(query_id),
+            "thresholds": thresholds,
+            "runs": raw_query.get("runs") or [],
+        })
+        for dataset in thresholds:
+            if dataset not in dataset_order:
+                dataset_order.append(dataset)
+    if not queries:
+        return None
+    return {
+        "mode": payload.get("threshold_mode", "standard"),
+        "dataset_order": (payload.get("threshold_dataset_order")
+                          or dataset_order),
+        "queries": queries,
+    }
 
 
 def _format_applied_value(value) -> str:
@@ -1787,6 +2112,73 @@ def _format_dataset_threshold_banner(by_dataset: dict) -> list:
             if tau is not None else ""
         lines.append(f"  {ds}: asked [{asked}] -> applied [{effective}]"
                      f"{collapse_txt}{tau_txt}")
+        for row in info.get("runs") or []:
+            if not isinstance(row, dict):
+                continue
+            lines.append(
+                "    threshold "
+                f"{_format_applied_value(row.get('threshold'))}: "
+                f"requested {_format_applied_value(row.get('requested_threshold'))} "
+                f"-> applied {_format_applied_value(row.get('applied_threshold'))} "
+                f"(source {_format_applied_value(row.get('applied_threshold_source'))}; "
+                f"SF budget {_format_applied_value(row.get('strongest_first_budget'))}, "
+                f"SF bite {_format_applied_value(row.get('strongest_first_budget_bitten'))}; "
+                f"tau {_format_applied_value(row.get('tau', row.get('strongest_first_tau')))}; "
+                f"edge budget {_format_applied_value(row.get('edge_budget'))} "
+                f"(applied {_format_applied_value(row.get('edge_budget_applied'))}); "
+                f"w0 {_format_applied_value(row.get('edge_weight_floor'))}; "
+                f"w1 {_format_applied_value(row.get('edge_budget_landing'))}; "
+                f"w2 {_format_applied_value(row.get('strongest_dropped_bottleneck'))}; "
+                f"W* {_format_applied_value(row.get('strongest_retained_bottleneck'))}; "
+                f"paths_complete {_format_applied_value(row.get('paths_complete'))})")
+    return lines
+
+
+def _format_threshold_query_banner(manifest: Optional[dict]) -> list:
+    """Format the comparison query rows for text/Markdown renderers."""
+    if not manifest:
+        return []
+    lines = [
+        f"  Threshold mode: {manifest.get('mode', 'standard')}",
+        "  Query rows (requested threshold by dataset):",
+    ]
+    dataset_order = manifest.get("dataset_order") or []
+    for query in manifest.get("queries") or []:
+        if not isinstance(query, dict):
+            continue
+        query_id = query.get("id") or query.get("query_id")
+        label = query.get("label") or query_id
+        thresholds = query.get("thresholds") or {}
+        requested = ", ".join(
+            f"{dataset}={thresholds.get(dataset, '—')}"
+            for dataset in dataset_order
+        ) or ", ".join(f"{dataset}={value}"
+                       for dataset, value in thresholds.items())
+        lines.append(f"    {query_id} ({label}): {requested}")
+        for run in query.get("runs") or []:
+            if not isinstance(run, dict):
+                continue
+            dataset = run.get("dataset")
+            if not dataset:
+                continue
+            tau = run.get("strongest_first_tau", run.get("tau"))
+            lines.append(
+                f"      {dataset}: requested "
+                f"{_format_applied_value(run.get('requested_threshold'))}"
+                f" -> applied "
+                f"{_format_applied_value(run.get('applied_threshold'))}"
+                f" (source "
+                f"{_format_applied_value(run.get('applied_threshold_source'))}; "
+                f"SF budget {_format_applied_value(run.get('strongest_first_budget'))}, "
+                f"SF bite {_format_applied_value(run.get('strongest_first_budget_bitten'))}; "
+                f"tau {_format_applied_value(tau)}; w0 "
+                f"{_format_applied_value(run.get('edge_weight_floor'))}; "
+                f"w1 {_format_applied_value(run.get('edge_budget_landing'))}; "
+                f"edge budget {_format_applied_value(run.get('edge_budget'))} "
+                f"(applied {_format_applied_value(run.get('edge_budget_applied'))}); "
+                f"w2 {_format_applied_value(run.get('strongest_dropped_bottleneck'))}; "
+                f"W* {_format_applied_value(run.get('strongest_retained_bottleneck'))}; "
+                f"paths_complete {_format_applied_value(run.get('paths_complete'))})")
     return lines
 
 
@@ -1796,6 +2188,7 @@ def _key_params(params: dict) -> list:
         "dataset", "datasets", "source_dataset", "target_dataset",
         "sourceNeurons", "targetNeurons", "source_neurons", "target_neurons",
         "source", "query", "line_names", "lines", "line_name",
+        "threshold_mode", "threshold_dataset_order", "threshold_combinations",
         "min_synapse_num", "min_synapse_threshold", "min_ratio",
         "min_traversal_probability", "max_interlayer", "thresholds",
         "graph_edge_limit_bodyid", "max_paths_bodyid", "drop_untyped",
@@ -1842,19 +2235,25 @@ def _render_explanation_txt(sections, applied=None) -> list:
     return lines
 
 
-def _render_applied_txt(applied, by_dataset) -> list:
+def _render_applied_txt(applied, by_dataset, threshold_queries=None) -> list:
     """Plain-text rendering of the applied-threshold block."""
     lines = []
+    combinations = bool(
+        threshold_queries and threshold_queries.get("mode") == "combinations")
     if applied:
         lines.append(_applied_headline(applied))
         lines.append("")
         for label, key in _APPLIED_ROWS:
             lines.append(
                 f"  {label}: {_format_applied_value(applied.get(key))}")
-    if by_dataset:
+    if by_dataset and not combinations:
         lines.append("")
         lines.append("  Per-dataset asked -> applied thresholds:")
         lines.extend(_format_dataset_threshold_banner(by_dataset))
+    if combinations:
+        lines.append("")
+        lines.append("  Cross-dataset threshold query rows:")
+        lines.extend(_format_threshold_query_banner(threshold_queries))
     return lines
 
 
@@ -1880,11 +2279,13 @@ def render_txt(content: dict) -> str:
             lines.append(f"  {key}: {value}")
         lines.append("")
 
-    if content.get("applied") or content.get("applied_by_dataset"):
+    if (content.get("applied") or content.get("applied_by_dataset")
+            or content.get("threshold_queries")):
         lines.append("APPLIED THRESHOLD (THIS RUN)")
         lines.append("-" * 72)
         lines.extend(_render_applied_txt(
-            content.get("applied"), content.get("applied_by_dataset")))
+            content.get("applied"), content.get("applied_by_dataset"),
+            content.get("threshold_queries")))
         lines.append("")
 
     if content.get("explanation"):
@@ -1976,9 +2377,11 @@ def _render_explanation_markdown(sections, applied=None) -> list:
     return md
 
 
-def _render_applied_markdown(applied, by_dataset) -> list:
+def _render_applied_markdown(applied, by_dataset, threshold_queries=None) -> list:
     """Markdown rendering of the applied-threshold block."""
     md = []
+    combinations = bool(
+        threshold_queries and threshold_queries.get("mode") == "combinations")
     if applied:
         md.append(_applied_headline(applied))
         md.append("")
@@ -1989,11 +2392,17 @@ def _render_applied_markdown(applied, by_dataset) -> list:
                 "|", "\\|")
             md.append(f"| {label} | {value} |")
         md.append("")
-    if by_dataset:
+    if by_dataset and not combinations:
         md.append("Per-dataset asked -> applied thresholds:")
         md.append("")
         md.extend(f"    {line.strip()}"
                   for line in _format_dataset_threshold_banner(by_dataset))
+        md.append("")
+    if combinations:
+        md.append("Cross-dataset threshold query rows:")
+        md.append("")
+        md.extend(f"    {line.strip()}"
+                  for line in _format_threshold_query_banner(threshold_queries))
         md.append("")
     return md
 
@@ -2019,11 +2428,13 @@ def render_markdown(content: dict) -> str:
             md.append(f"| `{key}` | `{value}` |")
         md.append("")
 
-    if content.get("applied") or content.get("applied_by_dataset"):
+    if (content.get("applied") or content.get("applied_by_dataset")
+            or content.get("threshold_queries")):
         md.append("## Applied threshold (this run)")
         md.append("")
         md.extend(_render_applied_markdown(
-            content.get("applied"), content.get("applied_by_dataset")))
+            content.get("applied"), content.get("applied_by_dataset"),
+            content.get("threshold_queries")))
 
     if content.get("explanation"):
         md.append("## Pathfinding model")
@@ -2164,7 +2575,10 @@ def render_html(content: dict) -> str:
 
     applied = content.get("applied")
     by_dataset = content.get("applied_by_dataset")
-    if applied or by_dataset:
+    threshold_queries = content.get("threshold_queries")
+    combinations = bool(
+        threshold_queries and threshold_queries.get("mode") == "combinations")
+    if applied or by_dataset or combinations:
         parts.append("<h2>Applied threshold (this run)</h2>")
         parts.append('<div class="card">')
         if applied:
@@ -2178,13 +2592,52 @@ def render_html(content: dict) -> str:
                     f"<code>{_html_escape(_format_applied_value(applied.get(key)))}"
                     "</code></td></tr>")
             parts.append("</table>")
-        if by_dataset:
+        if by_dataset and not combinations:
             parts.append("<p class=\"small\">Per-dataset asked &rarr; "
                          "applied thresholds:</p>")
-            parts.append("<table><tr><th>Dataset</th>"
-                         "<th>Asked &rarr; applied</th></tr>")
+            has_run_rows = any(
+                isinstance(info, dict) and info.get("runs")
+                for info in by_dataset.values())
+            if has_run_rows:
+                parts.append(
+                    "<table><tr><th>Dataset</th><th>Threshold</th>"
+                    "<th>Requested</th><th>Applied</th><th>Source</th>"
+                    "<th>SF budget</th><th>SF bite</th><th>tau</th>"
+                    "<th>Edge budget</th><th>Edge floor applied</th>"
+                    "<th>w0</th><th>w1</th><th>w2</th>"
+                    "<th>W*</th><th>paths_complete</th></tr>")
+            else:
+                parts.append("<table><tr><th>Dataset</th>"
+                             "<th>Asked &rarr; applied</th></tr>")
             for ds, info in sorted(by_dataset.items()):
                 if not isinstance(info, dict):
+                    continue
+                if has_run_rows and info.get("runs"):
+                    for row in info.get("runs") or []:
+                        if not isinstance(row, dict):
+                            continue
+                        cells = (
+                            ds,
+                            row.get("threshold"),
+                            row.get("requested_threshold"),
+                            row.get("applied_threshold"),
+                            row.get("applied_threshold_source"),
+                            row.get("strongest_first_budget"),
+                            row.get("strongest_first_budget_bitten"),
+                            row.get("tau", row.get("strongest_first_tau")),
+                            row.get("edge_budget"),
+                            row.get("edge_budget_applied"),
+                            row.get("edge_weight_floor"),
+                            row.get("edge_budget_landing"),
+                            row.get("strongest_dropped_bottleneck"),
+                            row.get("strongest_retained_bottleneck"),
+                            row.get("paths_complete"),
+                        )
+                        parts.append(
+                            "<tr>" + "".join(
+                                f"<td><code>{_html_escape(_format_applied_value(cell))}"
+                                "</code></td>" for cell in cells)
+                            + "</tr>")
                     continue
                 asked = ", ".join(str(t) for t in info.get("input") or [])
                 effective = ", ".join(
@@ -2204,6 +2657,57 @@ def render_html(content: dict) -> str:
                     f"[{_html_escape(asked)}] &rarr; "
                     f"[{_html_escape(effective)}]{_html_escape(collapse_txt)}"
                     f"{_html_escape(tau_txt)}</td></tr>")
+            parts.append("</table>")
+        if combinations:
+            parts.append("<p class=\"small\">Cross-dataset threshold query "
+                         "rows (each row is one comparison identity; "
+                         "applied values are per dataset):</p>")
+            parts.append(
+                "<table><tr><th>Query</th><th>Label</th>"
+                "<th>Requested thresholds</th><th>Dataset</th>"
+                "<th>Applied</th><th>Source</th><th>SF budget</th>"
+                "<th>SF bite</th><th>tau</th><th>Edge budget</th>"
+                "<th>Edge budget applied</th>"
+                "<th>w0</th><th>w1</th><th>w2</th><th>W*</th>"
+                "<th>paths_complete</th></tr>")
+            dataset_order = threshold_queries.get("dataset_order") or []
+            for query in threshold_queries.get("queries") or []:
+                if not isinstance(query, dict):
+                    continue
+                query_id = query.get("id") or query.get("query_id")
+                label = query.get("label") or query_id
+                thresholds = query.get("thresholds") or {}
+                requested = ", ".join(
+                    f"{dataset}={thresholds.get(dataset, '—')}"
+                    for dataset in dataset_order)
+                if not requested:
+                    requested = ", ".join(
+                        f"{dataset}={value}"
+                        for dataset, value in thresholds.items())
+                runs = query.get("runs") or [{}]
+                for run in runs:
+                    if not isinstance(run, dict):
+                        continue
+                    tau = run.get("strongest_first_tau", run.get("tau"))
+                    cells = (
+                        query_id, label, requested, run.get("dataset"),
+                        run.get("applied_threshold"),
+                        run.get("applied_threshold_source"),
+                        run.get("strongest_first_budget"),
+                        run.get("strongest_first_budget_bitten"), tau,
+                        run.get("edge_budget"),
+                        run.get("edge_budget_applied"),
+                        run.get("edge_weight_floor"),
+                        run.get("edge_budget_landing"),
+                        run.get("strongest_dropped_bottleneck"),
+                        run.get("strongest_retained_bottleneck"),
+                        run.get("paths_complete"),
+                    )
+                    parts.append(
+                        "<tr>" + "".join(
+                            f"<td><code>{_html_escape(_format_applied_value(cell))}"
+                            "</code></td>" for cell in cells)
+                        + "</tr>")
             parts.append("</table>")
         parts.append("</div>")
 

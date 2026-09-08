@@ -1,10 +1,10 @@
-"""Readiness checks for FlyWire morphology and skeleton workflows.
+"""Readiness checks for FAFB and standalone BANC morphology workflows.
 
-The connectivity tables for FlyWire datasets and their morphology sources are
-different resources.  In particular, BANC has no skeleton release available
-through FlyWire Codex, while FAFB can use either the downloaded local skeleton
-bundle or the CAVE API.  Keep those rules in one small, dependency-light
-module so the UI-facing scripts and the library entry points agree.
+The connectivity tables and morphology sources are different resources. FAFB
+can use either its downloaded local skeleton bundle or the CAVE API. BANC uses
+the public release bucket and never uses FlyWire Codex or a CAVE token. Keep
+those rules in one small, dependency-light module so UI-facing scripts and
+library entry points agree.
 """
 
 from __future__ import annotations
@@ -18,8 +18,8 @@ try:
 except ImportError:  # pragma: no cover - src laid bare on sys.path
     from utils.naming_utils import canonical_dataset_name
 
-# Re-exported so callers can keep importing the family predicates from this
-# module (the canonical definitions live in flywire_ids).
+# Re-exported for compatibility (the canonical definitions live in
+# flywire_ids).
 try:
     from ..flywire_ids import is_banc_dataset, is_fafb_dataset
 except ImportError:  # pragma: no cover - src laid bare on sys.path
@@ -27,7 +27,7 @@ except ImportError:  # pragma: no cover - src laid bare on sys.path
 
 
 class FlyWireSkeletonAccessError(RuntimeError):
-    """Raised when a FlyWire morphology workflow cannot obtain skeletons."""
+    """Raised when a FAFB morphology workflow cannot obtain skeletons."""
 
 
 def dataset_folder(dataset: object) -> str:
@@ -39,13 +39,11 @@ def dataset_folder(dataset: object) -> str:
 def flywire_manual_skeleton_instruction(
     dataset: object, dataset_dir: str | Path | None = None,
 ) -> str:
-    """Explicit manual-download instruction for FlyWire skeleton bundles.
+    """Return the manual-download instruction for FAFB skeleton bundles.
 
-    Bulk skeleton downloads are disabled for FlyWire datasets: their skeleton
-    bundles (e.g. ``sk_lod1_783_healed.zip`` for FAFB) are large one-time
-    downloads that must be fetched manually from the FlyWire Codex and placed
-    by the converter.  This is the single source of truth for that message,
-    used by the ``download_all_skeletons`` guard and the Settings tab.
+    Bulk skeleton downloads are disabled for FAFB: its healed skeleton bundle
+    is a large one-time download from FlyWire Codex. BANC is handled by the
+    early standalone public-bucket branch below.
     """
 
     dataset_name = str(dataset or "")
@@ -66,7 +64,7 @@ def flywire_manual_skeleton_instruction(
         )
     bundle = "the FAFB skeleton bundle (sk_lod1_783_healed.zip) from"
     return (
-        f"Download All Skeletons is disabled for FlyWire datasets "
+        f"Download All Skeletons is disabled for FAFB datasets "
         f"('{dataset_name}'); skeletons must be downloaded manually:\n"
         f"  1. Download {bundle} https://codex.flywire.ai/api/download?dataset={key}\n"
         f"  2. Save the download into {download_dir}\n"
@@ -81,14 +79,11 @@ def print_download_instructions(
     dataset: object,
     dataset_dir: str | Path | None = None,
 ) -> None:
-    """Print the canonical one-time download + conversion instructions for a
-    FlyWire dataset (FAFB or BANC) whose local tables are missing.
+    """Print source-specific preparation instructions for missing local tables.
 
-    Single source of truth for the missing-local-files message, used by both
-    converters, coana's data preparation and the skeleton-readiness guard, so
-    every entry point tells the same story: download from Codex, save into
-    ``datasets/<dataset>/downloads/``, run the converter once (one-time
-    preparation; re-runs reuse the converted tables).
+    FAFB uses a one-time Codex download and converter. BANC uses its public
+    release bucket and does not display a Codex URL, request a CAVE token, or
+    require manual skeleton downloads.
     """
 
     dataset_name = str(dataset or "")
@@ -98,6 +93,20 @@ def print_download_instructions(
         root = Path(__file__).resolve().parents[2]
         dataset_dir = root / "datasets" / dataset_folder(dataset_name)
     download_dir = Path(dataset_dir) / "downloads"
+    if key == "banc":
+        print()
+        print("=" * 70)
+        print("BANC PUBLIC RELEASE — AUTOMATIC PREPARATION")
+        print(f"Local BANC tables for '{dataset_name}' were not found.")
+        print("DROCAT prepares metadata and connections from the public BANC")
+        print("release bucket; no FlyWire/Codex login and no CAVE token are needed.")
+        print("Skeletons are fetched on demand from banc_public_gcs and cached")
+        print(f"as .swc.zst files under cache/{dataset_folder(dataset_name)}/skeletons/.")
+        print("Run the BANC converter only when preparing a local table bundle:")
+        print(f"  python src/{converter}.py")
+        print("=" * 70)
+        return
+
     required = (
         "neurons.csv.gz + connections_princeton.csv.gz"
         if key == "banc"
@@ -107,7 +116,7 @@ def print_download_instructions(
     print("=" * 70)
     print(f"MISSING LOCAL FILES — ONE-TIME DOWNLOAD + CONVERSION REQUIRED")
     print(f"Local tables for '{dataset_name}' were not found. DROCAT queries need the")
-    print("raw FlyWire downloads converted into local parquet tables first; this is a")
+    print("raw FAFB downloads converted into local parquet tables first; this is a")
     print("ONE-TIME preparation step (re-runs reuse the converted tables):")
     print()
     print(f"  1. Download the required files from:")
@@ -118,11 +127,6 @@ def print_download_instructions(
     print(f"  3. Run the one-time converter:")
     print(f"     python src/{converter}.py")
     print()
-    if key == "banc":
-        print("  Preferred: skip the manual download entirely — DROCAT")
-        print("  fetches BANC metadata + connections from the public release")
-        print("  bucket automatically (banc_public_data.prepare_dataset_tables).")
-        print()
     if key == "fafb":
         print("  Optional FAFB extras (names/coordinates/neurons/cell_stats/")
         print("  consolidated_cell_types .csv.gz, synapse table, sk_lod1_783_healed.zip)")
@@ -254,7 +258,9 @@ def flywire_skeleton_readiness(
         local_source = local_fafb_skeleton_source(dataset, root)
     else:
         local_source = None
-    cave_configured = bool(_configured_cave_token(root))
+    # BANC is deliberately independent of CAVE. Do not surface an ambient
+    # FAFB token as BANC readiness, because BANC never consumes that token.
+    cave_configured = False if banc else bool(_configured_cave_token(root))
     # BANC is always ready (public bucket); FAFB needs local data or a
     # token; NeuPrint datasets need neither.
     ready = (not fafb) or local_source is not None or cave_configured
@@ -274,7 +280,7 @@ def require_flywire_skeleton_access(
     project_root: Optional[str | Path] = None,
     log: Callable[[str], None] = print,
 ) -> dict:
-    """Validate access for a skeleton-based FlyWire workflow.
+    """Validate access for a local-release morphology workflow.
 
     BANC is always accepted: skeletons fetch on demand from the public
     release bucket and no CAVE token is involved.  FAFB is accepted when

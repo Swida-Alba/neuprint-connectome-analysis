@@ -1,8 +1,8 @@
-"""FlyWire mesh preparation and cache helpers.
+"""FAFB mesh preparation and cache helpers.
 
-FlyWire/FAFB CAVE fetches are surface meshes, not SWC trees.  This module
-keeps that representation separate from the NeuPrint raw-skeleton cache and
-provides the same soma-aware decimation used by the visualizer.
+FAFB CAVE fetches are surface meshes, not SWC trees. This module keeps that
+representation separate from the NeuPrint and standalone-BANC raw-skeleton
+caches and provides the same soma-aware decimation used by the visualizer.
 """
 
 from __future__ import annotations

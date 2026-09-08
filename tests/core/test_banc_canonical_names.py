@@ -128,22 +128,26 @@ class TestUiDatasetNames:
         # The generic NeuPrint rule must not invent a colon form.
         assert ds_mod.folder_to_dataset("banc_v626") != "banc:v626"
 
-    def test_ui_flywire_predicate_covers_banc(self):
+    def test_ui_predicates_keep_banc_out_of_flywire(self):
         sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
         import ui.dataset_service as ds_mod
 
-        assert ds_mod.is_flywire_dataset("banc_v888") is True
-        assert ds_mod.is_flywire_dataset("flywire_BANC_v888") is True
+        assert ds_mod.is_flywire_dataset("banc_v888") is False
+        assert ds_mod.is_flywire_dataset("flywire_BANC_v888") is False
+        assert ds_mod.is_banc_dataset("banc_v888") is True
+        assert ds_mod.is_banc_dataset("flywire_BANC_v888") is True
         # The hidden, non-queryable NeuPrint entry stays excluded.
         assert ds_mod.is_flywire_dataset("banc:v888") is False
+        assert ds_mod.is_banc_dataset("banc:v888") is True
         assert ds_mod.is_flywire_dataset("male-cns:v1.0") is False
 
     def test_static_catalog_uses_canonical_names(self):
         sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from ui.config import DATASETS, FLYWIRE_DATASETS
+        from ui.config import BANC_DATASETS, DATASETS, FLYWIRE_DATASETS
 
         assert "banc_v626" in DATASETS and "banc_v888" in DATASETS
-        assert "banc_v626" in FLYWIRE_DATASETS
+        assert "banc_v626" in BANC_DATASETS
+        assert "banc_v626" not in FLYWIRE_DATASETS
         assert not any(name.startswith("flywire_BANC") for name in DATASETS)
 
     def test_ui_label_uses_independent_banc_tag(self):
@@ -161,7 +165,7 @@ class TestUiDatasetNames:
 
         svc = _Svc()
         assert _dataset_label_parts("banc_v888", svc)[1] == "[BANC]"
-        assert _dataset_label_parts("flywire_FAFB_v783", svc)[1] == "[FW]"
+        assert _dataset_label_parts("flywire_FAFB_v783", svc)[1] == "[FAFB]"
         assert _dataset_label_parts("male-cns:v1.0", svc)[1] == "[NP]" 
 
 

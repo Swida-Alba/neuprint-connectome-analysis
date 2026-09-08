@@ -114,6 +114,28 @@ def create_inter_dataset_tab():
                          "and a high unreachable number (e.g. 99) gives an effectively "
                          "unlimited search.",
                 )
+            # Keep the mode selector in a fixed position above both editors.
+            # This follows the segmented-button treatment used by the
+            # Visualization > Skeleton tab: changing mode only swaps the
+            # panel below these buttons and never moves the selector.
+            threshold_mode_value = {"value": "standard"}
+            threshold_mode_buttons = {}
+            section_header("Threshold Mode", "tune")
+            with ui.row().classes(
+                "w-full items-center justify-between gap-4 px-2 flex-nowrap"
+            ):
+                for _mode, _label in (
+                    ("standard", "Standard"),
+                    ("combinations", "Custom combination"),
+                ):
+                    _button = ui.button(_label).props(
+                        "outline no-caps"
+                    ).classes("w-1/2")
+                    _button.style(
+                        "min-height: 3rem; font-size: 1.05rem; font-weight: 700;"
+                    )
+                    threshold_mode_buttons[_mode] = _button
+
             thresholds_input = neuron_list_input(
                 label="Synapse Thresholds",
                 initial=[3, 5, 10],
@@ -123,6 +145,226 @@ def create_inter_dataset_tab():
                 hint="List of min synapse thresholds to analyze. "
                      "Type one threshold per chip (e.g. 3, 5, 10), or keep the defaults.",
             ).classes("w-full drocat-full-row-control")
+
+            standard_threshold_hint = ui.label(
+                "Standard mode: each chip is one comparison query shared by all selected datasets."
+            ).classes("text-xs opacity-60 w-full")
+            combination_panel = ui.column().classes("w-full gap-2")
+            combination_rows = [
+                {"id": "combo_001", "label": "Combination 1", "values": {}}
+            ]
+            combination_inputs = []
+            combination_table = None
+
+            def _capture_combination_rows():
+                """Persist current cell editors before rebuilding the table."""
+                for row_state, input_map in combination_inputs:
+                    for dataset, inp in input_map.items():
+                        row_state.setdefault("values", {})[dataset] = str(
+                            inp.value or ""
+                        ).strip()
+
+            def _combination_datasets():
+                return list(datasets_select.value or [])
+
+            def _rebuild_combination_table(_event=None):
+                _capture_combination_rows()
+                selected = _combination_datasets()
+                combination_inputs.clear()
+                combination_table.clear()
+                if len(selected) < 2:
+                    with combination_table:
+                        ui.label(
+                            "Custom combination requires at least two selected "
+                            "datasets."
+                        ).classes("text-xs text-amber-8")
+                    return
+
+                # The first time Custom combination mode is opened, make a usable row
+                # from the first standard threshold. Newly selected datasets
+                # in an existing table intentionally remain blank.
+                default_values = thresholds_input.get_value()[1]
+                default_value = (
+                    str(default_values[0]) if default_values else ""
+                )
+                if not any(row.get("values") for row in combination_rows):
+                    combination_rows[0]["values"] = {
+                        dataset: default_value for dataset in selected
+                    }
+
+                with combination_table:
+                    with ui.row().classes("w-full items-center gap-2"):
+                        ui.label("Query").classes("w-36 text-xs font-medium")
+                        for dataset in selected:
+                            ui.label(dataset).classes(
+                                "flex-1 min-w-[120px] text-xs font-medium"
+                            )
+                        ui.label("").classes("w-8")
+
+                    for index, row_state in enumerate(combination_rows, start=1):
+                        row_state["id"] = row_state.get("id") or f"combo_{index:03d}"
+                        row_state["label"] = row_state.get("label") or f"Combination {index}"
+                        row_state.setdefault("values", {})
+                        input_map = {}
+                        with ui.row().classes("w-full items-center gap-2"):
+                            ui.label(row_state["label"]).classes(
+                                "w-36 text-xs font-medium"
+                            )
+                            for dataset in selected:
+                                inp = ui.input(
+                                    value=row_state["values"].get(dataset, ""),
+                                    placeholder="positive integer",
+                                ).props("dense outlined type=number").classes(
+                                    "flex-1 min-w-[120px]"
+                                )
+                                input_map[dataset] = inp
+                            remove = ui.button(
+                                icon="delete_outline",
+                                on_click=lambda _e, target=row_state: _remove_combination_row(target),
+                            ).props(
+                                'flat dense round color="negative" aria-label="Remove combination"'
+                            ).classes("w-8")
+                            remove.tooltip("Remove this query row")
+                        combination_inputs.append((row_state, input_map))
+
+                    with ui.row().classes("items-center gap-2"):
+                        add = ui.button(
+                            "Add combination", icon="add", on_click=_add_combination_row
+                        ).props("outline dense")
+                        add.tooltip("Add one complete cross-dataset threshold query")
+
+            def _add_combination_row(_event=None):
+                _capture_combination_rows()
+                existing_indices = []
+                for row_state in combination_rows:
+                    row_id = str(row_state.get("id", ""))
+                    if row_id.startswith("combo_"):
+                        try:
+                            existing_indices.append(int(row_id.rsplit("_", 1)[-1]))
+                        except ValueError:
+                            pass
+                next_index = max(existing_indices or [0]) + 1
+                combination_rows.append({
+                    "id": f"combo_{next_index:03d}",
+                    "label": f"Combination {next_index}",
+                    "values": {},
+                })
+                _rebuild_combination_table()
+
+            def _remove_combination_row(target):
+                if len(combination_rows) <= 1:
+                    ui.notify(
+                        "Keep at least one threshold combination row.",
+                        type="warning",
+                    )
+                    return
+                _capture_combination_rows()
+                combination_rows[:] = [
+                    row for row in combination_rows if row is not target
+                ]
+                _rebuild_combination_table()
+
+            with combination_panel:
+                ui.label(
+                    "Custom combination mode: each row is one query; every selected dataset "
+                    "must have one positive threshold. Blank cells are invalid."
+                ).classes("text-xs opacity-60 w-full")
+                combination_table = ui.column().classes("w-full gap-1")
+            combination_panel.set_visibility(False)
+
+            def _sync_threshold_mode():
+                advanced = threshold_mode_value["value"] == "combinations"
+                thresholds_input.set_visibility(not advanced)
+                standard_threshold_hint.set_visibility(not advanced)
+                combination_panel.set_visibility(advanced)
+                for _mode, _button in threshold_mode_buttons.items():
+                    _button.props(
+                        "color=primary"
+                        if _mode == threshold_mode_value["value"]
+                        else "color=grey-7"
+                    )
+                if advanced:
+                    _rebuild_combination_table()
+
+            def _set_threshold_mode(value):
+                threshold_mode_value["value"] = value
+                _sync_threshold_mode()
+
+            for _mode, _button in threshold_mode_buttons.items():
+                _button.on_click(
+                    lambda _e, mode=_mode: _set_threshold_mode(mode)
+                )
+            datasets_select.on_value_change(_rebuild_combination_table)
+            _sync_threshold_mode()
+
+            def _collect_threshold_configuration():
+                """Return the canonical threshold payload for the active mode."""
+                selected = _combination_datasets()
+                mode = threshold_mode_value["value"]
+                if mode == "standard":
+                    try:
+                        values = [
+                            int(value)
+                            for item in thresholds_input.get_value()[1]
+                            for value in str(item).replace(" ", "").split(",")
+                            if value
+                        ]
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            "Invalid thresholds format. Use positive integers."
+                        ) from exc
+                    if not values or any(value <= 0 for value in values):
+                        raise ValueError(
+                            "Please enter at least one positive synapse threshold."
+                        )
+                    return mode, sorted(set(values)), None
+
+                _capture_combination_rows()
+                if len(selected) < 2:
+                    raise ValueError(
+                        "Custom combination requires at least two selected "
+                        "datasets."
+                    )
+                combinations = []
+                signatures = set()
+                for index, row_state in enumerate(combination_rows, start=1):
+                    values = {}
+                    for dataset in selected:
+                        raw_value = str(
+                            row_state.get("values", {}).get(dataset, "")
+                        ).strip()
+                        if not raw_value:
+                            raise ValueError(
+                                f"Combination {index} is missing a threshold "
+                                f"for {dataset}."
+                            )
+                        try:
+                            value = int(raw_value)
+                        except (TypeError, ValueError) as exc:
+                            raise ValueError(
+                                f"Combination {index} has an invalid threshold "
+                                f"for {dataset}: {raw_value!r}."
+                            ) from exc
+                        if value <= 0:
+                            raise ValueError(
+                                f"Combination {index} threshold for {dataset} "
+                                "must be positive."
+                            )
+                        values[dataset] = value
+                    signature = tuple(values[dataset] for dataset in selected)
+                    if signature in signatures:
+                        raise ValueError(
+                            f"Combination {index} duplicates an existing "
+                            "threshold row."
+                        )
+                    signatures.add(signature)
+                    combinations.append({
+                        "id": row_state.get("id") or f"combo_{index:03d}",
+                        "label": row_state.get("label") or f"Combination {index}",
+                        "thresholds": values,
+                    })
+                return mode, [], combinations
+
             # Feature B: static rough-range hint (whole-dataset
             # connection-pair density per neuron). Informational only —
             # query-specific alignment is exported per run in the
@@ -248,87 +490,14 @@ def create_inter_dataset_tab():
                          "never match across datasets. Applied AFTER the "
                          "standardized cross-dataset labels are resolved. "
                          "Dropped rows: comparison_results/"
-                         "untyped_dropped_records.csv (per-dataset "
-                         "pathfinding runs record data_details/"
-                         "untyped_dropped_records.csv); counts appended to "
+                         "untyped_dropped_records.csv (the delegated "
+                         "per-dataset pathfinding folders intentionally keep "
+                         "untyped rows in their data_details/ outputs so "
+                         "filtering happens once after standardization); "
+                         "counts appended to "
                          "user_warning_notes.txt.",
                 )
 
-                # Feature E: per-dataset thresholds (vertical comparison).
-                # One ascending threshold list per selected dataset; empty =
-                # fall back to the global list.
-                dataset_thresholds_toggle = checkbox_input(
-                    "Per-dataset thresholds", False,
-                    hint="Assign a DIFFERENT threshold list per dataset (vertical "
-                         "comparison run mode). Each dataset then runs its own ascending "
-                         "list; horizontal cross-dataset tables only have content at "
-                         "thresholds shared by ≥ 2 datasets, and the threshold_alignment "
-                         "files carry the cross-dataset comparison.",
-                )
-                dataset_thresholds_container = ui.column().classes("w-full gap-1")
-                dataset_threshold_inputs: dict = {}
-
-                def _parse_threshold_list(text: str):
-                    values = []
-                    for part in str(text or '').replace(' ', '').split(','):
-                        if not part:
-                            continue
-                        values.append(int(part))
-                    return sorted(set(values))
-
-                def _rebuild_dataset_threshold_rows():
-                    dataset_threshold_inputs.clear()
-                    dataset_thresholds_container.clear()
-                    selected = list(datasets_select.value or [])
-                    if not dataset_thresholds_toggle.value or not selected:
-                        return
-                    global_values = thresholds_input.get_value()[1]
-                    with dataset_thresholds_container:
-                        for ds in selected:
-                            with ui.row().classes("w-full items-center gap-2 flex-wrap"):
-                                ui.label(ds).classes("text-xs font-medium min-w-[180px]")
-                                initial = ",".join(str(v) for v in global_values)
-                                inp = ui.input(
-                                    value=initial,
-                                    placeholder="e.g. 3, 5, 10 (empty = global list)",
-                                    on_change=None,
-                                ).classes("flex-1 min-w-[220px]").props("dense outlined")
-                                inp.on("blur", lambda e, i=inp: _normalize_row(i))
-                                dataset_threshold_inputs[ds] = inp
-
-                    def _normalize_row(inp):
-                        try:
-                            values = _parse_threshold_list(inp.value)
-                            inp.value = ",".join(str(v) for v in values)
-                        except (TypeError, ValueError):
-                            ui.notify(
-                                f"Invalid thresholds for per-dataset editor — use "
-                                f"comma-separated integers.",
-                                type="negative",
-                            )
-
-                def _collect_dataset_thresholds():
-                    if not dataset_thresholds_toggle.value:
-                        return None
-                    overrides = {}
-                    for ds, inp in dataset_threshold_inputs.items():
-                        text = (inp.value or "").strip()
-                        if not text:
-                            continue  # empty = fall back to global
-                        try:
-                            values = _parse_threshold_list(text)
-                        except (TypeError, ValueError):
-                            raise ValueError(
-                                f"Invalid per-dataset thresholds for {ds}: '{text}' "
-                                f"(use comma-separated integers)")
-                        if values:
-                            overrides[ds] = values
-                    return overrides or None
-
-                dataset_thresholds_toggle.on_value_change(
-                    lambda _e: _rebuild_dataset_threshold_rows())
-                datasets_select.on_value_change(
-                    lambda _e: _rebuild_dataset_threshold_rows())
                 with param_grid(3):
                     # F9: ratio/probability filters are disabled (ratio is a
                     # readout column now). The entrances stay in the code,
@@ -364,10 +533,11 @@ def create_inter_dataset_tab():
                         "Visualization Edge Limit", get_user_default("edgeN_limit"), 10, 5000,
                         hint="Drawing-only cap: at most this many unique edges are "
                              "rendered per visualization (network / Sankey / heatmap) "
-                             "in the FindAllPath runs. It never changes fetching, the "
-                             "graph, or the path output; a single complete path may "
-                             "still exceed it to stay intact. Same default as the "
-                             "Complete Paths tab.",
+                             "in the delegated Complete/Shortest Paths runs. It never "
+                             "changes fetching, the graph, or the path output; a single "
+                             "complete path may still exceed it to stay intact. Type- and "
+                             "bodyId-level visualizations share the same cap. Same "
+                             "default as the Complete Paths tab.",
                     )
 
                 def _apply_path_mode_defaults(notify=False):
@@ -411,26 +581,10 @@ def create_inter_dataset_tab():
             ui.notify("Please add at least 1 dataset to analyze", type="warning")
             return
 
-        # Parse thresholds (chip values are already normalized to integers;
-        # split comma-joined chips defensively in case a list was typed into
-        # one chip before the run).
         try:
-            thresholds = [
-                int(v)
-                for item in thresholds_input.get_value()[1]
-                for v in str(item).replace(' ', '').split(',')
-                if v
-            ]
-        except (TypeError, ValueError):
-            ui.notify("Invalid thresholds format. Use comma-separated integers.", type="negative")
-            return
-        if not thresholds:
-            ui.notify("Please enter at least one synapse threshold", type="warning")
-            return
-
-        # Feature E: per-dataset threshold overrides (vertical comparison)
-        try:
-            dataset_thresholds = _collect_dataset_thresholds()
+            threshold_mode, thresholds, threshold_combinations = (
+                _collect_threshold_configuration()
+            )
         except ValueError as exc:
             ui.notify(str(exc), type="negative")
             return
@@ -453,7 +607,9 @@ def create_inter_dataset_tab():
             "path_mode": path_mode.value,
             "max_interlayer": int(max_interlayer.value),
             "thresholds": thresholds,
-            "dataset_thresholds": dataset_thresholds,
+            "threshold_mode": threshold_mode,
+            "threshold_dataset_order": list(datasets),
+            "threshold_combinations": threshold_combinations,
             "replay_paths": replay_paths.value,
             "auto_extend_thresholds": auto_extend_thresholds.value,
             "drop_untyped": drop_untyped.value,
@@ -488,11 +644,12 @@ def create_inter_dataset_tab():
         result = await output_panel.run(runner, "inter_dataset", constructor_params, "run",
                                         output_dir=output_dir.value)
 
-        # F6: persistent effective-threshold banner — the analyzer writes
-        # effective_thresholds.json when a τ collapse happened; surface it
-        # as a durable notice above the log.
+        # Persistent threshold/bottleneck provenance notice — the analyzer
+        # writes effective_thresholds.json for every completed comparison
+        # mode, including shortest and complete (non-collapsed) runs.
         try:
-            notice_path = os.path.join(output_dir.value or "",
+            run_folder = result.get("output_folder") or output_dir.value or ""
+            notice_path = os.path.join(run_folder,
                                        "effective_thresholds.json")
             if os.path.isfile(notice_path):
                 with open(notice_path, "r", encoding="utf-8") as nf:

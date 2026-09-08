@@ -279,7 +279,8 @@ minimal threshold reproducing the materialized set, and
 landing/collapse bound — the budgeted output is a strength-bounded path
 set, never an arbitrary first-N truncation. Replay-materialized folders
 (`minsyn_{t}` via `_replay_output_folder_for_threshold`) and the
-Cross-Dataset per-dataset threshold folders carry the same block. A
+Cross-Dataset raw-run folders selected by standard or combination query rows
+carry the same block. A
 `[combined threshold]` note is appended to `user_warning_notes.txt`
 when BOTH budgets affected a run.
 

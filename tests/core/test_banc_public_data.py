@@ -467,6 +467,7 @@ class TestReadinessRelaxation:
         assert status["ready"] is True
         assert status["is_banc"] is True
         assert "banc_public_gcs" in status["local_source"]
+        assert status["cave_token"] is False
 
     def test_banc_not_rejected(self, tmp_path):
         from utils.flywire_readiness import require_flywire_skeleton_access

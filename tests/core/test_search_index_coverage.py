@@ -138,6 +138,27 @@ def test_dataset_folder_normalization():
     assert nib.dataset_folder(None) == ""
 
 
+def test_dataset_identifier_from_folder_preserves_release_names():
+    assert nib.dataset_identifier_from_folder("manc_v1_2_1") == "manc:v1.2.1"
+    assert nib.dataset_identifier_from_folder("banc_v888") == "banc_v888"
+    assert nib.dataset_identifier_from_folder("flywire_FAFB_v783") == "flywire_FAFB_v783"
+
+
+def test_ui_cross_dataset_index_discovery_includes_future_folder(
+    tmp_path, monkeypatch
+):
+    from ui import neuron_index
+
+    folder = tmp_path / "neuron_indexes" / "future_v2_0"
+    folder.mkdir(parents=True)
+    pl.DataFrame({"bodyId": ["1"], "type": ["FutureA"]}).write_parquet(
+        folder / "neuron_index.parquet"
+    )
+    monkeypatch.setattr(neuron_index, "PROJECT_ROOT", tmp_path)
+
+    assert neuron_index.datasets_with_cached_indexes() == ["future:v2.0"]
+
+
 def test_search_cache_path_and_system_path(tmp_path):
     index = tmp_path / "x" / "neuron_index.parquet"
     assert nib.search_cache_path(index).name == "neuron_index_search.parquet"

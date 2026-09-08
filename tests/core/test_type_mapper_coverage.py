@@ -195,6 +195,34 @@ def test_missing_flywire_table_disables_rename(tmp_path):
     assert m2._flywire_alt_to_primary.get('flywire_FAFB_v783') is None
 
 
+def test_mapper_prefers_fresh_prepared_parquet_index(tmp_path):
+    """Cold mapper loads use the prepared projection when it is current."""
+    import polars as pl
+
+    dataset_dir = tmp_path / 'datasets' / 'male-cns_v1_0'
+    dataset_dir.mkdir(parents=True)
+    source = dataset_dir / 'male-cns_v1_0_allneurons_neuron_df.csv'
+    source.write_text(
+        'bodyId,type,flywireType,hemibrainType,mancType\n'
+        '1,CSVOnly,CSVOnly,,\n', encoding='utf-8')
+
+    index_dir = tmp_path / 'neuron_indexes' / 'male-cns_v1_0'
+    index_dir.mkdir(parents=True)
+    pl.DataFrame({
+        'bodyId': ['1'],
+        'type': ['IndexOnly'],
+        'flywireType': ['IndexOnly'],
+        'hemibrainType': [''],
+        'mancType': [''],
+    }).write_parquet(index_dir / 'neuron_index.parquet')
+
+    mapper = CrossDatasetTypeMapper(
+        workspace_path=str(tmp_path), verbose=False)
+    assert mapper.load() is True
+    assert 'IndexOnly' in mapper._dataset_types[MCNS]
+    assert 'CSVOnly' not in mapper._dataset_types[MCNS]
+
+
 # ---------------------------------------------------------------------------
 # User warning notes (expanded / N-to-1 / 1-to-N)
 # ---------------------------------------------------------------------------

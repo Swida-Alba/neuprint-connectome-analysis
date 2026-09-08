@@ -90,6 +90,36 @@ def test_analyzer_complete_run_source_is_requested():
     assert source == "requested"
 
 
+def test_comparison_provenance_row_exposes_threshold_and_budget_fields():
+    analyzer = _analyzer_with_meta({
+        "requested_threshold": 3,
+        "tau": 14.0,
+        "tau_canonical": 12,
+        "budget_bitten": True,
+        "strongest_dropped_bottleneck": 11.0,
+        "strongest_first_budget": 500,
+        "edge_budget": 1000,
+        "edge_budget_landing": 5,
+        "edge_weight_floor": 6,
+        "strongest_retained_bottleneck": 15,
+        "paths_complete": False,
+        "skipped": False,
+        "applied_folder": 3,
+    })
+    row = analyzer._path_provenance_row("banc_v888", 3)
+
+    assert row["requested_threshold"] == 3
+    assert row["applied_threshold"] == 12
+    assert row["applied_threshold_source"] == \
+        "strongest_first_budget+edge_budget"
+    assert row["strongest_first_budget"] == 500
+    assert row["edge_budget"] == 1000
+    assert row["edge_budget_applied"] is True
+    assert row["edge_weight_floor"] == 6
+    assert row["strongest_dropped_bottleneck"] == 11.0
+    assert row["strongest_retained_bottleneck"] == 15
+
+
 def test_analyzer_bare_bite_source_is_strongest_first_budget():
     analyzer = _analyzer_with_meta({
         "tau": 12.0, "tau_canonical": 8,

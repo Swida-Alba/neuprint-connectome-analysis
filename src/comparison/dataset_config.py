@@ -6,8 +6,10 @@ settings. In the optimized workflow, DatasetConfig is typically auto-generated
 from dataset strings - users rarely need to create it manually.
 
 Dataset Detection:
-- If name starts with 'flywire' -> local dataset (FindNeuronConnection handles path)
-- Otherwise -> NeuPrint dataset (requires client for authentication)
+- FAFB identifiers (including historical ``flywire_FAFB_*`` names) use the
+  FAFB local release path.
+- BANC identifiers use the standalone public BANC release path.
+- Everything else is a NeuPrint dataset and requires a client for authentication.
 
 Note: Source/target neurons and max_interlayer are now defined in ComparisonParameters
 (shared across all datasets), not in DatasetConfig.
@@ -22,9 +24,17 @@ except ImportError:  # pragma: no cover - direct package imports
     from utils.naming_utils import canonical_dataset_name
 
 try:
-    from ..flywire_ids import is_flywire_dataset
+    from ..flywire_ids import (
+        is_banc_dataset,
+        is_fafb_dataset,
+        is_local_connectome_dataset,
+    )
 except ImportError:  # pragma: no cover - direct package imports
-    from flywire_ids import is_flywire_dataset
+    from flywire_ids import (
+        is_banc_dataset,
+        is_fafb_dataset,
+        is_local_connectome_dataset,
+    )
 
 
 @dataclass
@@ -37,7 +47,8 @@ class DatasetConfig:
     (shared across all datasets).
     
     Dataset Detection:
-    - FlyWire family (flywire_*/fafb/banc names) -> local dataset
+    - FAFB (including historical ``flywire_FAFB_*`` names) -> FAFB local data
+    - BANC -> standalone public BANC release data
     - Otherwise -> NeuPrint dataset (all use neuprint.janelia.org)
     
     Attributes:
@@ -87,13 +98,28 @@ class DatasetConfig:
     
     @property
     def is_flywire(self) -> bool:
-        """Check if this is a FlyWire-family local dataset (FAFB or BANC)."""
-        return is_flywire_dataset(self.dataset)
+        """Compatibility alias for the FAFB-only classification."""
+        return self.is_fafb
+
+    @property
+    def is_fafb(self) -> bool:
+        """Check if this is the FAFB local release."""
+        return is_fafb_dataset(self.dataset)
+
+    @property
+    def is_banc(self) -> bool:
+        """Check if this is the standalone BANC public release."""
+        return is_banc_dataset(self.dataset)
+
+    @property
+    def is_local(self) -> bool:
+        """Check if this is either supported local release."""
+        return is_local_connectome_dataset(self.dataset)
     
     @property
     def is_neuprint(self) -> bool:
         """Check if this is a NeuPrint-based dataset."""
-        return not self.is_flywire
+        return not self.is_local
     
     @classmethod
     def from_string(cls, dataset_str: str, client: Optional[Any] = None) -> 'DatasetConfig':
@@ -128,6 +154,10 @@ class DatasetConfig:
             'dataset': self.dataset,
             'name': self.name,
             'is_flywire': self.is_flywire,
+            'is_fafb': self.is_fafb,
+            'is_banc': self.is_banc,
+            'is_local': self.is_local,
+            'is_neuprint': self.is_neuprint,
             # Note: client is intentionally excluded
         }
     
@@ -150,6 +180,8 @@ class DatasetConfig:
         )
     
     def __repr__(self) -> str:
-        if self.is_flywire:
-            return f"DatasetConfig(dataset='{self.dataset}', type='local')"
+        if self.is_banc:
+            return f"DatasetConfig(dataset='{self.dataset}', type='banc')"
+        if self.is_fafb:
+            return f"DatasetConfig(dataset='{self.dataset}', type='fafb')"
         return f"DatasetConfig(dataset='{self.dataset}', type='neuprint')"

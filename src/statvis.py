@@ -39,7 +39,10 @@ except ImportError:  # pragma: no cover - src laid bare on sys.path
 
 try:
     from .flywire_ids import (
+        is_banc_dataset,
+        is_fafb_dataset,
         is_flywire_dataset,
+        is_local_connectome_dataset,
         normalize_flywire_body_id,
         normalize_flywire_id_columns,
         resolve_flywire_dataset_dir,
@@ -49,6 +52,7 @@ except ImportError:
         is_banc_dataset,
         is_fafb_dataset,
         is_flywire_dataset,
+        is_local_connectome_dataset,
         normalize_flywire_body_id,
         normalize_flywire_id_columns,
         resolve_flywire_dataset_dir,
@@ -141,7 +145,7 @@ _FAILED_DATASET_DOWNLOADS = set()
 
 
 def _flywire_neuron_table_path(dataset: str, project_root: str):
-    """Resolve a FlyWire-family neuron table without cross-dataset fallback."""
+    """Resolve an exact FAFB/BANC local-release table without fallback."""
 
     data_dir = resolve_flywire_dataset_dir(project_root, dataset)
     if data_dir is None:
@@ -316,12 +320,12 @@ def _get_cached_neuron_df(dataset: str, dataset_path_body: str):
     ndf = _load_dataframe_fast(neuron_csv)
     rdf = _load_dataframe_fast(roi_table)
     
-    if is_flywire_dataset(dataset):
+    if is_local_connectome_dataset(dataset):
         normalize_flywire_id_columns(ndf, ['bodyId'])
         normalize_flywire_id_columns(rdf, ['bodyId'])
     else:
         # NeuPrint's legacy client expects integer body IDs. This conversion
-        # is intentionally restricted to non-FlyWire datasets.
+        # is intentionally restricted to non-local-release datasets.
         if 'bodyId' in ndf.columns:
             try:
                 ndf['bodyId'] = ndf['bodyId'].astype('int64')
@@ -611,9 +615,11 @@ def _get_neuron_df(dataset: str = 'male-cns:v0.9', verbose: bool = False) -> pd.
     # Normalize dataset name
     dataset_normalized = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
     
-    # Special handling for the complete FlyWire family (FAFB and BANC).
-    if is_flywire_dataset(dataset):
-        cache_key = f"flywire_{dataset}"
+    # FAFB and BANC both use exact local-release tables, but they remain
+    # separate sources and therefore use separate cache namespaces.
+    if is_local_connectome_dataset(dataset):
+        cache_prefix = "banc" if is_banc_dataset(dataset) else "flywire"
+        cache_key = f"{cache_prefix}_{dataset}"
         if cache_key in _NEURON_DF_CACHE:
             return _NEURON_DF_CACHE[cache_key]['neuron_df'].copy()
         
@@ -631,7 +637,8 @@ def _get_neuron_df(dataset: str = 'male-cns:v0.9', verbose: bool = False) -> pd.
                 _NEURON_DF_CACHE[cache_key] = {'neuron_df': full_neuron_df}
                 return full_neuron_df.copy()
         except Exception as e:
-            raise FileNotFoundError(f"Could not load FlyWire/FAFB data: {e}")
+            source = "BANC" if is_banc_dataset(dataset) else "FAFB"
+            raise FileNotFoundError(f"Could not load {source} data: {e}")
         
         raise FileNotFoundError(f"Dataset '{dataset}' not found locally")
     
@@ -1919,7 +1926,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
         nf = NeuronFilter(requiredNeurons)
         
         # Load the dataset first
-        if is_flywire_dataset(dataset):
+        if is_local_connectome_dataset(dataset):
             ndf = _get_neuron_df(dataset, verbose=verbose)
         else:
             # Standard neuprint datasets
@@ -1948,8 +1955,8 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
     # Original getNeurons logic for legacy formats
     from neuprint import NeuronCriteria as NC
     
-    # Special handling for the complete FlyWire family (FAFB and BANC)
-    if is_flywire_dataset(dataset):
+    # FAFB and standalone BANC use their exact local-release tables.
+    if is_local_connectome_dataset(dataset):
         # Try to use local data first
         try:
             import fafb_utils
@@ -1962,7 +1969,8 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                 dataset_short = dataset.split('_')[1] if '_' in dataset else dataset
                 
                 # Check if already cached
-                cache_key = f"flywire_{dataset}"
+                cache_prefix = "banc" if is_banc_dataset(dataset) else "flywire"
+                cache_key = f"{cache_prefix}_{dataset}"
                 if cache_key in _NEURON_DF_CACHE:
                     if verbose:
                         print(f"Using cached {dataset_short} data...")
@@ -6239,7 +6247,7 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         dataset_clean = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
         dataset_path = (
             _flywire_neuron_table_path(dataset, script_path)
-            if is_flywire_dataset(dataset) else
+            if is_local_connectome_dataset(dataset) else
             os.path.join(
                 script_path,
                 'datasets',
@@ -6269,8 +6277,8 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
 
         if dataset_path is not None and os.path.exists(dataset_path):
             use_local = True
-            # Handle FlyWire/FAFB which might use string bodyIds
-            if is_flywire_dataset(dataset):
+            # FAFB/BANC local-release tables use exact string bodyIds.
+            if is_local_connectome_dataset(dataset):
                 if str(dataset_path).lower().endswith('.parquet'):
                     ndf_complete = pd.read_parquet(dataset_path)
                 else:
@@ -7018,7 +7026,7 @@ def Vis3S(data_df,**kwargs):
     
     # Load skeletons if needed
     if op.toPlot == 'skeleton':
-        if is_flywire_dataset(str(op.dataset)) and not is_banc_dataset(str(op.dataset)):
+        if is_fafb_dataset(str(op.dataset)):
             import fafb_utils
             import zipfile
             import io
@@ -7533,7 +7541,12 @@ _PL_NEURON_DF_CACHE_MAX = 4
 
 
 def _load_local_neuron_df_cached(dataset_path: str, is_fafb: bool) -> pl.DataFrame:
-    """Load the full local neuron CSV once per (path, mtime), cached."""
+    """Load a FAFB/BANC local table once per (path, mtime), cached.
+
+    ``is_fafb`` is retained as the private function's historical parameter
+    name; callers now pass ``True`` for either local release so exact body-ID
+    normalization is applied to BANC as well.
+    """
     try:
         # mtime_ns: getmtime() has only second resolution on some filesystems,
         # so a file regenerated within the same second would hit a stale entry.
@@ -7545,11 +7558,12 @@ def _load_local_neuron_df_cached(dataset_path: str, is_fafb: bool) -> pl.DataFra
     if cached is not None:
         return cached
 
-    # Handle FlyWire-family tables which might use exact string bodyIds.
+    is_local_release = bool(is_fafb)
+    # Handle FAFB/BANC local-release tables which might use exact string IDs.
     # NOTE: polars >= 1.0 removed the `dtypes=` kwarg (use schema_overrides).
     if str(dataset_path).lower().endswith('.parquet'):
         ndf = pl.read_parquet(dataset_path)
-    elif is_fafb:
+    elif is_local_release:
         ndf = pl.read_csv(
             dataset_path,
             infer_schema_length=10000,
@@ -7560,7 +7574,7 @@ def _load_local_neuron_df_cached(dataset_path: str, is_fafb: bool) -> pl.DataFra
         if 'bodyId' in ndf.columns:
             ndf = ndf.with_columns(pl.col('bodyId').cast(pl.Utf8))
 
-    if is_fafb and 'bodyId' in ndf.columns:
+    if is_local_release and 'bodyId' in ndf.columns:
         # A numeric parquet column may already have lost precision before it
         # reached this reader, but any exact integer/string representation is
         # still validated here.  Keep the Polars enrichment path consistent
@@ -8014,7 +8028,7 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
         dataset_clean = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
         dataset_path = (
             _flywire_neuron_table_path(dataset, script_path)
-            if is_flywire_dataset(dataset) else
+            if is_local_connectome_dataset(dataset) else
             os.path.join(
                 script_path,
                 'datasets',
@@ -8044,9 +8058,9 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
 
         if dataset_path is not None and os.path.exists(dataset_path):
             use_local = True
-            is_flywire_family = is_flywire_dataset(dataset)
+            is_local_release = is_local_connectome_dataset(dataset)
             ndf_complete = _load_local_neuron_df_cached(dataset_path,
-                                                        is_flywire_family)
+                                                        is_local_release)
     
     # Step 3: Build complete bodyId → std_label map from label_mapper
     bodyid_label_map = {}

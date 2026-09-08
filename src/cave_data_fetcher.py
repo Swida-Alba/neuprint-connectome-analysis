@@ -1,11 +1,17 @@
 """
-CAVE API Data Fetcher for FlyWire (FAFB) datasets.
+CAVE API Data Fetcher for FAFB datasets.
 
-This module provides functionality to fetch FlyWire meshes and synapses from
+This module provides functionality to fetch FAFB meshes and synapses from
 the CAVE/CloudVolume API.  CAVE/FAFB production fetches remain
 ``MeshNeuron`` objects; they are never converted to SWC trees.  The legacy
 ``fetch_skeleton`` methods remain available for compatibility with older
-callers, but the application FlyWire path uses ``fetch_fafb_mesh``.
+callers, but the application FAFB path uses ``fetch_fafb_mesh``.
+
+BANC is intentionally not served by this adapter. Its public-release SWCs
+and prepared tables are handled by ``banc_public_data`` and the BANC
+converter. The retained BANC config below is a compatibility surface for
+older callers that only inspected the public mesh URL; all data-fetch methods
+reject BANC before they can touch CloudVolume or CAVE.
 
 Key features:
 - Fetch meshes via CloudVolume (graphene protocol)
@@ -50,10 +56,15 @@ except ImportError:  # pragma: no cover - installation is covered by requirement
 try:
     from .flywire_ids import (
         body_id_to_api_int,
+        is_banc_dataset,
         normalize_flywire_id_columns,
     )
 except ImportError:
-    from flywire_ids import body_id_to_api_int, normalize_flywire_id_columns
+    from flywire_ids import (
+        body_id_to_api_int,
+        is_banc_dataset,
+        normalize_flywire_id_columns,
+    )
 
 try:
     from .flywire_mesh_cache import (
@@ -82,10 +93,10 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class CAVEDataFetcher:
-    """Fetch neuron data from CAVE/CloudVolume API for FlyWire datasets."""
+    """Fetch neuron data from CAVE/CloudVolume API for FAFB datasets."""
     
     dataset: str = 'flywire_FAFB_v783'
-    """Dataset name (flywire_FAFB_v783 or banc_v626)"""
+    """Dataset name (normally ``flywire_FAFB_v783``)."""
     
     cave_token: str = None
     """CAVE authentication token. If None, reads from config.json"""
@@ -114,7 +125,7 @@ class CAVEDataFetcher:
         'synapse_view': 'valid_synapses_nt_np_v6',
     }
     
-    FLYWIRE_BANC_CONFIG = {
+    BANC_PUBLIC_CONFIG = {
         'datastack': 'brain_and_nerve_cord',
         # Public precomputed neuron-mesh layer (nanometre coordinates, no
         # auth).  CAVE materialization queries stay token-gated and unused:
@@ -126,14 +137,20 @@ class CAVEDataFetcher:
         ),
         'synapse_table': 'synapses',
     }
+    # Compatibility alias for integrations that imported the old constant.
+    # BANC's active data path is in banc_public_data, never this CAVE adapter.
+    FLYWIRE_BANC_CONFIG = BANC_PUBLIC_CONFIG
     
     def __post_init__(self):
         """Initialize the fetcher with tokens and paths."""
         if self.project_root is None:
             self.project_root = str(Path(__file__).parent.parent)
         
-        # Load token if not provided
-        if self.cave_token is None:
+        # BANC never participates in this CAVE adapter. Do not even inspect
+        # token files for it; the public BANC release has no CAVE token path.
+        if is_banc_dataset(self.dataset):
+            self.cave_token = None
+        elif self.cave_token is None:
             self.cave_token = self._load_token('CAVE_TOKEN')
         
         # Cache creation is lazy.  In particular, a caller that performs an
@@ -180,7 +197,7 @@ class CAVEDataFetcher:
         # Check BANC first: a future BANC materialization could also use a
         # version number that happens to match the historical FAFB v783.
         if 'BANC' in self.dataset.upper():
-            return self.FLYWIRE_BANC_CONFIG
+            return self.BANC_PUBLIC_CONFIG
         if 'FAFB' in self.dataset.upper() or 'v783' in self.dataset:
             return self.FLYWIRE_FAFB_CONFIG
         else:
@@ -213,8 +230,8 @@ class CAVEDataFetcher:
 
         FAFB keeps its historical namespace for compatibility.  BANC must
         retain the requested release (for example, ``v888``) so a skeleton
-        fetched for one FlyWire materialization can never be reused by
-        another release merely because both are labelled BANC.
+        fetched for one release can never be reused by another release merely
+        because both are labelled BANC.
         """
         dataset_name = str(self.dataset or '').strip()
         upper = dataset_name.upper()
@@ -249,6 +266,11 @@ class CAVEDataFetcher:
     @property
     def cave_client(self):
         """Lazy-load CAVE client."""
+        if is_banc_dataset(self.dataset):
+            raise RuntimeError(
+                f"BANC dataset '{self.dataset}' does not use a CAVE client; "
+                "use banc_public_data and the local BANC tables instead."
+            )
         if self._cave_client is None:
             try:
                 from caveclient import CAVEclient
@@ -349,7 +371,7 @@ class CAVEDataFetcher:
                 logger.warning(f"Failed to save cache {cache_path}: {e}")
     
     def fetch_mesh(self, body_id: int, use_cache: bool = False) -> Optional['navis.MeshNeuron']:
-        """Fetch mesh for a neuron from CloudVolume.
+        """Fetch a FAFB mesh for a neuron from CloudVolume.
         
         Note: Meshes are NOT cached to save disk space. Raw skeletons are
         cached separately as compressed SWC (see ``fetch_skeleton``). Each
@@ -367,6 +389,11 @@ class CAVEDataFetcher:
         navis.MeshNeuron or None
             The mesh neuron, or None if fetch failed
         """
+        if is_banc_dataset(self.dataset):
+            raise RuntimeError(
+                f"BANC dataset '{self.dataset}' is SWC-first and does not use "
+                "CAVE/CloudVolume mesh fetching."
+            )
         body_id = body_id_to_api_int(body_id)
         
         try:
@@ -410,7 +437,7 @@ class CAVEDataFetcher:
             soma_pos=None,
             force_refresh: bool = False,
             ) -> Optional['navis.MeshNeuron']:
-        """Fetch, prepare, and cache one FlyWire/FAFB ``MeshNeuron``.
+        """Fetch, prepare, and cache one FAFB ``MeshNeuron``.
 
         The prepared cache is intentionally mesh-native.  The default
         settings match the visualization cache: remove 95% of branch-region
@@ -426,6 +453,11 @@ class CAVEDataFetcher:
         caching is enabled.  This is used for ZIP meshes with extrusion
         artifacts so a stale prepared cache entry cannot silently win.
         """
+        if is_banc_dataset(self.dataset):
+            raise RuntimeError(
+                f"BANC dataset '{self.dataset}' uses public SWCs, not the "
+                "FAFB prepared-mesh/CAVE path."
+            )
         api_body_id = body_id_to_api_int(body_id)
         mesh_cache = FlyWireMeshCache(
             self._cache_dataset_name(),
@@ -496,13 +528,18 @@ class CAVEDataFetcher:
             soma_positions: Optional[Dict[object, object]] = None,
             force_refresh: bool = False,
             ) -> 'navis.NeuronList':
-        """Fetch prepared FlyWire meshes without skeletonization.
+        """Fetch prepared FAFB meshes without skeletonization.
 
         ``force_refresh`` bypasses prepared-mesh cache reads for repair
         requests while preserving normal cache writes when ``use_cache`` is
         true.  With ``use_cache=False``, both reads and writes remain
         disabled regardless of ``force_refresh``.
         """
+        if is_banc_dataset(self.dataset):
+            raise RuntimeError(
+                f"BANC dataset '{self.dataset}' uses public SWCs, not FAFB "
+                "prepared-mesh fetching."
+            )
         from tqdm import tqdm
 
         positions = soma_positions or {}
@@ -534,9 +571,9 @@ class CAVEDataFetcher:
     def fetch_skeleton(self, body_id: int, use_cache: bool = True,
                        simplify_mesh: float = 0.0,
                        denoise_twigs: Optional[float] = None) -> Optional['navis.TreeNeuron']:
-        """Fetch skeleton for a neuron by skeletonizing the mesh.
+        """Fetch a FAFB skeleton for a neuron by skeletonizing its mesh.
         
-        Since FlyWire doesn't have L2 cache for pcg_skel, we fetch the mesh
+        Since FAFB doesn't have L2 cache for pcg_skel, we fetch the mesh
         and skeletonize it using navis.
         
         Parameters
@@ -559,6 +596,11 @@ class CAVEDataFetcher:
         navis.TreeNeuron or None
             The skeleton, or None if fetch failed
         """
+        if is_banc_dataset(self.dataset):
+            raise RuntimeError(
+                f"BANC dataset '{self.dataset}' uses public SWCs, not CAVE "
+                "mesh skeletonization."
+            )
         body_id = body_id_to_api_int(body_id)
         cache_path = self._get_skeleton_cache_path(body_id)
         
@@ -678,6 +720,11 @@ class CAVEDataFetcher:
         navis.NeuronList
             List of skeletons (may be fewer than requested if some fail)
         """
+        if is_banc_dataset(self.dataset):
+            raise RuntimeError(
+                f"BANC dataset '{self.dataset}' uses public SWCs, not CAVE "
+                "skeleton fetching."
+            )
         from tqdm import tqdm
         
         neurons = []
@@ -701,7 +748,7 @@ class CAVEDataFetcher:
         return navis.NeuronList(neurons)
     
     def fetch_synapses(self, body_id: int, direction: str = 'both') -> Optional[pd.DataFrame]:
-        """Fetch synapses for a neuron from CAVE.
+        """Fetch FAFB synapses for a neuron from CAVE.
         
         Parameters
         ----------
@@ -716,6 +763,11 @@ class CAVEDataFetcher:
             Synapse data with columns: pre_pt_root_id, post_pt_root_id, 
             pre_pt_position, post_pt_position, etc.
         """
+        if is_banc_dataset(self.dataset):
+            raise RuntimeError(
+                f"BANC dataset '{self.dataset}' has no CAVE synapse path; "
+                "use its public-release tables."
+            )
         body_id = body_id_to_api_int(body_id)
         config = self._get_config()
         
@@ -772,7 +824,7 @@ class CAVEDataFetcher:
     
     def fetch_connections(self, body_ids: List[int], direction: str = 'both', 
                           batch_size: int = 200, show_progress: bool = True) -> Optional[pd.DataFrame]:
-        """Fetch connections (aggregated synapse counts) for neurons from CAVE.
+        """Fetch FAFB connections (aggregated synapse counts) from CAVE.
         
         This fetches synapses and aggregates them into connection weights.
         For large numbers of neurons, batches requests with a progress bar.
@@ -793,6 +845,11 @@ class CAVEDataFetcher:
         pd.DataFrame or None
             Connections with columns: pre_pt_root_id, post_pt_root_id, weight
         """
+        if is_banc_dataset(self.dataset):
+            raise RuntimeError(
+                f"BANC dataset '{self.dataset}' has no CAVE connection path; "
+                "use its locally prepared public-release tables."
+            )
         body_ids = [body_id_to_api_int(bid) for bid in body_ids]
         config = self._get_config()
         
@@ -881,13 +938,18 @@ class CAVEDataFetcher:
     
     def fetch_neuron_info(self, body_ids: List[int], batch_size: int = 500, 
                           show_progress: bool = True) -> Optional[pd.DataFrame]:
-        """Fetch neuron annotations/info from CAVE by root ID.
+        """Fetch FAFB neuron annotations/info from CAVE by root ID.
 
         ``hierarchical_neuron_annotations`` references
         ``proofread_neurons`` by its internal row ID, so the two API tables
         are queried in sequence.  This avoids the invalid ``pt_root_id``
         filter that the annotation table itself does not accept.
         """
+        if is_banc_dataset(self.dataset):
+            raise RuntimeError(
+                f"BANC dataset '{self.dataset}' has no CAVE annotation path; "
+                "use its locally prepared public-release tables."
+            )
         body_ids = [body_id_to_api_int(bid) for bid in body_ids]
         if not body_ids:
             return pd.DataFrame()
@@ -978,12 +1040,17 @@ class CAVEDataFetcher:
     def fetch_neurons_by_types(
         self, types: List[str], show_progress: bool = True
     ) -> pd.DataFrame:
-        """Resolve named FlyWire types from online annotation tags.
+        """Resolve named FAFB types from online annotation tags.
 
         The public CAVE materialization exposes user tags by root ID.  Query
         each requested type as a regex in that table and return a normalized
         ``bodyId/type/instance/post`` frame for DROCAT.
         """
+        if is_banc_dataset(self.dataset):
+            raise RuntimeError(
+                f"BANC dataset '{self.dataset}' has no CAVE type path; use its "
+                "locally prepared public-release tables."
+            )
         if not types:
             return pd.DataFrame(columns=['bodyId', 'type', 'instance', 'post'])
 

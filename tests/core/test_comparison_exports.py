@@ -114,6 +114,61 @@ def test_neuron_counts_reads_minsyn_root_file(tmp_path):
     assert int(row['target_count'].iloc[0]) == 1
 
 
+def test_neuron_counts_combination_uses_each_dataset_threshold(tmp_path):
+    """Combination cells must not use the global union minimum threshold."""
+    from comparison.comparison_analyzer import ComparisonAnalyzer
+    from comparison.comparison_parameters import ComparisonParameters
+
+    datasets = ['male-cns:v1.0', 'banc_v888', 'flywire_FAFB_v783']
+    params = ComparisonParameters(
+        datasets=datasets,
+        source_neurons=['aMe.*'],
+        target_neurons=['PPL.*'],
+        thresholds=[3, 6, 10],
+        threshold_mode='combinations',
+        threshold_combinations=[{
+            'id': 'combo_001',
+            'thresholds': {
+                'male-cns:v1.0': 10,
+                'banc_v888': 3,
+                'flywire_FAFB_v783': 6,
+            },
+        }],
+        output_folder=str(tmp_path),
+        auto_type_mapping=False,
+        verbose=False,
+    )
+    analyzer = ComparisonAnalyzer(params, verbose=False)
+
+    expected_counts = {
+        'male-cns:v1.0': (4, 2),
+        'banc_v888': (3, 1),
+        'flywire_FAFB_v783': (5, 2),
+    }
+    for dataset, (source_count, target_count) in expected_counts.items():
+        output = params.get_dataset_output_path(
+            dataset, params.get_thresholds_for_dataset(dataset)[0])
+        os.makedirs(output, exist_ok=True)
+        pd.DataFrame({
+            'bodyId': range(source_count),
+            'type': [f'S{i}' for i in range(source_count)],
+        }).to_csv(os.path.join(output, 'source_neurons.csv'), index=False)
+        pd.DataFrame({
+            'bodyId': range(target_count),
+            'type': [f'T{i}' for i in range(target_count)],
+        }).to_csv(os.path.join(output, 'target_neurons.csv'), index=False)
+
+    out = tmp_path / 'cr'
+    out.mkdir()
+    analyzer._export_neuron_counts_comparison(str(out))
+    summary = pd.read_csv(out / 'neuron_counts_summary.csv').set_index('dataset')
+
+    for dataset, (source_count, target_count) in expected_counts.items():
+        safe = params._sanitize_name(dataset)
+        assert int(summary.loc[safe, 'source_count']) == source_count
+        assert int(summary.loc[safe, 'target_count']) == target_count
+
+
 # ---------------------------------------------------------------------------
 # N2: edge weight comparison source/target split + dedupe
 # ---------------------------------------------------------------------------

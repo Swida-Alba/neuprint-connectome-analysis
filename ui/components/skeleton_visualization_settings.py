@@ -414,7 +414,7 @@ def skeleton_visualization_settings(
                     "the accelerated FAFB radius profile; 'artistic' uses "
                     "vertex-cluster mesh decimation. All methods use "
                     "batched parallel online fetching and are available for "
-                    "NeuPrint and FlyWire/FAFB tube renders; line mode "
+                    "NeuPrint and FAFB/BANC tube renders; line mode "
                     "bypasses the method."
                 ),
             )

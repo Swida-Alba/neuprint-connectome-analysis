@@ -208,7 +208,9 @@ HTTPError: 503 Service Unavailable
 HTTPError: 504 Gateway Timeout
 ```
 
-**Cause:** NeuPrint server or FlyWire/CAVE servers are temporarily unavailable or overloaded.
+**Cause:** A NeuPrint or FAFB/CAVE server is temporarily unavailable or overloaded.
+The standalone BANC path uses the public release bucket and is independent of
+FlyWire/CAVE; for BANC, check the release-bucket connection instead.
 
 **Solutions:**
 
@@ -299,7 +301,7 @@ AuthError: Invalid token
 
 ---
 
-### CAVE/FlyWire Authentication
+### FAFB CAVE Authentication
 
 **Symptom:**
 ```
@@ -316,7 +318,7 @@ Follow the browser prompt to authenticate.
 
 ---
 
-## FlyWire Data Download Issues
+## FAFB and BANC Release Preparation Issues
 
 ### FAFB Dataset Setup
 
@@ -325,7 +327,7 @@ FlyWire FAFB data requires manual download from the Codex website.
 **Symptom:**
 ```
 ❌ Missing required file: classification.csv.gz
-CRITICAL ERROR: FlyWire/BANC data preparation failed.
+CRITICAL ERROR: FAFB data preparation failed.
 ```
 
 **Solution:**
@@ -364,17 +366,20 @@ CRITICAL ERROR: FlyWire/BANC data preparation failed.
 
 **Solution:**
 
-1. **Download required files** from: https://codex.flywire.ai/api/download?dataset=banc
+1. **Select** `banc_v626` or `banc_v888`. BANC metadata and connections are
+   fetched from the public release bucket; no Codex login or CAVE token is
+   needed.
 
-2. **Save files to:** `datasets/banc_v626/downloads/`
+2. **If automatic preparation is unavailable**, place the release files in
+   `datasets/banc_v626/downloads/` (or the selected version's folder).
 
-3. **Required files:**
+3. **Required files for the local converter:**
    | File                           | Description       | Required |
    | ------------------------------ | ----------------- | -------- |
    | `neurons.csv.gz`               | Neuron Data       | ✅ Yes    |
    | `connections_princeton.csv.gz` | Connectivity Data | ✅ Yes    |
 
-4. **Run the converter:**
+4. **Run the converter when using local input files:**
    ```bash
    python src/BANC_file_converter.py
    ```

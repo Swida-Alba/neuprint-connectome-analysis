@@ -348,10 +348,11 @@ def create_settings_tab():
                 ).props("outline").tooltip(
                     "Download missing raw skeletons as reusable .swc.zst files "
                     "at the Cache Simplification level selected beside this "
-                    "button, using the Dataset and Parallel workers "
-                    "selected above. FlyWire datasets require a manual "
-                    "download from the FlyWire Codex (see the converter "
-                    "instructions)."
+                        "button, using the Dataset and Parallel workers "
+                        "selected above. FAFB requires a manual Codex "
+                        "download (see the FAFB converter instructions); "
+                        "BANC skeletons are fetched from its public release "
+                        "bucket."
                 )
 
             skeleton_progress = ui.linear_progress(
@@ -434,24 +435,24 @@ def create_settings_tab():
                     ui.notify("Finish the active dataset/connection pull before downloading skeletons", type="warning")
                     return
                 dataset = str(ds_select.value)
-                # Bulk skeleton downloads are disabled for FlyWire datasets:
-                # print the explicit manual-download instruction (mirrors the
-                # file converter) instead of starting a pull.
+                # FAFB skeletons are supplied as a manually downloaded healed
+                # bundle. BANC is independent: its skeletons are fetched by
+                # the puller from the public release bucket.
                 # Note: the dataset predicate lives in flywire_ids, not in
                 # flywire_readiness (which only defines is_banc/is_fafb).
                 try:
                     from src.utils.flywire_readiness import (
                         flywire_manual_skeleton_instruction,
                     )
-                    from src.flywire_ids import is_banc_dataset, is_flywire_dataset
+                    from src.flywire_ids import is_banc_dataset, is_fafb_dataset
                 except ImportError:
                     from utils.flywire_readiness import (
                         flywire_manual_skeleton_instruction,
                     )
-                    from flywire_ids import is_banc_dataset, is_flywire_dataset
-                if is_flywire_dataset(dataset) and not is_banc_dataset(dataset):
+                    from flywire_ids import is_banc_dataset, is_fafb_dataset
+                if is_fafb_dataset(dataset):
                     message = flywire_manual_skeleton_instruction(dataset)
-                    skeleton_status.text = "Manual download required (FlyWire)"
+                    skeleton_status.text = "Manual download required (FAFB)"
                     skeleton_result.text = f"❌ {message}"
                     ui.notify(message, type="warning")
                     return
@@ -496,7 +497,7 @@ def create_settings_tab():
 
             # Reminder when tokens are missing: the NeuPrint token is
             # required for NeuPrint datasets; the CAVE token is optional and
-            # only needed for FlyWire FAFB online fetching. Refreshed
+            # only needed for FAFB online CAVE fetching. Refreshed
             # whenever the saved tokens change.
             token_reminder = ui.element("div").props('id="drocat-token-reminder"').classes(
                 "w-full drocat-token-reminder"
@@ -522,13 +523,13 @@ def create_settings_tab():
                 elif missing == ["cave"]:
                     token_reminder_text.text = (
                         "ℹ️ CAVE token not configured - optional; it is only needed for "
-                        "FlyWire FAFB online fetching."
+                        "FAFB online CAVE fetching. BANC never uses it."
                     )
                 else:
                     token_reminder_text.text = (
                         "⚠️ No API tokens configured. The NeuPrint token is required for NeuPrint "
-                        "datasets; the CAVE token is optional (only needed for FlyWire FAFB online "
-                        "fetching). Set them below or in config.json."
+                        "datasets; the CAVE token is optional (only needed for FAFB online CAVE "
+                        "fetching; BANC never uses it). Set them below or in config.json."
                     )
                 token_reminder_text.update()
 
@@ -552,13 +553,13 @@ def create_settings_tab():
 
             with ui.column().classes("w-full gap-1"):
                 with ui.row().classes("items-center gap-2"):
-                    ui.label("CAVE Token (for FlyWire CAVE API features)").classes("text-caption font-bold drocat-warn")
+                    ui.label("CAVE Token (for FAFB CAVE API features)").classes("text-caption font-bold drocat-warn")
                     cave_status = ui.label(_token_status(token_state["cave"], token_sources["cave"][1])).classes("text-caption drocat-muted")
                 ui.html("Get it from <a href='https://codex.flywire.ai/auth_token' target='_blank' style='color:var(--drocat-cobalt)'>codex.flywire.ai/auth_token</a>").classes("text-caption drocat-muted")
-                ui.label("Local converted FlyWire tables work without this token. A CAVE token is needed only when a workflow fetches data or skeletons through the CAVE API; it never replaces the required local files.").classes("text-caption drocat-warn")
+                ui.label("Local converted FAFB tables work without this token. A CAVE token is needed only for explicit FAFB CAVE fetches; BANC uses its public release bucket and never uses this token.").classes("text-caption drocat-warn")
 
             cave_token = ui.input(
-                label="CAVE Token (for FlyWire)",
+                label="CAVE Token (for FAFB)",
                 value="",
                 placeholder="Leave blank to keep the saved token",
                 password=True,
@@ -958,7 +959,7 @@ def create_settings_tab():
 
                     <p class="mt-3 font-bold" style="color:var(--drocat-cobalt)">4. Verify before running analysis</p>
                     <p>The selected dataset root should contain <code>&lt;dataset&gt;_allneurons_neuron_df.parquet</code> (and CSV) and <code>&lt;dataset&gt;_merged_connections.parquet</code>. Click <b>Refresh</b> above and look for <b>✓ local</b>.</p>
-                    <p style="color:var(--drocat-warn)"><b>BANC skeleton visualization and <code>force_API_fetching</code> are unsupported.</b> Pathfinding, network visualization, and tabular analysis use the converted local files.</p>
+                    <p style="color:var(--drocat-warn)"><b>BANC has no <code>force_API_fetching</code> or CAVE fallback.</b> Pathfinding, network visualization, tabular analysis, and skeleton visualization use the BANC public-release tables/SWCs.</p>
                 </div>
                 """)
 

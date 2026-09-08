@@ -72,4 +72,4 @@ All paths are relative to the repo root unless noted.
 - `python src/build_connection_cache.py <dataset>`
 - `python src/build_connectivity_profile_cache.py <dataset>`
 - `python src/build_seed_indexes.py`
-- `src/FAFB_file_converter.py`, `src/BANC_file_converter.py` — FlyWire/FAFB convert.
+- `src/FAFB_file_converter.py`, `src/BANC_file_converter.py` — FAFB and standalone BANC release conversion.

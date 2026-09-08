@@ -46,7 +46,8 @@ Successfully integrated the VisualizePath class network visualization into three
 
 **Output files:**
 - Same as FindPath() above
-- Files saved in `allpaths_L{x}w{y}r{z}p{w}_{timestamp}` folder
+- Files saved in the path-run `..._L{x}w{y}_{timestamp}` folder; disabled
+  ratio/probability filters are no longer encoded in the name.
 
 ### 3. FindDirectConnections() Integration
 **Location:** Line ~1024 in coana.py (in VisualizeDirectConnections_simple)

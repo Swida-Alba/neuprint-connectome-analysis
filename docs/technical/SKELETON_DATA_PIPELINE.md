@@ -1,7 +1,8 @@
 # Skeleton Data Pipeline — Technical Report
 
-**Scope:** neuron-skeleton handling for the three connectome dataset families
-(FAFB/flywire, male-cns, BANC), brain + VNC template meshes, and ROI meshes —
+**Scope:** neuron-skeleton handling for the three connectome dataset sources
+(FAFB local release, male-cns, and standalone BANC), brain + VNC template
+meshes, and ROI meshes —
 fetching, caching, storage, simplification, and scene-space handling.
 
 **Diagrams:** [skeleton_pipeline.html](../visualizations/skeleton_pipeline.html)
@@ -67,7 +68,7 @@ ships both):
 
 ## 2. Raw cache and storage rules
 
-All three families share one raw store layout:
+All three sources share one raw store layout:
 `cache/{dataset}/skeletons/raw_skeletons/{bodyId}.swc.zst`, always at **raw
 level (simplification 0)** and always in the dataset's **native coordinates**
 (FLYWIRE nm / JRCFIB2022Mraw voxels / BANC nm).

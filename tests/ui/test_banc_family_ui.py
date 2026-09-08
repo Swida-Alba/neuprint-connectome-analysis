@@ -1,11 +1,11 @@
-"""UI-side BANC-as-FlyWire-family categorization regressions.
+"""UI-side standalone-BANC categorization regressions.
 
 - ``progress_steps_for``: a BANC find-similar run resolves to the backend's
   4-step cache-direct checklist (it used to get the 6-step ROI checklist via
   a stale ``startswith("flywire_")`` test).
-- The Dataset Availability card's source badge must follow the resolved
-  ``DatasetInfo.source`` (BANC is FlyWire-family), not the dataset-name
-  prefix — ``banc_v888`` used to render a "NeuPrint" badge.
+- The Dataset Availability card must render BANC's own source badge from the
+  resolved ``DatasetInfo.source`` — ``banc_v888`` used to render a NeuPrint or
+  FlyWire badge depending on the call site.
 """
 
 import sys
@@ -67,7 +67,7 @@ def _badge_texts(client):
     ]
 
 
-def test_availability_badge_labels_banc_as_flywire(monkeypatch):
+def test_availability_badge_labels_banc_as_standalone_source(monkeypatch):
     import ui.dataset_service as ds_mod
     from ui.components.common import dataset_status_card
     from ui.dataset_service import DatasetInfo
@@ -75,7 +75,7 @@ def test_availability_badge_labels_banc_as_flywire(monkeypatch):
     class _FakeService:
         def get_cached_availability(self):
             banc = DatasetInfo(
-                name="banc_v888", source="flywire", local_prepared=True,
+                name="banc_v888", source="banc", local_prepared=True,
                 display_name="BANC v888")
             neuprint = DatasetInfo(
                 name="male-cns:v1.0", source="neuprint", available=True)
@@ -88,6 +88,6 @@ def test_availability_badge_labels_banc_as_flywire(monkeypatch):
         dataset_status_card()
 
     texts = _badge_texts(client)
-    assert "FlyWire" in texts, texts
+    assert "BANC" in texts, texts
     assert "NeuPrint" in texts, texts
-    assert texts.index("FlyWire") < texts.index("NeuPrint")
+    assert texts.index("BANC") < texts.index("NeuPrint")

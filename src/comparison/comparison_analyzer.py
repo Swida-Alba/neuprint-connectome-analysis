@@ -31,9 +31,9 @@ import numpy as np
 from tqdm import tqdm
 
 try:
-    from ..flywire_ids import is_fafb_dataset, is_flywire_dataset
+    from ..flywire_ids import is_fafb_dataset, is_local_connectome_dataset
 except ImportError:  # pragma: no cover - direct package imports
-    from flywire_ids import is_fafb_dataset, is_flywire_dataset
+    from flywire_ids import is_fafb_dataset, is_local_connectome_dataset
 
 from .dataset_config import DatasetConfig
 from .comparison_parameters import ComparisonParameters
@@ -41,6 +41,12 @@ from .label_mapper import LabelMapper
 from .data_loader import DataLoader
 from .metrics import ComparisonMetrics
 from .interactive_heatmap import generate_interactive_heatmap
+from .point_context import (
+    ComparisonPoint,
+    point_from_value,
+    points_from_parameters,
+    safe_point_id,
+)
 
 try:
     from utils.label_utils import is_untyped_type_label, untyped_side
@@ -161,13 +167,17 @@ class ComparisonAnalyzer:
         
         # Storage for results
         self.raw_results: Dict[str, Dict[int, pd.DataFrame]] = {}
-        self.aligned_results: Dict[int, pd.DataFrame] = {}
+        self.aligned_results: Dict[Any, pd.DataFrame] = {}
+        # Query-aware alignment cache.  Standard-mode scalar keys continue to
+        # live in aligned_results for compatibility; combination rows are
+        # keyed by their stable query ID here.
+        self.query_aligned_results: Dict[str, pd.DataFrame] = {}
         self.comparison_report: Optional[Dict] = None
         
         # Cache for expensive calculations (reused across export/visualizations)
         self._similarity_cache: Dict[int, pd.DataFrame] = {}  # threshold -> similarities
         self._hemisphere_symmetry_cache: Dict[int, Dict[str, Dict]] = {}
-        self._network_aligned_cache: Dict[int, pd.DataFrame] = {}
+        self._network_aligned_cache: Dict[Any, pd.DataFrame] = {}
         self._output_base_printed: bool = False  # Track if base dir was printed
         # Fix A: StrongestFirst effective cutoff (τ) per (dataset, threshold).
         # None = complete enumeration; a number = τ-bounded (budget bit).
@@ -305,6 +315,245 @@ class ComparisonAnalyzer:
             tqdm.write(f"[Comparison] {description}: {rel_path}")
         else:
             tqdm.write(f"[Comparison] {description}: {filepath}")
+
+    # ------------------------------------------------------------------
+    # Shared pathfinding provenance helpers
+    # ------------------------------------------------------------------
+
+    _PATH_PROVENANCE_KEYS = (
+        'threshold_scope', 'requested_threshold', 'applied_threshold',
+        'applied_threshold_source', 'strongest_first_budget',
+        'strongest_first_budget_bitten', 'strongest_first_tau',
+        'tau_canonical', 'strongest_dropped_bottleneck', 'edge_budget',
+        'edge_budget_applied', 'edge_budget_landing', 'edge_weight_floor',
+        'strongest_retained_bottleneck', 'paths_complete',
+    )
+
+    def _path_provenance_from_state(self, threshold: int,
+                                    state: Optional[Dict] = None) -> Dict:
+        """Return the canonical provenance block for a comparison run.
+
+        ``FindNeuronConnection`` writes the same block to its per-dataset
+        folder.  Comparison runs also need it in memory because aggregate
+        exports may be built from a replay slice, a cached folder, or the
+        edge-mode aggregation path rather than directly from the FNC object.
+        Missing legacy fields are reconstructed through the shared formula so
+        old cache metadata cannot make ``tau`` look like ``applied_threshold``.
+        """
+        state = dict(state or {})
+        parameters = getattr(self, 'parameters', None)
+        requested = state.get('requested_threshold', threshold)
+        if requested is None:
+            requested = threshold
+        strongest_tau = state.get('strongest_first_tau')
+        if strongest_tau is None:
+            strongest_tau = state.get('tau')
+        budget_bitten = bool(
+            state.get('strongest_first_budget_bitten', False)
+            or state.get('budget_bitten', False)
+        )
+        budget = state.get('strongest_first_budget')
+        if budget in (None, '', 0, '0'):
+            budget = getattr(parameters, 'max_paths_bodyid', None)
+        budget = int(budget) if budget not in (None, '', 0, '0') else 1000000
+
+        pruning_record = state.get('graph_pruning_record') or {}
+        edge_budget = state.get('edge_budget')
+        path_mode = state.get('path_mode', getattr(parameters, 'path_mode', 'all'))
+        if path_mode != 'shortest' and edge_budget in (None, '', 0, '0'):
+            configured_edge_budget = getattr(
+                parameters, 'graph_edge_limit_bodyid', None)
+            if configured_edge_budget not in (None, '', 0, '0'):
+                edge_budget = configured_edge_budget
+        edge_landing = state.get('edge_budget_landing')
+        if edge_landing is None:
+            edge_landing = pruning_record.get('landing')
+        strongest_retained = state.get('strongest_retained_bottleneck')
+        if strongest_retained is None:
+            strongest_retained = pruning_record.get('strongest_retained')
+
+        prov = applied_threshold_provenance(
+            requested_threshold=requested,
+            strongest_first_tau=strongest_tau,
+            strongest_first_budget_bitten=budget_bitten,
+            strongest_dropped_bottleneck=state.get(
+                'strongest_dropped_bottleneck',
+                state.get('strongest_dropped')),
+            tau_canonical=state.get('tau_canonical'),
+            edge_weight_floor=state.get('edge_weight_floor'),
+            edge_budget_landing=edge_landing,
+            edge_budget=edge_budget,
+            strongest_retained_bottleneck=strongest_retained,
+        )
+        # A pre-provenance cache may contain only the already-computed
+        # applied value/source. Preserve that explicit legacy result when
+        # there is not enough mechanism state to recompute it; new and full
+        # cache rows always take the shared formula above.
+        mechanism_keys = (
+            'strongest_first_budget_bitten', 'budget_bitten',
+            'strongest_dropped_bottleneck', 'strongest_dropped',
+            'tau_canonical', 'edge_weight_floor',
+        )
+        if (state.get('applied_threshold') is not None
+                and state.get('applied_threshold_source')
+                and not any(state.get(key) is not None
+                            for key in mechanism_keys)):
+            prov['applied_threshold'] = int(state['applied_threshold'])
+            prov['applied_threshold_source'] = str(
+                state['applied_threshold_source'])
+            prov['paths_complete'] = bool(state.get(
+                'paths_complete',
+                prov['applied_threshold_source'] == 'requested'))
+        prov['strongest_first_budget'] = budget
+        return prov
+
+    def _path_run_meta_from_state(self, dataset_name: str, threshold: int,
+                                  state: Optional[Dict] = None) -> Dict:
+        """Normalize partial/legacy per-threshold state to the full contract."""
+        state = dict(state or {})
+        parameters = getattr(self, 'parameters', None)
+        prov = self._path_provenance_from_state(threshold, state)
+        meta = dict(state)
+        meta.update(prov)
+        meta.update({
+            # Historical comparison exports use these shorter names.
+            'tau': prov.get('strongest_first_tau'),
+            'budget_bitten': prov.get('strongest_first_budget_bitten', False),
+            'skipped': bool(state.get('skipped', False)),
+            'duplicate_of': state.get('duplicate_of'),
+            'applied_folder': state.get('applied_folder', threshold),
+            'pathfinding': state.get(
+                'pathfinding', getattr(parameters, 'pathfinding',
+                                       'StrongestFirst')),
+            'path_mode': state.get(
+                'path_mode', getattr(parameters, 'path_mode', 'all')),
+            'comparison_mode': state.get(
+                'comparison_mode', getattr(parameters, 'comparison_mode',
+                                           'path')),
+        })
+        if 'paths_complete' not in state:
+            meta['paths_complete'] = prov['paths_complete']
+        # Preserve replay/fallback markers while normalizing all contract
+        # values above.
+        return meta
+
+    def _path_run_meta_from_fnc(self, dataset_name: str, threshold: int,
+                                fnc, path_mode: str) -> Dict:
+        """Capture the post-enumeration FNC provenance for one comparison row."""
+        state = dict(getattr(fnc, '_last_provenance', {}) or {})
+        if not state:
+            # Keep the comparison contract usable with lightweight FNC test
+            # doubles and older integrations that expose public attributes
+            # but predate ``_last_provenance``.
+            state = {
+                'strongest_first_budget': getattr(
+                    fnc, 'strongest_first_budget', None),
+                'strongest_first_budget_bitten': getattr(
+                    fnc, 'strongest_first_budget_bitten', False),
+                'strongest_first_tau': getattr(
+                    fnc, 'strongest_first_cutoff', None),
+                'tau_canonical': getattr(fnc, 'tau_canonical', None),
+                'strongest_dropped_bottleneck': getattr(
+                    fnc, 'strongest_dropped_bottleneck', None),
+                'edge_budget': getattr(fnc, 'edge_budget', None),
+                'edge_budget_landing': getattr(
+                    fnc, 'edge_budget_landing', None),
+                'edge_weight_floor': getattr(
+                    fnc, 'edge_weight_floor', None),
+                'strongest_retained_bottleneck': getattr(
+                    fnc, 'strongest_retained_bottleneck', None),
+            }
+        state.setdefault('requested_threshold', threshold)
+        state.setdefault('path_mode', path_mode)
+        state.setdefault('applied_folder', threshold)
+        return self._path_run_meta_from_state(dataset_name, threshold, state)
+
+    def _read_cached_path_meta(self, dataset_name: str,
+                               threshold: int) -> Dict:
+        """Read a per-dataset folder's provenance when resuming from disk."""
+        folder = self.parameters.get_dataset_output_path(dataset_name,
+                                                          threshold)
+        attrs_path = os.path.join(folder, 'all_attributes.json')
+        if os.path.exists(attrs_path):
+            try:
+                with open(attrs_path, encoding='utf-8') as handle:
+                    attrs = json.load(handle)
+                if isinstance(attrs, dict):
+                    return self._path_run_meta_from_state(
+                        dataset_name, threshold, attrs)
+            except (OSError, ValueError, TypeError):
+                pass
+        return self._path_run_meta_from_state(dataset_name, threshold, {})
+
+    def _complete_path_run_meta(self) -> None:
+        """Normalize every configured comparison row before exporting it."""
+        for dataset_name in self.parameters.get_dataset_names():
+            for threshold in self.parameters.get_thresholds_for_dataset(
+                    dataset_name):
+                key = (dataset_name, threshold)
+                meta = self._path_run_meta.get(key)
+                if meta is None:
+                    # A cache-only legacy folder may have result files but no
+                    # metadata.  Keep the row observable and explicitly mark
+                    # it as a requested-threshold complete fallback.
+                    meta = self._read_cached_path_meta(dataset_name,
+                                                       threshold)
+                self._path_run_meta[key] = self._path_run_meta_from_state(
+                    dataset_name, threshold, meta)
+
+    def _path_provenance_row(self, dataset_name: str, threshold: int) -> Dict:
+        """Build the stable CSV/JSON projection used by comparison outputs."""
+        meta = self._path_run_meta.get((dataset_name, threshold), {}) or {}
+        parameters = getattr(self, 'parameters', None)
+        prov = self._path_provenance_from_state(threshold, meta)
+        return {
+            'dataset': dataset_name,
+            'threshold': threshold,
+            'threshold_scope': (
+                'query' if getattr(parameters, 'threshold_mode', 'standard')
+                == 'combinations' else 'scalar'),
+            'requested_threshold': prov['requested_threshold'],
+            'applied_threshold': prov['applied_threshold'],
+            'applied_threshold_source': prov['applied_threshold_source'],
+            'strongest_first_budget': prov['strongest_first_budget'],
+            'strongest_first_budget_bitten': prov[
+                'strongest_first_budget_bitten'],
+            'strongest_first_tau': prov['strongest_first_tau'],
+            # Backward-compatible short name used by existing summaries.
+            'tau': prov['strongest_first_tau'],
+            'tau_canonical': prov['tau_canonical'],
+            'strongest_dropped_bottleneck': prov[
+                'strongest_dropped_bottleneck'],
+            'strongest_dropped': prov['strongest_dropped_bottleneck'],
+            'strongest_retained_bottleneck': prov[
+                'strongest_retained_bottleneck'],
+            'edge_budget': prov['edge_budget'],
+            'edge_budget_applied': prov['edge_budget_applied'],
+            'edge_budget_landing': prov['edge_budget_landing'],
+            'edge_weight_floor': prov['edge_weight_floor'],
+            'paths_complete': prov['paths_complete'],
+            'pruned': prov['edge_budget_applied'],
+            'skipped': bool(meta.get('skipped', False)),
+            'duplicate_of': meta.get('duplicate_of'),
+            'applied_folder': meta.get('applied_folder', threshold),
+            'path_mode': meta.get('path_mode',
+                                  getattr(parameters, 'path_mode', 'all')),
+            'comparison_mode': meta.get(
+                'comparison_mode',
+                getattr(parameters, 'comparison_mode', 'path')),
+            'drop_untyped': bool(getattr(parameters, 'drop_untyped',
+                                        True)),
+        }
+
+    @staticmethod
+    def _safe_query_filename_id(query_id: Any) -> str:
+        """Return a portable filename slug without changing query identity.
+
+        Query IDs remain verbatim in manifests and CSV columns.  Only the
+        filesystem-facing part is normalized so API callers cannot create
+        path separators or platform-specific special names.
+        """
+        return safe_point_id(query_id)
     
     def _save_csv(self, df: pd.DataFrame, filepath: str, index: bool = False):
         """Save DataFrame to CSV with UTF-8 encoding for cross-platform compatibility.
@@ -438,6 +687,41 @@ class ComparisonAnalyzer:
             self._hemisphere_symmetry_cache[threshold] = threshold_summaries
             summaries[threshold] = threshold_summaries
 
+        return summaries
+
+    def get_hemisphere_symmetry_summaries_for_query(
+            self, query: Any) -> Dict[str, Dict]:
+        """Load hemisphere symmetry summaries for one query row.
+
+        The raw-run symmetry JSON is keyed by (dataset, threshold); a query
+        simply selects each dataset's own requested threshold cell. No
+        summary is inferred from the raw threshold union.
+        """
+        if not self.parameters.symmetry_analysis:
+            return {}
+        if not isinstance(query, dict):
+            query = self._query_record(query)
+        thresholds = query.get('thresholds') or {}
+        summaries: Dict[str, Dict] = {}
+        for dataset, threshold in thresholds.items():
+            safe_name = self.parameters._sanitize_name(dataset)
+            summary_path = os.path.join(
+                self.parameters.full_output_path,
+                'dataset_data',
+                safe_name,
+                f'minsyn_{int(threshold)}',
+                'hemisphere_symmetry',
+                'symmetry_summary.json'
+            )
+            if os.path.exists(summary_path):
+                try:
+                    with open(summary_path, 'r', encoding='utf-8') as f:
+                        summaries[dataset] = json.load(f)
+                except Exception as e:
+                    self._log(
+                        f"Warning: Failed to load symmetry summary for "
+                        f"{dataset} at requested threshold {threshold}: {e}",
+                        level='warn')
         return summaries
     
     def get_mapped_results(self) -> Dict[str, Dict[int, pd.DataFrame]]:
@@ -695,9 +979,9 @@ class ComparisonAnalyzer:
 
         # Let FindNeuronConnection handle client creation
         # It will auto-detect client_type from dataset name and create/reuse clients as needed
-        # - If dataset contains 'flywire' or 'fafb' -> uses local data
+        # - If dataset is FAFB or BANC -> uses its local-release data
         # - Otherwise -> uses NeuPrint (creates client using dataset name and token from env var)
-        # Determine if force_API_fetching should be applied (only for FAFB/FlyWire datasets)
+        # Determine if force_API_fetching should be applied (only for FAFB datasets)
         is_fafb = is_fafb_dataset(dataset_name)
         use_force_api = self.parameters.force_API_fetching if is_fafb else False
         
@@ -750,34 +1034,58 @@ class ComparisonAnalyzer:
             fnc.FindShortestPath(find_reciprocal=self.parameters.find_reciprocal)
         else:
             fnc.FindAllPath(find_reciprocal=self.parameters.find_reciprocal)
-            # Fix A + Feature G: record the effective cutoff (τ) and the
-            # full run state per (dataset, threshold). τ is the budget
-            # cutoff when StrongestFirst was budget-bitten, else the
-            # NATURAL τ (min emitted-path bottleneck: every threshold up
-            # to τ yields this identical set) — the skip rule of Feature G
-            # keys off both cases uniformly.
-            tau = getattr(fnc, 'strongest_first_cutoff', None)
-            bitten = bool(getattr(fnc, 'strongest_first_budget_bitten', False))
-            self._path_taus[(dataset_name, threshold)] = tau
-            self._path_run_meta[(dataset_name, threshold)] = {
-                'tau': tau,
-                'tau_canonical': getattr(fnc, 'tau_canonical', None),
-                'strongest_dropped_bottleneck': getattr(
-                    fnc, 'strongest_dropped_bottleneck', None),
-                'budget_bitten': bitten,
-                'paths_complete': not bitten,
-                'skipped': False,
-                'duplicate_of': None,
-                'applied_folder': threshold,
-                'edge_weight_floor': getattr(fnc, 'edge_weight_floor', None),
-                'pathfinding': self.parameters.pathfinding,
-            }
+
+        # Capture the same post-enumeration provenance for BOTH modes.  The
+        # old code populated this block only in the all-path branch, which
+        # made shortest-path aggregate exports fall back to the requested
+        # threshold even when its StrongestFirst budget had bitten.
+        meta = self._path_run_meta_from_fnc(
+            dataset_name, threshold, fnc, self.parameters.path_mode)
+        self._path_taus[(dataset_name, threshold)] = meta.get('tau')
+        self._path_run_meta[(dataset_name, threshold)] = meta
         
         # Get results - FindAllPath saves both path data and connection data
         # For comparison metrics, we need the connection data (edge-level) format:
         # - data_details/connection_info_bodyId.csv has bodyId_pre, bodyId_post, weight, etc.
         # - This is the correct format for comparison metrics
         return self._load_fnc_results(fnc, dataset_name, threshold)
+
+    def _apply_label_mapping_to_dataframe(
+        self,
+        dataset_name: str,
+        threshold: int,
+        conn_df: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Apply standardized labels before any comparison-level filtering."""
+        if conn_df is None or conn_df.empty:
+            return conn_df
+        conn_df = conn_df.copy()
+        if 'dataset' not in conn_df.columns:
+            conn_df['dataset'] = dataset_name
+        if 'threshold' not in conn_df.columns:
+            conn_df['threshold'] = threshold
+        if self.label_mapper and not self.label_mapper.is_empty:
+            self._log(f"Applying label mapping to {dataset_name} results")
+            conn_df = self.label_mapper.apply_to_dataframe(
+                conn_df, dataset_name)
+            # Standardized labels are the comparison identity.  Do not let
+            # native type names survive in the columns consumed downstream.
+            if 'std_label_pre' in conn_df.columns:
+                mask = conn_df['std_label_pre'] != ''
+                conn_df.loc[mask, 'type_pre'] = conn_df.loc[
+                    mask, 'std_label_pre']
+            if 'std_label_post' in conn_df.columns:
+                mask = conn_df['std_label_post'] != ''
+                conn_df.loc[mask, 'type_post'] = conn_df.loc[
+                    mask, 'std_label_post']
+        return conn_df
+
+    def _finalize_loaded_result(self, dataset_name: str, threshold: int,
+                                conn_df: pd.DataFrame) -> pd.DataFrame:
+        """Normalize a cached/replayed frame exactly like a fresh result."""
+        conn_df = self._apply_label_mapping_to_dataframe(
+            dataset_name, threshold, conn_df)
+        return self._drop_untyped_neurons(dataset_name, threshold, conn_df)
 
     def _load_fnc_results(
         self,
@@ -827,27 +1135,9 @@ class ComparisonAnalyzer:
             conn_df['dataset'] = dataset_name
             conn_df['threshold'] = threshold
 
-            # Apply label mapping if available
-            if self.label_mapper and not self.label_mapper.is_empty:
-                self._log(f"Applying label mapping to {dataset_name} results")
-                conn_df = self.label_mapper.apply_to_dataframe(conn_df, dataset_name)
-
-                # Overwrite original types with standardized labels
-                # This ensures merging in downstream analysis and visualizations
-                if 'std_label_pre' in conn_df.columns:
-                    # Only overwrite if label is not empty
-                    mask = conn_df['std_label_pre'] != ''
-                    conn_df.loc[mask, 'type_pre'] = conn_df.loc[mask, 'std_label_pre']
-
-                if 'std_label_post' in conn_df.columns:
-                    mask = conn_df['std_label_post'] != ''
-                    conn_df.loc[mask, 'type_post'] = conn_df.loc[mask, 'std_label_post']
-
-        # Untyped-neuron drop (default on): edges touching untyped neurons
-        # never match across datasets and only dilute the comparison.
-        conn_df = self._drop_untyped_neurons(dataset_name, threshold, conn_df)
-
-        return conn_df
+        # Fresh, cached, and replayed frames all use the same order:
+        # standardized labels first, then the shared untyped predicate.
+        return self._finalize_loaded_result(dataset_name, threshold, conn_df)
     
     def run_edge_analysis(
         self,
@@ -880,7 +1170,8 @@ class ComparisonAnalyzer:
             filtered = base_edges[base_edges['weight'] >= threshold].copy()
             filtered['threshold'] = threshold
             self._log(f"Filtered {len(filtered)} edges from base at threshold={threshold}", 'debug')
-            return filtered
+            return self._finalize_loaded_result(
+                dataset_name, threshold, filtered)
         
         # Otherwise, query edges directly
         conn_df = self._query_edges_for_dataset(
@@ -892,20 +1183,8 @@ class ComparisonAnalyzer:
             conn_df['dataset'] = dataset_name
             conn_df['threshold'] = threshold
             
-            # Apply label mapping if available
-            if self.label_mapper and not self.label_mapper.is_empty:
-                self._log(f"Applying label mapping to {dataset_name} edge results")
-                conn_df = self.label_mapper.apply_to_dataframe(conn_df, dataset_name)
-                
-                # Overwrite original types with standardized labels
-                if 'std_label_pre' in conn_df.columns:
-                    mask = conn_df['std_label_pre'] != ''
-                    conn_df.loc[mask, 'type_pre'] = conn_df.loc[mask, 'std_label_pre']
-                    
-                if 'std_label_post' in conn_df.columns:
-                    mask = conn_df['std_label_post'] != ''
-                    conn_df.loc[mask, 'type_post'] = conn_df.loc[mask, 'std_label_post']
-        
+        conn_df = self._finalize_loaded_result(
+            dataset_name, threshold, conn_df)
         return conn_df
     
     def _query_edges_for_dataset(
@@ -930,8 +1209,9 @@ class ComparisonAnalyzer:
         Returns:
             DataFrame with columns: bodyId_pre, bodyId_post, type_pre, type_post, weight
         """
-        # Check if dataset is local (FlyWire family: FAFB/BANC) or NeuPrint
-        is_local = is_flywire_dataset(dataset_name)
+        # Check whether the dataset is one of the exact local releases or a
+        # NeuPrint dataset.  BANC and FAFB share file mechanics, not identity.
+        is_local = is_local_connectome_dataset(dataset_name)
         
         if is_local:
             return self._query_edges_local(dataset_name, source_neurons, target_neurons, min_weight)
@@ -1020,7 +1300,7 @@ class ComparisonAnalyzer:
         target_neurons: List,
         min_weight: int = 1
     ) -> pd.DataFrame:
-        """Query edges from local dataset files (FlyWire/FAFB/BANC)."""
+        """Query edges from exact FAFB or standalone BANC local files."""
         import re
         
         # Load local connection data
@@ -1255,6 +1535,147 @@ class ComparisonAnalyzer:
         meta = self._path_run_meta.get((dataset_name, threshold))
         return bool(meta and meta.get('skipped'))
 
+    def get_threshold_queries(self) -> List[Dict[str, Any]]:
+        """Return the normalized comparison query rows for this run."""
+        getter = getattr(self.parameters, 'get_threshold_queries', None)
+        if callable(getter):
+            return getter()
+        datasets = self.parameters.get_dataset_names()
+        if getattr(self.parameters, 'threshold_mode', 'standard') == 'combinations':
+            rows = getattr(self.parameters, 'threshold_combinations', None) or []
+            return [
+                {
+                    'id': str(row.get('id') or row.get('query_id')
+                             or f'combo_{index:03d}'),
+                    'label': row.get('label') or row.get('query_label')
+                             or f'Combination {index}',
+                    'thresholds': dict(row.get('thresholds') or row.get(
+                        'thresholds_by_dataset', {})),
+                }
+                for index, row in enumerate(rows, start=1)
+            ]
+        return [
+            {
+                'id': f'threshold_{int(threshold)}',
+                'label': f'N={int(threshold)}',
+                'thresholds': {dataset: int(threshold) for dataset in datasets},
+            }
+            for threshold in (getattr(self.parameters, 'thresholds', []) or [])
+        ]
+
+    def get_comparison_points(self) -> List[ComparisonPoint]:
+        """Return the canonical report/export points in display order."""
+        return points_from_parameters(self.parameters)
+
+    def _comparison_point(self, value: Any) -> ComparisonPoint:
+        """Resolve a scalar threshold, query ID, or point object."""
+        return point_from_value(value, self.parameters, self.get_comparison_points())
+
+    def _comparison_point_thresholds(self, value: Any) -> Dict[str, int]:
+        return dict(self._comparison_point(value).thresholds_by_dataset)
+
+    def _comparison_point_label(self, value: Any) -> str:
+        return self._comparison_point(value).display_label
+
+    def _comparison_point_metadata(self, value: Any) -> Dict[str, Any]:
+        """Return query-aware labels and provenance for visualization exports."""
+        point = self._comparison_point(value)
+        requested = dict(point.thresholds_by_dataset)
+        applied = {}
+        provenance = {}
+        for dataset, threshold in requested.items():
+            row = self._path_provenance_row(dataset, threshold)
+            provenance[dataset] = row
+            applied[dataset] = row.get('applied_threshold')
+        return {
+            'point_id': point.point_id,
+            'query_id': point.query_id,
+            'query_label': point.display_label,
+            'threshold_scope': 'query' if point.mode == 'combinations' else 'scalar',
+            'requested_thresholds': requested,
+            'applied_thresholds': applied,
+            'provenance': provenance,
+        }
+
+    def _query_record(self, query_or_id: Any) -> Dict[str, Any]:
+        """Resolve a query object, ID, or standard scalar threshold."""
+        if isinstance(query_or_id, dict):
+            query_id = query_or_id.get('id') or query_or_id.get('query_id')
+            if not query_id:
+                raise ValueError("A threshold query must have an id")
+            return query_or_id
+        if isinstance(query_or_id, str):
+            for query in self.get_threshold_queries():
+                if query.get('id') == query_or_id:
+                    return query
+            raise KeyError(f"Unknown threshold query: {query_or_id}")
+        try:
+            scalar = int(query_or_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid threshold query: {query_or_id!r}") from exc
+        matches = [
+            query for query in self.get_threshold_queries()
+            if len(set(query.get('thresholds', {}).values())) == 1
+            and next(iter(query.get('thresholds', {}).values()), None) == scalar
+        ]
+        if matches:
+            return matches[0]
+        if self.parameters.threshold_mode == 'combinations':
+            raise ValueError(
+                "A scalar threshold is not a valid key in advanced "
+                "combination mode; pass a query id or query record"
+            )
+        return {
+            'id': f'threshold_{scalar}',
+            'label': f'N={scalar}',
+            'thresholds': {
+                dataset: scalar
+                for dataset in self.parameters.get_dataset_names()
+            },
+            'dataset_order': self.parameters.get_dataset_names(),
+        }
+
+    def _threshold_for_dataset(self, threshold_or_query: Any,
+                               dataset: str) -> Any:
+        """Resolve the threshold used by one dataset in a query-aware call."""
+        if isinstance(threshold_or_query, dict):
+            return (threshold_or_query.get('thresholds', {}) or {}).get(dataset)
+        if (isinstance(threshold_or_query, str)
+                and self.parameters.threshold_mode == 'combinations'):
+            query = self._query_record(threshold_or_query)
+            return (query.get('thresholds', {}) or {}).get(dataset)
+        return threshold_or_query
+
+    def get_aligned_data_for_query(self, query_or_id: Any) -> pd.DataFrame:
+        """Align raw results using the threshold map of one query row."""
+        query = self._query_record(query_or_id)
+        query_id = query.get('id') or query.get('query_id')
+        if query_id in self.query_aligned_results:
+            return self.query_aligned_results[query_id]
+
+        dataset_names = self.parameters.get_dataset_names()
+        threshold_map = query.get('thresholds') or query.get(
+            'thresholds_by_dataset', {})
+        type_mapper = (
+            self.parameters._auto_type_mapper
+            if self.parameters.auto_type_mapping else None
+        )
+        aligned = self.metrics._align_results_for_threshold_map(
+            self.raw_results,
+            dataset_names,
+            threshold_map,
+            label_mapper=None,
+            type_mapper=type_mapper,
+        )
+        if self.parameters.keep_only_hemisphere_conserved_connections:
+            aligned = self._filter_hemisphere_unconserved(
+                aligned,
+                dataset_names,
+                f"query_{query_id}",
+            )
+        self.query_aligned_results[query_id] = aligned
+        return aligned
+
     def _analysis_thresholds(self) -> List[int]:
         """Input thresholds minus Feature-G duplicates — the list the
         heavy per-threshold analysis, rendering, and exports iterate.
@@ -1292,13 +1713,15 @@ class ComparisonAnalyzer:
           'edge_budget' | 'strongest_first_budget+edge_budget'.
         """
         meta = self._path_run_meta.get((dataset, threshold)) or {}
-        floor = meta.get('edge_weight_floor')
-        tau = meta.get('tau')
-        canonical = meta.get('tau_canonical')
-        complete = bool(meta.get('paths_complete', True))
+        prov = self._path_provenance_from_state(threshold, meta)
+        floor = prov.get('edge_weight_floor')
+        tau = prov.get('strongest_first_tau')
+        canonical = prov.get('tau_canonical')
+        complete = bool(prov.get('paths_complete', True))
         applied_folder = meta.get('applied_folder')
 
-        if tau is not None and not complete and canonical is None \
+        if tau is not None and not complete \
+                and meta.get('tau_canonical') is None \
                 and meta.get('skipped') and applied_folder is not None:
             # Collapsed row with missing canonical bookkeeping: the
             # applied folder IS the materialized equivalent threshold —
@@ -1306,18 +1729,6 @@ class ComparisonAnalyzer:
             return (applied_folder, floor is not None, floor,
                     'strongest_first_budget')
 
-        prov = applied_threshold_provenance(
-            requested_threshold=threshold,
-            strongest_first_tau=tau,
-            strongest_first_budget_bitten=(
-                bool(meta.get('budget_bitten', False)) or not complete),
-            strongest_dropped_bottleneck=meta.get(
-                'strongest_dropped_bottleneck'),
-            tau_canonical=canonical,
-            edge_weight_floor=floor,
-            edge_budget_landing=meta.get('edge_budget_landing'),
-            edge_budget=meta.get('edge_budget'),
-        )
         applied = prov['applied_threshold']
         if applied is None:
             # Degenerate meta (no tau / no floor): fall back to the asked
@@ -1326,13 +1737,73 @@ class ComparisonAnalyzer:
         return applied, prov['edge_budget_applied'], floor, \
             prov['applied_threshold_source']
 
-    def _export_effective_threshold_banner(self):
-        """F6: persist the asked -> applied threshold collapse for the
-        output panel's persistent banner (effective_thresholds.json in
-        the run root). Written only when at least one threshold was
-        τ-collapsed."""
-        if self.parameters.path_mode != 'all':
+    def _threshold_query_manifest_rows(self) -> List[Dict[str, Any]]:
+        """Build the query/dataset provenance join for comparison exports."""
+        rows = []
+        dataset_order = self.parameters.get_dataset_names()
+        mode = getattr(self.parameters, 'threshold_mode', 'standard')
+        for query_index, query in enumerate(self.get_threshold_queries(), start=1):
+            query_id = query.get('id') or query.get('query_id')
+            threshold_map = query.get('thresholds') or {}
+            for dataset_order_index, dataset in enumerate(dataset_order, start=1):
+                if dataset not in threshold_map:
+                    continue
+                threshold = int(threshold_map[dataset])
+                row = self._path_provenance_row(dataset, threshold)
+                row.update({
+                    'query_id': query_id,
+                    'query_index': query_index,
+                    'query_label': query.get('label', query_id),
+                    'threshold_mode': mode,
+                    'dataset_order': dataset_order_index,
+                    'requested_threshold': threshold,
+                    'raw_run_key': (
+                        f"{self.parameters._sanitize_name(dataset)}"
+                        f"/minsyn_{threshold}"
+                    ),
+                })
+                rows.append(row)
+        return rows
+
+    def _export_threshold_query_manifest(self, comparison_results_dir: str):
+        """Export one query/dataset row with full applied-threshold provenance."""
+        rows = self._threshold_query_manifest_rows()
+        if not rows:
             return
+        manifest = pd.DataFrame(rows)
+        preferred = [
+            'query_id', 'query_index', 'query_label', 'threshold_mode',
+            'threshold_scope',
+            'dataset', 'dataset_order', 'requested_threshold',
+            'applied_threshold', 'applied_threshold_source',
+            'strongest_first_budget', 'strongest_first_budget_bitten',
+            'strongest_first_tau', 'tau', 'tau_canonical',
+            'strongest_dropped_bottleneck', 'strongest_retained_bottleneck',
+            'edge_budget', 'edge_budget_applied', 'edge_budget_landing',
+            'edge_weight_floor', 'paths_complete', 'skipped',
+            'duplicate_of', 'applied_folder', 'raw_run_key', 'path_mode',
+            'comparison_mode', 'drop_untyped',
+        ]
+        manifest = manifest[
+            [column for column in preferred if column in manifest.columns]
+            + [column for column in manifest.columns if column not in preferred]
+        ]
+        path = os.path.join(
+            comparison_results_dir, 'threshold_combinations.csv'
+        )
+        self._save_csv(manifest, path)
+        self._log_file(path, 'Threshold query manifest')
+
+    def _export_effective_threshold_banner(self):
+        """Persist per-dataset applied-threshold provenance for the UI/guide.
+
+        The historical file was written only for all-path tau collapses.  It
+        is now the comparison run's compact, always-present notice payload:
+        shortest runs, complete runs, edge-budget-only runs, and collapsed
+        runs all carry the same complete provenance rows.  The old
+        ``input``/``effective``/``applied_folder`` keys remain for readers
+        that only understand the collapse banner.
+        """
         dataset_names = self.parameters.get_dataset_names()
         datasets_out = {}
         banner_parts = []
@@ -1344,8 +1815,13 @@ class ComparisonAnalyzer:
             effective = []
             aliased_folders = []
             tau_seen = None
+            applied_thresholds = {}
+            runs = []
             for t in thresholds:
                 meta = self._path_run_meta.get((ds, t), {})
+                row = self._path_provenance_row(ds, t)
+                runs.append(row)
+                applied_thresholds[str(t)] = row['applied_threshold']
                 applied = meta.get('applied_folder')
                 if meta.get('skipped') and applied is not None:
                     mapping[str(t)] = applied
@@ -1357,12 +1833,12 @@ class ComparisonAnalyzer:
                     # threshold became.
                     if applied not in thresholds:
                         aliased_folders.append(applied)
-                else:
-                    effective.append(t)
-                tau = meta.get('tau_canonical') or meta.get('tau')
+                tau = row.get('tau_canonical') or row.get('tau')
                 if tau is not None and not meta.get('skipped'):
                     tau_seen = tau if tau_seen is None else max(tau_seen, tau)
-            if mapping:
+                if not meta.get('skipped'):
+                    effective.append(row['applied_threshold'])
+            if thresholds:
                 # When every asked threshold collapsed, the applied
                 # folders ARE the effective points — show them instead of
                 # an empty list. Aliased canonical folders (materialized
@@ -1375,6 +1851,8 @@ class ComparisonAnalyzer:
                     'skipped': skipped,
                     'applied_folder': mapping,
                     'tau': tau_seen,
+                    'applied_thresholds': applied_thresholds,
+                    'runs': runs,
                 }
                 eff_txt = ', '.join(str(t) for t in effective) or '—'
                 alias_txt = ''
@@ -1383,20 +1861,53 @@ class ComparisonAnalyzer:
                         f'{t}→{applied}'
                         for t, applied in mapping.items()) + ')'
                 head = f"{ds}: input [{', '.join(map(str, thresholds))}]"
+                source_txt = ', '.join(sorted({
+                    str(r['applied_threshold_source']) for r in runs
+                }))
                 if tau_seen is not None:
                     banner_parts.append(
-                        f"{head} → applied [{eff_txt}] (τ={tau_seen:g})"
-                        f"{alias_txt}")
+                        f"{head} → applied [{eff_txt}] (sources: "
+                        f"{source_txt}; τ={tau_seen:g}){alias_txt}")
                 else:
                     banner_parts.append(
-                        f"{head} → applied [{eff_txt}]{alias_txt}")
-        if not any_skip:
-            return
+                        f"{head} → applied [{eff_txt}] (sources: "
+                        f"{source_txt}){alias_txt}")
+        manifest_rows = self._threshold_query_manifest_rows()
+        query_out = []
+        for query in self.get_threshold_queries():
+            query_id = query.get('id') or query.get('query_id')
+            query_rows = [
+                row for row in manifest_rows if row.get('query_id') == query_id
+            ]
+            query_out.append({
+                'id': query_id,
+                'label': query.get('label', query_id),
+                'requested_thresholds': dict(query.get('thresholds') or {}),
+                'applied_thresholds': {
+                    row['dataset']: row.get('applied_threshold')
+                    for row in query_rows
+                },
+                'runs': query_rows,
+            })
+        if any_skip:
+            prefix = 'Threshold collapse: '
+            suffix = (' — thresholds below τ skipped as duplicates '
+                      '(aliased to the applied folder).')
+        else:
+            prefix = 'Pathfinding provenance: '
+            suffix = ' — see comparison_results/pathfinding_provenance.csv.'
         payload = {
-            'banner': ('Threshold collapse: ' + '; '.join(banner_parts)
-                       + ' — thresholds below τ skipped as duplicates '
-                         '(aliased to the applied folder).'),
+            'banner': prefix + '; '.join(banner_parts) + suffix,
             'datasets': datasets_out,
+            'threshold_mode': getattr(
+                self.parameters, 'threshold_mode', 'standard'),
+            'threshold_dataset_order': dataset_names,
+            'combinations': query_out,
+            'queries': query_out,
+            'path_mode': getattr(self.parameters, 'path_mode', 'all'),
+            'comparison_mode': getattr(self.parameters, 'comparison_mode',
+                                       'path'),
+            'provenance_file': 'comparison_results/pathfinding_provenance.csv',
         }
         try:
             out_path = os.path.join(self.parameters.full_output_path,
@@ -1488,8 +1999,22 @@ class ComparisonAnalyzer:
         if not self._untyped_drop_stats:
             return
         out_dir = self.parameters.full_output_path
+        query_refs = {}
+        if self.parameters.threshold_mode == 'combinations':
+            for query in self.get_threshold_queries():
+                query_id = query.get('id') or query.get('query_id')
+                for dataset, threshold in (query.get('thresholds') or {}).items():
+                    query_refs.setdefault((dataset, int(threshold)), []).append(
+                        str(query_id))
         if self._untyped_dropped_records:
             recs = pd.concat(self._untyped_dropped_records, ignore_index=True)
+            if query_refs and {'dataset', 'threshold'} <= set(recs.columns):
+                recs['query_id'] = [
+                    ';'.join(query_refs.get((dataset, int(threshold)), []))
+                    for dataset, threshold in zip(
+                        recs['dataset'], recs['threshold'])
+                ]
+                recs['query_label'] = recs['query_id']
             rec_dir = os.path.join(out_dir, "comparison_results")
             os.makedirs(rec_dir, exist_ok=True)
             rec_path = os.path.join(rec_dir, "untyped_dropped_records.csv")
@@ -1498,11 +2023,17 @@ class ComparisonAnalyzer:
         total_rows = 0
         for (ds, t), s in sorted(self._untyped_drop_stats.items()):
             total_rows += s["rows"]
+            provenance = self._path_provenance_row(ds, t)
+            refs = query_refs.get((ds, int(t)), [])
+            query_text = (
+                f"; query_id={','.join(refs)}" if refs else "")
             lines.append(
                 f"- [untyped dropped] {ds} @ t={t}: {s['rows']} edges / "
                 f"{s['neurons']} distinct untyped neurons dropped "
                 f"(drop_untyped=True; pre-side {s['untyped_pre']}, "
-                f"post-side {s['untyped_post']})")
+                f"post-side {s['untyped_post']}; requested_threshold={t}; "
+                f"applied_threshold={provenance.get('applied_threshold')}"
+                f"{query_text})")
         note_path = os.path.join(out_dir, "user_warning_notes.txt")
         try:
             with open(note_path, "a", encoding="utf-8") as f:
@@ -1518,9 +2049,13 @@ class ComparisonAnalyzer:
     def _run_all_path_analyses(self, skip_existing: bool = True) -> Dict[str, Dict[int, pd.DataFrame]]:
         """Run path-based analyses for all datasets and their thresholds.
 
-        Feature E: each dataset iterates its OWN threshold list
-        (``get_thresholds_for_dataset``) — per-dataset overrides make this
-        a vertical comparison run.
+        Standard mode gives every dataset the same scalar query schedule.
+        Combination mode derives a per-dataset raw-run schedule from the
+        complete query rows, so repeated ``(dataset, threshold)`` cells are
+        executed once and later aligned by their owning query row.  The
+        derived schedule is an execution/cache detail, not an independent
+        comparison axis; the deprecated ``dataset_thresholds`` adapter is the
+        only legacy exception.
 
         Feature G: iterating ascending, an input threshold t whose
         previous (same-dataset) run has effective τ >= t is SKIPPED — its
@@ -1560,6 +2095,8 @@ class ComparisonAnalyzer:
 
             def _note_actual(threshold, meta):
                 nonlocal prev_meta, prev_t
+                meta = self._path_run_meta_from_state(
+                    dataset_name, threshold, meta)
                 meta.setdefault('_threshold', threshold)
                 self._path_run_meta[(dataset_name, threshold)] = meta
                 meta_map[threshold] = dict(meta)
@@ -1588,17 +2125,26 @@ class ComparisonAnalyzer:
                                 dataset_name, meta.get('applied_folder'))
                         if dup_df is not None:
                             # Resume key is the aliased frame (G §13.5 item 9)
-                            self.raw_results[dataset_name][threshold] = dup_df
-                            self._path_run_meta[(dataset_name, threshold)] = meta
+                            self.raw_results[dataset_name][threshold] = \
+                                self._finalize_loaded_result(
+                                    dataset_name, threshold, dup_df)
+                            self._path_run_meta[(dataset_name, threshold)] = \
+                                self._path_run_meta_from_state(
+                                    dataset_name, threshold, meta)
                             continue
                         # duplicate frame unavailable: fall through and
                         # re-run this threshold normally
                     else:
                         cached = self._try_load_cached(dataset_name, threshold)
                         if cached is not None:
-                            self.raw_results[dataset_name][threshold] = cached
-                            if meta:
-                                _note_actual(threshold, meta)
+                            self.raw_results[dataset_name][threshold] = \
+                                self._finalize_loaded_result(
+                                    dataset_name, threshold, cached)
+                            _note_actual(
+                                threshold,
+                                meta or self._read_cached_path_meta(
+                                    dataset_name, threshold),
+                            )
                             continue
 
                 # Feature G duplicate-threshold skip (legacy mode decides
@@ -1609,12 +2155,32 @@ class ComparisonAnalyzer:
                     bitten = bool(prev_meta.get('budget_bitten'))
                     skip_meta = {
                         'tau': tau,
+                        'strongest_first_tau': prev_meta.get(
+                            'strongest_first_tau', tau),
+                        'tau_canonical': prev_meta.get('tau_canonical'),
+                        'strongest_dropped_bottleneck': prev_meta.get(
+                            'strongest_dropped_bottleneck'),
                         'budget_bitten': bitten,
+                        'strongest_first_budget_bitten': prev_meta.get(
+                            'strongest_first_budget_bitten', bitten),
+                        'strongest_first_budget': prev_meta.get(
+                            'strongest_first_budget'),
                         'paths_complete': bool(prev_meta.get(
                             'paths_complete', not bitten)),
                         'skipped': True,
                         'duplicate_of': prev_t,
+                        'applied_folder': prev_meta.get(
+                            'applied_folder', prev_t),
+                        'edge_weight_floor': prev_meta.get(
+                            'edge_weight_floor'),
+                        'edge_budget_landing': prev_meta.get(
+                            'edge_budget_landing'),
+                        'edge_budget': prev_meta.get('edge_budget'),
                         'pathfinding': prev_meta.get('pathfinding'),
+                        'strongest_retained_bottleneck': prev_meta.get(
+                            'strongest_retained_bottleneck'),
+                        'graph_pruning_record': dict(
+                            prev_meta.get('graph_pruning_record') or {}),
                     }
                     # G §13.5 item 5: alias the frame as an independent
                     # COPY — never mutate it, and never share it by
@@ -1667,6 +2233,7 @@ class ComparisonAnalyzer:
         # (own key + folder) run through the same replay batch; Feature G
         # skipping applies between the points as usual.
         if (self.parameters.auto_extend_thresholds
+                and self.parameters.threshold_mode != 'combinations'
                 and self.parameters.path_mode == 'all'
                 and self.parameters.replay_paths):
             asked_max = 0
@@ -1693,17 +2260,32 @@ class ComparisonAnalyzer:
                           "auto-extension (raise thresholds >= tau to probe "
                           "further)")
             else:
-                for dataset_name in dataset_names:
-                    current = self.parameters.get_thresholds_for_dataset(
+                # Standard mode has one global schedule.  Snapshot each
+                # dataset's pre-extension schedule before updating the
+                # shared list; otherwise the first dataset would make the
+                # new points appear present for every later dataset and only
+                # the first dataset would be replayed.  The deprecated
+                # dataset_thresholds adapter remains per-dataset when an
+                # older caller supplied it explicitly.
+                base_schedules = {
+                    dataset_name: self.parameters.get_thresholds_for_dataset(
                         dataset_name)
+                    for dataset_name in dataset_names
+                }
+                uses_legacy_schedule = (
+                    self.parameters.dataset_thresholds is not None)
+                if not uses_legacy_schedule:
+                    self.parameters.thresholds = sorted(
+                        set(self.parameters.thresholds) | set(points))
+                for dataset_name in dataset_names:
+                    current = base_schedules[dataset_name]
                     new_points = [p for p in points if p not in current]
                     if not new_points:
                         continue
                     merged = sorted(set(current) | set(new_points))
                     # Persist the extended lists — exports iterate them.
-                    self.parameters.dataset_thresholds[dataset_name] = merged
-                    self.parameters.thresholds = sorted(
-                        set(self.parameters.thresholds) | set(merged))
+                    if uses_legacy_schedule:
+                        self.parameters.dataset_thresholds[dataset_name] = merged
                     meta_map = self._load_threshold_meta(dataset_name)
                     self._log(f"  F7 auto-extension for {dataset_name}: "
                               f"+{new_points}")
@@ -1718,7 +2300,19 @@ class ComparisonAnalyzer:
                         _note_expansion)
                     self._store_threshold_meta(dataset_name, meta_map)
                 self._export_effective_threshold_banner()
+        elif (
+            self.parameters.auto_extend_thresholds
+            and self.parameters.threshold_mode == 'combinations'
+        ):
+            self._log(
+                "Advanced threshold combinations keep their explicit rows; "
+                "auto-extension is not applied.",
+                level='warn',
+            )
 
+        # Replay, legacy, and cache paths all pass through one final
+        # normalization before aggregate exports are written.
+        self._complete_path_run_meta()
         self._export_untyped_drop_records()
         self._export_effective_threshold_banner()
         self._log(f"Completed path analysis for {len(dataset_names)} datasets")
@@ -1766,12 +2360,32 @@ class ComparisonAnalyzer:
                     bitten = bool(prev_meta.get('budget_bitten'))
                     skip_meta = {
                         'tau': tau,
+                        'strongest_first_tau': prev_meta.get(
+                            'strongest_first_tau', tau),
+                        'tau_canonical': prev_meta.get('tau_canonical'),
+                        'strongest_dropped_bottleneck': prev_meta.get(
+                            'strongest_dropped_bottleneck'),
                         'budget_bitten': bitten,
+                        'strongest_first_budget_bitten': prev_meta.get(
+                            'strongest_first_budget_bitten', bitten),
+                        'strongest_first_budget': prev_meta.get(
+                            'strongest_first_budget'),
                         'paths_complete': bool(prev_meta.get(
                             'paths_complete', not bitten)),
                         'skipped': True,
                         'duplicate_of': prev_t,
+                        'applied_folder': prev_meta.get(
+                            'applied_folder', prev_t),
+                        'edge_weight_floor': prev_meta.get(
+                            'edge_weight_floor'),
+                        'edge_budget_landing': prev_meta.get(
+                            'edge_budget_landing'),
+                        'edge_budget': prev_meta.get('edge_budget'),
                         'pathfinding': prev_meta.get('pathfinding'),
+                        'strongest_retained_bottleneck': prev_meta.get(
+                            'strongest_retained_bottleneck'),
+                        'graph_pruning_record': dict(
+                            prev_meta.get('graph_pruning_record') or {}),
                         '_threshold': threshold,
                     }
                     # Independent copy (directive 2): shared references
@@ -1840,16 +2454,31 @@ class ComparisonAnalyzer:
                 applied = raw.get('applied_folder')
                 meta = {
                     'tau': raw.get('tau'),
-                    'tau_canonical': raw.get('tau_canonical', applied),
+                    'strongest_first_tau': raw.get(
+                        'strongest_first_tau', raw.get('tau')),
+                    'tau_canonical': raw.get('tau_canonical') or applied,
                     'strongest_dropped_bottleneck': raw.get(
                         'strongest_dropped_bottleneck'),
                     'budget_bitten': bool(raw.get('budget_bitten')),
+                    'strongest_first_budget_bitten': bool(raw.get(
+                        'strongest_first_budget_bitten',
+                        raw.get('budget_bitten'))),
+                    'strongest_first_budget': raw.get(
+                        'strongest_first_budget'),
                     'paths_complete': bool(raw.get('paths_complete', False)),
                     'skipped': True,
                     'duplicate_of': raw.get('duplicate_of', applied),
                     'applied_folder': applied,
                     'pathfinding': self.parameters.pathfinding,
                     'edge_weight_floor': raw.get('edge_weight_floor'),
+                    'edge_budget': raw.get('edge_budget'),
+                    'edge_budget_applied': bool(raw.get(
+                        'edge_budget_applied', False)),
+                    'edge_budget_landing': raw.get('edge_budget_landing'),
+                    'strongest_retained_bottleneck': raw.get(
+                        'strongest_retained_bottleneck'),
+                    'graph_pruning_record': dict(
+                        raw.get('graph_pruning_record') or {}),
                 }
                 df = self._load_multi_threshold_result(dataset_name, applied)
                 self.raw_results[dataset_name][t] = df
@@ -1868,16 +2497,29 @@ class ComparisonAnalyzer:
                 continue
             meta = {
                 'tau': raw.get('tau'),
+                'strongest_first_tau': raw.get(
+                    'strongest_first_tau', raw.get('tau')),
                 'tau_canonical': raw.get('tau_canonical'),
                 'strongest_dropped_bottleneck': raw.get(
                     'strongest_dropped_bottleneck'),
                 'budget_bitten': bool(raw.get('budget_bitten')),
+                'strongest_first_budget_bitten': bool(raw.get(
+                    'strongest_first_budget_bitten', raw.get('budget_bitten'))),
+                'strongest_first_budget': raw.get('strongest_first_budget'),
                 'paths_complete': bool(raw.get('paths_complete', True)),
                 'skipped': False,
                 'duplicate_of': None,
                 'applied_folder': int(t),
                 'pathfinding': self.parameters.pathfinding,
                 'edge_weight_floor': raw.get('edge_weight_floor'),
+                'edge_budget': raw.get('edge_budget'),
+                'edge_budget_applied': bool(raw.get(
+                    'edge_budget_applied', False)),
+                'edge_budget_landing': raw.get('edge_budget_landing'),
+                'strongest_retained_bottleneck': raw.get(
+                    'strongest_retained_bottleneck'),
+                'graph_pruning_record': dict(
+                    raw.get('graph_pruning_record') or {}),
             }
             df = self._load_multi_threshold_result(dataset_name, t)
             self.raw_results[dataset_name][t] = df
@@ -2005,15 +2647,7 @@ class ComparisonAnalyzer:
         df = self._try_load_cached(dataset_name, threshold)
         if df is None:
             df = pd.DataFrame()
-        if not df.empty and self.label_mapper and not self.label_mapper.is_empty:
-            df = self.label_mapper.apply_to_dataframe(df, dataset_name)
-            if 'std_label_pre' in df.columns:
-                mask = df['std_label_pre'] != ''
-                df.loc[mask, 'type_pre'] = df.loc[mask, 'std_label_pre']
-            if 'std_label_post' in df.columns:
-                mask = df['std_label_post'] != ''
-                df.loc[mask, 'type_post'] = df.loc[mask, 'std_label_post']
-        return df
+        return self._finalize_loaded_result(dataset_name, threshold, df)
     
     def _run_all_edge_analyses(self, skip_existing: bool = True) -> Dict[str, Dict[int, pd.DataFrame]]:
         """
@@ -2066,6 +2700,14 @@ class ComparisonAnalyzer:
                     self.run_path_analysis(dataset_name, threshold, verbose_mode='silent')
                 continue
 
+            # Edge mode aggregates the bodyId frame directly instead of using
+            # the already-mapped frame returned by _load_fnc_results.  Apply
+            # the same label-mapping -> untyped-filter order here before any
+            # type aggregation; otherwise the checkbox silently did nothing
+            # for edge-mode comparison results.
+            bodyid_df = self._apply_label_mapping_to_dataframe(
+                dataset_name, lowest_threshold, bodyid_df)
+            label_map = self._build_label_map_from_df(bodyid_df)
             self._log(f"Loaded {len(bodyid_df)} bodyId-level connections from threshold={lowest_threshold}")
 
             # Get source/target types for path finding
@@ -2090,6 +2732,9 @@ class ComparisonAnalyzer:
                 for threshold in tqdm(remaining_thresholds, desc=f"  {dataset_name} thresholds", leave=False, unit="thr"):
                     self.run_path_analysis(dataset_name, threshold, verbose_mode='silent')
 
+        self._complete_path_run_meta()
+        self._export_untyped_drop_records()
+        self._export_effective_threshold_banner()
         self._log(f"Completed edge analysis for {len(dataset_names)} datasets")
         return self.raw_results
     
@@ -2113,8 +2758,11 @@ class ComparisonAnalyzer:
                 self._log(f"  Skipping threshold={threshold} (already computed)")
                 return
         
-        # Filter bodyId edges by current threshold
+        # Filter bodyId edges by current threshold, then apply the shared
+        # comparison-level untyped predicate after standardized labels.
         filtered_df = bodyid_df[bodyid_df['weight'] >= threshold].copy()
+        filtered_df = self._drop_untyped_neurons(
+            dataset_name, threshold, filtered_df)
         
         if filtered_df.empty:
             self._log(f"  threshold={threshold}: No edges meet threshold")
@@ -2582,7 +3230,7 @@ class ComparisonAnalyzer:
             'coverage_notes': self._get_coverage_notes(dataset_name)
         }
 
-        # Feature A: per-neuron synapse density. Local flywire-family
+        # Feature A: per-neuron synapse density. Local FAFB/BANC
         # tables carry post only — pre is derived from
         # merged_connections.parquet and flagged in pre_source.
         try:
@@ -2659,7 +3307,7 @@ class ComparisonAnalyzer:
             self._log(f"Fetching metadata for {dataset_name}...")
             
             # Determine if local or NeuPrint dataset
-            if is_flywire_dataset(dataset_name):
+            if is_local_connectome_dataset(dataset_name):
                 metadata = self._fetch_local_metadata(dataset_name)
             else:
                 metadata = self._fetch_neuprint_metadata(dataset_name)
@@ -2729,7 +3377,7 @@ class ComparisonAnalyzer:
                 df = self._read_csv(filepath)
                 if not df.empty:
                     self._log(f"Loading cached: {dataset_name} @ {threshold}", 'debug')
-                    return self._drop_untyped_neurons(dataset_name, threshold, df)
+                    return df
             except (pd.errors.EmptyDataError, Exception):
                 pass  # File is empty or corrupted, try other sources
         
@@ -2740,7 +3388,7 @@ class ComparisonAnalyzer:
                 df = self._read_csv(filepath)
                 if not df.empty:
                     self._log(f"Loading cached: {dataset_name} @ {threshold}", 'debug')
-                    return self._drop_untyped_neurons(dataset_name, threshold, df)
+                    return df
             except (pd.errors.EmptyDataError, Exception):
                 pass
         
@@ -2755,7 +3403,7 @@ class ComparisonAnalyzer:
                     if 'dataset' not in df.columns:
                         df['dataset'] = dataset_name
                         df['threshold'] = threshold
-                    return self._drop_untyped_neurons(dataset_name, threshold, df)
+                    return df
             except (pd.errors.EmptyDataError, Exception):
                 pass
         
@@ -2770,7 +3418,7 @@ class ComparisonAnalyzer:
                     if 'dataset' not in df.columns:
                         df['dataset'] = dataset_name
                         df['threshold'] = threshold
-                    return self._drop_untyped_neurons(dataset_name, threshold, df)
+                    return df
             except (pd.errors.EmptyDataError, Exception):
                 pass
         
@@ -2867,44 +3515,69 @@ class ComparisonAnalyzer:
         # Get type mapper for auto type mapping (if enabled)
         type_mapper = self.parameters._auto_type_mapper if self.parameters.auto_type_mapping else None
 
-        # Generate comprehensive summary
-        # Pass label_mapper=None because raw_results are already mapped
-        summary = self.metrics.generate_comparison_summary(
-            results=self.raw_results,
-            datasets=dataset_names,
-            thresholds=self.parameters.thresholds,
-            label_mapper=None,
-            type_mapper=type_mapper,
-            max_edges_for_metrics=self.parameters.max_edges_for_metrics
-        )
+        if self.parameters.threshold_mode == 'combinations':
+            queries = self.get_threshold_queries()
+            summary = self.metrics.generate_comparison_summary_for_queries(
+                results=self.raw_results,
+                datasets=dataset_names,
+                queries=queries,
+                label_mapper=None,
+                type_mapper=type_mapper,
+                max_edges_for_metrics=self.parameters.max_edges_for_metrics,
+            )
+            self._log("  Step 2/2: Calculating query similarities...")
+            similarities = self.metrics.calculate_similarity_across_queries(
+                results=self.raw_results,
+                datasets=dataset_names,
+                queries=queries,
+                label_mapper=None,
+                path_data_func=self._get_path_data_for_query,
+                type_mapper=type_mapper,
+                max_edges_for_metrics=self.parameters.max_edges_for_metrics,
+            )
+        else:
+            # Generate comprehensive summary. Pass label_mapper=None because
+            # raw_results are already mapped.
+            summary = self.metrics.generate_comparison_summary(
+                results=self.raw_results,
+                datasets=dataset_names,
+                thresholds=self.parameters.thresholds,
+                label_mapper=None,
+                type_mapper=type_mapper,
+                max_edges_for_metrics=self.parameters.max_edges_for_metrics
+            )
 
-        self._log("  Step 2/2: Calculating cross-threshold similarities...")
+            self._log("  Step 2/2: Calculating cross-threshold similarities...")
 
-        # Feature G: τ-collapse duplicates share their predecessor's path
-        # set — skip their similarity computation (identical rows) and let
-        # the report show the effective thresholds only.
-        similarity_thresholds = self._analysis_thresholds()
+            # Feature G: τ-collapse duplicates share their predecessor's path
+            # set — skip their similarity computation (identical rows) and let
+            # the report show the effective thresholds only.
+            similarity_thresholds = self._analysis_thresholds()
 
-        # Calculate cross-threshold similarities and cache them
-        # Pass label_mapper=None because raw_results are already mapped
-        # Pass path_data_func to enable path rank correlation computation
-        similarities = self.metrics.calculate_similarity_across_thresholds(
-            results=self.raw_results,
-            datasets=dataset_names,
-            thresholds=similarity_thresholds,
-            label_mapper=None,
-            path_data_func=self._get_path_data_for_threshold,
-            type_mapper=type_mapper,
-            max_edges_for_metrics=self.parameters.max_edges_for_metrics
-        )
+            similarities = self.metrics.calculate_similarity_across_thresholds(
+                results=self.raw_results,
+                datasets=dataset_names,
+                thresholds=similarity_thresholds,
+                label_mapper=None,
+                path_data_func=self._get_path_data_for_threshold,
+                type_mapper=type_mapper,
+                max_edges_for_metrics=self.parameters.max_edges_for_metrics
+            )
         summary['threshold_similarities'] = similarities
 
         # Cache per-threshold similarities for reuse in visualizations
-        if not similarities.empty and 'threshold' in similarities.columns:
-            for threshold in self.parameters.thresholds:
-                thresh_sims = similarities[similarities['threshold'] == threshold]
-                if not thresh_sims.empty:
-                    self._similarity_cache[threshold] = thresh_sims.copy()
+        if not similarities.empty:
+            if (
+                self.parameters.threshold_mode == 'combinations'
+                and 'query_id' in similarities.columns
+            ):
+                for query_id, query_sims in similarities.groupby('query_id'):
+                    self._similarity_cache[query_id] = query_sims.copy()
+            elif 'threshold' in similarities.columns:
+                for threshold in self.parameters.thresholds:
+                    thresh_sims = similarities[similarities['threshold'] == threshold]
+                    if not thresh_sims.empty:
+                        self._similarity_cache[threshold] = thresh_sims.copy()
 
         # Store for later use
         self.comparison_report = summary
@@ -2956,6 +3629,8 @@ class ComparisonAnalyzer:
         Returns:
             DataFrame with edges aligned across datasets
         """
+        if self.parameters.threshold_mode == 'combinations':
+            return self.get_aligned_data_for_query(threshold)
         if threshold in self.aligned_results:
             return self.aligned_results[threshold]
         
@@ -2987,52 +3662,77 @@ class ComparisonAnalyzer:
         When find_reciprocal=True, this uses reciprocal_connection_type.csv
         outputs (if available) to build the network graph.
         """
+        query = (
+            self._query_record(threshold)
+            if self.parameters.threshold_mode == 'combinations'
+            else None
+        )
+        cache_key = query.get('id') if query else threshold
         if not self.parameters.find_reciprocal:
             return self.get_aligned_data(threshold)
 
-        if threshold in self._network_aligned_cache:
-            return self._network_aligned_cache[threshold]
+        if cache_key in self._network_aligned_cache:
+            return self._network_aligned_cache[cache_key]
 
         dataset_names = self.parameters.get_dataset_names()
         type_mapper = self.parameters._auto_type_mapper if self.parameters.auto_type_mapping else None
+        threshold_map = query.get('thresholds', {}) if query else {}
 
         # Build temporary raw_results from reciprocal files when available
         reciprocal_results: Dict[str, Dict[int, pd.DataFrame]] = {}
         for dataset in dataset_names:
             reciprocal_results[dataset] = {}
             safe_name = self.parameters._sanitize_name(dataset)
+            dataset_threshold = (
+                threshold_map.get(dataset)
+                if query else threshold
+            )
             reciprocal_path = os.path.join(
                 self.parameters.full_output_path,
                 'dataset_data',
                 safe_name,
-                f'minsyn_{threshold}',
+                f'minsyn_{dataset_threshold}',
                 'find_reciprocal',
                 'reciprocal_connection_type.csv'
             )
             if os.path.exists(reciprocal_path):
                 try:
                     df = self._read_csv(reciprocal_path)
-                    reciprocal_results[dataset][threshold] = df
+                    reciprocal_results[dataset][dataset_threshold] = df
                 except Exception as e:
                     self._log(f"Warning: Failed to read reciprocal network data for {dataset} t={threshold}: {e}", level='warn')
 
         # If no reciprocal data found, fall back to standard aligned data
-        has_any = any(threshold in reciprocal_results.get(ds, {}) for ds in dataset_names)
+        has_any = any(
+            (threshold_map.get(ds) if query else threshold)
+            in reciprocal_results.get(ds, {})
+            for ds in dataset_names
+        )
         if not has_any:
             return self.get_aligned_data(threshold)
 
-        aligned = self.metrics._align_results_at_threshold(
-            reciprocal_results,
-            dataset_names,
-            threshold,
-            label_mapper=None,
-            type_mapper=type_mapper
+        aligned = (
+            self.metrics._align_results_for_threshold_map(
+                reciprocal_results,
+                dataset_names,
+                threshold_map,
+                label_mapper=None,
+                type_mapper=type_mapper,
+            )
+            if query else
+            self.metrics._align_results_at_threshold(
+                reciprocal_results,
+                dataset_names,
+                threshold,
+                label_mapper=None,
+                type_mapper=type_mapper
+            )
         )
 
         if self.parameters.keep_only_hemisphere_conserved_connections:
             aligned = self._filter_hemisphere_unconserved(aligned, dataset_names, threshold)
 
-        self._network_aligned_cache[threshold] = aligned
+        self._network_aligned_cache[cache_key] = aligned
         return aligned
 
     def _filter_hemisphere_unconserved(self, aligned: pd.DataFrame, dataset_names: List[str], 
@@ -3177,7 +3877,225 @@ class ComparisonAnalyzer:
     # =========================================================================
     # Report Generation
     # =========================================================================
-    
+
+    def _generate_combination_report(self, output_path: Optional[str] = None,
+                                     _skip_log: bool = False) -> str:
+        """Generate the text report for explicit row-wise threshold queries.
+
+        Combination mode deliberately does not reuse the scalar-threshold
+        report below: ``self.parameters.thresholds`` is only the raw-run
+        union in this mode, so iterating it would silently report a comparison
+        that was never requested.  Every metric row here is therefore keyed
+        by the stable query id and uses that query's per-dataset threshold
+        map.
+        """
+        if not _skip_log:
+            self._log("Generating combination-query comparison report text...")
+
+        dataset_names = self.parameters.get_dataset_names()
+        queries = self.get_threshold_queries()
+        lines = [
+            "=" * 70,
+            "CROSS-DATASET COMPARISON REPORT",
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "=" * 70,
+            "",
+            "DATASETS:",
+            "-" * 40,
+        ]
+        lines.extend(f"  • {dataset}" for dataset in dataset_names)
+        lines.extend([
+            "",
+            "ANALYSIS PARAMETERS:",
+            "-" * 40,
+            f"  Source neurons: {self.parameters.source_neurons}",
+            f"  Target neurons: {self.parameters.target_neurons}",
+            f"  Max interlayer: {self.parameters.max_interlayer}",
+            f"  Comparison mode: {self.parameters.comparison_mode}",
+            "  Threshold mode: combinations (one complete row per query)",
+            "",
+            "THRESHOLD QUERIES:",
+            "-" * 70,
+            "  query_id | label | requested thresholds",
+        ])
+        for query in queries:
+            threshold_text = ", ".join(
+                f"{dataset}={query['thresholds'].get(dataset)}"
+                for dataset in dataset_names
+            )
+            lines.append(
+                f"  {query['id']} | {query.get('label', query['id'])} | "
+                f"{threshold_text}")
+        lines.extend([
+            "",
+            "PATHFINDING THRESHOLD/BOTTLENECK PROVENANCE:",
+            "-" * 70,
+            "  query_id | dataset | requested | applied | source | SF budget | "
+            "SF bite | tau | Edge budget | floor applied | w0 | w1 | w2 | "
+            "W* | paths_complete",
+        ])
+        for query in queries:
+            query_id = query['id']
+            for dataset in dataset_names:
+                requested = int(query['thresholds'][dataset])
+                row = self._path_provenance_row(dataset, requested)
+                lines.append(
+                    f"  {query_id} | {dataset} | {row['requested_threshold']} | "
+                    f"{row['applied_threshold']} | "
+                    f"{row['applied_threshold_source']} | "
+                    f"{row['strongest_first_budget']} | "
+                    f"{row['strongest_first_budget_bitten']} | "
+                    f"{row['tau']} | {row['edge_budget']} | "
+                    f"{row['edge_budget_applied']} | "
+                    f"{row['edge_weight_floor']} | "
+                    f"{row['edge_budget_landing']} | "
+                    f"{row['strongest_dropped_bottleneck']} | "
+                    f"{row['strongest_retained_bottleneck']} | "
+                    f"{row['paths_complete']}")
+        lines.extend([
+            "  Definitions: SF budget = effective Max Paths budget; tau = "
+            "StrongestFirst landing; Edge budget = graph edge cap; floor "
+            "applied = whether the graph cap fired; w0 = Edge Budget floor; "
+            "w1 = landing tier; w2 = strongest dropped "
+            "bottleneck; W* = strongest retained bottleneck. The complete "
+            "machine-readable block is comparison_results/"
+            "threshold_combinations.csv.",
+            "",
+            "KEY METRICS BY THRESHOLD QUERY:",
+            "-" * 70,
+            f"{'Query':>12} | {'Label':<20} | {'Total Edges':>12} | "
+            f"{'Conserved':>10} | {'Edge Rate':>10} | "
+            f"{'Total Paths':>12} | {'Path Rate':>10}",
+            "-" * 70,
+        ])
+        for query in queries:
+            aligned = self.get_aligned_data_for_query(query)
+            if aligned.empty:
+                continue
+            available = [dataset for dataset in dataset_names
+                          if dataset in aligned.columns]
+            total_edges = len(aligned)
+            common_edges = int((aligned[available] > 0).all(axis=1).sum()) \
+                if available else 0
+            edge_rate = (common_edges / total_edges * 100) \
+                if total_edges else 0
+            path_count = common_paths = path_rate = 0
+            try:
+                path_data = self._get_path_data_for_query(query)
+                if not path_data.empty:
+                    path_count = len(path_data)
+                    path_available = [dataset for dataset in dataset_names
+                                      if dataset in path_data.columns]
+                    common_paths = int(
+                        (path_data[path_available] > 0).all(axis=1).sum()
+                    ) if path_available else 0
+                    path_rate = (common_paths / path_count * 100) \
+                        if path_count else 0
+            except Exception:
+                pass
+            lines.append(
+                f"{query['id']:>12} | {str(query.get('label', ''))[:20]:<20} | "
+                f"{total_edges:>12} | {common_edges:>10} | "
+                f"{edge_rate:>9.1f}% | {path_count:>12} | "
+                f"{path_rate:>9.1f}%")
+        lines.append("")
+
+        lines.extend([
+            "PAIRWISE SIMILARITIES BY THRESHOLD QUERY:",
+            "-" * 70,
+        ])
+        similarities = self.comparison_report.get('threshold_similarities',
+                                                    pd.DataFrame()) \
+            if self.comparison_report else pd.DataFrame()
+        if isinstance(similarities, pd.DataFrame) and not similarities.empty:
+            for query_id, query_sims in similarities.groupby('query_id') \
+                    if 'query_id' in similarities.columns else []:
+                label = next((q.get('label', query_id) for q in queries
+                              if q['id'] == query_id), query_id)
+                lines.append(f"\n  {query_id} ({label}):")
+                for _, row in query_sims.iterrows():
+                    pearson = row.get('pearson_correlation', 0)
+                    if pd.isna(pearson):
+                        pearson = 0
+                    lines.append(
+                        f"    {row.get('dataset_1')} vs "
+                        f"{row.get('dataset_2')}: Jaccard "
+                        f"{row.get('jaccard_similarity', 0):.3f} | "
+                        f"Ruzicka {row.get('ruzicka_similarity', 0):.3f} | "
+                        f"Weight Corr {pearson:.3f} | Common "
+                        f"{row.get('common_edges', 0)}")
+        else:
+            lines.append("  (No pairwise similarity rows found)")
+
+        lines.extend([
+            "",
+            "DATASET OVERLAP SUMMARY:",
+            "-" * 70,
+        ])
+        for query in queries:
+            aligned = self.get_aligned_data_for_query(query)
+            if aligned.empty:
+                continue
+            available = [dataset for dataset in dataset_names
+                          if dataset in aligned.columns]
+            lines.append(f"\n  Query = {query['id']} ({query.get('label')})")
+            for left_index, left in enumerate(available):
+                left_edges = set(aligned.index[aligned[left] > 0])
+                for right in available[left_index + 1:]:
+                    right_edges = set(aligned.index[aligned[right] > 0])
+                    overlap = len(left_edges & right_edges)
+                    left_pct = overlap / len(left_edges) * 100 \
+                        if left_edges else 0
+                    right_pct = overlap / len(right_edges) * 100 \
+                        if right_edges else 0
+                    lines.append(
+                        f"    {left} ∩ {right}: {overlap} edges "
+                        f"({left_pct:.0f}% of left, {right_pct:.0f}% of right)")
+
+        lines.extend([
+            "",
+            "QUERY-KEYED EXPORTS:",
+            "-" * 70,
+            "  Each query has its own comparison matrices and visualization "
+            "data. The filenames use a filesystem-safe query ID; the CSV "
+            "query_id/query_label fields retain the original identity.",
+        ])
+        for query in queries:
+            query_id = query['id']
+            safe_query_id = self._safe_query_filename_id(query_id)
+            lines.extend([
+                f"  {query_id}:",
+                f"    comparison_results/edge_presence_matrix_query_"
+                f"{safe_query_id}.csv",
+                f"    comparison_results/path_presence_matrix_query_"
+                f"{safe_query_id}.csv",
+                f"    similarity_matrices/similarity_query_{safe_query_id}.csv",
+                f"    comparison_visualizations/edge_heatmap_query_"
+                f"{safe_query_id}.png",
+                f"    comparison_visualizations/path_heatmap_query_"
+                f"{safe_query_id}.png",
+            ])
+        lines.extend([
+            "  Ratio and traversal-probability filtering is disabled for "
+            "pathfinding comparisons; no by_ratio/by_probability query "
+            "folders are produced.",
+        ])
+
+        lines.extend([
+            "",
+            "=" * 70,
+            "For interactive visualizations, see: comparison_report.html",
+            "For the exact query-to-run join, see: "
+            "comparison_results/threshold_combinations.csv",
+            "=" * 70,
+        ])
+        report_text = "\n".join(lines)
+        if output_path:
+            with open(output_path, 'w', encoding='utf-8') as handle:
+                handle.write(report_text)
+            self._log(f"Report saved to: {output_path}")
+        return report_text
+
     def generate_report(self, output_path: Optional[str] = None, _skip_log: bool = False) -> str:
         """
         Generate human-readable comparison report.
@@ -3195,6 +4113,10 @@ class ComparisonAnalyzer:
         # Ensure comparison has been run
         if self.comparison_report is None:
             self.run_comparison_analysis()
+
+        if self.parameters.threshold_mode == 'combinations':
+            return self._generate_combination_report(
+                output_path=output_path, _skip_log=_skip_log)
         
         thresholds_str = ', '.join(str(t) for t in self.parameters.thresholds)
         mid_threshold = self.parameters.thresholds[len(self.parameters.thresholds) // 2]
@@ -3228,6 +4150,42 @@ class ComparisonAnalyzer:
         lines.append("-" * 40)
         lines.append(f"  Thresholds analyzed: {thresholds_str}")
         lines.append("  NOTE: Results are highly sensitive to threshold choice.")
+        lines.append("")
+
+        # The report is also a durable, human-readable explanation of the
+        # actual threshold state.  ``tau`` is the StrongestFirst landing
+        # value; ``applied_threshold`` is the canonical equivalent threshold
+        # and must not be substituted with tau when a bottleneck gap exists.
+        lines.append("PATHFINDING THRESHOLD/BOTTLENECK PROVENANCE:")
+        lines.append("-" * 70)
+        lines.append(
+            "  dataset | requested | applied | source | SF budget | SF bite | "
+            "tau | Edge budget | floor applied | w0 | w1 | w2 | W* | "
+            "paths_complete")
+        for dataset_name in dataset_names:
+            for threshold in self.parameters.get_thresholds_for_dataset(
+                    dataset_name):
+                row = self._path_provenance_row(dataset_name, threshold)
+                lines.append(
+                    f"  {dataset_name} | {row['requested_threshold']} | "
+                    f"{row['applied_threshold']} | "
+                    f"{row['applied_threshold_source']} | "
+                    f"{row['strongest_first_budget']} | "
+                    f"{row['strongest_first_budget_bitten']} | "
+                    f"{row['tau']} | {row['edge_budget']} | "
+                    f"{row['edge_budget_applied']} | "
+                    f"{row['edge_weight_floor']} | "
+                    f"{row['edge_budget_landing']} | "
+                    f"{row['strongest_dropped_bottleneck']} | "
+                    f"{row['strongest_retained_bottleneck']} | "
+                    f"{row['paths_complete']}")
+        lines.append(
+            "  Definitions: SF budget = effective Max Paths budget; tau = "
+            "StrongestFirst landing; Edge budget = graph edge cap; w0 = Edge Budget "
+            "floor; w1 = Edge Budget landing tier; w2 = strongest dropped "
+            "bottleneck; W* = strongest retained bottleneck. The complete "
+            "machine-readable block is comparison_results/"
+            "pathfinding_provenance.csv.")
         lines.append("")
         
         # Key metrics by threshold (matches HTML summary section)
@@ -3455,9 +4413,77 @@ class ComparisonAnalyzer:
         
         # Save parameters
         params_path = os.path.join(out_dir, "parameters.json")
+        parameters_payload = self.parameters.to_dict()
+        parameters_payload['pathfinding_provenance'] = {
+            'file': 'comparison_results/pathfinding_provenance.csv',
+            'notice': 'effective_thresholds.json',
+            'fields': list(self._PATH_PROVENANCE_KEYS),
+            'tau_definition': 'StrongestFirst landing / natural bottleneck',
+            'applied_threshold_definition': (
+                'canonical equivalent Min Synapse Count for the materialized '
+                'output; requested threshold when no lossy budget applies'),
+        }
+        parameters_payload['threshold_query_manifest'] = {
+            'file': 'comparison_results/threshold_combinations.csv',
+            'threshold_mode': getattr(
+                self.parameters, 'threshold_mode', 'standard'),
+            'dataset_order': self.parameters.get_dataset_names(),
+            'query_count': len(self.get_threshold_queries()),
+            'description': (
+                'One row per threshold query and dataset. The requested '
+                'threshold is joined to the run-level applied threshold and '
+                'pathfinding bottleneck provenance.'
+            ),
+        }
+        # Keep the complete query definition and its per-dataset applied
+        # provenance in the portable parameters file as well as in the CSV
+        # join.  ``threshold_combinations`` remains the user input; this
+        # second block is the executed/query-level projection used by report
+        # consumers that do not load comparison_results/ first.
+        if getattr(self.parameters, 'threshold_mode', 'standard') == 'combinations':
+            manifest_rows = self._threshold_query_manifest_rows()
+            query_payload = []
+            for query in self.get_threshold_queries():
+                query_id = query.get('id') or query.get('query_id')
+                query_rows = [
+                    row for row in manifest_rows
+                    if row.get('query_id') == query_id
+                ]
+                query_payload.append({
+                    'id': query_id,
+                    'label': query.get('label', query_id),
+                    'requested_thresholds': dict(
+                        query.get('thresholds') or {}),
+                    'applied_thresholds': {
+                        row['dataset']: row.get('applied_threshold')
+                        for row in query_rows
+                    },
+                    'provenance': query_rows,
+                })
+            parameters_payload['threshold_queries'] = query_payload
+        else:
+            # Standard runs use scalar points, but still expose the same
+            # normalized key so downstream readers need no mode-specific
+            # schema discovery.
+            parameters_payload['threshold_queries'] = [
+                {
+                    'id': f'threshold_{threshold}',
+                    'label': f'N={threshold}',
+                    'requested_thresholds': {
+                        dataset: threshold
+                        for dataset in self.parameters.get_dataset_names()
+                    },
+                    'applied_thresholds': {
+                        dataset: self._path_provenance_row(
+                            dataset, threshold).get('applied_threshold')
+                        for dataset in self.parameters.get_dataset_names()
+                    },
+                }
+                for threshold in self.parameters.thresholds
+            ]
         with open(params_path, 'w', encoding='utf-8') as f:
             import json
-            json.dump(self.parameters.to_dict(), f, indent=2, default=str)
+            json.dump(parameters_payload, f, indent=2, default=str)
             
         # Save label mapping (always generate a compatible JSON)
         label_map_path = os.path.join(out_dir, "label_map.json")
@@ -3553,6 +4579,10 @@ class ComparisonAnalyzer:
         self.generate_report(report_path, _skip_log=True)
         
         self._log("  Step 2: Exporting cross-dataset comparisons...")
+
+        # Query identity/provenance is exported before aggregate tables so it
+        # is available as the canonical join for every comparison output.
+        self._export_threshold_query_manifest(comparison_results_dir)
         
         # === Cross-dataset comparison results ===
         self._export_cross_dataset_comparisons(comparison_results_dir)
@@ -3740,12 +4770,212 @@ class ComparisonAnalyzer:
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(output, f, indent=2)
 
+    def _export_cross_dataset_combinations(self, comparison_results_dir: str):
+        """Export comparison tables for explicit row-wise threshold queries.
+
+        The legacy exporter is scalar-threshold oriented.  Combination mode
+        uses this path so every aggregate row carries its query ID and the
+        requested threshold map instead of iterating the derived union.
+        """
+        dataset_names = self.parameters.get_dataset_names()
+        path_counts = []
+        edge_rows = []
+        summary_rows = []
+        motif_rows = []
+
+        for query in self.get_threshold_queries():
+            query_id = query.get('id') or query.get('query_id')
+            query_label = query.get('label', query_id)
+            threshold_map = query.get('thresholds', {})
+            aligned = self.get_aligned_data_for_query(query)
+
+            self._export_presence_matrix(
+                comparison_results_dir, query, silent=True)
+            self._export_path_presence_matrix(
+                comparison_results_dir, query, silent=True)
+            motif_rows.extend(
+                self._export_motif_analysis(comparison_results_dir, query)
+                or []
+            )
+
+            for dataset in dataset_names:
+                threshold = int(threshold_map[dataset])
+                df = self.raw_results.get(dataset, {}).get(
+                    threshold, pd.DataFrame())
+                if not df.empty:
+                    if {'type_pre', 'type_post'} <= set(df.columns):
+                        count = int(
+                            df[['type_pre', 'type_post']].drop_duplicates().shape[0]
+                        )
+                    elif {'source', 'target'} <= set(df.columns):
+                        count = int(
+                            df[['source', 'target']].drop_duplicates().shape[0]
+                        )
+                    else:
+                        count = int(len(df))
+                    total_weight = (
+                        float(df['weight'].sum())
+                        if 'weight' in df.columns else 0.0
+                    )
+                else:
+                    count = 0
+                    total_weight = 0.0
+                provenance = self._path_provenance_row(dataset, threshold)
+                row = {
+                    'query_id': query_id,
+                    'query_label': query_label,
+                    'threshold_mode': 'combinations',
+                    'dataset': dataset,
+                    'threshold': threshold,
+                    'connection_count': count,
+                    'total_weight': total_weight,
+                    'avg_weight': total_weight / count if count else 0,
+                    **provenance,
+                }
+                path_counts.append(row)
+                summary_rows.append({
+                    'query_id': query_id,
+                    'query_label': query_label,
+                    'threshold_mode': 'combinations',
+                    'dataset': self.parameters._sanitize_name(dataset),
+                    'threshold': threshold,
+                    'total_edges': count,
+                    'total_layer_rows': len(df),
+                    'total_weight': total_weight,
+                    'mean_weight': (
+                        float(df['weight'].mean())
+                        if not df.empty and 'weight' in df.columns else 0
+                    ),
+                    **provenance,
+                })
+
+            if aligned.empty:
+                continue
+            available = [
+                dataset for dataset in dataset_names
+                if dataset in aligned.columns
+            ]
+            for edge_key, values in aligned.iterrows():
+                edge_text = str(edge_key)
+                if ' -> ' in edge_text:
+                    source, target = edge_text.split(' -> ', 1)
+                else:
+                    source, target = edge_text, ''
+                row = {
+                    'query_id': query_id,
+                    'query_label': query_label,
+                    'threshold_mode': 'combinations',
+                    'edge_key': edge_text,
+                    'source': source,
+                    'target': target,
+                    'presence_count': int(
+                        (values[available] > 0).sum()) if available else 0,
+                    'total_datasets': len(available),
+                }
+                for dataset in available:
+                    safe_name = self.parameters._sanitize_name(dataset)
+                    row[f'weight_{safe_name}'] = values.get(dataset, 0)
+                    row[f'threshold_{safe_name}'] = threshold_map.get(dataset)
+                    provenance = self._path_provenance_row(
+                        dataset, threshold_map[dataset])
+                    row[f'applied_threshold_{safe_name}'] = provenance.get(
+                        'applied_threshold')
+                    row[f'applied_source_{safe_name}'] = provenance.get(
+                        'applied_threshold_source')
+                    # Keep the edge-level aggregate self-describing.  The
+                    # normalized threshold_combinations.csv remains the
+                    # canonical long-form join, while these columns make a
+                    # single exported edge row sufficient for audit tools.
+                    for field in (
+                            'strongest_first_budget',
+                            'strongest_first_budget_bitten',
+                            'strongest_first_tau', 'tau_canonical',
+                            'strongest_dropped_bottleneck',
+                            'strongest_retained_bottleneck', 'edge_budget',
+                            'edge_budget_applied', 'edge_budget_landing',
+                            'edge_weight_floor', 'paths_complete'):
+                        row[f'{field}_{safe_name}'] = provenance.get(field)
+                weights = [
+                    values.get(dataset, 0) for dataset in available
+                    if values.get(dataset, 0) > 0
+                ]
+                row['max_weight'] = max(weights) if weights else 0
+                row['avg_weight'] = (
+                    sum(weights) / len(weights) if weights else 0
+                )
+                edge_rows.append(row)
+
+        if path_counts:
+            self._save_csv(
+                pd.DataFrame(path_counts),
+                os.path.join(comparison_results_dir, 'path_count_comparison.csv'),
+            )
+        if summary_rows:
+            self._save_csv(
+                pd.DataFrame(summary_rows),
+                os.path.join(comparison_results_dir, 'unified_summary.csv'),
+            )
+        if edge_rows:
+            edge_df = pd.DataFrame(edge_rows)
+            self._save_csv(
+                edge_df,
+                os.path.join(comparison_results_dir, 'edge_weight_comparison.csv'),
+            )
+            self._save_csv(
+                edge_df,
+                os.path.join(
+                    comparison_results_dir, 'unified_edge_comparison.csv'),
+            )
+        if motif_rows:
+            self._save_csv(
+                pd.DataFrame(motif_rows),
+                os.path.join(comparison_results_dir, 'motif_analysis.csv'),
+            )
+
+        # The scalar HTML generator historically owns these files.  Advanced
+        # threshold rows bypass that generator, so persist the same similarity
+        # data here with the stable query id as the join key instead of
+        # inventing a scalar threshold from the raw-run union.
+        similarities = (self.comparison_report or {}).get(
+            'threshold_similarities', pd.DataFrame())
+        if isinstance(similarities, pd.DataFrame) and not similarities.empty:
+            similarity_dir = os.path.join(
+                self.parameters.full_output_path, 'similarity_matrices')
+            os.makedirs(similarity_dir, exist_ok=True)
+            all_similarity_rows = []
+            for query_id, query_df in similarities.groupby('query_id'):
+                query_df = query_df.copy()
+                query_df['threshold_mode'] = 'combinations'
+                all_similarity_rows.append(query_df)
+                safe_query_id = self._safe_query_filename_id(query_id)
+                query_path = os.path.join(
+                    similarity_dir,
+                    f'similarity_query_{safe_query_id}.csv',
+                )
+                self._save_csv(query_df, query_path)
+            if all_similarity_rows:
+                self._save_csv(
+                    pd.concat(all_similarity_rows, ignore_index=True),
+                    os.path.join(similarity_dir, 'similarity_by_query.csv'),
+                )
+
+        # Metadata and neuron-count exports are query-independent and remain
+        # useful in combination mode.  Scalar top-edge/degree helpers are not
+        # called here because their old APIs would silently choose a union
+        # threshold.
+        self._export_metadata_comparison(comparison_results_dir)
+        self._export_neuron_counts_comparison(comparison_results_dir)
+
     def _export_cross_dataset_comparisons(self, comparison_results_dir: str):
         """
         Export cross-dataset comparison results at each threshold level.
         
         Compares connections across datasets at the same synapse count cutoff.
         """
+        if self.parameters.threshold_mode == 'combinations':
+            self._export_cross_dataset_combinations(comparison_results_dir)
+            return
+
         dataset_names = self.parameters.get_dataset_names()
         
         # 1. Path count comparison across datasets
@@ -3969,9 +5199,14 @@ class ComparisonAnalyzer:
         
         Compares how connections change across different threshold levels within each dataset.
         """
+        if self.parameters.threshold_mode == 'combinations':
+            self._export_combination_threshold_sensitivity(comparison_results_dir)
+            return
+
         dataset_names = self.parameters.get_dataset_names()
 
         sensitivity_data = []
+        provenance_data = []
 
         def _cap_fields(dataset, threshold):
             """Fix A + Feature G + F6: per-row run state.
@@ -4002,7 +5237,13 @@ class ComparisonAnalyzer:
 
             for threshold in self.parameters.get_thresholds_for_dataset(dataset):
                 df = self.raw_results.get(dataset, {}).get(threshold, pd.DataFrame())
-                tau, paths_complete, skipped, duplicate_of, floor = _cap_fields(dataset, threshold)
+                provenance_row = self._path_provenance_row(dataset, threshold)
+                provenance_data.append(dict(provenance_row))
+                tau = provenance_row['tau']
+                paths_complete = provenance_row['paths_complete']
+                skipped = provenance_row['skipped']
+                duplicate_of = provenance_row['duplicate_of']
+                floor = provenance_row['edge_weight_floor']
 
                 # Concern 1: asked vs APPLIED threshold side by side.
                 # applied = the CANONICAL minimal threshold reproducing
@@ -4010,31 +5251,14 @@ class ComparisonAnalyzer:
                 # asked threshold for complete runs); tau is the budget
                 # landing (the collapse bound — every threshold in
                 # [applied, tau] yields this identical set).
-                applied, pruned, floor, applied_source = \
-                    self._applied_state_for(dataset, threshold)
-                dropped = (self._path_run_meta.get(
-                    (dataset, threshold), {}) or {}).get(
-                    'strongest_dropped_bottleneck')
+                dropped = provenance_row['strongest_dropped_bottleneck']
                 drop_stats = self._untyped_drop_stats.get((dataset, threshold), {})
-                row = {
-                    'dataset': dataset,
-                    'threshold': threshold,
-                    'applied_threshold': applied,
-                    'applied_threshold_source': applied_source,
-                    'tau': tau,
-                    'strongest_dropped': dropped,
-                    'paths_complete': paths_complete,
-                    'skipped': skipped,
-                    'duplicate_of': duplicate_of,
-                    # F6: the Edge-Budget floor (Fix D) — the only lossy
-                    # stage; tau-collapsed rows are marked skipped, not
-                    # pruned.
-                    'pruned': pruned,
-                    'edge_weight_floor': floor,
-                    # Untyped-neuron drop (default on).
-                    'untyped_dropped_rows': drop_stats.get('rows', 0),
-                    'untyped_dropped_neurons': drop_stats.get('neurons', 0),
-                }
+                row = dict(provenance_row)
+                # Retain the old column name used by downstream notebooks.
+                row['strongest_dropped'] = dropped
+                # Untyped-neuron drop (default on).
+                row['untyped_dropped_rows'] = drop_stats.get('rows', 0)
+                row['untyped_dropped_neurons'] = drop_stats.get('neurons', 0)
 
                 if df.empty:
                     row.update({
@@ -4082,6 +5306,79 @@ class ComparisonAnalyzer:
             sensitivity_df = pd.DataFrame(sensitivity_data)
             self._save_csv(sensitivity_df, os.path.join(comparison_results_dir, "threshold_sensitivity.csv"))
             self._log("Saved: threshold_sensitivity.csv")
+        if provenance_data:
+            provenance_df = pd.DataFrame(provenance_data)
+            self._save_csv(
+                provenance_df,
+                os.path.join(comparison_results_dir,
+                             "pathfinding_provenance.csv"),
+            )
+            self._log("Saved: pathfinding_provenance.csv")
+
+    def _export_combination_threshold_sensitivity(self, comparison_results_dir: str):
+        """Export query-keyed raw-run sensitivity/provenance for combinations.
+
+        The union of cell values is an execution schedule, not a comparison
+        axis.  Keep this diagnostic useful by repeating a raw run under each
+        query identity, rather than emitting rows that look like independent
+        scalar comparisons.
+        """
+        sensitivity_rows = []
+        provenance_rows = []
+        datasets = self.parameters.get_dataset_names()
+        for query_index, query in enumerate(self.get_threshold_queries(), start=1):
+            query_id = query.get('id') or query.get('query_id')
+            query_label = query.get('label', query_id)
+            threshold_map = query.get('thresholds') or {}
+            for dataset in datasets:
+                threshold = int(threshold_map[dataset])
+                provenance = self._path_provenance_row(dataset, threshold)
+                provenance.update({
+                    'query_id': query_id,
+                    'query_index': query_index,
+                    'query_label': query_label,
+                    'threshold_mode': 'combinations',
+                    'requested_threshold': threshold,
+                    'threshold_scope': 'query_cell',
+                })
+                provenance_rows.append(dict(provenance))
+
+                df = self.raw_results.get(dataset, {}).get(
+                    threshold, pd.DataFrame())
+                if {'type_pre', 'type_post'} <= set(df.columns):
+                    edge_count = int(
+                        df[['type_pre', 'type_post']].drop_duplicates().shape[0]
+                    )
+                elif {'source', 'target'} <= set(df.columns):
+                    edge_count = int(
+                        df[['source', 'target']].drop_duplicates().shape[0]
+                    )
+                else:
+                    edge_count = int(len(df))
+                row = dict(provenance)
+                row.update({
+                    'edge_count': edge_count,
+                    # Query rows are not a monotone within-dataset schedule;
+                    # adjacent-threshold retention is therefore undefined.
+                    'edges_retained_from_prev': None,
+                    'retention_rate': None,
+                    'edges_lost': None,
+                })
+                sensitivity_rows.append(row)
+
+        if sensitivity_rows:
+            self._save_csv(
+                pd.DataFrame(sensitivity_rows),
+                os.path.join(comparison_results_dir, 'threshold_sensitivity.csv'),
+            )
+            self._log('Saved: threshold_sensitivity.csv (query-keyed)')
+        if provenance_rows:
+            self._save_csv(
+                pd.DataFrame(provenance_rows),
+                os.path.join(comparison_results_dir,
+                             'pathfinding_provenance.csv'),
+            )
+            self._log('Saved: pathfinding_provenance.csv (query-keyed)')
 
     # ------------------------------------------------------------------
     # Feature C: query-specific threshold alignment (alignment spec §6)
@@ -4122,6 +5419,12 @@ class ComparisonAnalyzer:
           only (§6.3).
         - edge_density_per_threshold.csv — typed counts + the prober's
           extended-grid counts (feeds the Feature D curve plot).
+
+        In combination mode these files are explicitly raw-run schedule
+        diagnostics.  They compare the deduplicated cell-value grid for
+        density/alignment exploration; they are not comparison queries.  The
+        query-specific comparison exports are keyed by ``query_id`` in the
+        combination manifest and aggregate tables.
         """
         try:
             from .threshold_alignment import (
@@ -4181,6 +5484,14 @@ class ComparisonAnalyzer:
                     'is_typed_threshold': t in typed_set[ds],
                 })
         density_df = pd.DataFrame(density_rows)
+        alignment_scope = (
+            'raw_run_schedule_diagnostic'
+            if self.parameters.threshold_mode == 'combinations'
+            else 'standard_threshold_grid'
+        )
+        density_df['threshold_mode'] = getattr(
+            self.parameters, 'threshold_mode', 'standard')
+        density_df['threshold_scope'] = alignment_scope
         density_path = os.path.join(comparison_results_dir, "edge_density_per_threshold.csv")
         self._save_csv(density_df, density_path)
         self._log("Saved: edge_density_per_threshold.csv")
@@ -4196,6 +5507,9 @@ class ComparisonAnalyzer:
             and self.parameters._auto_type_mapper)
         matrix_df = build_alignment_matrix(grid_points, probers, mapped_names)
         if not matrix_df.empty:
+            matrix_df['threshold_mode'] = getattr(
+                self.parameters, 'threshold_mode', 'standard')
+            matrix_df['threshold_scope'] = alignment_scope
             matrix_path = os.path.join(comparison_results_dir, "threshold_alignment_matrix.csv")
             self._save_csv(matrix_df, matrix_path)
             self._log("Saved: threshold_alignment_matrix.csv")
@@ -4265,6 +5579,9 @@ class ComparisonAnalyzer:
 
         if best_rows:
             best_df = pd.DataFrame(best_rows)
+            best_df['threshold_mode'] = getattr(
+                self.parameters, 'threshold_mode', 'standard')
+            best_df['threshold_scope'] = alignment_scope
             best_path = os.path.join(comparison_results_dir, "threshold_alignment_best_matches.csv")
             self._save_csv(best_df, best_path)
             self._log("Saved: threshold_alignment_best_matches.csv")
@@ -4286,6 +5603,12 @@ class ComparisonAnalyzer:
                                  + ", ".join(segs))
             if parts:
                 self._log("Alignment: " + "; ".join(parts))
+        if self.parameters.threshold_mode == 'combinations':
+            self._log(
+                "Threshold alignment files are raw-run schedule diagnostics "
+                "in combination mode; query comparisons are keyed by "
+                "threshold_combinations.csv."
+            )
 
     def _export_threshold_alignment_heatmap(self, vis_dir: str):
         """Render the typed-grid alignment distance heatmap (§6.4)."""
@@ -4522,22 +5845,13 @@ class ComparisonAnalyzer:
             
             for threshold in self.parameters.thresholds:
                 df = self.raw_results.get(dataset, {}).get(threshold, pd.DataFrame())
-                # F6: asked vs applied threshold + run state on every row.
-                applied, pruned, floor, applied_source = \
-                    self._applied_state_for(dataset, threshold)
-                run_meta = self._path_run_meta.get((dataset, threshold), {})
-                applied_state = {
-                    'applied_threshold': applied,
-                    'applied_threshold_source': applied_source,
-                    'tau': run_meta.get('tau'),
-                    'paths_complete': bool(run_meta.get('paths_complete', True)),
-                    'skipped': bool(run_meta.get('skipped', False)),
-                    'pruned': pruned,
-                    'edge_weight_floor': floor,
-                }
+                # Full requested/applied/budget state on every row.  Keep
+                # the threshold alias for compatibility with older readers.
+                applied_state = self._path_provenance_row(dataset, threshold)
                 
                 if df.empty:
                     summary_data.append({
+                        **applied_state,
                         'dataset': safe_name,
                         'threshold': threshold,
                         'total_edges': 0,
@@ -4545,7 +5859,6 @@ class ComparisonAnalyzer:
                         'mean_weight': 0,
                         'unique_sources': 0,
                         'unique_targets': 0,
-                        **applied_state,
                     })
                     continue
                 
@@ -4565,6 +5878,7 @@ class ComparisonAnalyzer:
                 mean_weight = df[weight_col].mean() if weight_col else 1
                 
                 summary_data.append({
+                    **applied_state,
                     'dataset': safe_name,
                     'threshold': threshold,
                     # N6: unique (source, target) pairs — conn rows keep
@@ -4577,7 +5891,6 @@ class ComparisonAnalyzer:
                     'mean_weight': round(mean_weight, 2),
                     'unique_sources': sources,
                     'unique_targets': targets,
-                    **applied_state,
                 })
         
         if summary_data:
@@ -4820,7 +6133,6 @@ class ComparisonAnalyzer:
         Data is loaded from source_neurons.csv and target_neurons.csv saved by FindAllPath.
         """
         dataset_names = self.parameters.get_dataset_names()
-        lowest_threshold = min(self.parameters.thresholds)
         
         # Collect neuron data from each dataset
         all_source_data = []
@@ -4854,10 +6166,33 @@ class ComparisonAnalyzer:
         for dataset in dataset_names:
             safe_name = self.parameters._sanitize_name(dataset)
             
-            # Load from the lowest threshold output (source/target neurons are the same across thresholds)
+            # Load from the lowest threshold output for this dataset
+            # (source/target neurons are normally the same across thresholds).
+            # In combination mode ``parameters.thresholds`` is the global
+            # union of all query cells.  Using its minimum here can point at a
+            # directory that was never materialized for this dataset (for
+            # example, looking for male-cns/minsyn_3 when its query cell is
+            # minsyn_10), which silently turns valid counts into zeros.
+            get_dataset_thresholds = getattr(
+                self.parameters, 'get_thresholds_for_dataset', None)
+            dataset_thresholds = (
+                get_dataset_thresholds(dataset)
+                if callable(get_dataset_thresholds) else [])
+            if dataset_thresholds:
+                lowest_threshold = min(dataset_thresholds)
+            elif self.parameters.thresholds:
+                # Compatibility fallback for older parameter objects that do
+                # not expose a per-dataset schedule.
+                lowest_threshold = min(self.parameters.thresholds)
+            else:
+                lowest_threshold = None
+
             # N1: FNC writes source/target_neurons.csv at the minsyn folder
             # ROOT; older runs had them under data_details/ — try both.
-            dataset_output_path = self.parameters.get_dataset_output_path(dataset, lowest_threshold)
+            dataset_output_path = (
+                self.parameters.get_dataset_output_path(dataset, lowest_threshold)
+                if lowest_threshold is not None else ''
+            )
             source_candidates = [
                 os.path.join(dataset_output_path, 'source_neurons.csv'),
                 os.path.join(dataset_output_path, 'data_details', 'source_neurons.csv'),
@@ -5190,7 +6525,7 @@ class ComparisonAnalyzer:
         if self.comparison_report is not None:
             self.comparison_report['path_presence_matrix'] = path_df
 
-    def _export_presence_matrix(self, comparison_results_dir: str, threshold: int, silent: bool = False):
+    def _export_presence_matrix(self, comparison_results_dir: str, threshold: Any, silent: bool = False):
         """
         Export edge and path presence matrices showing conservation across datasets.
         
@@ -5205,8 +6540,19 @@ class ComparisonAnalyzer:
             threshold: Weight threshold for analysis
             silent: If True, suppress per-file logging
         """
+        query = (
+            self._query_record(threshold)
+            if self.parameters.threshold_mode == 'combinations'
+            else None
+        )
+        query_id = query.get('id') if query else None
+        query_label = query.get('label') if query else None
+        query_thresholds = query.get('thresholds', {}) if query else {}
         dataset_names = self.parameters.get_dataset_names()
-        aligned = self.get_aligned_data(threshold)
+        aligned = (
+            self.get_aligned_data_for_query(query)
+            if query else self.get_aligned_data(threshold)
+        )
         
         if aligned.empty:
             self._log(f"No aligned data for presence matrix at threshold {threshold}")
@@ -5344,19 +6690,34 @@ class ComparisonAnalyzer:
             ascending=[False, False]
         )
         
+        if query_id:
+            presence_df.insert(0, 'query_id', query_id)
+            presence_df.insert(1, 'query_label', query_label)
+            for dataset in dataset_names:
+                safe_name = self.parameters._sanitize_name(dataset)
+                presence_df.insert(
+                    len(presence_df.columns),
+                    f'threshold_{safe_name}',
+                    query_thresholds.get(dataset, ''),
+                )
+            safe_query_id = self._safe_query_filename_id(query_id)
+            output_name = f"edge_presence_matrix_query_{safe_query_id}.csv"
+        else:
+            output_name = f"edge_presence_matrix_minsyn_{threshold}.csv"
+
         # Save edge presence matrix
-        self._save_csv(presence_df, os.path.join(comparison_results_dir, f"edge_presence_matrix_minsyn_{threshold}.csv"))
+        self._save_csv(presence_df, os.path.join(comparison_results_dir, output_name))
         if not silent:
-            self._log(f"Saved: edge_presence_matrix_minsyn_{threshold}.csv ({len(presence_df)} edges)")
+            self._log(f"Saved: {output_name} ({len(presence_df)} edges)")
         
         # Also save a threshold-independent version at the middle threshold
         mid_threshold = self.parameters.thresholds[len(self.parameters.thresholds) // 2]
-        if threshold == mid_threshold:
+        if not query_id and threshold == mid_threshold:
             self._save_csv(presence_df, os.path.join(comparison_results_dir, "edge_presence_matrix.csv"))
             if not silent:
                 self._log("Saved: edge_presence_matrix.csv (default)")
     
-    def _export_path_presence_matrix(self, comparison_results_dir: str, threshold: int, silent: bool = False):
+    def _export_path_presence_matrix(self, comparison_results_dir: str, threshold: Any, silent: bool = False):
         """
         Export path presence matrix showing multi-hop path conservation across datasets.
         
@@ -5374,6 +6735,14 @@ class ComparisonAnalyzer:
         """
         import ast
         
+        query = (
+            self._query_record(threshold)
+            if self.parameters.threshold_mode == 'combinations'
+            else None
+        )
+        query_id = query.get('id') if query else None
+        query_label = query.get('label') if query else None
+        query_thresholds = query.get('thresholds', {}) if query else {}
         dataset_names = self.parameters.get_dataset_names()
         
         # Limit paths to prevent hanging on large datasets
@@ -5385,13 +6754,23 @@ class ComparisonAnalyzer:
         
         for dataset in dataset_names:
             safe_name = self.parameters._sanitize_name(dataset)
+            dataset_threshold = (
+                query_thresholds.get(dataset)
+                if query else threshold
+            )
+            if dataset_threshold is None:
+                continue
             
             # Find path data file: minsyn_X_data_original_paths.csv or {source}_to_{target}_allpaths_type.csv
-            dataset_output_path = self.parameters.get_dataset_output_path(dataset, threshold)
+            dataset_output_path = self.parameters.get_dataset_output_path(
+                dataset, dataset_threshold)
             
             # Try multiple path file patterns
             path_files_to_try = [
-                os.path.join(dataset_output_path, f"minsyn_{threshold}_data_original_paths.csv"),
+                os.path.join(
+                    dataset_output_path,
+                    f"minsyn_{dataset_threshold}_data_original_paths.csv",
+                ),
             ]
             
             # Also check for source_to_target_allpaths_type.csv pattern
@@ -5714,19 +7093,34 @@ class ComparisonAnalyzer:
             if len(path_presence_df) > max_paths:
                 path_presence_df = path_presence_df.head(max_paths)
         
+        if query_id:
+            path_presence_df.insert(0, 'query_id', query_id)
+            path_presence_df.insert(1, 'query_label', query_label)
+            for dataset in dataset_names:
+                safe_name = self.parameters._sanitize_name(dataset)
+                path_presence_df.insert(
+                    len(path_presence_df.columns),
+                    f'threshold_{safe_name}',
+                    query_thresholds.get(dataset, ''),
+                )
+            safe_query_id = self._safe_query_filename_id(query_id)
+            output_name = f"path_presence_matrix_query_{safe_query_id}.csv"
+        else:
+            output_name = f"path_presence_matrix_minsyn_{threshold}.csv"
+
         # Save
-        self._save_csv(path_presence_df, os.path.join(comparison_results_dir, f"path_presence_matrix_minsyn_{threshold}.csv"))
+        self._save_csv(path_presence_df, os.path.join(comparison_results_dir, output_name))
         if not silent:
-            self._log(f"Saved: path_presence_matrix_minsyn_{threshold}.csv ({len(path_presence_df)} paths)")
+            self._log(f"Saved: {output_name} ({len(path_presence_df)} paths)")
         
         # Save default version at middle threshold
         mid_threshold = self.parameters.thresholds[len(self.parameters.thresholds) // 2]
-        if threshold == mid_threshold:
+        if not query_id and threshold == mid_threshold:
             self._save_csv(path_presence_df, os.path.join(comparison_results_dir, "path_presence_matrix.csv"))
             if not silent:
                 self._log("Saved: path_presence_matrix.csv (default)")
     
-    def _export_motif_analysis(self, comparison_results_dir: str, threshold: int):
+    def _export_motif_analysis(self, comparison_results_dir: str, threshold: Any):
         """
         Export network motif analysis for each dataset.
         
@@ -5741,6 +7135,13 @@ class ComparisonAnalyzer:
             comparison_results_dir: Directory to save output files
             threshold: Weight threshold for analysis
         """
+        query = (
+            self._query_record(threshold)
+            if self.parameters.threshold_mode == 'combinations'
+            else None
+        )
+        query_id = query.get('id') if query else None
+        query_thresholds = query.get('thresholds', {}) if query else {}
         dataset_names = self.parameters.get_dataset_names()
         motif_data = []
         
@@ -5748,7 +7149,12 @@ class ComparisonAnalyzer:
             safe_name = self.parameters._sanitize_name(dataset)
             
             # Build graph from connection data
-            df = self.raw_results.get(dataset, {}).get(threshold, pd.DataFrame())
+            dataset_threshold = (
+                query_thresholds.get(dataset)
+                if query else threshold
+            )
+            df = self.raw_results.get(dataset, {}).get(
+                dataset_threshold, pd.DataFrame())
             if df.empty:
                 continue
             
@@ -5823,7 +7229,12 @@ class ComparisonAnalyzer:
             
             motif_data.append({
                 'dataset': safe_name,
-                'threshold': threshold,  # To-Do List 5 Item 6: Add threshold column
+                'threshold': dataset_threshold,
+                **({
+                    'query_id': query_id,
+                    'query_label': query.get('label', query_id),
+                    'threshold_mode': 'combinations',
+                } if query else {}),
                 'total_nodes': len(nodes),
                 'total_edges': len(edge_set),
                 'feedforward_loops': feedforward_loops,
@@ -5865,8 +7276,61 @@ class ComparisonAnalyzer:
         vis_dir = os.path.join(output_dir, "comparison_visualizations")
         os.makedirs(vis_dir, exist_ok=True)
         
-        mid_threshold = self.parameters.thresholds[len(self.parameters.thresholds) // 2]
-        aligned = self.get_aligned_data(mid_threshold)
+        if self.parameters.threshold_mode == 'combinations':
+            queries = self.get_threshold_queries()
+            # A combination query is a row-wise comparison point.  Render
+            # every row, never the middle row of the raw threshold union.
+            visualization_thresholds = [query['id'] for query in queries]
+            selected_query = queries[len(queries) // 2] if queries else None
+            mid_threshold = selected_query['id'] if selected_query else None
+            aligned = (
+                self.get_aligned_data_for_query(selected_query)
+                if selected_query else pd.DataFrame())
+            visualization_results = {
+                dataset: {
+                    query['id']: self.raw_results.get(dataset, {}).get(
+                        query['thresholds'][dataset], pd.DataFrame())
+                    for query in queries
+                }
+                for dataset in self.parameters.get_dataset_names()
+            }
+            align_func = self.get_aligned_data_for_query
+            similarity_func = lambda query_id: self._similarity_cache.get(
+                query_id, pd.DataFrame())
+            path_data_func = lambda query_id: self._get_path_data_for_query(
+                self._query_record(query_id))
+            # Ratio/probability filtering is disabled for pathfinding
+            # comparisons.  Passing None also prevents stale by_ratio/
+            # by_probability folders from being emitted by the generic
+            # visualizer.
+            ratio_data_func = None
+            prob_data_func = None
+            path_presence = pd.DataFrame()
+            point_metadata_func = lambda query_id: self._comparison_point_metadata(
+                query_id)
+            point_label_func = lambda query_id: self._comparison_point_label(
+                query_id)
+            point_stem_func = lambda query_id: self._comparison_point(
+                query_id).file_stem
+        else:
+            mid_threshold = self.parameters.thresholds[
+                len(self.parameters.thresholds) // 2
+            ]
+            aligned = self.get_aligned_data(mid_threshold)
+            visualization_thresholds = self._analysis_thresholds()
+            visualization_results = self.get_mapped_results()
+            align_func = self.get_aligned_data
+            similarity_func = self.get_cached_similarities
+            path_data_func = self._get_path_data_for_threshold
+            # Ratio/probability filtering is disabled for pathfinding
+            # comparisons in BOTH modes (parity with the combinations branch
+            # above).  Passing None keeps by_ratio/by_probability folders
+            # from being emitted for Standard runs as well.
+            ratio_data_func = None
+            prob_data_func = None
+            point_metadata_func = None
+            point_label_func = None
+            point_stem_func = None
         dataset_names = self.parameters.get_dataset_names()
         
         # Get pairwise similarities if available
@@ -5891,7 +7355,7 @@ class ComparisonAnalyzer:
             
             # Get type-mapped results for proper cross-dataset comparison
             # This ensures types like MeVPaMe1 (male-cns) and MTe46 (FAFB) are recognized as the same
-            mapped_results = self.get_mapped_results()
+            mapped_results = visualization_results
             
             # Generate all standard plots, passing cached similarity function
             # Feature G: render only the effective (non-duplicate) thresholds
@@ -5900,16 +7364,20 @@ class ComparisonAnalyzer:
                 aligned_data=aligned,
                 similarities=pairwise_sim,
                 output_dir=vis_dir,
-                thresholds=self._analysis_thresholds(),
-                align_func=self.get_aligned_data,  # Pass function to get aligned data at any threshold
-                similarity_func=self.get_cached_similarities,  # Pass cached similarity function
+                thresholds=visualization_thresholds,
+                align_func=align_func,
+                similarity_func=similarity_func,
                 current_threshold=mid_threshold,
-                path_data_func=self._get_path_data_for_threshold,
-                ratio_data_func=self._get_ratio_data_for_threshold,
-                prob_data_func=self._get_prob_data_for_threshold,
+                path_data_func=path_data_func,
+                ratio_data_func=ratio_data_func,
+                prob_data_func=prob_data_func,
                 output_base_path=self.parameters.full_output_path,
                 nickname_map=nickname_map,
                 path_presence_matrix=path_presence,  # Pass path presence matrix for accurate path counts
+                point_metadata_func=point_metadata_func,
+                point_label_func=point_label_func,
+                point_stem_func=point_stem_func,
+                threshold_mode=getattr(self.parameters, 'threshold_mode', 'standard'),
                 silent=True  # Suppress per-file messages, show summary instead
             )
             
@@ -5956,7 +7424,7 @@ class ComparisonAnalyzer:
             except Exception as e:
                 self._log(f"Warning: Failed to generate conserved reciprocal graphs: {e}")
     
-    def _get_path_data_for_threshold(self, threshold: int) -> pd.DataFrame:
+    def _get_path_data_for_threshold(self, threshold: Any) -> pd.DataFrame:
         """
         Get path min_weight data aligned across all datasets for a given threshold.
         
@@ -5969,21 +7437,33 @@ class ComparisonAnalyzer:
         Returns:
             DataFrame with path index and dataset columns containing min_weight
         """
+        query_map = threshold.get('thresholds', {}) if isinstance(
+            threshold, dict) else None
+        scalar_threshold = None if query_map is not None else threshold
         dataset_names = self.parameters.get_dataset_names()
         all_path_data = {}
         
         for dataset_name in dataset_names:
+            dataset_threshold = (
+                query_map.get(dataset_name)
+                if query_map is not None else scalar_threshold
+            )
+            if dataset_threshold is None:
+                continue
             safe_name = self.parameters._sanitize_name(dataset_name)
             dataset_output_path = os.path.join(
                 self.parameters.full_output_path,
                 'dataset_data',
                 safe_name,
-                f'minsyn_{threshold}'
+                f'minsyn_{dataset_threshold}'
             )
             
             # Try multiple path file patterns
             path_files_to_try = [
-                os.path.join(dataset_output_path, f'minsyn_{threshold}_data_original_paths.csv'),
+                os.path.join(
+                    dataset_output_path,
+                    f'minsyn_{dataset_threshold}_data_original_paths.csv',
+                ),
             ]
             
             # Also check for source_to_target_allpaths_type.csv pattern
@@ -6074,6 +7554,10 @@ class ComparisonAnalyzer:
         
         result_df = pd.DataFrame([r[1] for r in result_rows], index=[r[0] for r in result_rows])
         return result_df.fillna(0)
+
+    def _get_path_data_for_query(self, query: Dict[str, Any]) -> pd.DataFrame:
+        """Query-aware wrapper used by advanced similarity metrics."""
+        return self._get_path_data_for_threshold(query)
     
     def _get_path_hop_weights_for_threshold(self, threshold: int) -> Dict[str, Dict[str, List[float]]]:
         """
@@ -6334,7 +7818,7 @@ class ComparisonAnalyzer:
         result_df = pd.DataFrame([r[1] for r in result_rows], index=[r[0] for r in result_rows])
         return result_df.fillna(0)
 
-    def _get_edge_ratio_data_for_threshold(self, threshold: int) -> pd.DataFrame:
+    def _get_edge_ratio_data_for_threshold(self, threshold: Any) -> pd.DataFrame:
         """
         Get edge-level connection_ratio data aligned across datasets for a threshold.
         
@@ -6354,12 +7838,16 @@ class ComparisonAnalyzer:
         all_ratio_data = {}
         
         for dataset_name in dataset_names:
+            dataset_threshold = self._threshold_for_dataset(
+                threshold, dataset_name)
+            if dataset_threshold is None:
+                continue
             safe_name = self.parameters._sanitize_name(dataset_name)
             dataset_output_path = os.path.join(
                 self.parameters.full_output_path,
                 'dataset_data',
                 safe_name,
-                f'minsyn_{threshold}'
+                f'minsyn_{dataset_threshold}'
             )
             
             df = None
@@ -6450,7 +7938,7 @@ class ComparisonAnalyzer:
         result_df = pd.DataFrame([r[1] for r in result_rows], index=[r[0] for r in result_rows])
         return result_df.fillna(0)
 
-    def _get_edge_nt_details(self, threshold: int) -> Dict[str, Dict[str, str]]:
+    def _get_edge_nt_details(self, threshold: Any) -> Dict[str, Dict[str, str]]:
         """
         Get NT type per edge per dataset at a threshold.
         
@@ -6461,6 +7949,10 @@ class ComparisonAnalyzer:
         nt_by_edge: Dict[str, Dict[str, str]] = {} # canonical_key -> {dataset: nt}
 
         for dataset_name in dataset_names:
+            dataset_threshold = self._threshold_for_dataset(
+                threshold, dataset_name)
+            if dataset_threshold is None:
+                continue
             safe_name = self.parameters._sanitize_name(dataset_name)
             
             # Try reciprocal first, then standard
@@ -6469,7 +7961,7 @@ class ComparisonAnalyzer:
                 self.parameters.full_output_path,
                 'dataset_data',
                 safe_name,
-                f'minsyn_{threshold}',
+                f'minsyn_{dataset_threshold}',
                 'find_reciprocal'
             )
             conn_file = os.path.join(dataset_output_path, 'reciprocal_connection_type.csv')
@@ -6487,7 +7979,7 @@ class ComparisonAnalyzer:
                     self.parameters.full_output_path,
                     'dataset_data',
                     safe_name,
-                    f'minsyn_{threshold}'
+                    f'minsyn_{dataset_threshold}'
                 )
                 conn_file = os.path.join(dataset_output_path, 'connections_edge.csv')
                 if os.path.exists(conn_file) and os.path.getsize(conn_file) > 0:
@@ -6502,7 +7994,7 @@ class ComparisonAnalyzer:
                     self.parameters.full_output_path,
                     'dataset_data',
                     safe_name,
-                    f'minsyn_{threshold}'
+                    f'minsyn_{dataset_threshold}'
                 )
                 fallback = os.path.join(dataset_output_path, 'data_details', 'connection_type.csv')
                 if os.path.exists(fallback) and os.path.getsize(fallback) > 0:
@@ -6561,7 +8053,7 @@ class ComparisonAnalyzer:
         
         return nt_by_edge
 
-    def _get_reciprocal_edge_ratio_data_for_threshold(self, threshold: int) -> pd.DataFrame:
+    def _get_reciprocal_edge_ratio_data_for_threshold(self, threshold: Any) -> pd.DataFrame:
         """
         Get edge-level connection_ratio data from reciprocal outputs for a threshold.
 
@@ -6572,12 +8064,16 @@ class ComparisonAnalyzer:
         all_ratio_data = {}
 
         for dataset_name in dataset_names:
+            dataset_threshold = self._threshold_for_dataset(
+                threshold, dataset_name)
+            if dataset_threshold is None:
+                continue
             safe_name = self.parameters._sanitize_name(dataset_name)
             dataset_output_path = os.path.join(
                 self.parameters.full_output_path,
                 'dataset_data',
                 safe_name,
-                f'minsyn_{threshold}',
+                f'minsyn_{dataset_threshold}',
                 'find_reciprocal'
             )
 
@@ -7464,7 +8960,7 @@ class ComparisonAnalyzer:
     
     def visualize_conserved_paths(
         self,
-        threshold: Optional[int] = None,
+        threshold: Optional[Any] = None,
         trim_dead_ends: bool = True,
         output_folder: Optional[str] = None,
         showfig: bool = False,
@@ -7513,14 +9009,26 @@ class ComparisonAnalyzer:
         dataset_names = self.parameters.get_dataset_names()
         dataset_nickname_map = self.parameters.get_nickname_map()
         
+        query = None
+        if self.parameters.threshold_mode == 'combinations':
+            if threshold is None:
+                queries = self.get_threshold_queries()
+                threshold = queries[len(queries) // 2] if queries else None
+            if threshold is not None:
+                query = self._query_record(threshold)
+
         # Determine threshold
         if threshold is None:
             threshold = self.parameters.thresholds[len(self.parameters.thresholds) // 2]
-        
-        self._log(f"Generating conserved path visualization @ threshold={threshold}...")
-        
+
+        display_threshold = query.get('id') if query else threshold
+        self._log(
+            f"Generating conserved path visualization @ threshold="
+            f"{display_threshold}...")
+
         # Get aligned data
-        aligned = self.get_aligned_data(threshold)
+        aligned = (self.get_aligned_data_for_query(query)
+                   if query else self.get_aligned_data(threshold))
         if aligned.empty:
             self._log("Warning: No aligned data at this threshold.")
             return None
@@ -7542,11 +9050,12 @@ class ComparisonAnalyzer:
         self._log(f"  Found {len(conserved_edges)} conserved edges")
         
         # Get ratio and probability data for enhanced hover labels
-        ratio_data = self._get_edge_ratio_data_for_threshold(threshold)
+        ratio_data = self._get_edge_ratio_data_for_threshold(
+            query or threshold)
         # Note: prob_data is path-level, not edge-level. We'll include it if edge matches
         
         # Get NT details for all edges
-        nt_details = self._get_edge_nt_details(threshold)
+        nt_details = self._get_edge_nt_details(query or threshold)
         
         # Build edge list with weights from each dataset
         edge_list = []
@@ -7798,7 +9307,7 @@ class ComparisonAnalyzer:
             )
         os.makedirs(output_folder, exist_ok=True)
         
-        base_filename = f"conserved_network_t{threshold}"
+        base_filename = f"conserved_network_t{display_threshold}"
         
         self._log(f"  Creating VisualizePath visualization with {len(edges_df)} edges...")
         
@@ -7872,11 +9381,17 @@ class ComparisonAnalyzer:
             )
         os.makedirs(output_folder, exist_ok=True)
         
-        self._log(f"Generating conserved path visualizations for {len(self.parameters.thresholds)} thresholds...")
+        if self.parameters.threshold_mode == 'combinations':
+            thresholds_to_render = self.get_threshold_queries()
+        else:
+            thresholds_to_render = self.parameters.thresholds
+        self._log(
+            f"Generating conserved path visualizations for "
+            f"{len(thresholds_to_render)} threshold queries...")
         
         output_paths = []
         
-        for threshold in self.parameters.thresholds:
+        for threshold in thresholds_to_render:
             result = self.visualize_conserved_paths(
                 threshold=threshold,
                 trim_dead_ends=trim_dead_ends,
@@ -7898,7 +9413,7 @@ class ComparisonAnalyzer:
 
     def visualize_conserved_reciprocal_graph(
         self,
-        threshold: Optional[int] = None,
+        threshold: Optional[Any] = None,
         trim_dead_ends: bool = True,
         output_folder: Optional[str] = None,
         showfig: bool = False,
@@ -7920,12 +9435,24 @@ class ComparisonAnalyzer:
         dataset_names = self.parameters.get_dataset_names()
         dataset_nickname_map = self.parameters.get_nickname_map()
 
+        query = None
+        if self.parameters.threshold_mode == 'combinations':
+            if threshold is None:
+                queries = self.get_threshold_queries()
+                threshold = queries[len(queries) // 2] if queries else None
+            if threshold is not None:
+                query = self._query_record(threshold)
+
         if threshold is None:
             threshold = self.parameters.thresholds[len(self.parameters.thresholds) // 2]
 
-        self._log(f"Generating conserved reciprocal graph @ threshold={threshold}...")
+        display_threshold = query.get('id') if query else threshold
+        self._log(
+            f"Generating conserved reciprocal graph @ threshold="
+            f"{display_threshold}...")
 
-        aligned = self.get_aligned_data_for_network(threshold)
+        aligned = (self.get_aligned_data_for_network(query)
+                   if query else self.get_aligned_data_for_network(threshold))
         if aligned.empty:
             self._log("Warning: No aligned reciprocal data at this threshold.")
             return None
@@ -7943,7 +9470,8 @@ class ComparisonAnalyzer:
 
         self._log(f"  Found {len(conserved_edges)} conserved reciprocal edges")
 
-        ratio_data = self._get_reciprocal_edge_ratio_data_for_threshold(threshold)
+        ratio_data = self._get_reciprocal_edge_ratio_data_for_threshold(
+            query or threshold)
 
         edge_list = []
         edge_labels = {}
@@ -8092,7 +9620,7 @@ class ComparisonAnalyzer:
             )
         os.makedirs(output_folder, exist_ok=True)
 
-        base_filename = f"conserved_reciprocal_t{threshold}"
+        base_filename = f"conserved_reciprocal_t{display_threshold}"
 
         vp = VisualizePath(
             path_file=edges_df,
@@ -8137,10 +9665,16 @@ class ComparisonAnalyzer:
             )
         os.makedirs(output_folder, exist_ok=True)
 
-        self._log(f"Generating conserved reciprocal graphs for {len(self.parameters.thresholds)} thresholds...")
+        if self.parameters.threshold_mode == 'combinations':
+            thresholds_to_render = self.get_threshold_queries()
+        else:
+            thresholds_to_render = self.parameters.thresholds
+        self._log(
+            f"Generating conserved reciprocal graphs for "
+            f"{len(thresholds_to_render)} threshold queries...")
 
         output_paths = []
-        for threshold in self.parameters.thresholds:
+        for threshold in thresholds_to_render:
             result = self.visualize_conserved_reciprocal_graph(
                 threshold=threshold,
                 trim_dead_ends=trim_dead_ends,
@@ -8168,6 +9702,9 @@ class ComparisonAnalyzer:
         """Clear all cached results."""
         self.raw_results.clear()
         self.aligned_results.clear()
+        self.query_aligned_results.clear()
+        self._network_aligned_cache.clear()
+        self._similarity_cache.clear()
         self.comparison_report = None
         self._log("Results cleared")
     
@@ -8181,6 +9718,9 @@ class ComparisonAnalyzer:
         self.label_mapper = mapper
         # Clear aligned results since labels may change
         self.aligned_results.clear()
+        self.query_aligned_results.clear()
+        self._network_aligned_cache.clear()
+        self._similarity_cache.clear()
         self._log("Label mapper updated")
     
     def generate_html_report(self, output_path: Optional[str] = None) -> str:
@@ -8195,7 +9735,11 @@ class ComparisonAnalyzer:
         - Dataset comparison dashboard
         
         Args:
-            output_path: Path to save the HTML report (default: comparison_results/comparison_report.html)
+            output_path: Path to save the HTML report.  When omitted, the
+                compatibility default is ``comparison_results/comparison_report.html``;
+                :meth:`export_results` passes the run-root path so the
+                exported report is alongside ``parameters.json`` and the
+                plain-text report.
             
         Returns:
             Path to the generated HTML file
@@ -8232,6 +9776,19 @@ class ComparisonAnalyzer:
     def _generate_html_content(self, has_plotly: bool = True) -> str:
         """Generate the HTML content for the report - static version showing all thresholds."""
         from .html_report_generator import generate_html_report
+
+        if self.parameters.threshold_mode == 'combinations':
+            # Custom combinations use the same full report shell as Standard
+            # comparisons, but all sections consume explicit query points.
+            return generate_html_report(
+                analyzer=self,
+                dataset_names=self.parameters.get_dataset_names(),
+                thresholds=[],
+                mode_specific_note=self._generate_mode_specific_note(),
+                path_count_data=[],
+                key_findings_per_threshold={},
+                comparison_points=self.get_comparison_points(),
+            )
 
         dataset_names = self.parameters.get_dataset_names()
         # Feature G: per-threshold report sections render the effective
@@ -8316,6 +9873,165 @@ class ComparisonAnalyzer:
             path_count_data=path_count_data,
             key_findings_per_threshold=key_findings_per_threshold
         )
+
+    def _generate_combination_html_content(self) -> str:
+        """Backward-compatible entry point for the full query report.
+
+        Older integrations called this private method directly.  Keep that
+        call safe, but route it through the same full report shell used by
+        :meth:`_generate_html_content`; combination mode must not fall back to
+        the historical compact table.
+        """
+        from .html_report_generator import generate_html_report
+        return generate_html_report(
+            analyzer=self,
+            dataset_names=self.parameters.get_dataset_names(),
+            thresholds=[],
+            mode_specific_note=self._generate_mode_specific_note(),
+            path_count_data=[],
+            key_findings_per_threshold={},
+            comparison_points=self.get_comparison_points(),
+        )
+
+        # Kept below only as historical source context for downstream forks;
+        # the return above is intentional and makes the private compatibility
+        # path obey the current report contract.
+        import html
+
+        datasets = self.parameters.get_dataset_names()
+        queries = self.get_threshold_queries()
+        esc = lambda value: html.escape(str(value))
+
+        def fmt(value):
+            if value is None:
+                return '—'
+            if isinstance(value, float):
+                return f'{value:g}'
+            return str(value)
+
+        query_rows = []
+        provenance_rows = []
+        similarity_rows = []
+        for query in queries:
+            query_id = query['id']
+            aligned = self.get_aligned_data_for_query(query)
+            available = [ds for ds in datasets if ds in aligned.columns]
+            total_edges = len(aligned)
+            common_edges = int((aligned[available] > 0).all(axis=1).sum()) \
+                if available else 0
+            path_count = common_paths = 0
+            try:
+                path_data = self._get_path_data_for_query(query)
+                path_count = len(path_data)
+                path_available = [ds for ds in datasets
+                                  if ds in path_data.columns]
+                common_paths = int(
+                    (path_data[path_available] > 0).all(axis=1).sum()
+                ) if path_available else 0
+            except Exception:
+                pass
+            query_rows.append((query, total_edges, common_edges,
+                               path_count, common_paths))
+            for ds in datasets:
+                threshold = int(query['thresholds'][ds])
+                row = self._path_provenance_row(ds, threshold)
+                provenance_rows.append((query, ds, row))
+
+        similarities = (self.comparison_report or {}).get(
+            'threshold_similarities', pd.DataFrame())
+        if isinstance(similarities, pd.DataFrame) and not similarities.empty:
+            for _, row in similarities.iterrows():
+                similarity_rows.append(row)
+
+        parts = [
+            '<!doctype html><html lang="en"><head><meta charset="utf-8">',
+            '<meta name="viewport" content="width=device-width, initial-scale=1">',
+            '<title>DROCAT Cross-Dataset Comparison</title>',
+            '<style>body{font-family:system-ui,sans-serif;margin:2rem;color:#1f2937}'
+            'table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.9rem}'
+            'th,td{border:1px solid #d1d5db;padding:.4rem;text-align:left}'
+            'th{background:#f3f4f6}.card{padding:1rem;border:1px solid #d1d5db;'
+            'border-radius:.5rem;margin:1rem 0}.note{color:#4b5563}',
+            '</style></head><body>',
+            '<h1>Cross-Dataset Comparison</h1>',
+            '<p>Advanced threshold combinations: each query row uses one '
+            'requested threshold per dataset. The raw threshold union is not '
+            'a comparison axis.</p>',
+            '<div class="card"><strong>Datasets:</strong> '
+            + esc(', '.join(datasets)) + '</div>',
+            '<h2>Threshold queries</h2>',
+            '<table><tr><th>Query</th><th>Label</th>'
+            + ''.join(f'<th>{esc(ds)} requested</th>' for ds in datasets)
+            + '<th>Total edges</th><th>Common edges</th>'
+              '<th>Total paths</th><th>Common paths</th></tr>',
+        ]
+        for query, total_edges, common_edges, path_count, common_paths \
+                in query_rows:
+            parts.append(
+                '<tr><td>' + esc(query['id']) + '</td><td>'
+                + esc(query.get('label', query['id'])) + '</td>'
+                + ''.join(
+                    f'<td>{esc(query["thresholds"].get(ds))}</td>'
+                    for ds in datasets)
+                + f'<td>{total_edges}</td><td>{common_edges}</td>'
+                  f'<td>{path_count}</td><td>{common_paths}</td></tr>')
+        parts.append('</table>')
+
+        parts.extend([
+            '<h2>Applied threshold and bottleneck provenance</h2>',
+            '<p class="note">Applied is the canonical equivalent Min '
+            'Synapse Count for the materialized output. tau is the '
+            'StrongestFirst landing/collapse bound. w0/w1 are the Edge '
+            'Budget floor/landing, w2 is the strongest dropped bottleneck, '
+            'and W* is the strongest retained bottleneck.</p>',
+            '<table><tr><th>Query</th><th>Dataset</th><th>Requested</th>'
+            '<th>Applied</th><th>Source</th><th>SF budget</th>'
+            '<th>SF bite</th><th>tau</th><th>Edge budget</th>'
+            '<th>Edge budget applied</th><th>w0</th><th>w1</th><th>w2</th>'
+            '<th>W*</th>'
+            '<th>Complete</th></tr>',
+        ])
+        for query, ds, row in provenance_rows:
+            values = (
+                query['id'], ds, row.get('requested_threshold'),
+                row.get('applied_threshold'), row.get('applied_threshold_source'),
+                row.get('strongest_first_budget'),
+                row.get('strongest_first_budget_bitten'), row.get('tau'),
+                row.get('edge_budget'), row.get('edge_budget_applied'),
+                row.get('edge_weight_floor'),
+                row.get('edge_budget_landing'),
+                row.get('strongest_dropped_bottleneck'),
+                row.get('strongest_retained_bottleneck'),
+                row.get('paths_complete'),
+            )
+            parts.append('<tr>' + ''.join(
+                f'<td>{esc(fmt(value))}</td>' for value in values
+            ) + '</tr>')
+        parts.append('</table>')
+
+        parts.extend([
+            '<h2>Pairwise similarities</h2>',
+            '<table><tr><th>Query</th><th>Dataset 1</th><th>Dataset 2</th>'
+            '<th>Jaccard</th><th>Ruzicka</th><th>Weight correlation</th>'
+            '<th>Common edges</th></tr>',
+        ])
+        for row in similarity_rows:
+            parts.append('<tr>' + ''.join(
+                f'<td>{esc(fmt(row.get(key)))}</td>' for key in (
+                    'query_id', 'dataset_1', 'dataset_2',
+                    'jaccard_similarity', 'ruzicka_similarity',
+                    'pearson_correlation', 'common_edges')
+            ) + '</tr>')
+        if not similarity_rows:
+            parts.append('<tr><td colspan="7">No similarity rows found.</td></tr>')
+        parts.extend([
+            '</table>',
+            '<p class="note">Machine-readable query join: '
+            'comparison_results/threshold_combinations.csv. Presence and '
+            'path tables are exported as one file per query id.</p>',
+            '</body></html>',
+        ])
+        return ''.join(parts)
 
 
 def quick_compare(

@@ -114,7 +114,8 @@ vs.plot_neurons()
 ## General guidance
 
 - Chain by passing files — find the actual produced path, don't guess filenames.
-- Distinct resources: NeuPrint caches vs FlyWire local files vs the skeleton cache;
+- Distinct resources: NeuPrint caches vs FAFB local files vs BANC public-release
+  files vs the shared skeleton cache;
   one does not replace the other.
 - Keep `showfig=False` and bound graph size until artifacts are validated.
 - When mixing datasets, keep `use_auto_type_mapping`/`LabelMapper` consistent to

@@ -87,4 +87,7 @@ python skills/drocat-usage/scripts/run_direct.py \
 - Budgets: the StrongestFirst path budget (`max_paths_bodyid`) may bite and is
   reported as tau in the provenance block; the Edge Budget never applies —
   shortest mode is never floored.
+- `min_ratio` and `min_traversal_probability` remain available as readout
+  columns for compatibility, but their filters are disabled in Shortest Paths;
+  they do not appear as `r[]p[]` filename notes.
 - This is also the engine behind `inter_dataset`'s `path_mode="shortest"`.

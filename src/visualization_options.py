@@ -6,18 +6,18 @@ stack.
 """
 
 try:
-    from .flywire_ids import is_flywire_dataset
+    from .flywire_ids import is_fafb_dataset
 except ImportError:  # pragma: no cover - direct/script imports
-    from flywire_ids import is_flywire_dataset
+    from flywire_ids import is_fafb_dataset
 
 
 def _is_flywire_family(dataset: str) -> bool:
-    """Return whether *dataset* belongs to the FlyWire render family.
+    """Compatibility helper for FAFB-specific render defaults.
 
-    Mirrors ``flywire_ids.is_flywire_dataset``: FAFB and BANC releases both
-    use the FlyWire-family render defaults.
+    The historical helper name remains public to avoid breaking callers, but
+    BANC is a standalone source and is not part of the FlyWire render family.
     """
-    return is_flywire_dataset(dataset)
+    return is_fafb_dataset(dataset)
 
 
 def default_skeleton_tab_simplification(
@@ -26,13 +26,10 @@ def default_skeleton_tab_simplification(
 
     The fast/direct pipeline removes 90% of tube-mesh faces and fine/artistic
     pipelines remove 95%. The same method-specific defaults apply to
-    NeuPrint and FlyWire/FAFB tube renders.
+    NeuPrint, FAFB, and standalone BANC tube renders.
 
-    BANC needs no special default: the slider only ever drives the
-    full-resolution sources (FAFB-style 90%), while L2 tubes skip the
-    decimation stage structurally in the BANC render processor — a 0.0
-    default here would leave full-res-only neurons (they exist, e.g. one
-    l-LNv) undecimated.
+    BANC uses the same numeric default at the renderer boundary, while its
+    public-release SWC/L2 source selection remains separate from FAFB.
     """
     pipeline = str(neuprint_skeleton_pipeline or "fast").strip().lower()
     return 0.90 if pipeline in {"fast", "direct"} else 0.95

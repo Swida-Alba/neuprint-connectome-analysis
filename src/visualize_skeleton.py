@@ -8,11 +8,12 @@ of neuron skeletons, synapses, and brain region meshes across multiple connectom
 Supported Datasets
 ------------------
 - **NeuPrint datasets**: hemibrain:v1.2.1, optic-lobe:v1.1, manc:v1.0, male-cns:v0.9
-- **FlyWire/FAFB datasets**: flywire_FAFB_v783, banc_v626
+- **FAFB local release**: flywire_FAFB_v783 (FlyWire/Codex or CAVE-backed)
+- **BANC local release**: banc_v626 (standalone public-release bucket; no CAVE)
 
 Key Features
 ------------
-- **Multi-dataset support**: Seamlessly work with NeuPrint and FlyWire datasets
+- **Multi-dataset support**: Seamlessly work with NeuPrint, FAFB, and BANC
 - **Skeleton visualization**: Render neurons as meshes or lines with automatic simplification
 - **Synapse plotting**: Visualize synapses as scatter points, spheres, cones, or tetrahedrons
 - **ROI meshes**: Display brain region meshes with automatic bilateral expansion
@@ -61,7 +62,7 @@ VisualizeSkeleton : dataclass
 
 FAFB-Specific Features
 ----------------------
-For FlyWire/FAFB datasets, the system includes:
+For FAFB, the system includes:
 - **Soma-aware mesh simplification**: Preserves cell body detail
   (fast skeleton_mesh_simplification=0.90; fine/artistic=0.95;
   soma_mesh_simplification=0.8)
@@ -80,7 +81,7 @@ Performance Notes
 
 See Also
 --------
-- FAFB_INTEGRATION.md: Detailed guide for FlyWire/FAFB usage
+- FAFB_INTEGRATION.md: Detailed guide for FAFB usage
 - INSTALLATION.md: Setup and configuration instructions
 - OUTPUT_FILES.md: Documentation of output formats and file structure
 """
@@ -155,7 +156,7 @@ try:
         dataset_folder,
         is_banc_dataset,
         is_fafb_dataset,
-        is_flywire_dataset,
+        is_local_connectome_dataset,
         normalize_flywire_body_id,
         normalize_flywire_body_ids,
         resolve_flywire_dataset_dir,
@@ -166,7 +167,7 @@ except ImportError:
         dataset_folder,
         is_banc_dataset,
         is_fafb_dataset,
-        is_flywire_dataset,
+        is_local_connectome_dataset,
         normalize_flywire_body_id,
         normalize_flywire_body_ids,
         resolve_flywire_dataset_dir,
@@ -1780,7 +1781,7 @@ class VisualizeSkeleton:
     Interactive 3D visualization of neuron skeletons, synapses, and brain regions.
     
     This class provides comprehensive tools for visualizing connectome data from multiple
-    datasets including NeuPrint (hemibrain, male-cns, manc, optic-lobe) and FlyWire/FAFB.
+    datasets including NeuPrint (hemibrain, male-cns, manc, optic-lobe), FAFB, and BANC.
     It handles data fetching, coordinate transformations, mesh simplification, caching,
     and export to various formats.
     
@@ -1795,9 +1796,9 @@ class VisualizeSkeleton:
       and analysis results
     - **Export options**: HTML (interactive), PNG (multiple views), video animations
     
-    FAFB/FlyWire Features
+    FAFB Features
     ---------------------
-    For FlyWire datasets, specialized features handle high-resolution mesh data:
+    For FAFB, specialized features handle high-resolution mesh data:
     
     - **Soma-aware simplification**: Preserves cell body detail while simplifying branches
     - **Automatic extrusion detection**: Identifies and replaces distorted skeletons
@@ -1809,7 +1810,8 @@ class VisualizeSkeleton:
     dataset : str, default='hemibrain:v1.2.1'
         Dataset identifier. Supported values:
         - NeuPrint: 'hemibrain:v1.2.1', 'optic-lobe:v1.1', 'manc:v1.0', 'male-cns:v0.9'
-        - FlyWire: 'flywire_FAFB_v783', 'banc_v626'
+        - FAFB: 'flywire_FAFB_v783'
+        - BANC: 'banc_v626', 'banc_v888'
     
     neuron_layers : str | list
         Neuron layers to visualize. Can be:
@@ -1962,7 +1964,7 @@ class VisualizeSkeleton:
     
     See Also
     --------
-    FAFB_INTEGRATION.md : Detailed guide for FlyWire/FAFB usage
+    FAFB_INTEGRATION.md : Detailed guide for FAFB usage
     INSTALLATION.md : Setup and configuration instructions
     OUTPUT_FILES.md : Documentation of output formats
     """
@@ -2466,9 +2468,9 @@ class VisualizeSkeleton:
     >>> mesh_roi = ['AME', ['aL', 'bL', 'gL'], 'EB']  # Nested for shared color
     >>> mesh_roi = ['.*\\(R\\)']            # All right-hemisphere ROIs
     
-    FAFB/FlyWire Note
+    FAFB Note
     -----------------
-    FAFB/FlyWire datasets do not have native ROI meshes. When visualizing FAFB data,
+    FAFB does not have native ROI meshes. When visualizing FAFB data,
     ROI meshes from male-cns are automatically transformed to FAFB coordinates.
     This allows ROI context visualization but may have minor alignment differences.
     
@@ -2611,7 +2613,7 @@ class VisualizeSkeleton:
     soma_mesh_simplification: float = FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION
     '''
     Mesh simplification factor specifically for the soma (cell body) region (0.0 to 1.0).
-    Only applies when skeleton_mode='tube' and for FAFB/FlyWire datasets.
+    Only applies when skeleton_mode='tube' and for FAFB datasets.
     
     The soma region often has high vertex density that can cause extrusion artifacts
     when using high simplification levels. This parameter allows applying gentler 
@@ -2652,7 +2654,7 @@ class VisualizeSkeleton:
     is in use: native FAFB scenes, and any scene moved into FLYWIRE
     coordinates via brain_mesh='FAFB'.
     
-    The FAFB/FlyWire template mesh has a slight tilt relative to the standard view axes.
+    The FAFB template mesh has a slight tilt relative to the standard view axes.
     When True (default), a rotation correction is applied to align the brain:
     - Z-axis rotation: -4 degrees (corrects left-right tilt in front view)
     - Y-axis rotation: -3 degrees (corrects tilt in top view)
@@ -2679,7 +2681,7 @@ class VisualizeSkeleton:
     skeleton_radius_style: str = 'auto'
     '''
     How the skeleton radius is interpreted when skeleton_mode='tube'.\n
-    'auto' (default): NeuPrint datasets use 'fafb', FlyWire/FAFB use 'source'.\n
+    'auto' (default): NeuPrint datasets use 'fafb'; FAFB and BANC use 'source'.\n
     'fafb': synthesize a FAFB-style thickness profile (fat base, tapered\n
             tips, capped soma) because NeuPrint radius columns are a\n
             near-constant placeholder; this is a visualization convention.\n
@@ -2757,7 +2759,7 @@ class VisualizeSkeleton:
     Whether to cache fetched synapse data to disk\n
     True: Use synapse table from datasets/{dataset}/*_synapse_table.parquet if available\n
     False: Fetch from NeuPrint every time (default)\n
-    For FlyWire/FAFB: Always uses datasets/{dataset}/flywire_FAFB_v783_synapse_table.parquet\n
+    For FAFB/BANC: Uses the exact dataset-native synapse table under datasets/{dataset}/.\n
     '''
     
     banc_skeleton_resolution: str = 'l2'
@@ -2782,7 +2784,7 @@ class VisualizeSkeleton:
     False: Use downloaded ZIP skeletons if available (default).\n
     \n
     Note: API fetching is slower (~5-10s per neuron) but produces cleaner skeletons.\n
-    Only applies to FlyWire/FAFB datasets. Has no effect on NeuPrint datasets.\n
+    Only applies to FAFB datasets. Has no effect on BANC or NeuPrint datasets.\n
     '''
     
     auto_fix_extrusions: bool = True
@@ -2803,7 +2805,8 @@ class VisualizeSkeleton:
     \n
     Note: First run with this enabled may take longer due to mesh analysis.\n
     Subsequent runs use cached results and only check new neurons.\n
-    Only applies to FlyWire/FAFB datasets. Has no effect on NeuPrint datasets.\n
+    Only applies to FAFB prepared-mesh datasets. Has no effect on BANC or
+    NeuPrint datasets.\n
     '''
     
     layer_sample_notes: Optional[List[str]] = None
@@ -2829,7 +2832,8 @@ class VisualizeSkeleton:
       • optic-lobe → JRCFIB2022M (affine transform only, fast)\n
       • manc → MANC (male adult nerve cord VNC, affine transform only, fast)\n
       • male-cns → JRCFIB2022M (brain portion; VNC via vnc_mesh, fast)\n
-      • flywire/FAFB → FLYWIRE (native FAFB coordinates, NO transform needed)\n
+      • FAFB → FLYWIRE (native FAFB coordinates, NO transform needed)\n
+      • BANC → BANC (native BANC coordinates, NO transform needed)\n
       • banc → BANC public region outline (brain portion; VNC via vnc_mesh)\n
     - 'FAFB': render the whole scene (neurons, synapses, and the outline)
       in FLYWIRE/FAFB coordinates with the FAFB brain outline (renamed from
@@ -2885,7 +2889,8 @@ class VisualizeSkeleton:
     Available for datasets with VNC data (requires flybrains >= 0.6.3):\n
     - male-cns → JRCFIB2022M.mesh_vnc (VNC portion of male CNS)\n
     - manc → MANC template (native VNC mesh)\n
-    For other datasets (hemibrain, optic-lobe, flywire), this option is ignored.\n
+    - BANC → public BANC outline, split into brain and VNC portions\n
+    For other datasets (hemibrain, optic-lobe, FAFB), this option is ignored.\n
     Note: For MANC with brain_mesh='native', the VNC is already shown\n
     (MANC template IS the VNC, so it ignores vnc_mesh value). 
     Use brain_mesh='none' to hide brain and VNC mesh.\n
@@ -3223,24 +3228,22 @@ class VisualizeSkeleton:
             return None
 
         dataset_name = str(dataset or '')
-        normalized_dataset = dataset_name.lower()
         is_fafb = is_fafb_dataset(dataset_name)
-        is_flywire = is_flywire_dataset(dataset_name)
+        is_banc = is_banc_dataset(dataset_name)
 
         if is_fafb:
             family = 'FlyWire FAFB'
             threshold = 0.95
-        elif not is_flywire:
+        elif is_banc:
+            # BANC has its own public-release SWC pipeline and does not use
+            # the FAFB mesh warning threshold.
+            return None
+        else:
             family = 'NeuPrint'
             pipeline = str(neuprint_skeleton_pipeline or 'fast').strip().lower()
             threshold = 0.95 if pipeline in {
                 'fine', 'artistic', 'fine_opt', 'fine_opt1', 'fafb'
             } else 0.90
-        else:
-            # BANC and other FlyWire datasets do not share the FAFB mesh
-            # pipeline, so do not apply the FAFB warning to them.
-            return None
-
         if value <= threshold:
             return None
 
@@ -3621,7 +3624,7 @@ class VisualizeSkeleton:
         """BodyId leaf label for the tree legend panel.
 
         NeuPrint datasets: ``'{bodyId}_{instance}'`` (e.g. ``11309_aMe4_L``).
-        FlyWire/FAFB: ``'{bodyId}_{type}_L/_R'`` - the hemisphere comes from
+        FAFB/BANC local releases: ``'{bodyId}_{type}_L/_R'`` - the hemisphere comes from
         the side column or the instance suffix. Falls back to the instance,
         then the raw neuron id. Legacy navis neuron names of the form
         ``'{instance} ({bodyId})'`` are normalized to the same
@@ -3638,8 +3641,8 @@ class VisualizeSkeleton:
             body = source_row.get('bodyId')
             if body is not None and pd.notna(body):
                 base = str(body)
-            is_flywire_family = is_flywire_dataset(self.dataset)
-            if is_flywire_family:
+            is_local_release = is_local_connectome_dataset(self.dataset)
+            if is_local_release:
                 ntype = None
                 for col in ('flywireType', 'type'):
                     val = source_row.get(col)
@@ -5346,7 +5349,7 @@ class VisualizeSkeleton:
                 id_str = str(id_val).strip()
                 id_key = (
                     normalize_flywire_body_id(id_str)
-                    if is_flywire_dataset(self.dataset) and id_str.isdigit()
+                    if is_local_connectome_dataset(self.dataset) and id_str.isdigit()
                     else (int(id_str) if id_str.isdigit() else id_str)
                 )
                 try:
@@ -5385,7 +5388,7 @@ class VisualizeSkeleton:
                 if id_str.isdigit():
                     processed_ids.append(
                         normalize_flywire_body_id(id_str)
-                        if is_flywire_dataset(self.dataset)
+                        if is_local_connectome_dataset(self.dataset)
                         else int(id_str)
                     )
                 else:
@@ -6385,10 +6388,11 @@ class VisualizeSkeleton:
         elif self.verbose is False:
             self.verbose = False
 
-        # Record FlyWire readiness without rejecting cache-only/configuration
-        # callers.  The actual FAFB readiness check runs at plot_skeleton(),
-        # immediately before any skeleton query.  BANC is rejected here so
-        # its converter cannot be mistaken for skeleton support.
+        # Record local-release readiness without rejecting cache-only or
+        # configuration callers. The actual FAFB readiness check runs at
+        # plot_skeleton(), immediately before any skeleton query. BANC is
+        # accepted through its public bucket and never enters the FAFB/CAVE
+        # path.
         flywire_access = flywire_skeleton_readiness(
             self.dataset,
             project_root=self.script_path,
@@ -6445,9 +6449,9 @@ class VisualizeSkeleton:
         self.exportable_meshes = []
         
         # BANC normalization first (integration plan §I): a standalone
-        # public-bucket source — never present as a NeuPrint or FlyWire
-        # client.  ``is_flywire_dataset`` deliberately includes BANC, so
-        # the BANC check must precede the flywire auto-detect below.
+        # public-bucket source — never present as a NeuPrint or FAFB
+        # client. Keep the BANC check explicit so its source remains visible
+        # even when legacy ``flywire_BANC_*`` aliases are supplied.
         if is_banc_dataset(self.dataset):
             if self.client_type not in ('neuprint', 'banc'):
                 raise ValueError(
@@ -6458,24 +6462,24 @@ class VisualizeSkeleton:
             if self.client_type != 'banc':
                 self.client_type = 'banc'
                 self._vprint(f"Auto-detected client_type='banc' from dataset '{self.dataset}'", level='full')
-        elif self.client_type == 'neuprint' and is_flywire_dataset(self.dataset):
+        elif self.client_type == 'neuprint' and is_fafb_dataset(self.dataset):
             self.client_type = 'flywire'
             self._vprint(f"Auto-detected client_type='flywire' from dataset '{self.dataset}'", level='full')
 
-        # For FlyWire/FAFB: enable the representation-specific mesh cache for
+        # For FAFB: enable the representation-specific mesh cache for
         # morphology.  Synapse caching remains enabled when requested: the
         # local master connection table is the dataset's canonical synapse
         # cache and is also the source for pre/post connector sites.
-        if self.client_type == 'flywire' or is_flywire_dataset(self.dataset):
+        if self.client_type == 'flywire' or is_fafb_dataset(self.dataset):
             # Raw skeleton pkl caching is disabled (files too large and need transformation anyway)
             if self.cache_neurons:
-                self._vprint("  ℹ️  FlyWire/FAFB: Using mesh cache (simplified) instead of raw skeletons", level='full')
+                self._vprint("  ℹ️  FAFB: Using mesh cache (simplified) instead of raw skeletons", level='full')
         
         # Set the default mesh level based on the selected pipeline if it was
         # not specified. Fast/direct renders use 90% removal; fine/artistic
-        # renders use 95%, for both NeuPrint and FlyWire/FAFB tube renders.
+        # renders use 95%, for NeuPrint, FAFB, and BANC tube renders.
         if self.skeleton_mesh_simplification is None:
-            if is_flywire_dataset(self.dataset):
+            if is_fafb_dataset(self.dataset):
                 pipeline = self._resolved_fafb_pipeline()
             else:
                 pipeline = self._resolved_neuprint_skeleton_pipeline()
@@ -6587,8 +6591,9 @@ class VisualizeSkeleton:
             # FlyWire API fetching removed
             pass
 
-        # Check FlyWire visualization files
-        if is_flywire_dataset(self.dataset):
+        # Check local release visualization files. BANC and FAFB are prepared
+        # by different converters and neither path is a NeuPrint fetch.
+        if is_local_connectome_dataset(self.dataset):
             # Ensure data is prepared using the converter (canonical folder)
             dataset_dir = os.path.join(self.script_path, 'datasets',
                                        dataset_folder(self.dataset))
@@ -6600,7 +6605,8 @@ class VisualizeSkeleton:
                 success = FAFB_file_converter.ensure_flywire_data(self.dataset, dataset_dir)
 
             if not success:
-                print("\\n\033[31mCRITICAL ERROR: FlyWire/BANC data preparation failed.\033[0m")
+                source_name = "BANC" if is_banc_dataset(self.dataset) else "FAFB"
+                print(f"\\n\033[31mCRITICAL ERROR: {source_name} data preparation failed.\033[0m")
                 print("Please follow the instructions above to download the required files.")
                 sys.exit(1)
             
@@ -6652,7 +6658,7 @@ class VisualizeSkeleton:
                     if layer.isnumeric():
                         self.neuron_layers[i] = (
                             normalize_flywire_body_id(layer)
-                            if is_flywire_dataset(self.dataset)
+                            if is_local_connectome_dataset(self.dataset)
                             else int(layer)
                         )
             else:
@@ -7351,7 +7357,7 @@ class VisualizeSkeleton:
             "fine_opt1": "artistic",
             "fafb": "fine",
         }.get(requested_pipeline, requested_pipeline)
-        is_flywire_family = is_flywire_dataset(self.dataset)
+        is_fafb = is_fafb_dataset(self.dataset)
         if skeleton_mode == "tube":
             scope = "applied to the rendered tube mesh"
         else:
@@ -7361,13 +7367,13 @@ class VisualizeSkeleton:
                 "in-page export-pipeline warning raised for line mode "
                 "(simplification warning disabled)"
             )
-        elif is_flywire_family:
+        elif is_fafb:
             warning_note = "in-page warning threshold >0.95"
         elif pipeline in {"fine", "artistic"}:
             warning_note = "in-page warning threshold >0.95"
         else:
             warning_note = "in-page warning threshold >0.90"
-        if is_flywire_family:
+        if is_fafb:
             pipeline_note = f"neuprint_skeleton_pipeline={pipeline}"
         else:
             pipeline_note = f"neuprint_skeleton_pipeline={pipeline}"
@@ -7624,17 +7630,17 @@ class VisualizeSkeleton:
         """Get path to synapse table in datasets folder.
         
         Returns the path to the synapse table parquet file.
-        For FlyWire/FAFB: datasets/flywire_FAFB_v783/flywire_FAFB_v783_synapse_table.parquet
+        For local FAFB/BANC releases: datasets/{dataset}/{dataset}_synapse_table.parquet
         For NeuPrint: datasets/{dataset}/{dataset}_synapse_table.parquet
         
         Returns:
             str: Path to synapse table, or None if not found
         """
         dataset_normalized = canonical_dataset_name(self.dataset).replace(':', '_').replace('.', '_')
-        if is_flywire_dataset(self.dataset):
-            # FlyWire-family datasets are independent sources. In particular,
-            # a BANC query must never read FAFB synapses merely because the
-            # BANC table is absent.
+        if is_local_connectome_dataset(self.dataset):
+            # FAFB and BANC are independent local sources. In particular, a
+            # BANC query must never read FAFB synapses merely because the BANC
+            # table is absent.
             dataset_dir = resolve_flywire_dataset_dir(
                 self.script_path, self.dataset
             )
@@ -7674,7 +7680,7 @@ class VisualizeSkeleton:
         # Collect all body IDs needed. Internal FlyWire cache/file keys stay
         # canonical strings; navis object IDs are converted to integers only
         # when assigning the third-party object attribute below.
-        if is_flywire_dataset(self.dataset):
+        if is_fafb_dataset(self.dataset):
             if body_ids_filter is not None:
                 all_body_ids = set(normalize_flywire_body_ids(body_ids_filter))
             else:
@@ -7726,13 +7732,13 @@ class VisualizeSkeleton:
                         n.units = 'nm'
                         n.id = (
                             body_id_to_api_int(bid)
-                            if is_flywire_dataset(self.dataset)
+                            if is_fafb_dataset(self.dataset)
                             else int(bid)
                         )
                         n.name = str(bid)
                         skeleton_cache[
                             normalize_flywire_body_id(bid)
-                            if is_flywire_dataset(self.dataset)
+                            if is_fafb_dataset(self.dataset)
                             else int(bid)
                         ] = n
                     except Exception:
@@ -7771,13 +7777,13 @@ class VisualizeSkeleton:
                                     n.units = 'nm'
                                     n.id = (
                                         body_id_to_api_int(bid)
-                                        if is_flywire_dataset(self.dataset)
+                                        if is_fafb_dataset(self.dataset)
                                         else int(bid)
                                     )
                                     n.name = str(bid)
                                     skeleton_cache[
                                         normalize_flywire_body_id(bid)
-                                        if is_flywire_dataset(self.dataset)
+                                        if is_fafb_dataset(self.dataset)
                                         else int(bid)
                                     ] = n
                         except Exception:
@@ -7959,7 +7965,7 @@ class VisualizeSkeleton:
         if ignore_cache:
             return None, body_ids
         if (self.client_type == 'flywire'
-                or is_flywire_dataset(self.dataset)):
+                or is_local_connectome_dataset(self.dataset)):
             return None, body_ids
 
         try:
@@ -8002,7 +8008,7 @@ class VisualizeSkeleton:
         ``fast``/``fine`` decimation always starts from the same source level.
         """
         is_neuprint = not (self.client_type == 'flywire'
-                           or is_flywire_dataset(self.dataset))
+                           or is_local_connectome_dataset(self.dataset))
         if not is_neuprint or neuron_vols is None:
             return
 
@@ -8155,8 +8161,8 @@ class VisualizeSkeleton:
         if self.skeleton_mesh_simplification < self.FAFB_MESH_CACHE_SIMPLIFICATION:
             return {}, body_ids
         
-        # Check for flywire/fafb dataset
-        if not is_flywire_dataset(self.dataset):
+        # Check for FAFB prepared-mesh dataset
+        if not is_fafb_dataset(self.dataset):
             return {}, body_ids
         
         mesh_cache = FlyWireMeshCache(
@@ -8194,8 +8200,8 @@ class VisualizeSkeleton:
         if not self.cache_neurons:
             return
         
-        # Check for flywire/fafb dataset
-        if not is_flywire_dataset(self.dataset):
+        # Check for FAFB prepared-mesh dataset
+        if not is_fafb_dataset(self.dataset):
             return
         
         mesh_cache = FlyWireMeshCache(
@@ -8519,7 +8525,8 @@ class VisualizeSkeleton:
         fetch decision. Mesh-cache hits can still avoid a render fetch when
         that separate mesh cache is explicitly enabled.
         """
-        if is_flywire_dataset(self.dataset) or self.client_type == 'flywire':
+        if is_local_connectome_dataset(self.dataset) or self.client_type in {
+                'flywire', 'banc'}:
             return []
 
         all_fetch_ids = []
@@ -8960,7 +8967,7 @@ class VisualizeSkeleton:
         """
         style = (self.skeleton_radius_style or 'auto').strip().lower()
         if style == 'auto':
-            is_flywire = is_flywire_dataset(self.dataset)
+            is_flywire = is_fafb_dataset(self.dataset)
             return 'source' if is_flywire else 'fafb'
         return {'default': 'constant'}.get(style, style)
 
@@ -9267,7 +9274,7 @@ class VisualizeSkeleton:
         """
         requested_ids = (
             normalize_flywire_body_ids(body_ids)
-            if is_flywire_dataset(self.dataset)
+            if is_fafb_dataset(self.dataset)
             else list(body_ids)
         )
         cached = {}
@@ -9295,7 +9302,7 @@ class VisualizeSkeleton:
                     continue
                 key = (
                     normalize_flywire_body_id(bid)
-                    if is_flywire_dataset(self.dataset)
+                    if is_fafb_dataset(self.dataset)
                     else bid
                 )
                 cached[key] = neuron
@@ -9318,7 +9325,7 @@ class VisualizeSkeleton:
                         )
                     key = (
                         normalize_flywire_body_id(bid)
-                        if is_flywire_dataset(self.dataset)
+                        if is_fafb_dataset(self.dataset)
                         else bid
                     )
                     cached[key] = neuron
@@ -9635,7 +9642,7 @@ class VisualizeSkeleton:
         
         requested_ids = (
             normalize_flywire_body_ids(body_ids)
-            if is_flywire_dataset(self.dataset)
+            if is_fafb_dataset(self.dataset)
             else list(body_ids)
         )
 
@@ -9678,7 +9685,7 @@ class VisualizeSkeleton:
 
         # Convert to integers only at the CAVE boundary.
         int_body_ids = [
-            body_id_to_api_int(bid) if is_flywire_dataset(self.dataset)
+            body_id_to_api_int(bid) if is_fafb_dataset(self.dataset)
             else int(bid)
             for bid in requested_ids
         ]
@@ -9723,7 +9730,7 @@ class VisualizeSkeleton:
             if isinstance(n, navis.MeshNeuron) and hasattr(n, 'id'):
                 key = (
                     normalize_flywire_body_id(n.id)
-                    if is_flywire_dataset(self.dataset)
+                    if is_fafb_dataset(self.dataset)
                     else n.id
                 )
                 mesh_cache[key] = n
@@ -9980,11 +9987,11 @@ class VisualizeSkeleton:
         
         requested_ids = (
             normalize_flywire_body_ids(body_ids)
-            if is_flywire_dataset(dataset)
+            if is_fafb_dataset(dataset)
             else list(body_ids)
         )
         api_body_ids = [
-            body_id_to_api_int(bid) if is_flywire_dataset(dataset)
+            body_id_to_api_int(bid) if is_fafb_dataset(dataset)
             else int(bid)
             for bid in requested_ids
         ]
@@ -10012,7 +10019,7 @@ class VisualizeSkeleton:
             if hasattr(n, 'id'):
                 key = (
                     normalize_flywire_body_id(n.id)
-                    if is_flywire_dataset(dataset)
+                    if is_fafb_dataset(dataset)
                     else n.id
                 )
                 result[key] = n
@@ -10463,7 +10470,7 @@ class VisualizeSkeleton:
                 if (banc_pipeline == 'fast'
                         and isinstance(n, navis.TreeNeuron)
                         and is_full_resolution(n)):
-                    # Full-resolution SWCs get the FAFB-style node stage;
+                    # Full-resolution SWCs get the local-release node stage;
                     # coarse L2 sources already are the cache-level product.
                     try:
                         report(neuron_id, 'reduce nodes')
@@ -10925,9 +10932,9 @@ class VisualizeSkeleton:
         from tqdm import tqdm
         import sys
 
-        # Validate access at the script's skeleton-query boundary.  This
-        # blocks BANC and gives FAFB users the local-preparation/token
-        # instructions before any CAVE or ZIP fetch is attempted.
+        # Validate access at the script's skeleton-query boundary. BANC is
+        # accepted as a public-bucket source; FAFB users get the
+        # local-preparation/token instructions before CAVE or ZIP access.
         flywire_access = require_flywire_skeleton_access(
             self.dataset,
             project_root=self.script_path,
@@ -10958,11 +10965,12 @@ class VisualizeSkeleton:
         # - simplification=0.98 (keep 2%): load from cache (5%), simplify to 2% → additional_keep = 0.02/0.05 = 40%
         # - simplification=0.95 (keep 5%): load from cache (5%), no additional simplification needed
         # - simplification=0.5 (keep 50%): cannot use cache (only has 10%), load from ZIP and apply 0.5 simplification
-        is_flywire_family = is_flywire_dataset(self.dataset)
+        is_fafb = is_fafb_dataset(self.dataset)
         is_banc = is_banc_dataset(self.dataset)
+        is_local_release = is_fafb or is_banc
         neuprint_pipeline = self._resolved_neuprint_skeleton_pipeline()
         use_neuprint_fine_pipeline = (
-            not is_flywire_family
+            not is_local_release
             and self.skeleton_mode == 'tube'
             and neuprint_pipeline in {'fine', 'artistic'}
         )
@@ -10970,13 +10978,13 @@ class VisualizeSkeleton:
             use_neuprint_fine_pipeline
             and neuprint_pipeline in {'fine', 'artistic'}
         )
-        fafb_pipeline = self._resolved_fafb_pipeline() if is_flywire_family else None
+        local_pipeline = self._resolved_fafb_pipeline() if is_local_release else None
 
         # FAFB prepared mesh cache eligibility: caching enabled, tube mode,
         # and the render target at/above the prepared cache level (0.95).
         # Line mode disables the prepared mesh cache entirely.
         use_fafb_cache = (
-            is_flywire_family and not is_banc
+            is_fafb
             and self.skeleton_mode == 'tube' and self.cache_neurons
             and self.skeleton_mesh_simplification
             >= self.FAFB_MESH_CACHE_SIMPLIFICATION
@@ -10985,51 +10993,57 @@ class VisualizeSkeleton:
         # Check for force_API_fetching - bypasses ZIP loading for FAFB.
         # BANC always fetches from the public bucket, so the CAVE override
         # does not apply.
-        use_api_fetching = is_flywire_family and not is_banc and self.force_API_fetching
+        use_api_fetching = is_fafb and self.force_API_fetching
 
-        # FAFB source resolution: SWC-first for every render mode.
-        # skeleton_cache holds TreeNeuron sources (ZIP / raw SWC cache),
-        # mesh_cache holds MeshNeuron sources (prepared cache / CAVE online).
-        fafb_sources = {}           # canonical bodyId -> source name
-        fafb_skeleton_cache = {}    # canonical bodyId -> TreeNeuron
-        fafb_mesh_cache = {}        # canonical bodyId -> MeshNeuron
+        # Local-release source resolution: SWC-first for every render mode.
+        # skeleton_cache holds TreeNeuron sources (public release/raw SWC
+        # cache), mesh_cache holds FAFB MeshNeuron sources (prepared cache /
+        # CAVE online).
+        local_sources = {}          # canonical bodyId -> source name
+        local_skeleton_cache = {}   # canonical bodyId -> TreeNeuron
+        local_mesh_cache = {}       # canonical bodyId -> MeshNeuron
         # Render-time mesh products are reused when a body appears in more
         # than one layer.  This cache is intentionally in-memory only and is
         # scoped to one visualization run.
-        fafb_render_mesh_cache = {}  # canonical bodyId -> MeshNeuron
-        if is_flywire_family:
+        local_render_mesh_cache = {}  # canonical bodyId -> MeshNeuron
+        if is_local_release:
             # Collect all body IDs first
-            all_fafb_body_ids = []
+            all_local_body_ids = []
             for df in self.neuron_dfs:
                 if df is not None and 'bodyId' in df.columns:
-                    all_fafb_body_ids.extend(
+                    all_local_body_ids.extend(
                         normalize_flywire_body_ids(df['bodyId'].tolist())
-                        if is_flywire_dataset(self.dataset)
+                        if is_local_release
                         else [int(body_id) for body_id in df['bodyId'].tolist()]
                     )
-            all_fafb_body_ids = list(set(all_fafb_body_ids))
+            all_local_body_ids = list(set(all_local_body_ids))
 
-            if use_api_fetching:
+            if is_banc:
+                self._vprint(
+                    '  ℹ️  BANC public release source selected '
+                    '(SWC-first; public bucket; no CAVE token).',
+                    level='simple')
+            elif use_api_fetching:
                 self._vprint(f'  ℹ️  force_API_fetching=True: Using CAVE API instead of ZIP', level='simple')
             elif use_fafb_cache:
                 self._vprint(f'  ℹ️  FAFB prepared mesh cache eligible (simplification={self.skeleton_mesh_simplification} >= cache level {self.FAFB_MESH_CACHE_SIMPLIFICATION})', level='full')
-            else:
+            elif is_fafb:
                 self._vprint(f'  ℹ️  FAFB prepared mesh cache bypassed (SWC-first sources only)', level='full')
 
             if is_banc:
                 # BANC resolves through its own public-bucket path; the
                 # FAFB resolver (healed ZIP / CAVE / extrusion repair) is
                 # never touched.
-                fafb_sources, fafb_skeleton_cache, fafb_mesh_cache = (
+                local_sources, local_skeleton_cache, local_mesh_cache = (
                     self._resolve_banc_sources(
-                        all_fafb_body_ids,
+                        all_local_body_ids,
                         use_cache=bool(self.cache_neurons),
                     )
                 )
             else:
-                fafb_sources, fafb_skeleton_cache, fafb_mesh_cache = (
+                local_sources, local_skeleton_cache, local_mesh_cache = (
                     self._resolve_fafb_sources(
-                        all_fafb_body_ids,
+                        all_local_body_ids,
                         allow_mesh_cache=use_fafb_cache,
                         api_only=use_api_fetching,
                     )
@@ -11049,7 +11063,7 @@ class VisualizeSkeleton:
         neuprint_prepared_skeletons = {}
         neuprint_prepared_mesh = False
         neuprint_preprocessing_active = (
-            self.client_type == 'neuprint' and not is_flywire_family)
+            self.client_type == 'neuprint' and not is_local_release)
         if neuprint_preprocessing_active:
             neuprint_prepared_skeletons, neuprint_prepared_mesh = (
                 self._prepare_neuprint_skeletons_for_render(
@@ -11078,7 +11092,7 @@ class VisualizeSkeleton:
         
         # One render-wide bar is more useful than a layer counter: a single
         # layer can contain hundreds of neurons and otherwise remains at 0%
-        # while its mesh stages run.  FAFB processing reports each source
+        # while its mesh stages run.  Local-release processing reports each source
         # through this bar; other datasets complete their layer's count once
         # the already-aggregated sources have been plotted.
         layer_pbar = tqdm(
@@ -11095,8 +11109,8 @@ class VisualizeSkeleton:
             layer_pbar.set_postfix_str(f"{layer_name} (0/{n_in_layer})")
             processed_this_layer = 0
 
-            def report_fafb_progress(neuron_id, stage, done=False):
-                """Refresh the single render bar for one FAFB source.
+            def report_local_progress(neuron_id, stage, done=False):
+                """Refresh the single render bar for one local-release source.
 
                 Stage names remain available to callers/tests, but they are
                 intentionally not printed.  The render bar is the only
@@ -11130,13 +11144,13 @@ class VisualizeSkeleton:
 
             neuron_vols = None
             
-            # For FAFB: split the layer into MeshNeuron sources (prepared
-            # cache / CAVE online, resolved up front) and the remaining IDs
-            # that resolve to TreeNeuron sources.
+            # For local releases: split the layer into any MeshNeuron sources
+            # (FAFB prepared cache / CAVE online, resolved up front) and the
+            # remaining IDs that resolve to TreeNeuron sources.
             layer_body_ids = self.neuron_dfs[i]['bodyId'].tolist() if self.neuron_dfs[i] is not None else []
             layer_body_ids = (
                 normalize_flywire_body_ids(layer_body_ids)
-                if is_flywire_dataset(self.dataset)
+                if is_local_release
                 else [int(body_id) for body_id in layer_body_ids]
             )
             neuprint_layer_prepared = (
@@ -11148,19 +11162,19 @@ class VisualizeSkeleton:
             cached_mesh_neurons = []  # MeshNeurons loaded from cache
             mesh_missing_ids = layer_body_ids  # IDs that need processing
             
-            if is_flywire_family and fafb_mesh_cache and not is_custom_layer:
+            if is_fafb and local_mesh_cache and not is_custom_layer:
                 # Separate mesh sources vs TreeNeuron sources with
                 # type-robust matching
                 cached_mesh_neurons = []
                 mesh_missing_ids = []
                 for bid in layer_body_ids:
                     # Check both int and str versions of the ID
-                    if bid in fafb_mesh_cache:
-                        cached_mesh_neurons.append(fafb_mesh_cache[bid])
-                    elif str(bid) in fafb_mesh_cache:
-                        cached_mesh_neurons.append(fafb_mesh_cache[str(bid)])
-                    elif isinstance(bid, str) and bid.isdigit() and int(bid) in fafb_mesh_cache:
-                        cached_mesh_neurons.append(fafb_mesh_cache[int(bid)])
+                    if bid in local_mesh_cache:
+                        cached_mesh_neurons.append(local_mesh_cache[bid])
+                    elif str(bid) in local_mesh_cache:
+                        cached_mesh_neurons.append(local_mesh_cache[str(bid)])
+                    elif isinstance(bid, str) and bid.isdigit() and int(bid) in local_mesh_cache:
+                        cached_mesh_neurons.append(local_mesh_cache[int(bid)])
                     else:
                         mesh_missing_ids.append(bid)
                 
@@ -11222,21 +11236,21 @@ class VisualizeSkeleton:
             # Fetch missing neurons (only those not in the mesh cache when
             # the FAFB or NeuPrint mesh cache is in use)
             fetch_ids = [] if (neuprint_preprocessing_active or is_custom_layer) else (
-                mesh_missing_ids if (is_flywire_family or use_neuprint_mesh_cache)
+                mesh_missing_ids if (is_local_release or use_neuprint_mesh_cache)
                 else missing_ids)
             remaining_fetch_ids = list(fetch_ids)
             if fetch_ids:
-                # Special handling for FAFB local data - use pre-loaded cache
-                if fafb_skeleton_cache:
+                # Special handling for local-release data - use pre-loaded cache
+                if local_skeleton_cache:
                     neurons = []
                     for bid in fetch_ids:
                         # Handle both int and string types for body ID lookup
-                        if bid in fafb_skeleton_cache:
-                            neurons.append(fafb_skeleton_cache[bid])
-                        elif str(bid) in fafb_skeleton_cache:
-                            neurons.append(fafb_skeleton_cache[str(bid)])
-                        elif isinstance(bid, str) and bid.isdigit() and int(bid) in fafb_skeleton_cache:
-                            neurons.append(fafb_skeleton_cache[int(bid)])
+                        if bid in local_skeleton_cache:
+                            neurons.append(local_skeleton_cache[bid])
+                        elif str(bid) in local_skeleton_cache:
+                            neurons.append(local_skeleton_cache[str(bid)])
+                        elif isinstance(bid, str) and bid.isdigit() and int(bid) in local_skeleton_cache:
+                            neurons.append(local_skeleton_cache[int(bid)])
                     if neurons:
                         raw_neuron_vols = navis.NeuronList(neurons)
 
@@ -11334,7 +11348,7 @@ class VisualizeSkeleton:
                 # compressed-SWC files. Keep rendering on the selected
                 # in-memory representation; never persist a transformed or
                 # simplified skeleton here.
-                if (raw_neuron_vols is not None and not is_flywire_family
+                if (raw_neuron_vols is not None and not is_local_release
                         and not neuprint_layer_prepared):
                     self._save_cached_neurons(self.neuron_dfs[i], raw_neuron_vols)
                     raw_neuron_vols = render_neuron_vols
@@ -11355,7 +11369,7 @@ class VisualizeSkeleton:
                 neuron_vols = navis.NeuronList([neuron_vols])
             
             # For FAFB with all meshes cached, we can skip skeleton processing
-            if is_flywire_family and cached_mesh_neurons and (neuron_vols is None or len(neuron_vols) == 0):
+            if is_fafb and cached_mesh_neurons and (neuron_vols is None or len(neuron_vols) == 0):
                 # All neurons loaded from mesh cache - neuron_vols stays None/empty
                 # The combine block below will handle adding cached_mesh_neurons with simplification
                 pass
@@ -11382,26 +11396,26 @@ class VisualizeSkeleton:
             # here would node-reduce/mesh them AND poison the per-run
             # render-mesh cache with scene-space meshes keyed by bodyIds
             # that native layers may share (-> double transforms).
-            fafb_already_simplified = False
+            local_already_simplified = False
             if is_custom_layer:
                 neuron_vols = navis.NeuronList(custom_layer_neurons)
             elif is_banc:
-                neuron_vols, fafb_already_simplified = (
+                neuron_vols, local_already_simplified = (
                     self._process_banc_layer(
                         neuron_vols,
-                        fafb_pipeline,
-                        progress_callback=report_fafb_progress,
+                        local_pipeline,
+                        progress_callback=report_local_progress,
                     )
                 )
-            elif is_flywire_family:
-                neuron_vols, fafb_already_simplified = (
+            elif is_fafb:
+                neuron_vols, local_already_simplified = (
                     self._process_fafb_layer(
                         neuron_vols,
                         cached_mesh_neurons,
-                        fafb_pipeline,
+                        local_pipeline,
                         use_fafb_cache,
-                        render_mesh_cache=fafb_render_mesh_cache,
-                        progress_callback=report_fafb_progress,
+                        render_mesh_cache=local_render_mesh_cache,
+                        progress_callback=report_local_progress,
                     )
                 )
 
@@ -11411,7 +11425,7 @@ class VisualizeSkeleton:
             # plotting.  FAFB line renders were handled by their own branch.
             if (self.skeleton_mode == 'line'
                     and neuron_vols is not None
-                    and not is_flywire_family
+                    and not is_local_release
                     and not neuprint_preprocessing_active):
                 prepared_lines = []
                 neurons_list = (
@@ -11669,10 +11683,10 @@ class VisualizeSkeleton:
             # in the aggregate preprocessing phase; this block handles only
             # the remaining legacy/direct paths and line mode is skipped.
             render_simplification = self._effective_render_simplification(
-                is_flywire_family,
+                is_local_release,
             )
             if (render_simplification > 0 and self.skeleton_mode == 'tube'
-                    and not fafb_already_simplified
+                    and not local_already_simplified
                     and not neuprint_already_simplified):
                 try:
                     import trimesh
@@ -12110,12 +12124,12 @@ class VisualizeSkeleton:
                 except Exception as e:
                     self._vprint(f'⚠️  k3d plotting failed: {e}', level='full')
 
-            # FAFB source processing normally accounts for every body above.
+            # Local-release source processing normally accounts for every body above.
             # Fill any gap caused by an unavailable source or a layer with no
             # bodyId column so the render-wide bar still reaches its total.
             remaining = (
                 n_in_layer - processed_this_layer
-                if is_flywire_family else n_in_layer
+                if is_local_release else n_in_layer
             )
             if remaining > 0:
                 layer_pbar.update(remaining)
@@ -12262,7 +12276,8 @@ class VisualizeSkeleton:
     def _load_cached_synapses(self, source_ids, target_ids):
         """Load cached synapse connections for given source/target neuron pairs.
         
-        For FlyWire/FAFB datasets, loads from the master synapse table at:
+        For FAFB/BANC local releases, loads from the exact dataset-native
+        master synapse table at:
             datasets/{dataset}/{dataset}_synapse_table.parquet
         and filters by source_ids and target_ids.
         
@@ -12286,10 +12301,10 @@ class VisualizeSkeleton:
         source_ids = set(str(s) for s in source_ids)
         target_ids = set(str(t) for t in target_ids)
         
-        # FlyWire/FAFB have one dataset-native paired synapse table.  It is
+        # FAFB/BANC have one dataset-native paired synapse table.  It is
         # the synapse cache source, not a skeleton/mesh cache, and the reader
         # applies the same column/coordinate normalization used everywhere.
-        if is_flywire_dataset(self.dataset):
+        if is_fafb_dataset(self.dataset):
             frame = self._read_flywire_connection_frame(
                 source_ids=source_ids, target_ids=target_ids)
             return (
@@ -12330,7 +12345,7 @@ class VisualizeSkeleton:
         """
         if not self.cache_synapses:
             return
-        if is_flywire_dataset(self.dataset):
+        if is_fafb_dataset(self.dataset):
             # The dataset-native master table is already the canonical
             # FlyWire synapse cache; do not duplicate it into pair files.
             return
@@ -12411,14 +12426,13 @@ class VisualizeSkeleton:
             # neuron_info.csv.
             conn_df = None
 
-            # --- Begin FlyWire/NeuPrint synapse loading logic ---
-            # BANC shares the flywire-shaped local synapse-table reader
-            # (its synapse product follows the same fallback-name probe)
-            # even though its client_type is the standalone 'banc'.
+            # --- Begin FAFB/BANC/NeuPrint synapse loading logic ---
+            # FAFB and BANC use the same normalized table-reader mechanics,
+            # while their source identities and table paths remain separate.
             if self.client_type in ('flywire', 'banc'):
                 source_ids = set(self.neuron_dfs[i]['bodyId'].astype(str))
                 target_ids = set(self.neuron_dfs[i + 1]['bodyId'].astype(str))
-                # All FlyWire/FAFB connector consumers use this one
+                # All FAFB/BANC connector consumers use this one
                 # coordinate-normalizing synapse-table reader.  In addition to
                 # keeping rendering, site mode, and size estimation identical,
                 # it applies Parquet predicate pushdown and a run-scoped memo.
@@ -12432,10 +12446,15 @@ class VisualizeSkeleton:
                         f"  ⚠️ Synapse table not found or unreadable for "
                         f"dataset '{self.dataset}'.",
                         level='full')
-                    if 'fafb' in self.dataset.lower():
+                    if is_fafb_dataset(self.dataset):
                         self._vprint(
                             "  Please download the synapse table from: "
                             "https://codex.flywire.ai/api/download?dataset=fafb",
+                            level='full')
+                    elif is_banc_dataset(self.dataset):
+                        self._vprint(
+                            "  Prepare the BANC connection table from the "
+                            "public release bucket; no CAVE token is needed.",
                             level='full')
                     self._vprint(f"  Save the file to: {dataset_dir}", level='full')
                     self._vprint(
@@ -13363,7 +13382,7 @@ class VisualizeSkeleton:
             })
             long_post['role'] = 'post'
             return pd.concat([long_pre, long_post], ignore_index=True)
-        # The standardized paired reader is the only FlyWire/FAFB source of
+        # The standardized paired reader is the only FAFB/BANC local-release source of
         # site rows.  Keeping a second schema/scale implementation here would
         # allow plotting and pre/post mode to disagree and would defeat its
         # filtered-read memoization.
@@ -14809,7 +14828,7 @@ class VisualizeSkeleton:
         
         # Get available ROIs if not provided
         if available_rois is None:
-            is_fafb = is_flywire_dataset(self.dataset) and not is_banc_dataset(self.dataset)
+            is_fafb = is_fafb_dataset(self.dataset)
             if is_fafb:
                 malecns_cache = os.path.join(self.script_path, 'cache', 'male-cns_v0_9', 'available_rois.json')
                 if os.path.exists(malecns_cache):
@@ -14894,7 +14913,7 @@ class VisualizeSkeleton:
         dataset_normalized = canonical_dataset_name(self.dataset).replace(':', '_').replace('.', '_')
         folders = [dataset_normalized]
         dataset_lower = str(self.dataset).lower()
-        if is_flywire_dataset(self.dataset) and not is_banc_dataset(self.dataset):
+        if is_fafb_dataset(self.dataset):
             folders = ['male-cns_v0_9', 'male-cns_v1_0', *folders]
 
         for folder in folders:
@@ -15159,9 +15178,10 @@ class VisualizeSkeleton:
                                      level='full')
                 return roi_list
 
-            # Special handling for FlyWire/FAFB: Do not use API, use local primary_rois or hemibrain cache
-            if is_flywire_dataset(self.dataset):
-                self._vprint('ℹ️  FlyWire/FAFB dataset detected: Skipping online API fetch for ROIs.', level='full')
+            # Special handling for FAFB: Do not use API; use local primary_rois
+            # or the hemibrain cache. BANC uses its own public region outlines.
+            if is_fafb_dataset(self.dataset):
+                self._vprint('ℹ️  FAFB dataset detected: Skipping online API fetch for ROIs.', level='full')
                 self._vprint('   Scanning local ROI meshes...', level='full')
                 
                 found_rois = set()
@@ -15338,7 +15358,7 @@ class VisualizeSkeleton:
             d = str(self.dataset or '').lower()
             return not any(k in d for k in ('manc', 'hemibrain'))
         return self.brain_mesh == 'native' and (
-            is_flywire_dataset(self.dataset)
+            is_fafb_dataset(self.dataset)
             and not is_banc_dataset(self.dataset))
 
     def _get_fafb_tilt_correction_matrix(self):
@@ -15822,7 +15842,7 @@ class VisualizeSkeleton:
         - manc: MANCraw → MANC (VNC only, no brain transform)
         - male-cns: JRCFIB2022Mraw → JRCFIB2022M (brain + VNC)
         - banc: BANC (native, no transform)
-        - flywire/FAFB: FLYWIRE (native, no transform)
+        - FAFB: FLYWIRE (native, no transform)
 
         Note: optic-lobe uses the same coordinate system as hemibrain because it's
         a focused reconstruction of the optic lobe region within the hemibrain volume.
@@ -15892,7 +15912,7 @@ class VisualizeSkeleton:
 
         # FlyWire / FAFB datasets — native FLYWIRE coordinates unless an
         # explicit selection moves the scene.
-        elif is_flywire_dataset(dataset_lower):
+        elif is_fafb_dataset(dataset_lower):
             source = 'FLYWIRE'
             target = self._scene_render_target(source, 'FLYWIRE')
             return {
@@ -16164,7 +16184,8 @@ class VisualizeSkeleton:
         Notes
         -----
         Returns False (skip transform) for:
-        - FlyWire/FAFB: Data and template mesh are both in FLYWIRE space (identity transform)
+        - FAFB: Data and template mesh are both in FLYWIRE space (identity transform)
+        - BANC: Data and template mesh are both in BANC space (identity transform)
         - brain_mesh='none': No template mesh, no transform needed
         
         Returns True (apply transform) for:
@@ -16179,7 +16200,7 @@ class VisualizeSkeleton:
             
         template_info = self._get_template_info()
         
-        # Check for skip_transform flag (set for FAFB/FlyWire - identity transform)
+        # Check for skip_transform flag (set for FAFB or BANC native scenes)
         if template_info.get('skip_transform', False):
             return False
         
@@ -16233,7 +16254,7 @@ class VisualizeSkeleton:
         if not has_roi_meshes and not has_brain_mesh and not has_vnc_mesh:
             return
         
-        is_flywire = is_flywire_dataset(self.dataset) and not is_banc_dataset(self.dataset)
+        is_flywire = is_fafb_dataset(self.dataset)
         
         # Ensure available_rois.json exists (generate if missing)
         # This checks cache first, and if missing, fetches from API or scans local meshes
@@ -16274,9 +16295,10 @@ class VisualizeSkeleton:
             roi_source_space = None # Track the coordinate space of the ROI
             roi_needs_transform = False  # Track if ROI needs transform after loading
             
-            # Determine if this is FlyWire/FAFB (BANC aggregates have
-            # their own native source; named ROIs come from male-cns).
-            is_flywire = is_flywire_dataset(self.dataset) and not is_banc_dataset(self.dataset)
+            # Determine whether this is a FAFB or BANC local release. BANC
+            # aggregates have their own native source; named ROIs come from
+            # male-cns.
+            is_flywire = is_fafb_dataset(self.dataset)
             is_banc_scene = is_banc_dataset(self.dataset)
 
             # Try dataset-specific directory first (with case-safe filename)
@@ -16328,8 +16350,8 @@ class VisualizeSkeleton:
                     roi_needs_transform = False
                     self._vprint(f'  ✓ Loading "{roi}" from transformed cache ({target_space})', level='full')
             
-            # Special handling for FlyWire/FAFB and BANC - fetch from
-            # male-cns if not found (neither dataset ships named ROIs)
+            # Special handling for FAFB and BANC - fetch from male-cns if
+            # not found (neither dataset ships named ROIs)
             if (is_flywire or is_banc_scene) and not os.path.exists(mesh_file):
                     self._vprint(f'📥 ROI mesh "{roi}" not found locally, attempting to download...', level='full')
                     mesh_found = False

@@ -77,6 +77,22 @@ NEURON_INDEX_FILENAME = "neuron_index.parquet"
 # not occur in a particular dataset simply drop out of the resulting list.
 TAXONOMY_PRIORITY_COLUMNS = ("class", "subclass", "superclass")
 
+# A pulled dataset folder normally ends in ``_v1_2_3``.  Keep local-release
+# identifiers such as ``flywire_FAFB_v783`` and ``banc_v888`` untouched: those
+# names are public release IDs rather than NeuPrint's ``family:vX.Y`` form.
+_VERSIONED_DATASET_FOLDER_RE = re.compile(
+    r"^(?P<prefix>.+)_v(?P<version>\d+(?:_\d+)*)$",
+    re.IGNORECASE,
+)
+
+# ``metadata_candidates`` has a schema-validated fallback for a future pull
+# whose filename does not follow the current ``*_neuron_df`` convention.  Do
+# not inspect obvious non-neuron artifacts as possible metadata tables.
+_NON_METADATA_FILENAME_MARKERS = (
+    "connection", "synapse", "roi", "skeleton", "mesh", "manifest",
+    "index", "summary",
+)
+
 
 def _normalized_column_name(column: str) -> str:
     """Normalize a metadata name for case/spacing/punctuation comparisons."""
@@ -427,7 +443,14 @@ def dataset_folder(dataset: str) -> str:
 
 
 def metadata_candidates(dataset: str, datasets_dir: Path) -> List[Path]:
-    """Return local neuron metadata files in preferred read order."""
+    """Return local neuron metadata files in preferred read order.
+
+    Current pulls use deterministic ``*_allneurons_neuron_df``/``*_neuron_df``
+    names and those always win.  The final schema-validated fallback keeps
+    future releases discoverable when a provider changes only the filename:
+    a candidate must be a direct CSV/Parquet file with a recognized body-ID
+    column and must not look like a connection, ROI, or other derived table.
+    """
     folder = Path(datasets_dir) / dataset_folder(dataset)
     if not folder.is_dir():
         return []
@@ -454,8 +477,40 @@ def metadata_candidates(dataset: str, datasets_dir: Path) -> List[Path]:
     )
     result: List[Path] = []
     for path in (*exact, *discovered):
-        if path.is_file() and path not in result:
+        if not path.is_file() or path in result:
+            continue
+        try:
+            has_body_id = body_id_column(_metadata_schema(path).names()) is not None
+        except Exception:
+            has_body_id = False
+        if has_body_id:
             result.append(path)
+
+    # Be tolerant of a future provider-specific filename while avoiding a
+    # full data read.  ``_metadata_schema`` uses Polars' lazy reader, so this
+    # only inspects headers/Parquet schemas during dataset discovery.
+    fallback = []
+    for path in sorted(folder.iterdir(), key=lambda candidate: candidate.name):
+        if (
+            not path.is_file()
+            or path in result
+            or path.suffix.lower() not in {".csv", ".parquet"}
+        ):
+            continue
+        normalized_name = _normalized_column_name(path.stem)
+        if any(
+            marker in normalized_name
+            for marker in _NON_METADATA_FILENAME_MARKERS
+        ):
+            continue
+        try:
+            if body_id_column(_metadata_schema(path).names()) is not None:
+                fallback.append(path)
+        except Exception:
+            # A corrupt/unreadable artifact should not make a valid sibling
+            # table disappear from the candidate list.
+            continue
+    result.extend(fallback)
     return result
 
 
@@ -463,6 +518,57 @@ def metadata_path(dataset: str, datasets_dir: Path) -> Optional[Path]:
     """Return the first usable local neuron metadata file, if any."""
     candidates = metadata_candidates(dataset, datasets_dir)
     return candidates[0] if candidates else None
+
+
+def dataset_identifier_from_folder(folder: str) -> str:
+    """Convert a local dataset folder into the identifier used by the app.
+
+    NeuPrint folders encode dots as underscores (for example
+    ``male-cns_v1_0``), while FlyWire/BANC release folders are already public
+    identifiers and must remain unchanged.  Unknown/unversioned folder names
+    are returned verbatim so a new provider can still be prepared without a
+    new hard-coded mapping table.
+    """
+    name = Path(str(folder or "")).name.strip()
+    if not name:
+        return ""
+    normalized = name.casefold()
+    if normalized.startswith(("flywire_", "banc_")):
+        return name
+    match = _VERSIONED_DATASET_FOLDER_RE.match(name)
+    if match is None:
+        return name
+    version = match.group("version").replace("_", ".")
+    return f'{match.group("prefix")}:v{version}'
+
+
+def discover_metadata_datasets(datasets_dir: Path) -> List[str]:
+    """Discover every local dataset that has a usable neuron table.
+
+    This is intentionally filesystem/schema based rather than tied to the
+    UI's current dataset list.  It lets the preparation script handle newly
+    pulled releases and datasets that are no longer available from a remote
+    service but whose metadata remains on disk.
+    """
+    root = Path(datasets_dir)
+    if not root.is_dir():
+        return []
+
+    datasets: List[str] = []
+    seen = set()
+    for folder in sorted(
+        (path for path in root.iterdir() if path.is_dir()),
+        key=lambda path: path.name,
+    ):
+        if folder.name.startswith("."):
+            continue
+        if not metadata_candidates(folder.name, root):
+            continue
+        dataset = dataset_identifier_from_folder(folder.name)
+        if dataset and dataset not in seen:
+            datasets.append(dataset)
+            seen.add(dataset)
+    return datasets
 
 
 def metadata_columns(path: Path) -> List[str]:
@@ -568,7 +674,11 @@ def read_metadata_projection(path: Path):
     # Large FlyWire IDs must remain exact.  The UI also uses strings so the
     # browser never rounds a value beyond JavaScript's safe integer range.
     frame = frame.with_columns(
-        pl.col("bodyId").cast(pl.Utf8, strict=False).fill_null("").alias("bodyId")
+        pl.col("bodyId")
+        .cast(pl.Utf8, strict=False)
+        .fill_null("")
+        .str.strip_chars()
+        .alias("bodyId")
     )
     for column in ("type", "instance"):
         if column in frame.columns:

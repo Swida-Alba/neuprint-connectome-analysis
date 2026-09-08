@@ -279,3 +279,108 @@ def test_by_dataset_banner_renders_for_comparison_runs(tmp_path):
     assert "asked [1, 3, 5] -> applied [1, 9]" in txt
     md = og.render_markdown(content)
     assert "3->9" in md
+
+
+def test_by_dataset_provenance_table_shows_applied_and_budget_fields(tmp_path):
+    run = tmp_path / "cross-dataset_PROVENANCE"
+    run.mkdir()
+    run_meta = dict(_PROVENANCE)
+    run_meta.update({
+        "dataset": "hemibrain:v1.2.1",
+        "threshold": 3,
+        "tau": 12.0,
+        "path_mode": "all",
+        "comparison_mode": "path",
+        "drop_untyped": True,
+    })
+    (run / "effective_thresholds.json").write_text(json.dumps({
+        "banner": "Pathfinding provenance: hemibrain:v1.2.1",
+        "datasets": {
+            "hemibrain:v1.2.1": {
+                "input": [3],
+                "effective": [8],
+                "runs": [run_meta],
+            },
+        },
+    }), encoding="utf-8")
+
+    content = og.assemble_run_content(run, "inter_dataset", {})
+    html = og.render_html(content)
+    assert "<th>Applied</th>" in html
+    assert "<th>SF budget</th>" in html
+    assert "<th>Edge budget</th>" in html
+    assert "<code>8</code>" in html
+    assert "<code>12</code>" in html
+
+    text = og.render_txt(content)
+    assert "requested 3 -> applied 8" in text
+    assert "SF budget 1000000" in text
+    assert "edge budget 1000000" in text
+
+
+def test_combination_manifest_renders_query_identity_and_provenance(tmp_path):
+    run = tmp_path / "cross-dataset_COMBINATIONS"
+    run.mkdir()
+    results = run / "comparison_results"
+    results.mkdir()
+    rows = [
+        {
+            "query_id": "q-low", "query_label": "Low density",
+            "threshold_mode": "combinations", "dataset": "BANC",
+            "requested_threshold": "3", "applied_threshold": "4",
+            "applied_threshold_source": "edge_budget",
+            "strongest_first_budget": "1000000",
+            "strongest_first_budget_bitten": "False",
+            "strongest_first_tau": "12", "tau": "12",
+            "tau_canonical": "4", "strongest_dropped_bottleneck": "—",
+            "strongest_retained_bottleneck": "15",
+            "edge_budget": "100", "edge_budget_applied": "True",
+            "edge_budget_landing": "3", "edge_weight_floor": "4",
+            "paths_complete": "True",
+        },
+        {
+            "query_id": "q-low", "query_label": "Low density",
+            "threshold_mode": "combinations", "dataset": "FAFB",
+            "requested_threshold": "7", "applied_threshold": "7",
+            "applied_threshold_source": "requested",
+            "strongest_first_budget": "1000000",
+            "strongest_first_budget_bitten": "False",
+            "strongest_first_tau": "10", "tau": "10",
+            "tau_canonical": "7", "strongest_dropped_bottleneck": "—",
+            "strongest_retained_bottleneck": "10",
+            "edge_budget": "100", "edge_budget_applied": "False",
+            "edge_budget_landing": "—", "edge_weight_floor": "—",
+            "paths_complete": "True",
+        },
+    ]
+    columns = list(rows[0])
+    text = ",".join(columns) + "\n"
+    text += "\n".join(
+        ",".join(str(row.get(column, "")) for column in columns)
+        for row in rows
+    ) + "\n"
+    (results / "threshold_combinations.csv").write_text(
+        text, encoding="utf-8")
+
+    content = og.assemble_run_content(run, "inter_dataset", {})
+    manifest = content["threshold_queries"]
+    assert manifest["mode"] == "combinations"
+    assert manifest["queries"][0]["thresholds"] == {"BANC": 3, "FAFB": 7}
+
+    html = og.render_html(content)
+    assert "Cross-dataset threshold query rows" in html
+    assert "q-low" in html
+    assert "Edge budget applied" in html
+    assert "strongest_first_budget" in html or "SF budget" in html
+    assert "w0" in html and "w2" in html and "W*" in html
+
+    md = og.render_markdown(content)
+    assert "Cross-dataset threshold query rows:" in md
+    assert "BANC=3" in md
+    assert "w0 4" in md
+
+    txt = og.render_txt(content)
+    assert "Cross-dataset threshold query rows:" in txt
+    assert "q-low (Low density)" in txt
+    assert "edge budget 100 (applied True)" in txt
+    assert "w2 —" in txt

@@ -72,8 +72,8 @@
       cached (<code>cache/{dataset}/morphology/roi_profiles.npz</code>);
       the top screen-ranked <b>types</b> (bounded by <b>Candidate Cap</b>)
       are kept and expanded to <b>all their member neurons</b>; raw
-      skeletons are then fetched for the pool and shared for reuse. FlyWire/FAFB sources use healed raw skeletons
-      or the CAVE fallback. Mesh and simp90 visualization files are never
+      skeletons are then fetched for the pool and shared for reuse. FAFB uses healed raw skeletons
+      or the CAVE fallback; BANC uses its public-release SWCs without CAVE. Mesh and simp90 visualization files are never
       candidates for either method.</li>
     <li><b>roi</b>: the ROI-distribution screen only. Requires the dataset's
       ROI-count table and metadata sidecar (missing sidecars are fetched

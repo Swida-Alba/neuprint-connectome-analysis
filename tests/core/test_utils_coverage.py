@@ -4,7 +4,7 @@ Targets uncovered branches in:
 - ``utils/color_utils.py``  : parsing edge cases, output formats, palettes
 - ``utils/report_utils.py`` : ``img2pptx`` aggregation + layout paths
 - ``utils/neuron_filter.py``: legacy parsing + vectorized operator internals
-- ``visualization_options.py``: FlyWire-family detection
+- ``visualization_options.py``: FAFB/local-release detection
 
 All tests are hermetic: no network, no cache reads, file I/O confined to
 pytest ``tmp_path``. Synthetic images are generated with Pillow.
@@ -492,8 +492,8 @@ class TestVisualizationOptions:
     def test_flywire_family_detection(self):
         assert _is_flywire_family('flywire_FAFB_v783') is True
         assert _is_flywire_family('something_fafb') is True
-        # BANC belongs to the FlyWire family (shared predicates).
-        assert _is_flywire_family('banc_v888') is True
+        # BANC is a standalone local release, not a FlyWire-family value.
+        assert _is_flywire_family('banc_v888') is False
         assert _is_flywire_family('hemibrain:v1.2.1') is False
         assert _is_flywire_family(None) is False
 

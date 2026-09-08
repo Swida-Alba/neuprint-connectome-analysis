@@ -350,10 +350,15 @@ NEUPRINT_DATASETS = [
     "mushroombody",
 ]
 
-# FlyWire datasets (require converted local files; CAVE token is only needed
-# when a workflow explicitly fetches data or skeletons through the CAVE API)
+# FAFB release datasets (converted local files; CAVE is only relevant to
+# explicit FAFB API/skeleton fallbacks).
 FLYWIRE_DATASETS = [
     "flywire_FAFB_v783",
+]
+
+# Standalone BANC public-release datasets.  BANC preparation and skeleton
+# fetches use the public release bucket and never require a CAVE token.
+BANC_DATASETS = [
     "banc_v888",
     "banc_v626",
 ]

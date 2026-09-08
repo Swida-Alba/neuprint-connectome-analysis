@@ -352,13 +352,18 @@ class RoiProfileStore:
 
         table = roi_count_table_path(self.dataset, str(self.root))
         if not table.exists():
-            if any(k in self.dataset.lower() for k in ("flywire", "fafb", "banc")):
-                # FlyWire datasets have no per-ROI synapse count table at
+            try:
+                from .flywire_ids import is_local_connectome_dataset
+            except ImportError:  # pragma: no cover - direct module import
+                from flywire_ids import is_local_connectome_dataset
+            if is_local_connectome_dataset(self.dataset):
+                # FAFB/BANC local releases have no per-ROI synapse count table at
                 # all (the ROI screen is NeuPrint-only); "pull/prepare" can
                 # never produce one, so the guidance must say so.
                 raise RoiScreeningUnavailable(
                     f"ROI screening is not available for {self.dataset}: "
-                    "FlyWire datasets have no per-ROI synapse count table. "
+                    "FAFB/BANC local releases have no per-ROI synapse count "
+                    "table. "
                     "Use Candidate Source 'profile' (shared connectivity "
                     "partners) or 'cache' (full vector-cache search) instead."
                 )

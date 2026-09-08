@@ -34,7 +34,7 @@ Bidirectional mapping between EM body IDs and LM driver lines using the NeuronBr
 - **EM → LM**: Find driver lines (GAL4, LexA, Split-GAL4) matching EM body IDs
 - **LM → EM**: Find EM neurons matching driver line names
 - **Match Types**: CDS (Color Depth Search), PPPM (PatchPerPixMatch), or combined ranking
-- **Multi-Dataset**: Support for hemibrain, male-cns, FlyWire FAFB/BANC
+- **Multi-Dataset**: Support for hemibrain, male-cns, FAFB, and standalone BANC
 - **Batch Processing**: Process multiple queries with automatic aggregation
 - **Image Downloads**: Integrated with FlyLight for imagery access
 
@@ -259,7 +259,7 @@ results = finder.find_homologs(
 Complete guide to comparing neural connectivity across multiple connectome datasets.
 
 **Key Topics**:
-- Comparing hemibrain, male-cns, and FlyWire datasets
+- Comparing hemibrain, male-cns, FAFB, and standalone BANC datasets
 - Path-based vs edge-based comparison modes
 - Conservation analysis and similarity metrics
 - Interactive HTML reports with network visualizations

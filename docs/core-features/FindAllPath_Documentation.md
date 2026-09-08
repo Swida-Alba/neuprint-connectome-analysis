@@ -82,8 +82,14 @@ For CSV runs, connection tables and supporting files are under
 `data_details/`; the two enrollment CSVs remain at the run root.
 
 ### Sankey Diagrams
-- **Sankey_type_allpaths_snp{N}.html**: Shows all paths by neuron type
-- **Sankey_bodyId_allpaths_snp{N}.html**: Shows all paths by bodyId
+- **`visualization/Sankey_<run>.html`**: Shows all paths by neuron type
+- **`bodyId_visualization/Sankey_<run>.html`**: Shows all paths by bodyId
+
+The type-level and bodyId-level folders use the same `Network_<run>.html`,
+`Heatmap_<run>.html`, and `Sankey_<run>.html` naming contract; the containing
+folder identifies the visualization level. Early network previews use
+`network_early/` and `network_early_bodyId/` with the same
+`Network_<run>.html` prefix.
 
 Both diagrams visualize the complete network including:
 - All layers from source to furthest target
@@ -163,7 +169,10 @@ Result: Complete picture of all PPL1→MBON pathways within 3 layers.
 - `find_bodyId_path=True`: Also generate bodyId-level paths (can be very large)
 - `max_interlayer`: Maximum layers to search (default: 2)
 - `min_synapse_num`: Minimum synapses for connection (default: 10)
-- `min_traversal_probability`: Minimum probability threshold (default: 0.001)
+- `min_ratio` / `min_traversal_probability`: retained for API compatibility
+  and exported readout columns; both filters are disabled in Complete and
+  Shortest Paths (default values are 0). They do not appear in the path-run
+  folder name as `r[]p[]` notes.
 - `drop_untyped`: Drop edges touching untyped neurons before the graph is
   built (type `bool`, default `True`). The shared predicate
   (`utils.label_utils.is_untyped_type_label`, also used by Cross-Dataset

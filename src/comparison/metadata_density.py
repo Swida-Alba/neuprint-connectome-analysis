@@ -13,7 +13,7 @@ design (``neuron_universe: "all_neurons"`` documents the choice).
 
 Per-neuron ``pre`` availability differs by source: NeuPrint-hosted neuron
 tables carry ``pre`` + ``post`` (``pre_source: "neuron_table"``), while
-local FlyWire/BANC tables carry ``post`` only — there ``pre`` is derived
+local FAFB/BANC tables carry ``post`` only — there ``pre`` is derived
 offline from ``merged_connections.parquet`` (sum of weight grouped by
 ``bodyId_pre``) and flagged ``pre_source: "derived_from_connections"``.
 """
@@ -78,7 +78,7 @@ def compute_synapse_density(
     Args:
         neuron_df: neuron table with a ``post`` column (and ``pre`` when
             the source provides it). ``bodyId`` is used to join derived
-            presynaptic sums for flywire-family datasets.
+            presynaptic sums for FAFB/BANC local-release datasets.
         dataset_path: dataset folder holding ``merged_connections.parquet``
             (needed only when ``pre`` must be derived).
         is_flywire_source: force the derivation decision; auto-detected
@@ -109,7 +109,7 @@ def compute_synapse_density(
     pre_source = 'neuron_table'
     if pre is None:
         # No per-neuron pre in the table: derive from the connections file
-        # when the dataset is a local flywire-family download.
+        # when the dataset is a local FAFB/BANC release download.
         derive = is_flywire_source
         if derive is None:
             derive = _find_connections_file(dataset_path or '') is not None

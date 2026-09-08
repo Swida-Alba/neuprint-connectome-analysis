@@ -96,9 +96,9 @@ skipped entirely the run logs a loud warning and records
 aggregate IPSILATERAL pairs only; contralateral rows stay in results.csv,
 and types with exclusively contralateral evidence are omitted from the
 type ranking. The vector method lateral-normalizes and uses both sides.
-NBLAST on FlyWire/FAFB scores the whole candidate pool from the healed
-bundle skeletons and runs against the V2 skeleton-vector cache (never the
-mesh cache).
+NBLAST on FAFB scores the whole candidate pool from the healed bundle
+skeletons; standalone BANC scores its public-release SWCs. Both run against
+the V2 skeleton-vector cache (never the mesh cache).
 
 **Two-pass type reevaluation** (`expand_top_types=20`, `expand_per_type=10`,
 `0` disables): after the first scoring pass, the remaining members of the
@@ -156,13 +156,11 @@ vecs = cache.vectors_for(body_ids, compute_missing=True)
 - `find_similar_raw_cache(dataset, ...)` — the raw skeleton cache helper.
 - `find_similar_dataset_cache(dataset, ...)` — dataset-level cache helper.
 - `find_similar_flywire_mesh_cache(...)` — FlyWire mesh cache helper.
-- `load_flywire_skeletons_batch(dataset, body_ids, ...)` — canonical
-  FlyWire/FAFB raw-skeleton loader: local raw cache → healed FAFB bundle
-  (newly served trees are cached into the raw store) → per-run extrusion
-  check with cached results (flagged neurons replaced through CAVE) →
-  token-gated CAVE skeletonization (mesh → wavefront tree, cached as
-  `.swc.zst`). The prepared mesh cache is never consulted — morphology
-  scoring is TreeNeuron-native.
+- `load_flywire_skeletons_batch(dataset, body_ids, ...)` — canonical local
+  raw-skeleton loader: raw cache → FAFB healed bundle or standalone BANC
+  public-release SWCs. Only FAFB performs the per-run extrusion check and
+  token-gated CAVE repair; BANC never enters those stages. All returned trees
+  are cached as `.swc.zst`; the prepared mesh cache is never consulted.
 
 ## Notes
 

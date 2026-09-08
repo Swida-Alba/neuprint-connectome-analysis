@@ -438,6 +438,170 @@ class ComparisonMetrics:
             return pd.DataFrame()
         
         return pd.concat(all_rows, ignore_index=True)
+
+    def calculate_similarity_across_queries(
+        self,
+        results: Dict[str, Dict[int, pd.DataFrame]],
+        datasets: List[str],
+        queries: List[Dict[str, Any]],
+        label_mapper: Optional[Any] = None,
+        show_progress: bool = True,
+        path_data_func: Optional[callable] = None,
+        type_mapper: Optional[Any] = None,
+        max_edges_for_metrics: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """Calculate pairwise similarities for explicit threshold queries.
+
+        Each query supplies a threshold mapping keyed by dataset. The
+        returned rows retain the query ID and the requested threshold per
+        dataset so downstream exports never have to reconstruct a scalar
+        threshold from a union.
+        """
+        rows = []
+        query_iter = queries
+        if show_progress and len(queries) > 1:
+            query_iter = tqdm(
+                queries,
+                desc="Computing similarity metrics",
+                unit="query",
+                leave=True,
+            )
+        for query in query_iter:
+            query_id = query.get('id') or query.get('query_id')
+            threshold_map = query.get('thresholds') or query.get(
+                'thresholds_by_dataset', {})
+            aligned = self._align_results_for_threshold_map(
+                results,
+                datasets,
+                threshold_map,
+                label_mapper=label_mapper,
+                type_mapper=type_mapper,
+            )
+            if aligned.empty or (
+                max_edges_for_metrics and len(aligned) > max_edges_for_metrics
+            ):
+                continue
+            path_data = None
+            if path_data_func is not None:
+                try:
+                    path_data = path_data_func(query)
+                except Exception:
+                    path_data = None
+            similarities = self.calculate_all_pairwise_similarities(
+                aligned,
+                datasets,
+                threshold=1,
+                include_advanced_metrics=True,
+                path_data=path_data,
+            )
+            if similarities.empty:
+                continue
+            similarities['query_id'] = query_id
+            similarities['query_label'] = query.get('label', query_id)
+            for dataset in datasets:
+                similarities[f'threshold_{dataset}'] = threshold_map.get(dataset)
+            rows.append(similarities)
+        return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+    def generate_comparison_summary_for_queries(
+        self,
+        results: Dict[str, Dict[int, pd.DataFrame]],
+        datasets: List[str],
+        queries: List[Dict[str, Any]],
+        label_mapper: Optional[Any] = None,
+        type_mapper: Optional[Any] = None,
+        show_progress: bool = True,
+        max_edges_for_metrics: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Generate a compact comparison summary for explicit query rows."""
+        summary: Dict[str, Any] = {
+            'datasets': list(datasets),
+            'threshold_mode': 'combinations',
+            'queries': [],
+            'key_findings': [],
+            'key_findings_per_query': {},
+        }
+        query_iter = queries
+        if show_progress and len(queries) > 1:
+            query_iter = tqdm(
+                queries,
+                desc="Generating query summaries",
+                unit="query",
+                leave=True,
+            )
+        for query in query_iter:
+            query_id = query.get('id') or query.get('query_id')
+            threshold_map = query.get('thresholds') or query.get(
+                'thresholds_by_dataset', {})
+            aligned = self._align_results_for_threshold_map(
+                results,
+                datasets,
+                threshold_map,
+                label_mapper=label_mapper,
+                type_mapper=type_mapper,
+            )
+            query_summary = {
+                'query_id': query_id,
+                'query_label': query.get('label', query_id),
+                'thresholds': dict(threshold_map),
+                'edge_counts': {},
+                'common_edges': 0,
+                'unique_edges': {},
+                'total_edges': int(len(aligned)),
+            }
+            available = [dataset for dataset in datasets if dataset in aligned.columns]
+            if not aligned.empty and available:
+                for dataset in available:
+                    query_summary['edge_counts'][dataset] = int(
+                        (aligned[dataset] > 0).sum()
+                    )
+                query_summary['common_edges'] = int(
+                    (aligned[available] > 0).all(axis=1).sum()
+                )
+                for dataset in available:
+                    others = [item for item in available if item != dataset]
+                    if others:
+                        query_summary['unique_edges'][dataset] = int(
+                            ((aligned[dataset] > 0)
+                             & ((aligned[others] > 0).sum(axis=1) == 0)).sum()
+                        )
+                    else:
+                        query_summary['unique_edges'][dataset] = int(
+                            (aligned[dataset] > 0).sum()
+                        )
+                if not (
+                    max_edges_for_metrics
+                    and len(aligned) > max_edges_for_metrics
+                ):
+                    sims = self.calculate_all_pairwise_similarities(
+                        aligned,
+                        datasets,
+                        threshold=1,
+                        include_advanced_metrics=True,
+                    )
+                    query_summary['pairwise_similarities'] = sims
+                    if not sims.empty and 'jaccard_similarity' in sims:
+                        query_summary['avg_jaccard'] = float(
+                            sims['jaccard_similarity'].mean()
+                        )
+                query_summary['conservation_rate'] = (
+                    query_summary['common_edges'] / len(aligned)
+                    if len(aligned) else 0.0
+                )
+            else:
+                query_summary['pairwise_similarities'] = pd.DataFrame()
+                query_summary['conservation_rate'] = 0.0
+            summary['queries'].append(query_summary)
+            summary['key_findings_per_query'][query_id] = query_summary
+            summary['key_findings'].append(
+                f"{query_id}: {query_summary['common_edges']} common edges"
+            )
+        if summary['queries']:
+            summary['selected_query'] = summary['queries'][len(summary['queries']) // 2]
+            summary['summary_stats'] = summary['selected_query']
+            summary['pairwise_similarities'] = summary['selected_query'].get(
+                'pairwise_similarities', pd.DataFrame())
+        return summary
     
     def _align_results_at_threshold(
         self,
@@ -464,10 +628,36 @@ class ComparisonMetrics:
         Returns:
             Aligned DataFrame with edge index and weight columns per dataset
         """
+        return self._align_results_for_threshold_map(
+            results,
+            datasets,
+            {dataset: threshold for dataset in datasets},
+            label_mapper=label_mapper,
+            type_mapper=type_mapper,
+        )
+
+    def _align_results_for_threshold_map(
+        self,
+        results: Dict[str, Dict[int, pd.DataFrame]],
+        datasets: List[str],
+        threshold_map: Dict[str, int],
+        label_mapper: Optional[Any] = None,
+        type_mapper: Optional[Any] = None,
+    ) -> pd.DataFrame:
+        """Align each dataset at its own requested threshold.
+
+        This is the query-aware counterpart to the scalar alignment helper.
+        The map is dataset-keyed so an advanced cross-dataset query such as
+        {dataset_a: 3, dataset_b: 7} cannot accidentally fall back to a
+        scalar union threshold.
+        """
         dfs = []
         edge_display_names = {}  # canonical_edge -> display_name
         
         for dataset in datasets:
+            threshold = threshold_map.get(dataset)
+            if threshold is None:
+                continue
             if dataset not in results or threshold not in results[dataset]:
                 continue
             

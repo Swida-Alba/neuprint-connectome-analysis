@@ -83,6 +83,48 @@ def test_metadata_path_prefers_the_pulled_csv_over_an_old_projection(tmp_path):
     assert metadata_path(dataset, tmp_path) == csv
 
 
+def test_dataset_folder_discovery_handles_releases_and_future_names(tmp_path):
+    from src.neuron_index_builder import (
+        dataset_identifier_from_folder,
+        discover_metadata_datasets,
+    )
+
+    assert dataset_identifier_from_folder("male-cns_v1_0") == "male-cns:v1.0"
+    assert dataset_identifier_from_folder("optic-lobe_v1_1") == "optic-lobe:v1.1"
+    assert dataset_identifier_from_folder("manc_v1_2_1") == "manc:v1.2.1"
+    assert dataset_identifier_from_folder("flywire_FAFB_v783") == "flywire_FAFB_v783"
+    assert dataset_identifier_from_folder("banc_v888") == "banc_v888"
+    assert dataset_identifier_from_folder("future_release") == "future_release"
+
+    for folder in (
+        "male-cns_v1_0", "optic-lobe_v1_1", "flywire_FAFB_v783",
+    ):
+        path = tmp_path / folder
+        path.mkdir()
+        (path / f"{folder}_allneurons_neuron_df.csv").write_text(
+            "bodyId,type\n1,A\n", encoding="utf-8"
+        )
+    (tmp_path / "not_a_dataset").mkdir()
+    assert discover_metadata_datasets(tmp_path) == [
+        "flywire_FAFB_v783", "male-cns:v1.0", "optic-lobe:v1.1",
+    ]
+
+
+def test_metadata_candidates_accepts_future_schema_validated_filename(tmp_path):
+    from src.neuron_index_builder import metadata_candidates
+
+    folder = tmp_path / "future_v2_0"
+    folder.mkdir()
+    future = folder / "neurons_export_2026.csv"
+    future.write_text("root_id,cell_class\n720575940000000001,Kenyon\n", encoding="utf-8")
+    # A similarly named derived table must not win the fallback.
+    (folder / "synapse_summary.csv").write_text(
+        "bodyId,weight\n1,2\n", encoding="utf-8"
+    )
+
+    assert metadata_candidates("future:v2.0", tmp_path) == [future]
+
+
 def test_priority_columns_put_cross_dataset_taxonomy_after_instance():
     from src.neuron_index_builder import ordered_projection_columns
 
@@ -231,6 +273,47 @@ def test_metadata_pull_materializes_index_and_search_cache(tmp_path):
     assert index.columns[:4] == ["bodyId", "type", "instance", "flywireType"]
     assert "roiInfo" not in index.columns
     assert is_search_cache_compatible(search, index.columns)
+
+
+def test_metadata_pull_stabilizes_missing_type_and_instance_schema(tmp_path):
+    """A sparse future table is padded once, not rebuilt on every init."""
+    import pandas as pd
+
+    from src.coana import FindNeuronConnection
+
+    dataset = "future:v2.0"
+    folder = "future_v2_0"
+    metadata_dir = tmp_path / "datasets" / folder
+    metadata_dir.mkdir(parents=True)
+    metadata = metadata_dir / f"{folder}_allneurons_neuron_df.csv"
+    pl.DataFrame({
+        "bodyId": ["100", "200"],
+        "cell_class": ["Kenyon", "projection"],
+    }).write_csv(metadata)
+
+    index_path = tmp_path / "neuron_indexes" / folder / "neuron_index.parquet"
+    finder = object.__new__(FindNeuronConnection)
+    finder.use_cache = True
+    finder.cache_folder = str(index_path.parent)
+    finder.script_path = str(tmp_path)
+    finder.dataset = dataset
+    finder._dataset_safe = folder
+    finder._neuron_index_cache = None
+    finder._neuron_index_dict = {}
+    finder._vprint = lambda *args, **kwargs: None
+    finder._get_neuron_index_path = lambda: str(index_path)
+    finder._get_neuron_search_cache_path = lambda: str(
+        index_path.with_name("neuron_index_search.parquet")
+    )
+    finder._read_neuron_index_disk = lambda: pd.DataFrame()
+
+    assert FindNeuronConnection._ensure_neuron_index_from_metadata(finder) is True
+    assert pl.read_parquet(index_path).columns[:4] == [
+        "bodyId", "type", "instance", "cell_class"
+    ]
+    # The synthesized columns are included in the expected schema, so a
+    # second initialization only refreshes the sidecar if needed.
+    assert FindNeuronConnection._ensure_neuron_index_from_metadata(finder) is False
 
 
 def test_legacy_index_migration_moves_index_and_sidecar(tmp_path):

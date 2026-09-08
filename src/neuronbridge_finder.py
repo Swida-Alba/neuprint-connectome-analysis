@@ -10,7 +10,7 @@ Key features:
 - Convert neuron queries (bodyId/instance/type) to lines (neuron_to_lines)
 - Reverse search: find neurons matching a driver line (line_to_neuron)
 - Support for both CDS and PPPM matching algorithms
-- Multi-dataset support (hemibrain, male-cns, FlyWire, etc.)
+- Multi-dataset support (hemibrain, male-cns, FAFB, standalone BANC, etc.)
 - Automatic dataset detection from NeuronBridge image metadata
 - Caching of API results to reduce redundant calls
 - Versioned, compressed Parquet caching
@@ -66,14 +66,14 @@ except ImportError:  # pragma: no cover - src laid bare on sys.path
     from utils.naming_utils import canonical_dataset_name
 try:
     from .flywire_ids import (
-        is_flywire_dataset,
+        is_local_connectome_dataset,
         normalize_flywire_body_id,
         normalize_flywire_id_columns,
         resolve_flywire_dataset_dir,
     )
 except ImportError:
     from flywire_ids import (
-        is_flywire_dataset,
+        is_local_connectome_dataset,
         normalize_flywire_body_id,
         normalize_flywire_id_columns,
         resolve_flywire_dataset_dir,
@@ -3861,16 +3861,16 @@ class NeuronBridgeFinder:
                 loaded.append(dataset_folder)
                 continue
 
-            # FlyWire-family tables are local prepared artifacts, not
+            # FAFB/BANC local-release tables are prepared artifacts, not
             # NeuPrint datasets. Prefer the exact Parquet/CSV resolver and
             # never attempt a NeuPrint/FAFB fallback for a missing BANC table.
-            if is_flywire_dataset(dataset_folder):
+            if is_local_connectome_dataset(dataset_folder):
                 local_df = self._load_neuron_df_for_dataset(dataset_folder)
                 if local_df is not None and not local_df.empty:
                     loaded.append(dataset_folder)
                 else:
                     self._vprint(
-                        f"   ⚠️ Could not load FlyWire dataset: {dataset_folder}"
+                        f"   ⚠️ Could not load local release dataset: {dataset_folder}"
                     )
                 continue
             
@@ -3931,11 +3931,11 @@ class NeuronBridgeFinder:
         if dataset in self._neuron_dfs:
             return self._neuron_dfs[dataset]
         
-        # Try to load from datasets folder. FlyWire-family datasets must use
+        # Try to load from datasets folder. FAFB/BANC local releases must use
         # their own exact table; in particular BANC must never fall back to
         # the FAFB table or a NeuPrint pull.
         if self.datasets_path:
-            if is_flywire_dataset(dataset):
+            if is_local_connectome_dataset(dataset):
                 dataset_root = resolve_flywire_dataset_dir(
                     Path(self.datasets_path).parent, dataset
                 )
@@ -3967,7 +3967,7 @@ class NeuronBridgeFinder:
                             dtype={'bodyId': 'string'},
                             low_memory=False,
                         )
-                    if is_flywire_dataset(dataset):
+                    if is_local_connectome_dataset(dataset):
                         normalize_flywire_id_columns(df, ['bodyId', 'root_id'])
                     self._neuron_dfs[dataset] = df
                     # Only print loading message if not suppressing
@@ -3976,9 +3976,9 @@ class NeuronBridgeFinder:
                     return df
                 except Exception as e:
                     self._vprint(f"  ⚠️ Could not load neuron data for {dataset}: {e}")
-            elif is_flywire_dataset(dataset):
+            elif is_local_connectome_dataset(dataset):
                 self._vprint(
-                    f"  ⚠️ No local FlyWire neuron table found for {dataset}; "
+                    f"  ⚠️ No local FAFB/BANC neuron table found for {dataset}; "
                     "skipping this dataset."
                 )
                 return None
@@ -5544,7 +5544,7 @@ class NeuronBridgeFinder:
                 shared_results.append({
                     "bodyId": (
                         normalize_flywire_body_id(body_id)
-                        if is_flywire_dataset(ds_folder)
+                        if is_local_connectome_dataset(ds_folder)
                         else str(body_id)
                     ),
                     "dataset": ds_name,
@@ -7035,7 +7035,7 @@ class NeuronBridgeFinder:
                     # historical integer body-ID representation.
                     type_neurons = [
                         normalize_flywire_body_id(n)
-                        if is_flywire_dataset(dataset)
+                        if is_local_connectome_dataset(dataset)
                         else _to_int_bodyid(n)
                         for n in type_neurons
                     ]
@@ -7099,7 +7099,7 @@ class NeuronBridgeFinder:
                     bodyid = row['bodyId']
                     bodyid_val = (
                         normalize_flywire_body_id(bodyid)
-                        if is_flywire_dataset(dataset)
+                        if is_local_connectome_dataset(dataset)
                         else _to_int_bodyid(bodyid)
                     )
                     type_label = row['type_label']
@@ -7174,7 +7174,7 @@ class NeuronBridgeFinder:
             # NeuPrint comparison behavior unchanged.
             test_ids = [
                 normalize_flywire_body_id(bid)
-                if is_flywire_dataset(dataset)
+                if is_local_connectome_dataset(dataset)
                 else str(_to_int_bodyid(bid))
                 for bid in sample_ids
             ]
@@ -7270,7 +7270,7 @@ class NeuronBridgeFinder:
                     'background_color', background_color
                 )
                 default_cache_neurons = (
-                    True if is_flywire_dataset(dataset)
+                    True if is_local_connectome_dataset(dataset)
                     else pipeline not in {
                         'fast', 'direct', 'artistic', 'fine_opt1'
                     }

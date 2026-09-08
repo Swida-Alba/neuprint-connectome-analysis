@@ -985,7 +985,8 @@ class TestFlyWireIds:
         assert fid.is_banc_dataset('banc_v888')
         assert not fid.is_banc_dataset('flywire_FAFB_v783')
         assert fid.is_flywire_dataset('flywire_FAFB_v783')
-        assert fid.is_flywire_dataset('banc_v888')
+        assert not fid.is_flywire_dataset('banc_v888')
+        assert fid.is_local_connectome_dataset('banc_v888')
         assert not fid.is_flywire_dataset('hemibrain')
         assert fid.dataset_folder('a:b.c') == 'a_b_c'
         assert fid.resolve_flywire_dataset_dir('/nonexistent/root',

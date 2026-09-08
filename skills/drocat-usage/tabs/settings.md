@@ -2,7 +2,7 @@
 
 Reproduce the **Settings** UI tab as a direct-backend workflow. The Settings tab
 is the data-management hub: it pulls dataset metadata/connections, pulls skeletons,
-builds connection/profile caches, checks FlyWire local readiness, and configures
+builds connection/profile caches, checks FAFB/BANC release readiness, and configures
 tokens — none of which are a single `FindNeuronConnection`-style scientific tool.
 Use this recipe when the task is about dataset readiness, cache building, indexes,
 or token configuration rather than a specific scientific analysis.
@@ -16,8 +16,8 @@ or token configuration rather than a specific scientific analysis.
 | Skeleton pull | `SkeletonPuller` (`ui/skeleton_pull.py`) | Resumable, cancelable. |
 | Connectivity-profile cache | `python src/build_connectivity_profile_cache.py` | Used by profiling/similar tools. |
 | Seed neuron indexes | `python src/build_seed_indexes.py` | Refreshes committed `neuron_indexes/` seeds. |
-| FlyWire local readiness | `src/utils/flywire_readiness.py` (`flywire_skeleton_readiness`, `require_flywire_skeleton_access`) | Detects missing local FAFB/BANC files. |
-| FlyWire/FAFB conversion | `src/FAFB_file_converter.py`, `src/BANC_file_converter.py` | Converts raw Codex downloads to parquet. |
+| FAFB/BANC release readiness | `src/utils/flywire_readiness.py` (`flywire_skeleton_readiness`, `require_flywire_skeleton_access`) | Detects FAFB local files and BANC public-bucket readiness. |
+| FAFB/BANC conversion | `src/FAFB_file_converter.py`, `src/BANC_file_converter.py` | Converts FAFB raw downloads and BANC release tables to parquet. |
 | Token configuration | `config.json` / `config_local.json` `tokens` section | See `src/utils/token_manager.py`. |
 
 ## Metadata pull (first run for a new dataset)
@@ -64,19 +64,20 @@ python src/build_connectivity_profile_cache.py male-cns:v0.9
 python src/build_seed_indexes.py
 ```
 
-## FlyWire local readiness & conversion
+## FAFB/BANC local-release readiness & conversion
 
 ```python
 from src.utils.flywire_readiness import flywire_skeleton_readiness, require_flywire_skeleton_access
-from src.flywire_ids import is_flywire_dataset, is_banc_dataset
+from src.flywire_ids import is_fafb_dataset, is_banc_dataset
 
-# check the converted parquet layout for a FlyWire dataset
+# check the converted/public-release layout for a local dataset
 readiness = flywire_skeleton_readiness("flywire_FAFB_v783")
 ```
 
-For FlyWire datasets, the raw Codex downloads belong under
-`datasets/<dataset>/downloads/` and must be converted (via
-`FAFB_file_converter.py` / `BANC_file_converter.py`) before analysis. See
+For FAFB, raw Codex downloads belong under `datasets/<dataset>/downloads/` and
+must be converted via `FAFB_file_converter.py`. BANC is prepared by its own
+public-release fetcher and `BANC_file_converter.py`; it does not use Codex or
+CAVE. See
 [references/datasets-and-auth.md](../references/datasets-and-auth.md).
 
 ## Tokens
@@ -90,9 +91,9 @@ or the gitignored `config_local.json`. Never print or commit the values.
 
 ## Notes
 
-- FlyWire FAFB/BANC are local-file datasets: they require converted local files
-  (CAVE token only for explicit remote fetch/fallback). NeuPrint datasets are
-  API-only and need the NeuPrint token.
+- FAFB is a local-file release with an optional CAVE token for explicit remote
+  fetch/fallback. BANC is a standalone public-bucket release and never needs a
+  CAVE token. NeuPrint datasets are API-only and need the NeuPrint token.
 - Pulls stream and are resumable/cancelable; metadata must exist before
   connection/skeleton pulls (the puller enforces this).
 - `neuron_indexes/` are persistent "system files" (not `cache/`); clearing

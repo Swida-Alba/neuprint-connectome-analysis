@@ -101,14 +101,14 @@ fc.FindDirectConnections()
 
 ## 2.5. Local FAFB/BANC Analysis (NEW! 10-100x faster!)
 
-Use local dataset files for blazing-fast FlyWire analysis.
+Use the matching local-release source for fast FAFB or standalone BANC analysis.
 
 ```python
 from coana import FindNeuronConnection
 
 fc = FindNeuronConnection(
     dataset='flywire_FAFB_v783',  # Automatically uses local cache if available
-    sourceNeurons=['CB0038'],      # FlyWire root IDs
+    sourceNeurons=['CB0038'],      # FAFB/local-release root IDs
     targetNeurons=['LPLC2'],
     min_synapse_num=3,
     use_cache=True,               # Enable local caching
@@ -119,7 +119,9 @@ fc.InitializeNeuronInfo()
 fc.FindAllPath()
 ```
 
-📖 **[FAFB Integration Guide](FAFB_INTEGRATION.md)** - Complete setup instructions for local datasets
+📖 **[FAFB Integration Guide](FAFB_INTEGRATION.md)** and
+**[BANC Integration Guide](BANC_INTEGRATION.md)** - setup instructions for the
+two local-release sources
 
 ## 3. Network Visualization (Sankey, Heatmap)
 

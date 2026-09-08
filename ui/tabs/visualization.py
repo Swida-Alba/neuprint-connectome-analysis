@@ -879,7 +879,7 @@ def create_skeleton_tab():
                                 "radius profile; 'artistic' uses vertex-cluster "
                                 "mesh decimation. All methods use batched "
                                 "parallel online fetching and are available for "
-                                "NeuPrint and FlyWire/FAFB tube renders; line "
+                                "NeuPrint and FAFB/BANC tube renders; line "
                                 "mode bypasses the method."
                             ),
                         )
@@ -887,7 +887,7 @@ def create_skeleton_tab():
                             "Use Default Mesh Simplification", True,
                             hint="Use the method default: fast removes 0.90 of faces; "
                                  "fine/artistic remove 0.95 for NeuPrint and "
-                                 "FlyWire/FAFB. For BANC the value applies to "
+                                 "FAFB. For BANC the value applies to "
                                  "full-resolution sources; L2 tubes are already "
                                  "cache-level and are never decimated. Uncheck to "
                                  "set the value below.",

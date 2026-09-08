@@ -217,7 +217,7 @@ class TestConstruction:
         fafb = make_fetcher(tmp_path)
         assert fafb._cache_dataset_name() == 'flywire_FAFB_v783'
         banc = make_fetcher(tmp_path, dataset='flywire_BANC:v8.88')
-        assert banc._cache_dataset_name() == 'flywire_BANC_v8_88'
+        assert banc._cache_dataset_name() == 'banc_v8_88'
 
     def test_ensure_cache_dir(self, tmp_path):
         f = make_fetcher(tmp_path)

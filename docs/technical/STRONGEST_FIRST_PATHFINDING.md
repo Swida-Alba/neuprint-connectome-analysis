@@ -248,7 +248,8 @@ arbitrary first-N truncation. `parameters.txt` keeps the
 backward-compatible alias lines `applied_tau (min path bottleneck)` and
 `edge_weight_floor`. Replay folders materialized by
 `_replay_output_folder_for_threshold` (`minsyn_{t}`) and the
-Cross-Dataset per-dataset threshold folders carry the same block.
+Cross-Dataset raw-run folders selected by standard or combination query rows
+carry the same block.
 Shortest mode may take the StrongestFirst budget but **never** the Edge
 Budget floor. A `[combined threshold]` note is appended to
 `user_warning_notes.txt` when BOTH budgets affected a run.

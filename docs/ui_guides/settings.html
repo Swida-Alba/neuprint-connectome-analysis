@@ -128,11 +128,12 @@
   <h2>Dataset preparation</h2>
   <div class="callout info">
     <b>Use the converter's directory contract exactly</b>
-    NeuPrint tables are fetched automatically. FlyWire/BANC datasets are
-    prepared from raw Codex downloads placed in
-    <code>datasets/&lt;dataset&gt;/downloads/</code>. Do not rename raw files or
-    place them directly in the dataset root. The UI reports <b>✓ local</b> only
-    after both the generated neuron table and merged connection table exist.
+    NeuPrint tables are fetched automatically. FAFB is prepared from raw
+    Codex downloads placed in <code>datasets/&lt;dataset&gt;/downloads/</code>;
+    BANC metadata and connections are prepared from its public release
+    products. Do not rename raw files or place them directly in the dataset
+    root. The UI reports <b>✓ local</b> only after both the generated neuron
+    table and merged connection table exist.
   </div>
 
   <h3>NeuPrint</h3>
@@ -170,33 +171,36 @@
     <code>flywire_FAFB_v783_merged_connections.parquet</code>, then click
     <b>Refresh</b>.</p>
 
-  <h3>FlyWire BANC v888 / v626</h3>
-  <p>Choose exactly one identifier and do not mix versions. Create
-    <code>datasets/banc_v888/downloads/</code> or
-    <code>datasets/banc_v626/downloads/</code> and place the original
-    Codex files from the
-    <a href="https://codex.flywire.ai/api/download?dataset=banc" target="_blank">BANC download</a> there:</p>
+  <h3>BANC v888 / v626</h3>
+  <p>Choose exactly one identifier and do not mix versions. DROCAT prepares
+    the metadata and connection tables automatically from the
+    <a href="https://storage.googleapis.com/lee-lab_brain-and-nerve-cord-fly-connectome" target="_blank">public BANC release bucket</a>;
+    no FlyWire/Codex login or CAVE token is needed. The legacy files below
+    are an optional offline fallback for users who already have a manual
+    bundle:</p>
   <ul>
     <li><code>neurons.csv.gz</code></li>
     <li><code>connections_princeton.csv.gz</code></li>
   </ul>
   <p>Do not manually create or rename a <code>*_allneurons_neuron_df.csv</code>
-    file; that is generated output. Convert v626 with:</p>
+    file; that is generated output. If the public bucket is unavailable,
+    convert the legacy v626 bundle with:</p>
   <pre><code>python src/BANC_file_converter.py</code></pre>
   <p>For v888, run the converter with the selected dataset name:</p>
   <pre><code>python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter import ensure_banc_data; d='banc_v888'; ensure_banc_data(d, 'datasets/' + d)"</code></pre>
   <p>Verify that the selected root contains both
     <code>&lt;dataset&gt;_allneurons_neuron_df.parquet</code> and
     <code>&lt;dataset&gt;_merged_connections.parquet</code>, then click
-    <b>Refresh</b>. BANC skeleton visualization and CAVE API fetching are not
-    supported; use the converted local files for pathfinding, networks, and
+    <b>Refresh</b>. BANC skeletons are fetched on demand from the public
+    release bucket and cached as raw <code>.swc.zst</code>; no CAVE token is
+    involved. Use the converted local files for pathfinding, networks, and
     tabular analysis.</p>
 
   <div class="callout warn">
     <b>CAVE token scope</b>
     A CAVE token is needed only for workflows that explicitly fetch FAFB data
     or skeletons through CAVE. It does not replace the local input files, and
-    a token alone does not prepare a FlyWire dataset.
+    a token alone does not prepare a FAFB dataset.
   </div>
 
   <h2>About</h2>

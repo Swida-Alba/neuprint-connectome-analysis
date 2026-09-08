@@ -241,7 +241,7 @@ class TestRoiProfileStore:
             store.ensure()
 
     def test_flywire_roi_screening_unavailable_with_clear_guidance(self, tmp_path):
-        """FlyWire datasets have no per-ROI synapse table anywhere; the
+        """FAFB has no per-ROI synapse table anywhere; the
         error must not suggest pulling/preparing one."""
         store = rois.RoiProfileStore("flywire_FAFB_v783",
                                      project_root=str(tmp_path))

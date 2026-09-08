@@ -20,6 +20,13 @@ params = ComparisonParameters(
     path_mode="all",                     # "all" | "shortest"
     max_interlayer=2,
     thresholds=[1, 3, 5, 10],
+    threshold_mode="standard",          # "standard" | "combinations"
+    # Combination mode example (replace thresholds above):
+    # threshold_dataset_order=["hemibrain:v1.2.1", "male-cns:v0.9"],
+    # threshold_combinations=[
+    #     {"id": "combo_001", "label": "density match",
+    #      "thresholds": {"hemibrain:v1.2.1": 3, "male-cns:v0.9": 8}},
+    # ],
     top_edges=500,
     graph_edge_limit_bodyid=0,          # Edge Budget off; set ~1_000_000 to cap the discovery cone
     edgeN_limit=500,
@@ -99,6 +106,59 @@ Outputs, only when rows were dropped:
   `dataset`, `threshold`, the connection columns, and `untyped_side`
   (`pre` / `post` / `pre+post`).
 - Per-run counts appended to the run root's `user_warning_notes.txt`.
+
+## Threshold query model
+
+`threshold_mode="standard"` expands each scalar in `thresholds` into one
+same-threshold query for every selected dataset. Use
+`threshold_mode="combinations"` with `threshold_combinations` when a query
+needs different thresholds per dataset. Custom combination mode requires at
+least two selected datasets. Each row must contain exactly one positive
+threshold for every selected dataset; it is a comparison identity, not a
+per-dataset schedule. The union of cell values is only the deduplicated
+raw-run/cache schedule.
+
+Combination rows retain stable `id`/`label` values. Alignment, similarity,
+reports, and presence matrices are keyed by that query row and never infer a
+scalar from the union. Raw `(dataset, threshold)` jobs shared by multiple
+rows run once and are referenced from each row.
+
+## Pathfinding threshold/bottleneck provenance
+
+Every delegated pathfinding threshold folder writes the shared provenance
+block to `parameters.txt`, `all_attributes.json`, and
+`data_details/parameters.csv`: `requested_threshold`, canonical
+`applied_threshold`, `applied_threshold_source`, the effective
+`strongest_first_budget` and bite flag, landing `tau`, `tau_canonical`, `w2`
+(`strongest_dropped_bottleneck`), Edge Budget `edge_budget`/`w0`/`w1`,
+`strongest_retained_bottleneck` (`W*`), and `paths_complete`.
+
+The comparison root additionally exports:
+
+- `effective_thresholds.json` — the UI/run-guide notice with one `runs` row
+  per dataset and requested threshold, plus `queries`/`combinations` with
+  requested threshold maps and applied per-dataset provenance.
+- `comparison_results/pathfinding_provenance.csv` — the complete machine-
+  readable row set. Use `applied_threshold` for the canonical equivalent Min
+  Synapse Count; `tau` is the StrongestFirst landing/collapse bound, not
+  necessarily the minimal applied threshold.
+- `comparison_results/threshold_combinations.csv` — the canonical query
+  manifest. It joins `query_id`, dataset, requested/applied threshold,
+  StrongestFirst budget/tau, Edge Budget `w0`/`w1`, `w2`, `W*`, completeness,
+  and raw-run/alias provenance.
+- `comparison_results/threshold_sensitivity.csv` and
+  `comparison_results/unified_summary.csv` — summary tables that retain the
+  same provenance fields, including `skipped`/`duplicate_of` for tau-collapsed
+  thresholds and untyped-drop counts where applicable. In combination mode,
+  sensitivity rows carry `query_id`/`query_label`; adjacent-threshold
+  retention is not inferred across unrelated query rows.
+- `similarity_matrices/similarity_query_{query_id}.csv` and
+  `similarity_matrices/similarity_by_query.csv` — query-keyed similarity
+  exports for advanced combinations.
+
+The Edge Budget is a lossy graph floor in `all` mode only. Shortest mode can
+be bounded by the StrongestFirst path budget and report tau, but its Edge
+Budget is ignored and `edge_weight_floor` remains empty.
 
 ## Notes
 

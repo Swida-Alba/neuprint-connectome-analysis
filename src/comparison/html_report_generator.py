@@ -15,9 +15,15 @@ Structure:
 
 import json
 import os
+import html
 import pandas as pd
 import numpy as np
-from typing import Dict, List
+from typing import Dict, List, Tuple
+
+try:
+    from utils.threshold_state import applied_threshold_provenance
+except ImportError:  # pragma: no cover - direct package imports
+    from src.utils.threshold_state import applied_threshold_provenance
 
 
 def _make_link(path: str, base_dir: str) -> str:
@@ -80,11 +86,19 @@ def generate_html_report(
     thresholds: List[int],
     mode_specific_note: str,
     path_count_data: List[Dict],
-    key_findings_per_threshold: Dict[int, Dict]
+    key_findings_per_threshold: Dict[int, Dict],
+    comparison_points=None,
 ) -> str:
     """
     Generate a static HTML report organized by content type.
     """
+    if comparison_points:
+        return _generate_query_html_report(
+            analyzer=analyzer,
+            dataset_names=dataset_names,
+            comparison_points=comparison_points,
+            mode_specific_note=mode_specific_note,
+        )
     html_parts = []
     
     # Get nicknames for display (shorter names)
@@ -102,7 +116,10 @@ def generate_html_report(
     html_parts.append(_generate_applied_threshold_banner(analyzer, dataset_names))
 
     # Table of Contents
-    html_parts.append(_generate_toc(thresholds))
+    html_parts.append(_generate_toc(
+        thresholds,
+        include_type_mapping=bool(getattr(
+            analyzer.parameters, 'auto_type_mapping', False))))
     
     # 1. Summary Section
     html_parts.append(_generate_summary_section(
@@ -148,6 +165,853 @@ def generate_html_report(
     html_parts.append(_generate_footer())
     
     return ''.join(html_parts)
+
+
+def _query_report_slug(value) -> str:
+    """Return the same safe query slug used by comparison CSV exports."""
+    import re
+    slug = re.sub(r'[^A-Za-z0-9._-]+', '_', str(value or 'query'))
+    return slug.strip(' ._-') or 'query'
+
+
+def _query_report_value(value) -> str:
+    """Format a scalar for the query report without exposing NaN text."""
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return '—'
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    if isinstance(value, float):
+        return f'{value:g}'
+    return str(value)
+
+
+def _query_report_cell(value) -> str:
+    return html.escape(_query_report_value(value))
+
+
+def _query_report_save_used_data(analyzer, dataframe: pd.DataFrame, filename: str):
+    """Save a query-scoped source table used by the HTML report."""
+    if dataframe is None:
+        return
+    output_root = getattr(analyzer.parameters, 'full_output_path', None)
+    if not output_root:
+        return
+    used_dir = os.path.join(output_root, 'comparison_report_used_data')
+    os.makedirs(used_dir, exist_ok=True)
+    try:
+        dataframe.to_csv(os.path.join(used_dir, filename), index=False)
+    except Exception:
+        # Report rendering should remain available when an optional table has
+        # an unusual index or an object that pandas cannot serialize.
+        pass
+
+
+def _query_report_edge_table(aligned: pd.DataFrame, dataset_names, nickname_map,
+                             caption: str) -> str:
+    """Render one bounded edge table for a query point."""
+    if aligned is None or aligned.empty:
+        return f'<div class="card"><h3>{html.escape(caption)}</h3><p>No edge data available.</p></div>'
+    available = [dataset for dataset in dataset_names if dataset in aligned.columns]
+    if not available:
+        return f'<div class="card"><h3>{html.escape(caption)}</h3><p>No dataset columns available.</p></div>'
+    data = aligned.copy()
+    data['_conservation'] = (data[available] > 0).sum(axis=1)
+    data['_weight_total'] = data[available].sum(axis=1)
+    data = data.sort_values(['_conservation', '_weight_total'], ascending=False).head(50)
+    parts = [f'<div class="card"><h3>{html.escape(caption)}</h3>',
+             '<div class="sticky-table-container"><table><thead><tr><th>Edge</th>']
+    parts.extend(f'<th>{html.escape(nickname_map.get(ds, ds))}</th>' for ds in available)
+    parts.append('<th>Conservation</th></tr></thead><tbody>')
+    for key, row in data.iterrows():
+        count = int(sum(row.get(ds, 0) > 0 for ds in available))
+        badge = 'badge-success' if count == len(available) else (
+            'badge-warning' if count > 1 else 'badge-danger')
+        parts.append(f'<tr><td><strong>{html.escape(str(key))}</strong></td>')
+        for ds in available:
+            weight = row.get(ds, 0)
+            cell = ('<span class="presence-check">✔️</span> '
+                    + _query_report_cell(weight)) if weight > 0 else (
+                        '<span class="presence-cross">❌</span>')
+            parts.append(f'<td>{cell}</td>')
+        parts.append(f'<td><span class="badge {badge}">{count}/{len(available)}</span></td></tr>')
+    parts.append('</tbody></table></div></div>')
+    return ''.join(parts)
+
+
+def _query_report_path_table(path_data: pd.DataFrame, dataset_names, nickname_map,
+                             caption: str) -> str:
+    """Render one bounded path table for a query point.
+
+    Keep the query report's path table aligned with the Standard report: the
+    path key is followed by a ``Len`` column containing the number of edges
+    (hops) in the path before the per-dataset weights.
+    """
+    if path_data is None or path_data.empty:
+        return f'<div class="card"><h3>{html.escape(caption)}</h3><p>No path data available.</p></div>'
+    available = [dataset for dataset in dataset_names if dataset in path_data.columns]
+    if not available:
+        return f'<div class="card"><h3>{html.escape(caption)}</h3><p>No dataset columns available.</p></div>'
+    data = path_data.copy()
+    data['_conservation'] = (data[available] > 0).sum(axis=1)
+    data['_weight_total'] = data[available].sum(axis=1)
+    data = data.sort_values(['_conservation', '_weight_total'], ascending=False).head(50)
+    parts = [f'<div class="card"><h3>{html.escape(caption)}</h3>',
+             '<div class="sticky-table-container"><table><thead><tr><th>Path</th><th>Len</th>']
+    parts.extend(f'<th>{html.escape(nickname_map.get(ds, ds))}</th>' for ds in available)
+    parts.append('<th>Conservation</th></tr></thead><tbody>')
+    for key, row in data.iterrows():
+        count = int(sum(row.get(ds, 0) > 0 for ds in available))
+        badge = 'badge-success' if count == len(available) else (
+            'badge-warning' if count > 1 else 'badge-danger')
+        # Match the Standard report's definition: path length is the number
+        # of edges, i.e. the number of arrows in the normalized key.
+        path_length = _path_length_from_key(key)
+        parts.append(
+            f'<tr><td><strong>{html.escape(str(key))}</strong></td>'
+            f'<td>{path_length}</td>')
+        for ds in available:
+            weight = row.get(ds, 0)
+            cell = ('<span class="presence-check">✔️</span> '
+                    + _query_report_cell(weight)) if weight > 0 else (
+                        '<span class="presence-cross">❌</span>')
+            parts.append(f'<td>{cell}</td>')
+        parts.append(f'<td><span class="badge {badge}">{count}/{len(available)}</span></td></tr>')
+    parts.append('</tbody></table></div></div>')
+    return ''.join(parts)
+
+
+def _query_report_overlap_table(matrix, labels, title: str) -> str:
+    parts = [f'<div class="card"><h3>{html.escape(title)}</h3><table><thead><tr><th>From / in</th>']
+    parts.extend(f'<th>{html.escape(str(label))}</th>' for label in labels)
+    parts.append('</tr></thead><tbody>')
+    for label, row in zip(labels, matrix):
+        parts.append(f'<tr><th>{html.escape(str(label))}</th>')
+        parts.extend(f'<td>{_query_report_cell(value)}</td>' for value in row)
+        parts.append('</tr>')
+    parts.append('</tbody></table></div>')
+    return ''.join(parts)
+
+
+def _query_report_network_card(aligned: pd.DataFrame, dataset_names,
+                               nickname_map, query_id: str, query_label: str) -> str:
+    """Render an interactive vis-network card for one query row."""
+    safe = _query_report_slug(query_id)
+    if aligned is None or aligned.empty:
+        return f'<div class="card"><h3>{html.escape(query_label)}</h3><p>No network edges available.</p></div>'
+    node_ids = {}
+    nodes = []
+    edges = []
+    source_nodes = set()
+    target_nodes = set()
+    available = [ds for ds in dataset_names if ds in aligned.columns]
+
+    def node_id(label):
+        label = str(label)
+        if label not in node_ids:
+            node_ids[label] = len(node_ids) + 1
+            nodes.append({'id': node_ids[label], 'label': label})
+        return node_ids[label]
+
+    for edge_index, (edge_key, row) in enumerate(aligned.head(1000).iterrows(), start=1):
+        text = str(edge_key)
+        if ' -> ' not in text:
+            continue
+        source, target = text.split(' -> ', 1)
+        source_nodes.add(source)
+        target_nodes.add(target)
+        present = [ds for ds in available if row.get(ds, 0) > 0]
+        if not present:
+            continue
+        source_id = node_id(source)
+        target_id = node_id(target)
+        count = len(present)
+        color = '#22c55e' if count == len(available) else (
+            '#f59e0b' if count > 1 else '#94a3b8')
+        weight_text = ', '.join(
+            f'{nickname_map.get(ds, ds)}={_query_report_value(row.get(ds, 0))}'
+            for ds in present)
+        edges.append({
+            'id': edge_index,
+            'from': source_id,
+            'to': target_id,
+            'label': weight_text,
+            'title': weight_text,
+            'color': color,
+            'arrows': 'to',
+        })
+    for node in nodes:
+        if node['label'] in source_nodes and node['label'] in target_nodes:
+            node['color'] = '#14b8a6'
+        elif node['label'] in source_nodes:
+            node['color'] = '#ef4444'
+        elif node['label'] in target_nodes:
+            node['color'] = '#8b5cf6'
+        else:
+            node['color'] = '#3b82f6'
+    node_json = json.dumps(nodes)
+    edge_json = json.dumps(edges)
+    return f'''
+        <div class="card">
+            <h3>{html.escape(query_label)}</h3>
+            <p style="color:var(--secondary-color);">Green = conserved, amber = partial, gray = dataset-specific. The network is capped at 1,000 displayed edges; the CSV links below are lossless for the exported comparison table.</p>
+            <div id="query_network_{safe}" style="height:520px;border:1px solid var(--border-color);border-radius:8px;"></div>
+            <script>
+                (function() {{
+                    const nodes = new vis.DataSet({node_json});
+                    const edges = new vis.DataSet({edge_json});
+                    const container = document.getElementById('query_network_{safe}');
+                    if (container && typeof vis !== 'undefined') {{
+                        new vis.Network(container, {{nodes:nodes, edges:edges}}, {{
+                            interaction: {{hover:true}},
+                            physics: {{enabled:false}},
+                            nodes: {{shape:'dot', size:18, font:{{size:12}}}},
+                            edges: {{smooth:false, font:{{size:9, align:'middle'}}}}
+                        }});
+                    }}
+                }})();
+            </script>
+        </div>'''
+
+
+def _generate_query_html_report(analyzer, dataset_names, comparison_points,
+                                mode_specific_note: str) -> str:
+    """Generate the full report shell for row-wise threshold combinations.
+
+    This section-for-section reuses the Standard report's generators so both
+    modes share the same presentation and controls. Every section is keyed by
+    ``query_id`` and every dataset cell is read from that query's threshold
+    map. The raw threshold union is never treated as a comparison axis.
+    """
+    queries = analyzer.get_threshold_queries()
+    query_by_id = {str(query.get('id') or query.get('query_id')): query
+                   for query in queries}
+    nicknames = analyzer.parameters.get_dataset_nicknames()
+    nickname_map = {dataset: nicknames[index]
+                    for index, dataset in enumerate(dataset_names)}
+    output_root = getattr(analyzer.parameters, 'full_output_path', '')
+    results_dir = os.path.join(output_root, 'comparison_results')
+    used_dir = os.path.join(output_root, 'comparison_report_used_data')
+    esc = html.escape
+
+    point_rows = []
+    provenance_rows = []
+    similarity_rows = []
+    aligned_by_id = {}
+    path_by_id = {}
+    for query in queries:
+        query_id = str(query.get('id') or query.get('query_id'))
+        query_label = str(query.get('label') or query_id)
+        aligned = analyzer.get_aligned_data_for_query(query)
+        path_data = analyzer._get_path_data_for_query(query)
+        aligned_by_id[query_id] = aligned
+        path_by_id[query_id] = path_data
+        available = [ds for ds in dataset_names if ds in aligned.columns]
+        total_edges = int(len(aligned))
+        common_edges = int((aligned[available] > 0).all(axis=1).sum()) if available else 0
+        path_available = [ds for ds in dataset_names if ds in path_data.columns]
+        total_paths = int(len(path_data))
+        common_paths = int((path_data[path_available] > 0).all(axis=1).sum()) if path_available else 0
+        requested = dict(query.get('thresholds') or {})
+        point_rows.append({
+            'query_id': query_id,
+            'query_label': query_label,
+            'requested_thresholds': requested,
+            'total_edges': total_edges,
+            'common_edges': common_edges,
+            'edge_rate': common_edges / total_edges if total_edges else 0,
+            'total_paths': total_paths,
+            'common_paths': common_paths,
+            'path_rate': common_paths / total_paths if total_paths else 0,
+        })
+        for dataset in dataset_names:
+            requested_threshold = int(requested[dataset])
+            provenance = analyzer._path_provenance_row(dataset, requested_threshold)
+            row = dict(provenance)
+            row.update({
+                'query_id': query_id,
+                'query_label': query_label,
+                'query_index': queries.index(query) + 1,
+                'threshold_mode': 'combinations',
+            })
+            provenance_rows.append(row)
+
+        similarity = (getattr(analyzer, '_similarity_cache', {}) or {}).get(
+            query_id, pd.DataFrame())
+        if similarity is None or similarity.empty:
+            report_similarity = (analyzer.comparison_report or {}).get(
+                'threshold_similarities', pd.DataFrame())
+            if isinstance(report_similarity, pd.DataFrame) and 'query_id' in report_similarity.columns:
+                similarity = report_similarity[report_similarity['query_id'].astype(str) == query_id]
+        if isinstance(similarity, pd.DataFrame) and not similarity.empty:
+            similarity = similarity.copy()
+            similarity['query_id'] = query_id
+            similarity['query_label'] = query_label
+            similarity_rows.extend(similarity.to_dict('records'))
+
+    provenance_df = pd.DataFrame(provenance_rows)
+    similarity_df = pd.DataFrame(similarity_rows)
+    _query_report_save_used_data(analyzer, provenance_df,
+                                 'provenance_by_query.csv')
+    _query_report_save_used_data(analyzer, similarity_df,
+                                 'similarity_by_query.csv')
+    try:
+        manifest_path = os.path.join(results_dir, 'threshold_combinations.csv')
+        manifest_df = pd.read_csv(manifest_path) if os.path.exists(manifest_path) else pd.DataFrame()
+        _query_report_save_used_data(analyzer, manifest_df, 'threshold_combinations.csv')
+    except Exception:
+        pass
+
+    parts = [_generate_html_header()]
+    from datetime import datetime
+    params = analyzer.parameters
+    dataset_display = ', '.join(esc(nickname_map.get(ds, ds)) for ds in dataset_names)
+    parts.append(f'''
+        <header>
+            <h1>📊 Cross-Dataset Comparison Report</h1>
+            <p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+            <p>Datasets: {dataset_display}</p>
+            <p>Threshold mode: <strong>custom combinations</strong> | Queries: <strong>{len(queries)}</strong> | Mode: <strong>{esc(getattr(params, 'comparison_mode', 'path'))}</strong> | Path Enumeration: <strong>{esc(getattr(params, 'path_mode', 'all'))}</strong></p>
+            <p>Each query is one comparison point. Its requested threshold is allowed to differ by dataset; the raw execution union is not a comparison axis.</p>
+        </header>
+        {mode_specific_note}
+    ''')
+    parts.append(_generate_applied_threshold_banner(analyzer, dataset_names))
+    parts.append(_generate_toc(
+        [row['query_id'] for row in point_rows],
+        include_provenance=True,
+        include_type_mapping=bool(getattr(params, 'auto_type_mapping', False))))
+
+    # Summary: key findings plus the four Standard summary charts (edge
+    # counts, total weight, average connection ratio, average traversal
+    # probability), each keyed by query.
+    parts.append('<div id="summary" class="section"><div class="section-header">📋 Summary &amp; Key Findings</div><div class="section-content">')
+    parts.append('<p class="card">Ratio and traversal-probability filtering is disabled for pathfinding comparisons. Counts below are keyed by query row and use the requested per-dataset thresholds plus the applied-threshold provenance shown in the next table.</p>')
+    parts.append('<div class="card"><h3>Key Findings by Query</h3><div class="sticky-table-container"><table><thead><tr><th>Query</th><th>Label</th>')
+    parts.extend(f'<th>{esc(nickname_map.get(ds, ds))} requested</th>' for ds in dataset_names)
+    parts.append('<th>Total edges</th><th>Common edges</th><th>Edge conservation</th><th>Total paths</th><th>Common paths</th><th>Path conservation</th></tr></thead><tbody>')
+    for row in point_rows:
+        parts.append('<tr><td><strong>' + esc(row['query_id']) + '</strong></td><td>' + esc(row['query_label']) + '</td>')
+        parts.extend(f'<td>{_query_report_cell(row["requested_thresholds"].get(ds))}</td>' for ds in dataset_names)
+        parts.append(''.join([
+            f'<td>{row["total_edges"]}</td><td>{row["common_edges"]}</td><td>{row["edge_rate"] * 100:.1f}%</td>',
+            f'<td>{row["total_paths"]}</td><td>{row["common_paths"]}</td><td>{row["path_rate"] * 100:.1f}%</td></tr>',
+        ]))
+    parts.append('</tbody></table></div></div>')
+
+    # Chart data, including per-query average connection ratio and traversal
+    # probability. Each dataset cell is read from the raw run at that
+    # dataset's own requested threshold.
+    chart_counts = []
+    chart_weights = []
+    avg_ratio_data = []
+    avg_prob_data = []
+    for query in queries:
+        query_id = str(query.get('id') or query.get('query_id'))
+        query_label = str(query.get('label') or query_id)
+        for dataset in dataset_names:
+            threshold = int((query.get('thresholds') or {})[dataset])
+            df = analyzer.raw_results.get(dataset, {}).get(threshold, pd.DataFrame())
+            chart_counts.append({'query_id': query_id, 'query_label': query_label, 'dataset': nickname_map.get(dataset, dataset), 'count': int(len(df))})
+            chart_weights.append({'query_id': query_id, 'query_label': query_label, 'dataset': nickname_map.get(dataset, dataset), 'weight': float(df['weight'].sum()) if not df.empty and 'weight' in df.columns else 0})
+            avg_ratio = 0.0
+            avg_prob = 0.0
+            try:
+                ratio_data = analyzer._get_edge_ratio_data_for_threshold(threshold)
+                if ratio_data is not None and not ratio_data.empty and dataset in ratio_data.columns:
+                    non_zero = ratio_data[dataset][ratio_data[dataset] > 0]
+                    if len(non_zero) > 0:
+                        avg_ratio = float(non_zero.mean())
+                        if pd.isna(avg_ratio):
+                            avg_ratio = 0.0
+            except Exception:
+                avg_ratio = 0.0
+            try:
+                prob_data = analyzer._get_prob_data_for_threshold(threshold)
+                if prob_data is not None and not prob_data.empty and dataset in prob_data.columns:
+                    non_zero = prob_data[dataset][prob_data[dataset] > 0]
+                    if len(non_zero) > 0:
+                        avg_prob = float(non_zero.mean())
+                        if pd.isna(avg_prob):
+                            avg_prob = 0.0
+            except Exception:
+                avg_prob = 0.0
+            avg_ratio_data.append({'query_id': query_id, 'query_label': query_label, 'dataset': nickname_map.get(dataset, dataset), 'ratio': avg_ratio})
+            avg_prob_data.append({'query_id': query_id, 'query_label': query_label, 'dataset': nickname_map.get(dataset, dataset), 'prob': avg_prob})
+    _query_report_save_used_data(analyzer, pd.DataFrame(chart_counts), 'edge_count_data_by_query.csv')
+    _query_report_save_used_data(analyzer, pd.DataFrame(chart_weights), 'total_weight_data_by_query.csv')
+    _query_report_save_used_data(analyzer, pd.DataFrame(avg_ratio_data), 'avg_ratio_data_by_query.csv')
+    _query_report_save_used_data(analyzer, pd.DataFrame(avg_prob_data), 'avg_prob_data_by_query.csv')
+    labels_json = json.dumps([row['query_id'] for row in point_rows])
+    display_labels_json = json.dumps([row['query_label'] for row in point_rows])
+    datasets_json = json.dumps([nickname_map.get(ds, ds) for ds in dataset_names])
+    counts_json = json.dumps(chart_counts, default=str)
+    weights_json = json.dumps(chart_weights, default=str)
+    ratio_json = json.dumps(avg_ratio_data, default=str)
+    prob_json = json.dumps(avg_prob_data, default=str)
+    parts.append(f'''
+        <div class="card"><h3>Edges, Weight, Ratio and Probability Across All Queries</h3>
+            <div id="queryEdgeCountChart" class="chart-container"></div>
+            <div id="queryTotalWeightChart" class="chart-container"></div>
+            <div id="queryAvgRatioChart" class="chart-container"></div>
+            <div id="queryAvgProbChart" class="chart-container"></div>
+        </div>
+        <script>
+        (function() {{
+            const ids={labels_json}, labels={display_labels_json}, datasets={datasets_json};
+            const counts={counts_json}, weights={weights_json}, ratios={ratio_json}, probs={prob_json};
+            function traces(rows, field) {{ return datasets.map(ds => ({{ name:ds, x:labels, y:ids.map(id => {{ const r=rows.find(v=>v.dataset===ds && v.query_id===id); return r ? Number(r[field]) : 0; }}), type:'bar', textposition:'outside' }})); }}
+            Plotly.newPlot('queryEdgeCountChart', traces(counts, 'count'), {{barmode:'group', xaxis:{{title:'Query'}}, yaxis:{{title:'Edge count'}}}}, {{responsive:true}});
+            Plotly.newPlot('queryTotalWeightChart', traces(weights, 'weight'), {{barmode:'group', xaxis:{{title:'Query'}}, yaxis:{{title:'Total edge weight'}}}}, {{responsive:true}});
+            Plotly.newPlot('queryAvgRatioChart', traces(ratios, 'ratio'), {{barmode:'group', xaxis:{{title:'Query'}}, yaxis:{{title:'Avg connection ratio (w_ij / W_j)'}}}}, {{responsive:true}});
+            Plotly.newPlot('queryAvgProbChart', traces(probs, 'prob'), {{barmode:'group', xaxis:{{title:'Query'}}, yaxis:{{title:'Avg traversal probability'}}}}, {{responsive:true}});
+        }})();
+        </script>
+    ''')
+    parts.append('</div></div>')
+
+    # The query-independent informational sections use exactly the same
+    # helpers as the Standard report and therefore keep the report shell in
+    # lockstep with future changes to type mapping/neuron exports.
+    parts.append(_generate_neuron_counts_section(analyzer, dataset_names, nickname_map))
+    parts.append(_generate_type_mapping_section(analyzer, dataset_names))
+
+    # Provenance section: requested/applied plus all bottleneck fields.
+    parts.append('<div id="threshold-provenance" class="section"><div class="section-header">🎯 Applied Thresholds &amp; Bottleneck Provenance</div><div class="section-content">')
+    parts.append('<p class="card">Applied threshold is the canonical equivalent Min Synapse Count for the materialized result. tau is the StrongestFirst landing value. The edge budget is the graph cap; w0 is its floor, w1 its landing tier, w2 the strongest dropped bottleneck, and W* the strongest retained bottleneck.</p>')
+    provenance_fields = [
+        ('query_id', 'Query'), ('query_label', 'Label'), ('dataset', 'Dataset'),
+        ('requested_threshold', 'Requested'), ('applied_threshold', 'Applied'),
+        ('applied_threshold_source', 'Source'),
+        ('strongest_first_budget', 'SF budget'),
+        ('strongest_first_budget_bitten', 'SF bite'),
+        ('tau', 'tau'), ('edge_budget', 'Edge budget'),
+        ('edge_budget_applied', 'Edge floor applied'),
+        ('edge_weight_floor', 'w0'), ('edge_budget_landing', 'w1'),
+        ('strongest_dropped_bottleneck', 'w2'),
+        ('strongest_retained_bottleneck', 'W*'), ('paths_complete', 'Complete'),
+    ]
+    parts.append('<div class="card"><div class="sticky-table-container"><table><thead><tr>')
+    parts.extend(f'<th>{esc(label)}</th>' for _, label in provenance_fields)
+    parts.append('</tr></thead><tbody>')
+    for row in provenance_rows:
+        parts.append('<tr>' + ''.join(f'<td>{_query_report_cell(row.get(key))}</td>' for key, _ in provenance_fields) + '</tr>')
+    parts.append('</tbody></table></div><p class="note">Machine-readable join: ' + _make_link(os.path.join(results_dir, 'threshold_combinations.csv'), output_root) + ' and ' + _make_link(os.path.join(results_dir, 'pathfinding_provenance.csv'), output_root) + '.</p></div></div>')
+
+    # Hemisphere symmetry: point-aware. When the feature is enabled, render
+    # the Standard per-dataset summary table once per query using each
+    # dataset's requested-threshold run; otherwise show the same warning
+    # card as the Standard report.
+    separate_hemispheres = bool(getattr(params, 'separate_hemispheres', False))
+    symmetry_analysis = bool(getattr(params, 'symmetry_analysis', False))
+    parts.append('<div id="hemisphere-symmetry" class="section"><div class="section-header">🪞 Hemisphere Symmetry</div><div class="section-content">')
+    if symmetry_analysis and separate_hemispheres:
+        parts.append('<p class="card">Hemisphere symmetry summaries per dataset and query (ipsilateral vs contralateral). Each dataset is read at its own requested threshold.</p>')
+        for query in queries:
+            query_id = str(query.get('id') or query.get('query_id'))
+            query_label = str(query.get('label') or query_id)
+            summaries = analyzer.get_hemisphere_symmetry_summaries_for_query(query)
+            parts.append(f'<div class="card"><h3>{esc(query_id)} — {esc(query_label)}</h3>')
+            if not summaries:
+                parts.append('<p style="color:#999; text-align:center;">No hemisphere symmetry summaries found for this query.</p></div>')
+                continue
+            parts.append('<table><thead><tr>'
+                         '<th>Dataset</th>'
+                         '<th>Ipsi Jaccard</th><th>Contra Jaccard</th>'
+                         '<th>Ipsi Conserved/Union</th><th>Contra Conserved/Union</th>'
+                         '<th>Types Conserved/Union</th><th>Counts L/R</th>'
+                         '</tr></thead><tbody>')
+            for dataset in dataset_names:
+                summary = summaries.get(dataset)
+                if not summary:
+                    continue
+                ipsi = summary.get('ipsi', {})
+                contra = summary.get('contra', {})
+                types = summary.get('neuron_types', {})
+                counts = summary.get('hemisphere_counts', {}).get('total', {})
+                ipsi_cons = f"{ipsi.get('conserved', 0)}/{ipsi.get('union', 0)}"
+                contra_cons = f"{contra.get('conserved', 0)}/{contra.get('union', 0)}"
+                types_cons = f"{types.get('types_conserved', 0)}/{types.get('types_union', 0)}"
+                lr_counts = f"{counts.get('L', 0)}/{counts.get('R', 0)}"
+                parts.append(
+                    f'<tr><td><strong>{esc(nickname_map.get(dataset, dataset))}</strong></td>'
+                    f'<td>{float(ipsi.get("jaccard", 0)):.3f}</td>'
+                    f'<td>{float(contra.get("jaccard", 0)):.3f}</td>'
+                    f'<td>{esc(ipsi_cons)}</td>'
+                    f'<td>{esc(contra_cons)}</td>'
+                    f'<td>{esc(types_cons)}</td>'
+                    f'<td>{esc(lr_counts)}</td></tr>')
+            parts.append('</tbody></table></div>')
+    else:
+        parts.append('<div class="card" style="background: #fef3c7; border: 1px solid #f59e0b;"><p style="color: #92400e; margin: 0;">'
+                     '<strong>⚠️ Hemisphere analysis unavailable:</strong> this comparison was not run with '
+                     '<code>separate_hemispheres=True</code> (and symmetry analysis enabled). Hemisphere symmetry is '
+                     'query-independent to enable; set both options in ComparisonParameters to populate per-query summaries.</p></div>')
+    parts.append('</div></div>')
+
+    # Similarity: the Standard four-metric heatmap card per query plus the
+    # per-query pair table with the full shared metric schema. Both consume
+    # the exact same query-keyed similarity frame that feeds the
+    # similarity_by_query.csv used-data export.
+    parts.append('<div id="similarity" class="section"><div class="section-header">🔢 Similarity Matrices</div><div class="section-content"><p class="card">Pairwise metrics are calculated independently for every query row.</p>')
+    sim_pair_columns = ('dataset_1', 'dataset_2', 'jaccard_similarity',
+                        'ruzicka_similarity', 'pearson_correlation',
+                        'edge_rank_correlation', 'cosine_similarity',
+                        'spearman_rank_correlation', 'common_edges')
+    sim_pair_headers = ('Dataset 1', 'Dataset 2', 'Jaccard', 'Ruzicka',
+                        'Pearson', 'Edge Rank', 'Cosine', 'Spearman',
+                        'Common edges')
+    for point_row in point_rows:
+        query_id = point_row['query_id']
+        query_label = point_row['query_label']
+        safe = _query_report_slug(query_id)
+        qdf = similarity_df[similarity_df.get('query_id', pd.Series(dtype=str)).astype(str) == query_id] if not similarity_df.empty and 'query_id' in similarity_df.columns else pd.DataFrame()
+        matrices = _similarity_matrices_from_frame(qdf, dataset_names)
+        parts.append(_similarity_heatmap_card(
+            safe, f"{query_id} — {query_label}",
+            [nickname_map.get(ds, ds) for ds in dataset_names], matrices))
+        parts.append('<div class="card"><h3>Pair metrics</h3><table><thead><tr>')
+        parts.extend(f'<th>{esc(header)}</th>' for header in sim_pair_headers)
+        parts.append('</tr></thead><tbody>')
+        if qdf.empty:
+            parts.append(f'<tr><td colspan="{len(sim_pair_headers)}">No similarity rows available.</td></tr>')
+        else:
+            for _, row in qdf.iterrows():
+                parts.append('<tr>' + ''.join(f'<td>{_query_report_cell(row.get(key))}</td>' for key in sim_pair_columns) + '</tr>')
+        parts.append('</tbody></table><p class="note">Used data: ' + _make_link(os.path.join(used_dir, 'similarity_by_query.csv'), output_root) + f' | query export: {_make_link(os.path.join(output_root, "similarity_matrices", f"similarity_query_{safe}.csv"), output_root)}</p></div>')
+    parts.append('</div></div>')
+
+    # Networks: the exact Standard section generator, driven by query keys
+    # and query-aware data getters. The query is the primary tab axis and
+    # the dataset view shows one dataset across all queries.
+    try:
+        parts.append(_generate_networks_section(
+            analyzer, dataset_names, [], nickname_map,
+            point_keys=[row['query_id'] for row in point_rows],
+            point_labels=[f"{row['query_id']} — {row['query_label']}" for row in point_rows],
+            aligned_network_getter=lambda k: analyzer.get_aligned_data_for_network(
+                query_by_id.get(k, k)),
+            aligned_getter=lambda k: analyzer.get_aligned_data_for_query(
+                query_by_id.get(k, k)),
+            path_getter=lambda k: analyzer._get_path_data_for_query(
+                query_by_id.get(k, k)),
+            mode_labels=('Query', 'Dataset'),
+            tab_label_prefix='',
+            key_noun_plural='queries',
+            key_noun_singular='query'))
+    except Exception as e:
+        parts.append(f'<div id="networks" class="section"><div class="section-header">🕸️ Network Visualizations</div><div class="section-content"><div class="card"><p>Network rendering failed: {esc(str(e))}</p></div></div></div>')
+
+    def render_query_matrix_section(section_id, section_header, intro, table_builder, export_pattern):
+        """Query tabs + per-dataset-across-queries view for one matrix type."""
+        out = [f'<div id="{section_id}" class="section"><div class="section-header">{section_header}</div><div class="section-content">']
+        out.append(f'<p class="card">{intro}</p>')
+        out.append('<div style="margin-bottom: 15px;"><span style="font-weight: 600; margin-right: 10px;">View by:</span>'
+                   f'<button class="tab-btn active" id="{section_id}_mode_query" onclick="switch_{section_id}_mode(\'query\')">Query</button>'
+                   f'<button class="tab-btn" id="{section_id}_mode_dataset" onclick="switch_{section_id}_mode(\'dataset\')">Dataset</button></div>')
+        # By-query view
+        out.append(f'<div id="{section_id}_by_query" class="tabs"><div class="tab-buttons">')
+        for i, row in enumerate(point_rows):
+            active = 'active' if i == 0 else ''
+            out.append(f'<button class="tab-btn {active}" onclick="show_{section_id}_query_tab(\'{_query_report_slug(row["query_id"])}\')">{esc(row["query_id"])}</button>')
+        out.append('</div>')
+        for i, row in enumerate(point_rows):
+            query_id = row['query_id']
+            safe = _query_report_slug(query_id)
+            active = 'active' if i == 0 else ''
+            out.append(f'<div id="{section_id}_query_tab_{safe}" class="tab-content {active}">')
+            caption = (f"{query_id} — {row['query_label']} (requested: "
+                       + ', '.join(f"{nickname_map.get(ds, ds)}={row['requested_thresholds'].get(ds)}"
+                                   for ds in dataset_names) + ')')
+            out.append(table_builder(query_id, caption))
+            out.append('<p class="note">Export: ' + _make_link(os.path.join(results_dir, export_pattern.format(safe=safe)), output_root) + '</p>')
+            out.append('</div>')
+        out.append('</div>')
+        # By-dataset view: one dataset across all queries
+        out.append(f'<div id="{section_id}_by_dataset" class="tabs" style="display: none;"><div class="tab-buttons">')
+        for i, ds in enumerate(dataset_names):
+            active = 'active' if i == 0 else ''
+            nick = nickname_map.get(ds, ds)
+            out.append(f'<button class="tab-btn {active}" onclick="show_{section_id}_dataset_tab(\'{esc(nick)}\')">{esc(nick)}</button>')
+        out.append('</div>')
+        for i, ds in enumerate(dataset_names):
+            nick = nickname_map.get(ds, ds)
+            active = 'active' if i == 0 else ''
+            out.append(f'<div id="{section_id}_dataset_tab_{esc(nick)}" class="tab-content {active}">')
+            out.append(_query_dataset_across_points_table(
+                point_rows, aligned_by_id, path_by_id, ds, dataset_names,
+                nickname_map, section_id))
+            out.append('</div>')
+        out.append('</div>')
+        out.append(f'''
+        <script>
+            function switch_{section_id}_mode(mode) {{
+                document.getElementById('{section_id}_mode_query').classList.toggle('active', mode === 'query');
+                document.getElementById('{section_id}_mode_dataset').classList.toggle('active', mode === 'dataset');
+                document.getElementById('{section_id}_by_query').style.display = mode === 'query' ? 'block' : 'none';
+                document.getElementById('{section_id}_by_dataset').style.display = mode === 'dataset' ? 'block' : 'none';
+            }}
+            function show_{section_id}_query_tab(key) {{
+                document.querySelectorAll('#{section_id}_by_query .tab-content').forEach(el => el.classList.remove('active'));
+                document.querySelectorAll('#{section_id}_by_query .tab-btn').forEach(el => el.classList.remove('active'));
+                document.getElementById('{section_id}_query_tab_' + key).classList.add('active');
+                event.target.classList.add('active');
+            }}
+            function show_{section_id}_dataset_tab(nick) {{
+                document.querySelectorAll('#{section_id}_by_dataset .tab-content').forEach(el => el.classList.remove('active'));
+                document.querySelectorAll('#{section_id}_by_dataset .tab-btn').forEach(el => el.classList.remove('active'));
+                document.getElementById('{section_id}_dataset_tab_' + nick).classList.add('active');
+                event.target.classList.add('active');
+            }}
+        </script>
+        ''')
+        out.append('</div></div>')
+        return ''.join(out)
+
+    parts.append(render_query_matrix_section(
+        'edge-matrices', '🔗 Edge Presence Matrices',
+        'Presence is read from each query\'s own aligned edge matrix; the dataset view shows one dataset across all queries.',
+        lambda query_id, caption: _generate_presence_table(
+            aligned_by_id.get(query_id, pd.DataFrame()), dataset_names,
+            nickname_map, caption_override=caption),
+        'edge_presence_matrix_query_{safe}.csv'))
+
+    parts.append(render_query_matrix_section(
+        'path-matrices', '🛤️ Path Presence Matrices',
+        'Paths follow the Standard report\'s Len column (number of hops); the dataset view shows one dataset across all queries.',
+        lambda query_id, caption: _generate_path_presence_table(
+            analyzer, path_by_id.get(query_id, pd.DataFrame()), dataset_names,
+            nickname_map, caption_override=caption),
+        'path_presence_matrix_query_{safe}.csv'))
+
+    # Conservation: per-query distribution donuts plus the per-query
+    # conserved-graph exports. Query order is a display order, not a
+    # monotone threshold trend, so there is deliberately no trend chart.
+    conservation_colors = [
+        '#22c55e',  # All datasets (green)
+        '#84cc16',  # N-1 (lime)
+        '#eab308',  # N-2 (yellow)
+        '#f97316',  # N-3 (orange)
+        '#ef4444',  # N-4 (red)
+        '#94a3b8',  # unique (gray)
+    ]
+    n_datasets = len(dataset_names)
+    parts.append('<div id="conservation" class="section"><div class="section-header">🏆 Conservation Analysis</div><div class="section-content">')
+    parts.append(f'<p class="card">Edge and path conservation across all {n_datasets} datasets, per query row. Shows the distribution of how many datasets each edge/path appears in.</p>')
+    parts.append('<div style="display: flex; flex-wrap: wrap; gap: 15px; justify-content: center;">')
+    for row in point_rows:
+        query_id = row['query_id']
+        query_label = row['query_label']
+        safe = _query_report_slug(query_id)
+        aligned = aligned_by_id.get(query_id, pd.DataFrame())
+        path_data = path_by_id.get(query_id, pd.DataFrame())
+        available = [ds for ds in dataset_names if ds in aligned.columns]
+        edge_counts = {}
+        if available and not aligned.empty:
+            counts_per_edge = (aligned[available] > 0).sum(axis=1)
+            edge_counts = counts_per_edge[counts_per_edge > 0].value_counts().to_dict()
+        path_counts = {}
+        path_available = [ds for ds in dataset_names if ds in path_data.columns]
+        if path_available and not path_data.empty:
+            counts_per_path = (path_data[path_available] > 0).sum(axis=1)
+            path_counts = counts_per_path[counts_per_path > 0].value_counts().to_dict()
+
+        edge_values = []
+        edge_labels = []
+        edge_colors = []
+        for count in range(n_datasets, 0, -1):
+            if count in edge_counts and edge_counts[count] > 0:
+                edge_values.append(edge_counts[count])
+                if count == n_datasets:
+                    edge_labels.append(f'All {n_datasets} datasets')
+                elif count == 1:
+                    edge_labels.append('Unique (1)')
+                else:
+                    edge_labels.append(f'In {count} datasets')
+                edge_colors.append(conservation_colors[min(n_datasets - count, len(conservation_colors) - 1)])
+        path_values = []
+        path_labels = []
+        path_colors = []
+        for count in range(n_datasets, 0, -1):
+            if count in path_counts and path_counts[count] > 0:
+                path_values.append(path_counts[count])
+                if count == n_datasets:
+                    path_labels.append(f'All {n_datasets} datasets')
+                elif count == 1:
+                    path_labels.append('Unique (1)')
+                else:
+                    path_labels.append(f'In {count} datasets')
+                path_colors.append(conservation_colors[min(n_datasets - count, len(conservation_colors) - 1)])
+
+        parts.append(_render_conservation_donut_card(
+            safe, f"Conservation at {query_id} — {query_label}",
+            edge_values, edge_labels, edge_colors,
+            path_values, path_labels, path_colors,
+            row['total_edges'], row['common_edges'],
+            row['total_paths'], row['common_paths']))
+    parts.append('</div>')
+    parts.append('''<div class="card" style="margin-top: 30px;"><h3>Conserved Graph Visualizations</h3><table><thead><tr><th>Query</th><th>Conserved Paths</th><th>Conserved Reciprocal Graph</th></tr></thead><tbody>''')
+    for row in point_rows:
+        query_id = row['query_id']
+        conserved_path_file = os.path.join(
+            output_root, 'conserved_paths',
+            f'conserved_network_t{query_id}_network.html')
+        conserved_recip_file = os.path.join(
+            output_root, 'conserved_reciprocal_graph',
+            f'conserved_reciprocal_t{query_id}_network.html')
+        parts.append(
+            f'<tr><td><strong>{esc(query_id)}</strong></td>'
+            f'<td>{_make_link(conserved_path_file, output_root)}</td>'
+            f'<td>{_make_link(conserved_recip_file, output_root)}</td></tr>')
+    parts.append('</tbody></table></div></div></div>')
+
+    # Dataset overlap: the shared count/proportion heatmap card per query.
+    parts.append('<div id="overlap-matrices" class="section"><div class="section-header">🔀 Dataset Overlap Matrices</div><div class="section-content">')
+    parts.append('<p class="card">Asymmetric overlap matrices per query. Cell (row, col) shows how many edges/paths from the <strong>row</strong> dataset are also found in the <strong>column</strong> dataset. Diagonal = total count per dataset.</p>')
+    parts.append('<div class="tabs"><div class="tab-buttons">')
+    for i, row in enumerate(point_rows):
+        active = 'active' if i == 0 else ''
+        safe = _query_report_slug(row['query_id'])
+        parts.append(f'<button class="tab-btn {active}" onclick="showOverlapTab(\'{safe}\')">{esc(row["query_id"])}</button>')
+    parts.append('</div>')
+    for i, row in enumerate(point_rows):
+        query_id = row['query_id']
+        safe = _query_report_slug(query_id)
+        aligned = aligned_by_id.get(query_id, pd.DataFrame())
+        path_data = path_by_id.get(query_id, pd.DataFrame())
+        n = len(dataset_names)
+        edge_matrix = [[0 for _ in range(n)] for _ in range(n)]
+        for i1, d1 in enumerate(dataset_names):
+            edges_in_d1 = set(aligned.index[aligned[d1] > 0]) if d1 in aligned.columns else set()
+            edge_matrix[i1][i1] = len(edges_in_d1)
+            for i2, d2 in enumerate(dataset_names):
+                if i1 != i2:
+                    edges_in_d2 = set(aligned.index[aligned[d2] > 0]) if d2 in aligned.columns else set()
+                    edge_matrix[i1][i2] = len(edges_in_d1 & edges_in_d2)
+        path_matrix = [[0 for _ in range(n)] for _ in range(n)]
+        path_available = [ds for ds in dataset_names if ds in path_data.columns]
+        if path_available and not path_data.empty:
+            for i1, d1 in enumerate(dataset_names):
+                paths_in_d1 = set(path_data.index[path_data[d1] > 0]) if d1 in path_data.columns else set()
+                path_matrix[i1][i1] = len(paths_in_d1)
+                for i2, d2 in enumerate(dataset_names):
+                    if i1 != i2:
+                        paths_in_d2 = set(path_data.index[path_data[d2] > 0]) if d2 in path_data.columns else set()
+                        path_matrix[i1][i2] = len(paths_in_d1 & paths_in_d2)
+        parts.append(_render_overlap_point_card(
+            safe, f"Dataset Overlap for {query_id} — {row['query_label']}",
+            [nickname_map.get(ds, ds) for ds in dataset_names],
+            edge_matrix, path_matrix, active=(i == 0)))
+    parts.append('''</div>
+        <script>
+            function showOverlapTab(key) {
+                document.querySelectorAll('#overlap-matrices .tab-content').forEach(el => el.classList.remove('active'));
+                document.querySelectorAll('#overlap-matrices .tab-btn').forEach(el => el.classList.remove('active'));
+                document.getElementById('overlap_tab_' + key).classList.add('active');
+                event.target.classList.add('active');
+            }
+        </script>''')
+    parts.append('</div></div>')
+
+    # Statistics: the shared per-point statistics blocks (identical row
+    # semantics to Standard) per query tab, with requested/applied
+    # provenance, plus the 2x2 similarity-trends plot on the query axis.
+    parts.append('<div id="statistics" class="section"><div class="section-header">📉 Statistics</div><div class="section-content">')
+    parts.append('<p class="card">Detailed statistics per dataset and query. Per-Dataset Statistics use the same definition as the Standard report (aligned edges &gt;0, mean over positive weights); the note above each tab adds each dataset\'s requested threshold.</p>')
+    parts.append('<div class="tabs"><div class="tab-buttons">')
+    for i, row in enumerate(point_rows):
+        active = 'active' if i == 0 else ''
+        safe = _query_report_slug(row['query_id'])
+        parts.append(f'<button class="tab-btn {active}" onclick="showStatsTab(\'{safe}\')">{esc(row["query_id"])}</button>')
+    parts.append('</div>')
+    for i, row in enumerate(point_rows):
+        query_id = row['query_id']
+        safe = _query_report_slug(query_id)
+        active = 'active' if i == 0 else ''
+        parts.append(f'<div id="stats_tab_{safe}" class="tab-content {active}">')
+        prov_line = ', '.join(
+            f"{nickname_map.get(ds, ds)}: requested {row['requested_thresholds'].get(ds)}"
+            for ds in dataset_names)
+        parts.append(f'<p class="note">{esc(query_id)} — {esc(row["query_label"])} | {esc(prov_line)}</p>')
+        parts.append(_stats_blocks_html(
+            aligned_by_id.get(query_id, pd.DataFrame()), dataset_names,
+            nickname_map, f"({query_id} — {row['query_label']})"))
+        parts.append('</div>')
+    parts.append('''</div>
+        <script>
+            function showStatsTab(key) {
+                document.querySelectorAll('#statistics .tab-content').forEach(el => el.classList.remove('active'));
+                document.querySelectorAll('#statistics .tab-btn').forEach(el => el.classList.remove('active'));
+                document.getElementById('stats_tab_' + key).classList.add('active');
+                event.target.classList.add('active');
+            }
+        </script>''')
+    try:
+        parts.append(_generate_similarity_trends_2x2_plot(
+            analyzer, dataset_names, [], nickname_map,
+            point_keys=[row['query_id'] for row in point_rows],
+            point_labels=[f"{row['query_id']} — {row['query_label']}" for row in point_rows],
+            point_similarities={
+                row['query_id']:
+                    similarity_df[similarity_df.get('query_id', pd.Series(dtype=str)).astype(str) == row['query_id']]
+                for row in point_rows},
+            axis_title='Query (display order)',
+            card_title='Similarity Trends Across Query Rows'))
+    except Exception as e:
+        parts.append(f'<div class="card"><p>Similarity trends plot failed: {esc(str(e))}</p></div>')
+    parts.append('</div></div>')
+
+    parts.append(_generate_footer())
+    return ''.join(parts)
+
+
+def _query_dataset_across_points_table(point_rows, aligned_by_id, path_by_id,
+                                       dataset, dataset_names, nickname_map,
+                                       section_id):
+    """Render one dataset's presence/weights across all query rows."""
+    esc = html.escape
+    nick = nickname_map.get(dataset, dataset)
+    is_path = section_id == 'path-matrices'
+    header = 'Path' if is_path else 'Edge'
+    by_key = {}
+    for row in point_rows:
+        data = (path_by_id if is_path else aligned_by_id).get(row['query_id'], pd.DataFrame())
+        if dataset in data.columns and not data.empty:
+            present = data.index[data[dataset] > 0]
+            for key in present:
+                weight = data.loc[key, dataset]
+                if hasattr(weight, 'iloc'):
+                    weight = weight.iloc[0]
+                by_key.setdefault(key, {})[row['query_id']] = weight
+    if not by_key:
+        return (f'<p style="color:#999; text-align:center;">No connections for '
+                f'{esc(nick)} at any query.</p>')
+
+    ordered = sorted(by_key.items(), key=lambda item: str(item[0]))
+    parts = [f'<div style="margin-bottom: 8px; color: var(--primary-color); font-weight: 600;">Dataset: {esc(nick)} (all queries)</div>']
+    parts.append('<div style="overflow-x: auto;"><table><thead><tr>')
+    parts.append(f'<th>{esc(header)}</th>')
+    if is_path:
+        parts.append('<th>Len</th>')
+    parts.extend(f'<th>{esc(row["query_id"])}</th>' for row in point_rows)
+    parts.append('<th>Queries present</th></tr></thead><tbody>')
+    for key, per_query in ordered:
+        count = len(per_query)
+        badge = ('badge-success' if count == len(point_rows)
+                 else 'badge-warning' if count > 1 else 'badge-danger')
+        cells = f'<tr><td><strong>{esc(str(key))}</strong></td>'
+        if is_path:
+            cells += f'<td>{_path_length_from_key(key)}</td>'
+        for row in point_rows:
+            weight = per_query.get(row['query_id'])
+            if weight is not None and weight > 0:
+                cells += (f'<td><span class="presence-check">✔️</span> '
+                          f'{_query_report_cell(weight)}</td>')
+            else:
+                cells += '<td><span class="presence-cross">❌</span></td>'
+        cells += f'<td><span class="badge {badge}">{count}/{len(point_rows)}</span></td></tr>'
+        parts.append(cells)
+    parts.append('</tbody></table></div>')
+    return ''.join(parts)
 
 
 def _generate_html_header() -> str:
@@ -370,33 +1234,112 @@ def _generate_html_header() -> str:
 
 
 def _generate_applied_threshold_banner(analyzer, dataset_names: List[str]) -> str:
-    """Concern 2: in-page banner stating the APPLIED minimal synapse
-    threshold per dataset (Feature G τ collapse). Shown only when at
-    least one dataset was budget-bitten — otherwise the asked thresholds
-    applied unchanged and no banner is warranted."""
-    applied = {}
+    """Render the cross-dataset threshold/bottleneck provenance table.
+
+    ``applied_threshold`` is the canonical equivalent threshold for the
+    materialized output.  It is intentionally displayed beside the
+    StrongestFirst landing ``tau`` and the Edge Budget values so a landing
+    tau is never mistaken for the applied threshold.  The old collapse title
+    is retained for readers/tests that already recognize it.
+    """
     meta_map = getattr(analyzer, '_path_run_meta', {}) or {}
-    for (ds, _t), meta in meta_map.items():
-        if ds not in dataset_names:
-            continue
-        tau = meta.get('tau')
-        if meta.get('budget_bitten') and tau is not None:
-            applied[ds] = max(applied.get(ds, 0), float(tau))
-    if not applied:
+    if not meta_map:
         return ''
-    rows = ''.join(
-        f'<tr><td>{ds}</td><td style="text-align:center;">{applied[ds]:g}</td></tr>'
-        for ds in dataset_names if ds in applied)
+
+    def value(value):
+        if value is None:
+            return '—'
+        if isinstance(value, bool):
+            return str(value)
+        if isinstance(value, float):
+            return f'{value:g}'
+        return str(value)
+
+    rows = []
+    has_provenance = False
+    for ds in dataset_names:
+        thresholds = sorted(
+            threshold for dataset, threshold in meta_map
+            if dataset == ds)
+        for threshold in thresholds:
+            meta = meta_map.get((ds, threshold), {}) or {}
+            # Real post-fix runs carry the canonical field even when no
+            # budget bit.  Legacy fake/old metadata with no applied state
+            # should not create a meaningless banner.
+            if not any([
+                'applied_threshold' in meta,
+                meta.get('tau') is not None,
+                meta.get('strongest_first_tau') is not None,
+                meta.get('budget_bitten'),
+                meta.get('strongest_first_budget_bitten'),
+                meta.get('edge_weight_floor') is not None,
+            ]):
+                continue
+            has_provenance = True
+            if hasattr(analyzer, '_path_provenance_row'):
+                row = analyzer._path_provenance_row(ds, threshold)
+            else:
+                state = dict(meta)
+                row = applied_threshold_provenance(
+                    requested_threshold=state.get(
+                        'requested_threshold', threshold),
+                    strongest_first_tau=state.get(
+                        'strongest_first_tau', state.get('tau')),
+                    strongest_first_budget_bitten=state.get(
+                        'strongest_first_budget_bitten',
+                        state.get('budget_bitten', False)),
+                    strongest_dropped_bottleneck=state.get(
+                        'strongest_dropped_bottleneck'),
+                    tau_canonical=state.get('tau_canonical'),
+                    edge_weight_floor=state.get('edge_weight_floor'),
+                    edge_budget_landing=state.get('edge_budget_landing'),
+                    edge_budget=state.get('edge_budget'),
+                    strongest_retained_bottleneck=state.get(
+                        'strongest_retained_bottleneck'),
+                )
+                row['tau'] = row.get('strongest_first_tau')
+            rows.append(
+                '<tr>' + ''.join(
+                    f'<td>{html.escape(value(cell))}</td>'
+                    for cell in (
+                        ds,
+                        threshold,
+                        row.get('requested_threshold'),
+                        row.get('applied_threshold'),
+                        row.get('applied_threshold_source'),
+                        row.get('strongest_first_budget'),
+                        row.get('strongest_first_budget_bitten'),
+                        row.get('tau', row.get('strongest_first_tau')),
+                        row.get('edge_budget'),
+                        row.get('edge_budget_applied'),
+                        row.get('edge_weight_floor'),
+                        row.get('edge_budget_landing'),
+                        row.get('strongest_dropped_bottleneck'),
+                        row.get('strongest_retained_bottleneck'),
+                        row.get('paths_complete'),
+                    )) + '</tr>')
+    if not has_provenance:
+        return ''
+    # The first table cell is the threshold label; retain a compact table for
+    # the report while keeping every value needed to interpret the run.
+    header = ('<th>Dataset</th><th>Threshold</th><th>Requested</th>'
+              '<th>Applied</th><th>Source</th><th>SF budget</th>'
+              '<th>SF bite</th><th>tau</th><th>Edge budget</th>'
+              '<th>Edge floor applied</th><th>w0</th><th>w1</th>'
+              '<th>w2</th><th>W*</th><th>Complete</th>')
     return (
         '<div style="margin:14px 0; padding:10px 14px; border:1px solid #d9a441;'
         ' background:#fdf6e3; border-radius:6px; font-size:0.95em;">'
-        '<strong>Applied minimal thresholds (StrongestFirst budget reached):</strong>'
+        '<strong>Applied minimal thresholds / threshold provenance:</strong>'
         '<table style="margin-top:6px; border-collapse:collapse;">'
-        f'{rows}</table>'
-        '<div style="margin-top:6px; color:#666;">Each dataset\'s output contains '
-        'exactly the intact paths whose weakest hop is at or above its applied '
-        'threshold — identical to a complete run at that threshold. Lower input '
-        'thresholds were skipped as τ-collapse duplicates of these runs.</div>'
+        f'<tr>{header}</tr>{"".join(rows)}</table>'
+        '<div style="margin-top:6px; color:#666;">Applied is the canonical '
+        'equivalent Min Synapse Count for the materialized output. tau is the '
+        'StrongestFirst landing/collapse bound; SF budget is the effective '
+        'path budget and Edge budget is the graph edge cap; w0 is the Edge Budget floor, '
+        'w1 its landing tier, w2 the strongest dropped bottleneck, and W* the '
+        'strongest retained bottleneck. A skipped row aliases the applied folder.'
+        '</div>'
         '</div>')
 
 
@@ -434,20 +1377,36 @@ def _generate_report_header(analyzer, dataset_names: List[str], thresholds: List
 """
 
 
-def _generate_toc(thresholds: List[int]) -> str:
-    """Generate table of contents."""
-    return """
+def _generate_toc(thresholds: List[int],
+                  include_provenance: bool = False,
+                  include_type_mapping: bool = False) -> str:
+    """Generate the shared table of contents.
+
+    Both report modes render the same section set, so the TOC lists every
+    rendered section. ``include_provenance`` adds the Custom combination
+    mode's ``threshold-provenance`` entry and ``include_type_mapping`` the
+    type-mapping entry (rendered only when auto type mapping is on). The
+    ``thresholds`` argument is retained for call compatibility and is not
+    rendered.
+    """
+    provenance_entry = ('<li><a href="#threshold-provenance">🎯 Applied '
+                        'Thresholds &amp; Bottleneck Provenance</a></li>\n'
+                        if include_provenance else '')
+    type_mapping_entry = ('<li><a href="#type-mapping">🏷️ Type Mapping'
+                          '</a></li>\n' if include_type_mapping else '')
+    return f"""
         <div class="toc">
             <h2>📑 Quick Navigation</h2>
             <ul>
                 <li><a href="#summary">📋 Summary & Key Findings</a></li>
                 <li><a href="#neuron-counts">🧬 Neuron Counts Comparison</a></li>
-                <li><a href="#hemisphere-symmetry">🪞 Hemisphere Symmetry</a></li>
+                {type_mapping_entry}{provenance_entry}<li><a href="#hemisphere-symmetry">🪞 Hemisphere Symmetry</a></li>
                 <li><a href="#similarity">🔢 Similarity Matrices</a></li>
                 <li><a href="#networks">🕸️ Network Visualizations</a></li>
                 <li><a href="#edge-matrices">🔗 Edge Presence Matrices</a></li>
                 <li><a href="#path-matrices">🛤️ Path Presence Matrices</a></li>
                 <li><a href="#conservation">🏆 Conservation Analysis</a></li>
+                <li><a href="#overlap-matrices">🔀 Dataset Overlap Matrices</a></li>
                 <li><a href="#statistics">📉 Statistics</a></li>
             </ul>
         </div>
@@ -1032,6 +1991,148 @@ def _generate_neuron_counts_section(analyzer, dataset_names: List[str],
     return ''.join(html_parts)
 
 
+def _similarity_matrices_from_frame(similarities: pd.DataFrame,
+                                    available: List[str]) -> Dict[str, list]:
+    """Build symmetric per-metric matrices from pairwise similarity rows.
+
+    Shared by the Standard per-threshold section and the Custom per-query
+    section so both render the identical four-metric set.
+    """
+    n = len(available)
+    jaccard = [[1.0 if i == j else None for j in range(n)] for i in range(n)]
+    spearman_sim = [[1.0 if i == j else None for j in range(n)] for i in range(n)]
+    edge_rank_sim = [[1.0 if i == j else None for j in range(n)] for i in range(n)]
+    cosine_sim = [[1.0 if i == j else None for j in range(n)] for i in range(n)]
+    if similarities is not None and not similarities.empty:
+        for _, row in similarities.iterrows():
+            d1, d2 = row['dataset_1'], row['dataset_2']
+            if d1 in available and d2 in available:
+                i1, i2 = available.index(d1), available.index(d2)
+                jac = row.get('jaccard_similarity', None)
+                spearman_val = row.get('spearman_rank_correlation', None)
+                edge_rank_val = row.get('edge_rank_correlation', None)
+                cosine_val = row.get('cosine_similarity', None)
+                if pd.isna(jac): jac = None
+                if pd.isna(edge_rank_val): edge_rank_val = None
+                if pd.isna(cosine_val): cosine_val = None
+                if pd.isna(spearman_val): spearman_val = None
+                jaccard[i1][i2] = jaccard[i2][i1] = jac
+                spearman_sim[i1][i2] = spearman_sim[i2][i1] = spearman_val
+                edge_rank_sim[i1][i2] = edge_rank_sim[i2][i1] = edge_rank_val
+                cosine_sim[i1][i2] = cosine_sim[i2][i1] = cosine_val
+    return {
+        'edge_rank': edge_rank_sim,
+        'cosine': cosine_sim,
+        'jaccard': jaccard,
+        'spearman': spearman_sim,
+    }
+
+
+def _similarity_heatmap_card(dom_key: str, title: str, labels: List[str],
+                             matrices: Dict[str, list]) -> str:
+    """Render one four-metric similarity heatmap card.
+
+    ``dom_key`` must be a DOM-safe string unique within the report (the
+    Standard mode passes the scalar threshold, Custom mode the safe query
+    slug). The chart/annotation logic is shared verbatim by both modes.
+    """
+    cell_size = 50
+    n = len(labels)
+    chart_size = min(n * cell_size + 80, 200)
+    num_metrics = 4
+    max_width_pct = f"{100 // num_metrics}%"
+    edge_rank_sim = matrices['edge_rank']
+    cosine_sim = matrices['cosine']
+    jaccard = matrices['jaccard']
+    spearman_sim = matrices['spearman']
+    return f"""
+                <div class="card">
+                    <h3>{html.escape(title)}</h3>
+
+                    <!-- Metrics in one row -->
+                    <div style="display: flex; flex-wrap: nowrap; gap: 10px; overflow-x: auto; padding: 8px 0;">
+                        <!-- Edge Rank Correlation (union) -->
+                        <div style="flex: 1; min-width: {chart_size}px; max-width: {max_width_pct}; background: #eff6ff; border-radius: 6px; padding: 8px;">
+                            <h5 style="font-size: 10px; margin: 0 0 4px 0; color: #1e40af; text-align: center;">🔷 Edge Rank</h5>
+                            <div id="edge_rank_{dom_key}" style="width: 100%; height: {chart_size}px;"></div>
+                        </div>
+                        <!-- Cosine Similarity (union) -->
+                        <div style="flex: 1; min-width: {chart_size}px; max-width: {max_width_pct}; background: #eff6ff; border-radius: 6px; padding: 8px;">
+                            <h5 style="font-size: 10px; margin: 0 0 4px 0; color: #1e40af; text-align: center;">🔷 Cosine</h5>
+                            <div id="cosine_{dom_key}" style="width: 100%; height: {chart_size}px;"></div>
+                        </div>
+                        <!-- Jaccard -->
+                        <div style="flex: 1; min-width: {chart_size}px; max-width: {max_width_pct}; background: #fef3c7; border-radius: 6px; padding: 8px;">
+                            <h5 style="font-size: 10px; margin: 0 0 4px 0; color: #92400e; text-align: center;">🔶 Jaccard</h5>
+                            <div id="jaccard_{dom_key}" style="width: 100%; height: {chart_size}px;"></div>
+                        </div>
+                        <!-- Spearman (shared) -->
+                        <div style="flex: 1; min-width: {chart_size}px; max-width: {max_width_pct}; background: #fef3c7; border-radius: 6px; padding: 8px;">
+                            <h5 style="font-size: 10px; margin: 0 0 4px 0; color: #92400e; text-align: center;">🔶 Spearman</h5>
+                            <div id="spearman_{dom_key}" style="width: 100%; height: {chart_size}px;"></div>
+                        </div>
+                    </div>
+                    <p style="font-size: 0.75em; color: #64748b; margin-top: 8px; text-align: center;">
+                        🔷 All-edge (compare all edges, 0 for missing) | 🔶 Set-based (shared edges only)
+                    </p>
+                </div>
+                <script>
+                    (function() {{
+                        const labels = {json.dumps(labels)};
+                        const jaccard = {json.dumps(jaccard)};
+                        const edgeRankSim = {json.dumps(edge_rank_sim)};
+                        const cosineSim = {json.dumps(cosine_sim)};
+                        const spearmanSim = {json.dumps(spearman_sim)};
+                        const layout = {{
+                            margin: {{ l: 45, r: 10, t: 10, b: 45 }},
+                            xaxis: {{ tickangle: -45, scaleanchor: 'y', constrain: 'domain', tickfont: {{size: 8}} }},
+                            yaxis: {{ autorange: 'reversed', constrain: 'domain', tickfont: {{size: 8}} }}
+                        }};
+                        // Annotation function for [0, 1] metrics
+                        const makeAnnotations = (data, labels) => data.flatMap((row, i) =>
+                            row.map((val, j) => ({{
+                                x: labels[j], y: labels[i],
+                                text: val === null ? 'N/A' : val.toFixed(2),
+                                showarrow: false,
+                                font: {{ color: (val === null || val > 0.5) ? 'white' : 'black', size: 10 }}
+                            }})));
+                        // Annotation function for [-1, 1] range (Edge Rank, Spearman)
+                        const makeDivergingAnnotations = (data, labels) => data.flatMap((row, i) =>
+                            row.map((val, j) => ({{
+                                x: labels[j], y: labels[i],
+                                text: val === null ? 'N/A' : val.toFixed(2),
+                                showarrow: false,
+                                font: {{ color: (val === null || val > 0) ? 'white' : 'black', size: 10 }}
+                            }})));
+                        // Use consistent green colorscale: higher value = darker green
+                        const greenScale = [[0, '#ffffff'], [0.3, '#c6efce'], [0.6, '#22c55e'], [1, '#166534']];
+                        // Diverging colorscale for [-1, 1]: red (negative) -> white (0) -> green (positive)
+                        const divergingScale = [[0, '#dc2626'], [0.5, '#ffffff'], [1, '#166534']];
+                        // Edge Rank uses diverging scale [-1, 1] (all-edge, blue background)
+                        Plotly.newPlot('edge_rank_{dom_key}', [{{
+                            z: edgeRankSim, x: labels, y: labels, type: 'heatmap',
+                            colorscale: divergingScale, zmin: -1, zmax: 1, showscale: false
+                        }}], {{...layout, annotations: makeDivergingAnnotations(edgeRankSim, labels)}}, {{responsive: true}});
+                        // Cosine uses [0, 1] scale (all-edge, blue background)
+                        Plotly.newPlot('cosine_{dom_key}', [{{
+                            z: cosineSim, x: labels, y: labels, type: 'heatmap',
+                            colorscale: greenScale, zmin: 0, zmax: 1, showscale: false
+                        }}], {{...layout, annotations: makeAnnotations(cosineSim, labels)}}, {{responsive: true}});
+                        // Jaccard uses [0, 1] scale (set-based, yellow background)
+                        Plotly.newPlot('jaccard_{dom_key}', [{{
+                            z: jaccard, x: labels, y: labels, type: 'heatmap',
+                            colorscale: greenScale, zmin: 0, zmax: 1, showscale: false
+                        }}], {{...layout, annotations: makeAnnotations(jaccard, labels)}}, {{responsive: true}});
+                        // Spearman uses diverging scale [-1, 1] (set-based, yellow background)
+                        Plotly.newPlot('spearman_{dom_key}', [{{
+                            z: spearmanSim, x: labels, y: labels, type: 'heatmap',
+                            colorscale: divergingScale, zmin: -1, zmax: 1, showscale: false
+                        }}], {{...layout, annotations: makeDivergingAnnotations(spearmanSim, labels)}}, {{responsive: true}});
+                    }})();
+                </script>
+"""
+
+
 def _generate_similarity_section(analyzer, dataset_names: List[str], thresholds: List[int],
                                   nickname_map: Dict[str, str]) -> str:
     """Generate similarity matrices section with square cell heatmaps for all metrics."""
@@ -1099,131 +2200,15 @@ def _generate_similarity_section(analyzer, dataset_names: List[str], thresholds:
         except Exception:
             pass
         
-        n = len(available)
-        # Initialize similarity matrices for 4 key metrics
-        # Diagonal is always 1.0 for self-comparison
-        jaccard = [[1.0 if i == j else None for j in range(n)] for i in range(n)]
-        spearman_sim = [[1.0 if i == j else None for j in range(n)] for i in range(n)]
-        edge_rank_sim = [[1.0 if i == j else None for j in range(n)] for i in range(n)]
-        cosine_sim = [[1.0 if i == j else None for j in range(n)] for i in range(n)]
-        
-        for _, row in similarities.iterrows():
-            d1, d2 = row['dataset_1'], row['dataset_2']
-            if d1 in available and d2 in available:
-                i1, i2 = available.index(d1), available.index(d2)
-                jac = row.get('jaccard_similarity', None)
-                # Spearman returns raw correlation in [-1, 1], NaN for undefined
-                spearman_val = row.get('spearman_rank_correlation', None)
-                # Edge rank now returns raw correlation in [-1, 1], NaN for undefined
-                edge_rank_val = row.get('edge_rank_correlation', None)
-                cosine_val = row.get('cosine_similarity', None)
-                # Handle NaN values - use None to show as "N/A"
-                if pd.isna(jac): jac = None
-                if pd.isna(edge_rank_val): edge_rank_val = None
-                if pd.isna(cosine_val): cosine_val = None
-                if pd.isna(spearman_val): spearman_val = None
-                # Fill symmetric matrices
-                jaccard[i1][i2] = jaccard[i2][i1] = jac
-                spearman_sim[i1][i2] = spearman_sim[i2][i1] = spearman_val
-                edge_rank_sim[i1][i2] = edge_rank_sim[i2][i1] = edge_rank_val
-                cosine_sim[i1][i2] = cosine_sim[i2][i1] = cosine_val
-        
         # Calculate cell size for square cells - smaller to fit 4 in a row
-        cell_size = 50
-        # Chart size scales with number of datasets but caps for 4-in-row layout
-        chart_size = min(n * cell_size + 80, 200)
-        
-        # Always display 4 metrics: Edge Rank, Cosine, Jaccard, Spearman
-        num_metrics = 4
-        max_width_pct = f"{100 // num_metrics}%" if num_metrics <= 4 else "25%"
-        
-        # Display metrics in a single row with responsive layout
-        html_parts.append(f"""
-                <div class="card">
-                    <h3>Threshold = {threshold}</h3>
-                    
-                    <!-- Metrics in one row -->
-                    <div style="display: flex; flex-wrap: nowrap; gap: 10px; overflow-x: auto; padding: 8px 0;">
-                        <!-- Edge Rank Correlation (union) -->
-                        <div style="flex: 1; min-width: {chart_size}px; max-width: {max_width_pct}; background: #eff6ff; border-radius: 6px; padding: 8px;">
-                            <h5 style="font-size: 10px; margin: 0 0 4px 0; color: #1e40af; text-align: center;">🔷 Edge Rank</h5>
-                            <div id="edge_rank_{threshold}" style="width: 100%; height: {chart_size}px;"></div>
-                        </div>
-                        <!-- Cosine Similarity (union) -->
-                        <div style="flex: 1; min-width: {chart_size}px; max-width: {max_width_pct}; background: #eff6ff; border-radius: 6px; padding: 8px;">
-                            <h5 style="font-size: 10px; margin: 0 0 4px 0; color: #1e40af; text-align: center;">🔷 Cosine</h5>
-                            <div id="cosine_{threshold}" style="width: 100%; height: {chart_size}px;"></div>
-                        </div>
-                        <!-- Jaccard -->
-                        <div style="flex: 1; min-width: {chart_size}px; max-width: {max_width_pct}; background: #fef3c7; border-radius: 6px; padding: 8px;">
-                            <h5 style="font-size: 10px; margin: 0 0 4px 0; color: #92400e; text-align: center;">🔶 Jaccard</h5>
-                            <div id="jaccard_{threshold}" style="width: 100%; height: {chart_size}px;"></div>
-                        </div>
-                        <!-- Spearman (shared) -->
-                        <div style="flex: 1; min-width: {chart_size}px; max-width: {max_width_pct}; background: #fef3c7; border-radius: 6px; padding: 8px;">
-                            <h5 style="font-size: 10px; margin: 0 0 4px 0; color: #92400e; text-align: center;">🔶 Spearman</h5>
-                            <div id="spearman_{threshold}" style="width: 100%; height: {chart_size}px;"></div>
-                        </div>
-                    </div>
-                    <p style="font-size: 0.75em; color: #64748b; margin-top: 8px; text-align: center;">
-                        🔷 All-edge (compare all edges, 0 for missing) | 🔶 Set-based (shared edges only)
-                    </p>
-                </div>
-                <script>
-                    (function() {{
-                        const labels = {json.dumps(labels)};
-                        const jaccard = {json.dumps(jaccard)};
-                        const edgeRankSim = {json.dumps(edge_rank_sim)};
-                        const cosineSim = {json.dumps(cosine_sim)};
-                        const spearmanSim = {json.dumps(spearman_sim)};
-                        const layout = {{
-                            margin: {{ l: 45, r: 10, t: 10, b: 45 }},
-                            xaxis: {{ tickangle: -45, scaleanchor: 'y', constrain: 'domain', tickfont: {{size: 8}} }},
-                            yaxis: {{ autorange: 'reversed', constrain: 'domain', tickfont: {{size: 8}} }}
-                        }};
-                        // Annotation function for [0, 1] metrics
-                        const makeAnnotations = (data, labels) => data.flatMap((row, i) => 
-                            row.map((val, j) => ({{
-                                x: labels[j], y: labels[i], 
-                                text: val === null ? 'N/A' : val.toFixed(2), 
-                                showarrow: false,
-                                font: {{ color: (val === null || val > 0.5) ? 'white' : 'black', size: 10 }}
-                            }})));
-                        // Annotation function for [-1, 1] range (Edge Rank, Spearman)
-                        const makeDivergingAnnotations = (data, labels) => data.flatMap((row, i) => 
-                            row.map((val, j) => ({{
-                                x: labels[j], y: labels[i], 
-                                text: val === null ? 'N/A' : val.toFixed(2), 
-                                showarrow: false,
-                                font: {{ color: (val === null || val > 0) ? 'white' : 'black', size: 10 }}
-                            }})));
-                        // Use consistent green colorscale: higher value = darker green
-                        const greenScale = [[0, '#ffffff'], [0.3, '#c6efce'], [0.6, '#22c55e'], [1, '#166534']];
-                        // Diverging colorscale for [-1, 1]: red (negative) -> white (0) -> green (positive)
-                        const divergingScale = [[0, '#dc2626'], [0.5, '#ffffff'], [1, '#166534']];
-                        // Edge Rank uses diverging scale [-1, 1] (all-edge, blue background)
-                        Plotly.newPlot('edge_rank_{threshold}', [{{
-                            z: edgeRankSim, x: labels, y: labels, type: 'heatmap',
-                            colorscale: divergingScale, zmin: -1, zmax: 1, showscale: false
-                        }}], {{...layout, annotations: makeDivergingAnnotations(edgeRankSim, labels)}}, {{responsive: true}});
-                        // Cosine uses [0, 1] scale (all-edge, blue background)
-                        Plotly.newPlot('cosine_{threshold}', [{{
-                            z: cosineSim, x: labels, y: labels, type: 'heatmap',
-                            colorscale: greenScale, zmin: 0, zmax: 1, showscale: false
-                        }}], {{...layout, annotations: makeAnnotations(cosineSim, labels)}}, {{responsive: true}});
-                        // Jaccard uses [0, 1] scale (set-based, yellow background)
-                        Plotly.newPlot('jaccard_{threshold}', [{{
-                            z: jaccard, x: labels, y: labels, type: 'heatmap',
-                            colorscale: greenScale, zmin: 0, zmax: 1, showscale: false
-                        }}], {{...layout, annotations: makeAnnotations(jaccard, labels)}}, {{responsive: true}});
-                        // Spearman uses diverging scale [-1, 1] (set-based, yellow background)
-                        Plotly.newPlot('spearman_{threshold}', [{{
-                            z: spearmanSim, x: labels, y: labels, type: 'heatmap',
-                            colorscale: divergingScale, zmin: -1, zmax: 1, showscale: false
-                        }}], {{...layout, annotations: makeDivergingAnnotations(spearmanSim, labels)}}, {{responsive: true}});
-                    }})();
-                </script>
-""")
+        # (handled inside the shared heatmap card helper)
+
+        # Always display 4 metrics: Edge Rank, Cosine, Jaccard, Spearman —
+        # through the shared card so the Custom query section stays in
+        # lockstep with this layout.
+        matrices = _similarity_matrices_from_frame(similarities, available)
+        html_parts.append(_similarity_heatmap_card(
+            str(threshold), f"Threshold = {threshold}", labels, matrices))
     
     html_parts.append('</div></div>')
     return ''.join(html_parts)
@@ -1335,10 +2320,50 @@ def _generate_hemisphere_symmetry_section(analyzer, dataset_names: List[str], th
 
 
 def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: List[int],
-                                nickname_map: Dict[str, str]) -> str:
-    """Generate networks section with conservation-colored edges and role-colored nodes."""
-    thresholds_json = json.dumps(thresholds)
-    num_networks = len(thresholds)
+                                nickname_map: Dict[str, str],
+                                point_keys: List = None,
+                                point_labels: List[str] = None,
+                                aligned_network_getter=None,
+                                aligned_getter=None,
+                                path_getter=None,
+                                mode_labels: Tuple[str, str] = ('Threshold', 'Dataset'),
+                                tab_label_prefix: str = 't = ',
+                                key_noun_plural: str = 'thresholds',
+                                key_noun_singular: str = 'threshold') -> str:
+    """Generate networks section with conservation-colored edges and role-colored nodes.
+
+    Both report modes share this generator. Standard mode passes only the
+    scalar ``thresholds``; Custom combination mode additionally passes
+    ``point_keys`` (query ids used for DOM/JS state), ``point_labels`` and
+    query-aware data getters, and the mode/button wording adapts through
+    ``mode_labels``/``tab_label_prefix``/``key_noun_*``.
+    """
+    point_keys = list(thresholds) if point_keys is None else list(point_keys)
+    if point_labels is None:
+        point_labels = [f"{tab_label_prefix}{k}" for k in point_keys]
+    js_keys = [json.dumps(k) for k in point_keys]
+    key_label_by_key = {k: point_labels[i] for i, k in enumerate(point_keys)}
+
+    def resolve_network_aligned(k):
+        if aligned_network_getter is not None:
+            return aligned_network_getter(k)
+        return analyzer.get_aligned_data_for_network(k)
+
+    def resolve_aligned(k):
+        if aligned_getter is not None:
+            return aligned_getter(k)
+        return analyzer.get_aligned_data(k)
+
+    def resolve_paths(k):
+        if path_getter is not None:
+            try:
+                return path_getter(k)
+            except Exception:
+                return None
+        return None
+
+    thresholds_json = json.dumps(point_keys)
+    num_networks = len(point_keys)
     # Responsive grid: 1 col on small, 2 cols if 2+ networks
     grid_cols = min(num_networks, 2)
     separate_hemispheres = bool(getattr(getattr(analyzer, 'parameters', None), 'separate_hemispheres', False))
@@ -1367,8 +2392,8 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
             is_source_equals_target = True
             # Count self-edges across all thresholds
             self_edge_count = 0
-            for threshold in thresholds:
-                aligned = analyzer.get_aligned_data_for_network(threshold)
+            for k in point_keys:
+                aligned = resolve_network_aligned(k)
                 if not aligned.empty:
                     for edge_key in aligned.index:
                         if ' -> ' in str(edge_key):
@@ -1851,32 +2876,37 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
     # Mode toggle (Threshold vs Dataset)
     nicknames = [nickname_map[d] for d in dataset_names]
     nicknames_json = json.dumps(nicknames)
-    
+
     html_parts.append(f'''
                 <!-- Toggle Mode Selector -->
                 <div style="margin-bottom: 15px;">
                     <span style="font-weight: 600; margin-right: 10px;">View by:</span>
-                    <button class="tab-btn active" id="network_mode_threshold" onclick="switchNetworkMode('threshold')">Threshold</button>
-                    <button class="tab-btn" id="network_mode_dataset" onclick="switchNetworkMode('dataset')">Dataset</button>
+                    <button class="tab-btn active" id="network_mode_threshold" onclick="switchNetworkMode('threshold')">{mode_labels[0]}</button>
+                    <button class="tab-btn" id="network_mode_dataset" onclick="switchNetworkMode('dataset')">{mode_labels[1]}</button>
                 </div>
 ''')
-    
+
     # By Threshold View
     html_parts.append('<div id="network_by_threshold" class="tabs"><div class="tab-buttons">')
-    for i, t in enumerate(thresholds):
+    for i, (k, js_key, k_label) in enumerate(zip(point_keys, js_keys, point_labels)):
         active = 'active' if i == 0 else ''
-        html_parts.append(f'<button class="tab-btn {active}" onclick="showNetworkTab({t})">t = {t}</button>')
+        html_parts.append(f'<button class="tab-btn {active}" onclick="showNetworkTab({js_key})">{html.escape(k_label)}</button>')
     html_parts.append('</div>')
-    
+
     # Network containers (only first visible initially)
-    for i, threshold in enumerate(thresholds):
+    for i, k in enumerate(point_keys):
         active = 'active' if i == 0 else ''
-        html_parts.append(f'<div id="network_tab_{threshold}" class="tab-content {active}">')
-        html_parts.append(_generate_conservation_network(analyzer, dataset_names, threshold, nickname_map))
+        html_parts.append(f'<div id="network_tab_{_js_ident(k)}" class="tab-content {active}">')
+        html_parts.append(_generate_conservation_network(
+            analyzer, dataset_names, k, nickname_map,
+            key=k, display_label=point_labels[i],
+            aligned_override=(resolve_network_aligned(k)
+                              if aligned_network_getter else None),
+            path_override=(resolve_paths(k) if path_getter else None)))
         html_parts.append('</div>')
-    
+
     html_parts.append('</div>')  # Close network_by_threshold tabs div
-    
+
     # By Dataset View
     html_parts.append('<div id="network_by_dataset" class="tabs" style="display: none;"><div class="tab-buttons">')
     for i, d in enumerate(dataset_names):
@@ -1884,13 +2914,18 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
         nick = nickname_map[d]
         html_parts.append(f'<button class="tab-btn {active}" onclick="showNetworkDatasetTab(\'{nick}\')">{nick}</button>')
     html_parts.append('</div>')
-    
-    # Dataset-centric network containers (showing all thresholds for one dataset)
+
+    # Dataset-centric network containers (showing all points for one dataset)
     for i, d in enumerate(dataset_names):
         nick = nickname_map[d]
         active = 'active' if i == 0 else ''
         html_parts.append(f'<div id="network_dataset_tab_{nick}" class="tab-content {active}">')
-        html_parts.append(_generate_dataset_network(analyzer, d, thresholds, nickname_map))
+        html_parts.append(_generate_dataset_network(
+            analyzer, d, thresholds, nickname_map,
+            keys=point_keys, key_labels=point_labels,
+            aligned_getter=aligned_getter, path_getter=path_getter,
+            key_noun_plural=key_noun_plural,
+            key_noun_singular=key_noun_singular))
         html_parts.append('</div>')
     
     html_parts.append('</div>')  # Close network_by_dataset tabs div
@@ -2194,21 +3229,43 @@ def _filter_aligned_by_paths(aligned: pd.DataFrame, path_data: pd.DataFrame,
 
 
 def _generate_conservation_network(analyzer, dataset_names: List[str], threshold: int,
-                                    nickname_map: Dict[str, str], max_edges: int = 500) -> str:
+                                    nickname_map: Dict[str, str], max_edges: int = 500,
+                                    key=None, display_label: str = None,
+                                    aligned_override: pd.DataFrame = None,
+                                    path_override: pd.DataFrame = None) -> str:
     """Generate network with conservation-based edge coloring and role-based node coloring.
-    
+
     Args:
         max_edges: Maximum number of edges to show in the network (default 500).
                    Edges are selected from top paths to preserve path connectivity.
+        key: Comparison-point key used in DOM ids and JS state. Defaults to the
+             scalar ``threshold`` so Standard reports are unchanged; Custom
+             combination mode passes the safe query slug.
+        display_label: Card title. Defaults to the historical
+             "Network at Threshold = {threshold}".
+        aligned_override: Pre-resolved aligned edges (query-aware callers);
+             when omitted the Standard threshold accessor is used.
+        path_override: Pre-resolved path data (query-aware callers).
     """
-    aligned = analyzer.get_aligned_data_for_network(threshold)
-    
+    point_key = threshold if key is None else key
+    dom_key = str(point_key)
+    js_key = json.dumps(point_key)
+    card_title = display_label if display_label is not None \
+        else f"Network at Threshold = {threshold}"
+    if aligned_override is not None:
+        aligned = aligned_override
+    else:
+        aligned = analyzer.get_aligned_data_for_network(threshold)
+
     # Get path data for this threshold to filter by top paths
-    path_data = None
-    try:
-        path_data = analyzer._get_path_data_for_threshold(threshold)
-    except Exception:
-        pass
+    if path_override is not None:
+        path_data = path_override
+    else:
+        path_data = None
+        try:
+            path_data = analyzer._get_path_data_for_threshold(threshold)
+        except Exception:
+            pass
     
     # Filter aligned data using path-based approach
     aligned = _filter_aligned_by_paths(aligned, path_data, dataset_names, max_edges)
@@ -2670,7 +3727,7 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
             })
             node_counter += 1
     
-    div_id = f"network_{threshold}"
+    div_id = f"network_{dom_key}"
     nodes_json = json.dumps(nodes)
     edges_json = json.dumps(edges)
     conserved_ids_json = json.dumps(conserved_edge_ids)
@@ -2712,28 +3769,28 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     
     return f'''
         <div class="card">
-            <h3>Network at Threshold = {threshold}</h3>
+            <h3>{html.escape(card_title)}</h3>
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
                 <div style="color: var(--secondary-color);">
                     <strong>{len(nodes)}</strong> neurons | <strong>{len(edges)}</strong> edges{conserved_info}{unique_info}{dead_end_info}
                 </div>
                 <div style="display: flex; gap: 8px;">
-                    <button id="filter_btn_{threshold}" onclick="toggleNetworkFilter({threshold})" 
-                        style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color); 
+                    <button id="filter_btn_{dom_key}" onclick="toggleNetworkFilter({js_key})"
+                        style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color);
                                background: var(--secondary-color); color: white; cursor: pointer; font-size: 12px; white-space: nowrap;">
                         🌐 Show All
                     </button>
-                    <button id="deadend_btn_{threshold}" onclick="toggleDeadEndNodes({threshold})" 
-                        style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color); 
+                    <button id="deadend_btn_{dom_key}" onclick="toggleDeadEndNodes({js_key})"
+                        style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color);
                                background: var(--secondary-color); color: white; cursor: pointer; font-size: 12px; white-space: nowrap;">
                         👁️ Show Dead-ends
                     </button>
-                    <button id="physics_btn_{threshold}" onclick="toggleNetworkPhysics({threshold})" 
-                        style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color); 
+                    <button id="physics_btn_{dom_key}" onclick="toggleNetworkPhysics({js_key})"
+                        style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color);
                                background: var(--secondary-color); color: white; cursor: pointer; font-size: 12px; white-space: nowrap;">
                         📌 Static Mode
                     </button>
-                    <button id="mirror_btn_{threshold}" onclick="toggleHemisphereMirror({threshold})" {mirror_disabled_attr}
+                    <button id="mirror_btn_{dom_key}" onclick="toggleHemisphereMirror({js_key})" {mirror_disabled_attr}
                         title="{mirror_btn_title}"
                         style="{mirror_btn_style}">
                         🪞 Mirror Hemispheres
@@ -2801,7 +3858,7 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
                 }}, 200);
                 
                 // Register with global toggle (store original data for filtering)
-                window.allNetworks[{threshold}] = {{
+                window.allNetworks[{js_key}] = {{
                     network: network,
                     nodes: nodes,
                     edges: edges,
@@ -2813,10 +3870,10 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
                     deadEndNodeIds: deadEndNodeIds,
                     nodeRoles: nodeRoles
                 }};
-                
+
                 // Auto-enable the mirror layout when Separate Hemispheres (L/R) is on
-                if (window.hemisphereMirrorEnabled[{threshold}]) {{
-                    applyHemisphereMirror({threshold});
+                if (window.hemisphereMirrorEnabled[{js_key}]) {{
+                    applyHemisphereMirror({js_key});
                 }}
             }})();
         </script>
@@ -2824,26 +3881,35 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
 
 
 def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
-                               nickname_map: Dict[str, str], max_edges: int = 500) -> str:
-    """Generate network visualization for a single dataset across all thresholds.
-    
-    Shows unique edges with conservation-style coloring based on how many thresholds
-    the edge appears at. Hover shows weights at all threshold levels.
-    
-    Args:
-        max_edges: Maximum number of edges to show (default 500).
-                   Edges are selected from top paths to preserve path connectivity.
+                               nickname_map: Dict[str, str], max_edges: int = 500,
+                               keys: List = None, key_labels: List[str] = None,
+                               aligned_getter=None, path_getter=None,
+                               key_noun_plural: str = 'thresholds',
+                               key_noun_singular: str = 'threshold') -> str:
+    """Generate network visualization for a single dataset across all points.
+
+    Standard mode iterates the scalar ``thresholds``; Custom combination mode
+    passes ``keys`` (query ids), ``key_labels`` and query-aware getters so the
+    same cross-point view is rendered over the query axis.
     """
+    point_keys = list(thresholds) if keys is None else list(keys)
+    if key_labels is None:
+        key_labels = [f"t={k}" for k in point_keys]
+    key_label_by_key = {k: key_labels[i] for i, k in enumerate(point_keys)}
+    num_thresholds = len(point_keys)
+
     nick = nickname_map[dataset]
-    num_thresholds = len(thresholds)
-    
-    # Get path data for filtering (use first threshold with data)
+
+    # Get path data for filtering (use first point with data)
     all_path_edges = set()
-    for threshold in thresholds:
+    for k in point_keys:
         try:
-            path_data = analyzer._get_path_data_for_threshold(threshold)
+            if path_getter is not None:
+                path_data = path_getter(k)
+            else:
+                path_data = analyzer._get_path_data_for_threshold(k)
             if path_data is not None and not path_data.empty:
-                # Get edges from top paths for this threshold
+                # Get edges from top paths for this point
                 edges_from_paths = _extract_edges_from_paths(path_data, [dataset], max_paths=int(max_edges * 2))
                 all_path_edges.update(edges_from_paths)
         except Exception:
@@ -2856,21 +3922,24 @@ def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
     # First pass: get total weights per edge for prioritization
     edge_total_weights = {}
     
-    for threshold in thresholds:
-        aligned = analyzer.get_aligned_data(threshold)
+    for k in point_keys:
+        if aligned_getter is not None:
+            aligned = aligned_getter(k)
+        else:
+            aligned = analyzer.get_aligned_data(k)
         if dataset not in aligned.columns:
             continue
-        
+
         # Vectorized extraction of edges
         valid_mask = aligned[dataset] > 0
         for edge_key in aligned.loc[valid_mask].index:
             if ' -> ' not in str(edge_key):
                 continue
-            
+
             # If we have path edges, filter to only those
             if all_path_edges and edge_key not in all_path_edges:
                 continue
-                
+
             parts = str(edge_key).split(' -> ')
             source, target = parts[0], parts[1] if len(parts) > 1 else ''
             weight = aligned.loc[edge_key, dataset]
@@ -2883,7 +3952,7 @@ def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
                 if edge_tuple not in edge_weights:
                     edge_weights[edge_tuple] = {}
                     edge_total_weights[edge_tuple] = 0
-                edge_weights[edge_tuple][threshold] = weight
+                edge_weights[edge_tuple][k] = weight
                 edge_total_weights[edge_tuple] += weight
     
     # Limit to top edges if still too many
@@ -2898,7 +3967,8 @@ def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
         all_nodes.add(target)
     
     if not all_nodes:
-        return f'<div class="card"><p>No connections for {nick} at any threshold.</p></div>'
+        return (f'<div class="card"><p>No connections for {nick} at any '
+                f'{key_noun_singular}.</p></div>')
     
     # Get source and target neurons for role coloring
     source_neurons = set()
@@ -2977,33 +4047,33 @@ def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
     # gray (1 threshold) -> orange (some) -> green (all thresholds)
     edges = []
     edge_id = 0
-    edges_by_threshold = {t: [] for t in thresholds}  # Track which edges appear at each threshold
-    conserved_edge_ids = []  # Edges at ALL thresholds
-    unique_edge_ids = []  # Edges at only 1 threshold
-    
+    edges_by_key = {k: [] for k in point_keys}  # Track which edges appear at each point
+    conserved_edge_ids = []  # Edges at ALL points
+    unique_edge_ids = []  # Edges at only 1 point
+
     for (source, target), t_weights in edge_weights.items():
         thresholds_present = len(t_weights)
-        
+
         # Conservation-style coloring
         if thresholds_present == num_thresholds:
-            color = '#22c55e'  # All thresholds - green
-            conservation = 'All thresholds'
+            color = '#22c55e'  # All points - green
+            conservation = f'All {key_noun_plural}'
             conserved_edge_ids.append(edge_id)
         elif thresholds_present > 1:
             color = '#f59e0b'  # Partial - orange
-            conservation = f'{thresholds_present}/{num_thresholds} thresholds'
+            conservation = f'{thresholds_present}/{num_thresholds} {key_noun_plural}'
         else:
             color = '#94a3b8'  # Unique - gray
-            conservation = '1 threshold only'
+            conservation = f'1 {key_noun_singular} only'
             unique_edge_ids.append(edge_id)
-        
-        # Build hover with all threshold weights
+
+        # Build hover with all point weights
         hover_lines = [f"{source} → {target}", f"Conservation: {conservation}"]
-        for t in thresholds:
-            w = t_weights.get(t, 0)
+        for k in point_keys:
+            w = t_weights.get(k, 0)
             status = f"{int(w)}" if w > 0 else "—"
-            hover_lines.append(f"t={t}: {status}")
-        
+            hover_lines.append(f"{key_label_by_key[k]}: {status}")
+
         edges.append({
             'id': edge_id,
             'from': node_ids[source],
@@ -3011,20 +4081,20 @@ def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
             'color': {'color': color, 'highlight': color},
             'width': 2 + min(thresholds_present, 3),
             'title': '\n'.join(hover_lines),
-            'thresholds': list(t_weights.keys())  # Store which thresholds this edge appears at
+            'thresholds': list(t_weights.keys())  # Store which points this edge appears at
         })
-        
-        # Track edges by threshold for filtering
-        for t in t_weights.keys():
-            edges_by_threshold[t].append(edge_id)
-        
+
+        # Track edges by point for filtering
+        for k in t_weights.keys():
+            edges_by_key[k].append(edge_id)
+
         edge_id += 1
-    
+
     div_id = f"network_{nick}_dataset"
     nodes_json = json.dumps(nodes)
     edges_json = json.dumps(edges)
-    edges_by_threshold_json = json.dumps({str(t): ids for t, ids in edges_by_threshold.items()})
-    thresholds_json = json.dumps(thresholds)
+    edges_by_threshold_json = json.dumps({str(_js_ident(k)): ids for k, ids in edges_by_key.items()})
+    thresholds_json = json.dumps(point_keys)
     conserved_ids_json = json.dumps(conserved_edge_ids)
     unique_ids_json = json.dumps(unique_edge_ids)
     dead_end_node_ids = [node_ids[label] for label in dead_end_nodes if label in node_ids]
@@ -3047,16 +4117,21 @@ def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
     stats_parts = [s for s in [conserved_info, partial_info, unique_info, dead_end_info] if s]
     stats_str = ' | '.join(stats_parts)
     
-    # Build threshold filter buttons
+    # Build point filter buttons
     threshold_buttons = []
-    for t in thresholds:
-        count = len(edges_by_threshold[t])
-        btn_html = f'<button id="t_btn_{nick}_{t}" class="threshold-filter-btn active" onclick="toggleDatasetThreshold(\'{nick}\', {t})" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-color); background: #22c55e; color: white; cursor: pointer; font-size: 11px; margin-right: 4px;">t={t} ({count})</button>'
+    for k in point_keys:
+        count = len(edges_by_key[k])
+        k_dom = _js_ident(k)
+        btn_html = (f'<button id="t_btn_{nick}_{k_dom}" class="threshold-filter-btn active" '
+                    f'onclick="toggleDatasetThreshold(\'{nick}\', {json.dumps(k_dom)})" '
+                    f'style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-color); '
+                    f'background: #22c55e; color: white; cursor: pointer; font-size: 11px; margin-right: 4px;">'
+                    f'{html.escape(key_label_by_key[k])} ({count})</button>')
         threshold_buttons.append(btn_html)
-    
+
     return f'''
         <div class="card">
-            <h3>{nick}: Cross-Threshold Network</h3>
+            <h3>{nick}: Cross-{key_noun_plural.title()} Network</h3>
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
                 <div style="color: var(--secondary-color);">
                     <strong>{len(nodes)}</strong> neurons | <strong>{total_edges}</strong> edges | {stats_str}
@@ -3075,7 +4150,7 @@ def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
                 </div>
             </div>
             <div style="margin-bottom: 10px;">
-                <strong>Show thresholds:</strong> {''.join(threshold_buttons)}
+                <strong>Show {key_noun_plural}:</strong> {''.join(threshold_buttons)}
                 <span style="margin-left: 10px; color: var(--secondary-color);">
                     <span style="color: #22c55e;">● All</span>
                     <span style="color: #f59e0b; margin-left: 8px;">● Partial</span>
@@ -3615,6 +4690,13 @@ def _normalize_path_key(key) -> str:
     return ' -> '.join(nodes)
 
 
+def _path_length_from_key(key) -> int:
+    """Return the number of edges represented by a displayed path key."""
+    # A path with N nodes has N - 1 edges.  Path rows are expected to contain
+    # at least one edge; keep the lower bound defensive for malformed keys.
+    return max(1, _normalize_path_key(key).count(' -> '))
+
+
 def _generate_path_matrices_section(analyzer, dataset_names: List[str], thresholds: List[int],
                                      nickname_map: Dict[str, str]) -> str:
     """Generate path presence matrices section with dual toggle (by threshold and by dataset)."""
@@ -3712,28 +4794,40 @@ def _generate_path_matrices_section(analyzer, dataset_names: List[str], threshol
     return ''.join(html_parts)
 
 
-def _generate_path_presence_table(analyzer, data: pd.DataFrame, dataset_names: List[str], 
-                                   nickname_map: Dict[str, str], threshold: int = None) -> str:
+def _generate_path_presence_table(analyzer, data: pd.DataFrame, dataset_names: List[str],
+                                   nickname_map: Dict[str, str], threshold: int = None,
+                                   caption_override: str = None) -> str:
     """Generate path presence table with hop weights shown as -w1-w2- with min bolded."""
     if data is None or data.empty:
         return '<p>No data available.</p>'
-    
+
     available = [d for d in dataset_names if d in data.columns]
     if not available:
         return '<p>No datasets available.</p>'
-    
-    # Get path hop weights from analyzer
-    path_hop_weights = analyzer._get_path_hop_weights_for_threshold(threshold) if hasattr(analyzer, '_get_path_hop_weights_for_threshold') else {}
+
+    # Get path hop weights from analyzer.  Query keys have no scalar
+    # threshold to read hop weights from, so they fall back to no hop
+    # annotations rather than failing.
+    path_hop_weights = {}
+    if threshold is not None and hasattr(analyzer, '_get_path_hop_weights_for_threshold'):
+        try:
+            path_hop_weights = analyzer._get_path_hop_weights_for_threshold(threshold) or {}
+        except Exception:
+            path_hop_weights = {}
     # §3: normalized lookup so display/canonical key variants meet
     hop_by_norm = {_normalize_path_key(k): v for k, v in path_hop_weights.items()}
 
     # Add threshold caption if provided
-    threshold_caption = f'<div style="margin-bottom: 8px; color: var(--primary-color); font-weight: 600;">Threshold = {threshold}</div>' if threshold is not None else ''
+    if caption_override is not None:
+        threshold_caption = (f'<div style="margin-bottom: 8px; color: var(--primary-color); '
+                             f'font-weight: 600;">{html.escape(caption_override)}</div>')
+    else:
+        threshold_caption = f'<div style="margin-bottom: 8px; color: var(--primary-color); font-weight: 600;">Threshold = {threshold}</div>' if threshold is not None else ''
 
-    html = [f'{threshold_caption}<div style="overflow-x: auto;"><table><thead><tr><th>Item</th><th>Len</th>']
+    parts = [f'{threshold_caption}<div style="overflow-x: auto;"><table><thead><tr><th>Item</th><th>Len</th>']
     for d in available:
-        html.append(f'<th>{nickname_map[d]}</th>')
-    html.append('<th>Conservation</th></tr></thead><tbody>')
+        parts.append(f'<th>{nickname_map[d]}</th>')
+    parts.append('<th>Conservation</th></tr></thead><tbody>')
 
     # Sort by conservation (count of datasets present), then by total weight
     data_copy = data.copy()
@@ -3754,12 +4848,16 @@ def _generate_path_presence_table(analyzer, data: pd.DataFrame, dataset_names: L
         if any(_hop_hits):
             length = max(len(h) for h in _hop_hits if h)
         else:
-            length = _norm.count(' -> ') + 1
+            length = _path_length_from_key(key)
 
-        html.append(f'<tr><td><strong>{key}</strong></td><td>{length}</td>')
+        parts.append(f'<tr><td><strong>{key}</strong></td><td>{length}</td>')
         for d in available:
             w = row.get(d, 0)
-            safe_name = analyzer.parameters._sanitize_name(d)
+            try:
+                safe_name = analyzer.parameters._sanitize_name(d)
+            except AttributeError:
+                import re as _re
+                safe_name = _re.sub(r'[^A-Za-z0-9_-]+', '_', str(d))
             if w > 0:
                 # Get hop weights if available (normalized lookup, §3)
                 hop_weights_str = ''
@@ -3775,13 +4873,13 @@ def _generate_path_presence_table(analyzer, data: pd.DataFrame, dataset_names: L
                                 formatted.append(str(int(hw)))
                         hop_weights_str = f'<br><span style="font-size: 0.8em; color: #666;">-{"-".join(formatted)}-</span>'
                 
-                html.append(f'<td><span class="presence-check">✔️</span> {int(w)}{hop_weights_str}</td>')
+                parts.append(f'<td><span class="presence-check">✔️</span> {int(w)}{hop_weights_str}</td>')
             else:
-                html.append('<td><span class="presence-cross">❌</span></td>')
-        html.append(f'<td><span class="badge {badge}">{count}/{len(available)}</span></td></tr>')
+                parts.append('<td><span class="presence-cross">❌</span></td>')
+        parts.append(f'<td><span class="badge {badge}">{count}/{len(available)}</span></td></tr>')
     
-    html.append('</tbody></table></div>')
-    return ''.join(html)
+    parts.append('</tbody></table></div>')
+    return ''.join(parts)
 
 
 def _generate_path_dataset_table(analyzer, dataset: str, thresholds: List[int], 
@@ -3854,8 +4952,7 @@ def _generate_path_dataset_table(analyzer, dataset: str, thresholds: List[int],
         # §3: path length = max hop-list length across thresholds, else
         # derived from the key's hop count.
         _lens = [len(h) for (_w, h) in weights.values() if h]
-        _norm_key = _normalize_path_key(path_key)
-        length = max(_lens) if _lens else (_norm_key.count(' -> ') + 1)
+        length = max(_lens) if _lens else _path_length_from_key(path_key)
         html.append(f'<tr><td><strong>{path_key}</strong></td><td>{length}</td>')
         for t in thresholds:
             w, hop_weights = weights.get(t, (0, []))
@@ -3879,23 +4976,28 @@ def _generate_path_dataset_table(analyzer, dataset: str, thresholds: List[int],
     return ''.join(html)
 
 
-def _generate_presence_table(data: pd.DataFrame, dataset_names: List[str], 
-                              nickname_map: Dict[str, str], threshold: int = None) -> str:
+def _generate_presence_table(data: pd.DataFrame, dataset_names: List[str],
+                              nickname_map: Dict[str, str], threshold: int = None,
+                              caption_override: str = None) -> str:
     """Generate a presence matrix table with optional threshold indication."""
     if data is None or data.empty:
         return '<p>No data available.</p>'
-    
+
     available = [d for d in dataset_names if d in data.columns]
     if not available:
         return '<p>No datasets available.</p>'
-    
+
     # Add threshold caption if provided
-    threshold_caption = f'<div style="margin-bottom: 8px; color: var(--primary-color); font-weight: 600;">Threshold = {threshold}</div>' if threshold is not None else ''
+    if caption_override is not None:
+        threshold_caption = (f'<div style="margin-bottom: 8px; color: var(--primary-color); '
+                             f'font-weight: 600;">{html.escape(caption_override)}</div>')
+    else:
+        threshold_caption = f'<div style="margin-bottom: 8px; color: var(--primary-color); font-weight: 600;">Threshold = {threshold}</div>' if threshold is not None else ''
     
-    html = [f'{threshold_caption}<div style="overflow-x: auto;"><table><thead><tr><th>Item</th>']
+    parts = [f'{threshold_caption}<div style="overflow-x: auto;"><table><thead><tr><th>Item</th>']
     for d in available:
-        html.append(f'<th>{nickname_map[d]}</th>')
-    html.append('<th>Conservation</th></tr></thead><tbody>')
+        parts.append(f'<th>{nickname_map[d]}</th>')
+    parts.append('<th>Conservation</th></tr></thead><tbody>')
     
     # Sort by conservation (count of datasets present), then by total weight
     data_copy = data.copy()
@@ -3909,17 +5011,96 @@ def _generate_presence_table(data: pd.DataFrame, dataset_names: List[str],
         count = sum(1 for d in available if row.get(d, 0) > 0)
         badge = 'badge-success' if count == len(available) else 'badge-warning' if count > 1 else 'badge-danger'
         
-        html.append(f'<tr><td><strong>{key}</strong></td>')
+        parts.append(f'<tr><td><strong>{key}</strong></td>')
         for d in available:
             w = row.get(d, 0)
             if w > 0:
-                html.append(f'<td><span class="presence-check">✔️</span> {int(w)}</td>')
+                parts.append(f'<td><span class="presence-check">✔️</span> {int(w)}</td>')
             else:
-                html.append('<td><span class="presence-cross">❌</span></td>')
-        html.append(f'<td><span class="badge {badge}">{count}/{len(available)}</span></td></tr>')
+                parts.append('<td><span class="presence-cross">❌</span></td>')
+        parts.append(f'<td><span class="badge {badge}">{count}/{len(available)}</span></td></tr>')
     
-    html.append('</tbody></table></div>')
-    return ''.join(html)
+    parts.append('</tbody></table></div>')
+    return ''.join(parts)
+
+
+def _render_conservation_donut_card(dom_key: str, title: str,
+                                    edge_values: List, edge_labels: List[str],
+                                    edge_colors: List[str],
+                                    path_values: List, path_labels: List[str],
+                                    path_colors: List[str],
+                                    total_edges: int, common_edges: int,
+                                    total_paths: int, common_paths: int) -> str:
+    """Render one conservation-distribution card (edge/path donuts).
+
+    Shared by the Standard per-threshold section (``dom_key`` = scalar
+    threshold) and the Custom per-query section (``dom_key`` = safe query
+    slug).
+    """
+    er = (common_edges / total_edges * 100) if total_edges > 0 else 0
+    pr = (common_paths / total_paths * 100) if total_paths > 0 else 0
+    return f'''
+            <div class="card" style="min-width: 350px;">
+                <h3 style="font-size: 1rem; margin-bottom: 10px;">{html.escape(title)}</h3>
+                <div style="display: flex; flex-wrap: wrap; gap: 10px; justify-content: center;">
+                    <div id="cons_edge_{dom_key}" style="flex: 1; min-width: 160px; max-width: 200px; height: 220px;"></div>
+                    <div id="cons_path_{dom_key}" style="flex: 1; min-width: 160px; max-width: 200px; height: 220px;"></div>
+                </div>
+                <div style="text-align: center; color: var(--secondary-color); font-size: 0.8rem; margin-top: 8px;">
+                    Edges: {common_edges}/{total_edges} ({er:.1f}%) | Paths: {common_paths}/{total_paths} ({pr:.1f}%)
+                </div>
+            </div>
+            <script>
+                (function() {{
+                    const edgeValues = {json.dumps(edge_values)};
+                    const edgeLabels = {json.dumps(edge_labels)};
+                    const edgeColors = {json.dumps(edge_colors)};
+                    const pathValues = {json.dumps(path_values)};
+                    const pathLabels = {json.dumps(path_labels)};
+                    const pathColors = {json.dumps(path_colors)};
+
+                    if (edgeValues.length > 0) {{
+                        Plotly.newPlot('cons_edge_{dom_key}', [{{
+                            values: edgeValues,
+                            labels: edgeLabels,
+                            type: 'pie',
+                            hole: 0.4,
+                            marker: {{ colors: edgeColors }},
+                            textinfo: 'percent',
+                            textposition: 'inside',
+                            textfont: {{ size: 10 }},
+                            hoverinfo: 'label+value+percent'
+                        }}], {{
+                            title: {{ text: 'Edges', font: {{ size: 12 }} }},
+                            showlegend: false,
+                            margin: {{ t: 30, b: 10, l: 10, r: 10 }}
+                        }}, {{responsive: true}});
+                    }} else {{
+                        document.getElementById('cons_edge_{dom_key}').innerHTML = '<p style="text-align:center;color:#999;">No edge data</p>';
+                    }}
+
+                    if (pathValues.length > 0) {{
+                        Plotly.newPlot('cons_path_{dom_key}', [{{
+                            values: pathValues,
+                            labels: pathLabels,
+                            type: 'pie',
+                            hole: 0.4,
+                            marker: {{ colors: pathColors }},
+                            textinfo: 'percent',
+                            textposition: 'inside',
+                            textfont: {{ size: 10 }},
+                            hoverinfo: 'label+value+percent'
+                        }}], {{
+                            title: {{ text: 'Paths', font: {{ size: 12 }} }},
+                            showlegend: false,
+                            margin: {{ t: 30, b: 10, l: 10, r: 10 }}
+                        }}, {{responsive: true}});
+                    }} else {{
+                        document.getElementById('cons_path_{dom_key}').innerHTML = '<p style="text-align:center;color:#999;">No path data</p>';
+                    }}
+                }})();
+            </script>
+'''
 
 
 def _generate_conservation_section(analyzer, dataset_names: List[str], thresholds: List[int],
@@ -4083,79 +5264,12 @@ def _generate_conservation_section(analyzer, dataset_names: List[str], threshold
         kf = key_findings.get(threshold, {})
         te, ce = kf.get('total_edges', 0), kf.get('common_edges', 0)
         tp, cp = kf.get('total_paths', 0), kf.get('common_paths', 0)
-        er = (ce / te * 100) if te > 0 else 0
-        pr = (cp / tp * 100) if tp > 0 else 0
-        
-        # Convert to JSON for JavaScript
-        edge_values_json = json.dumps(edge_values)
-        edge_labels_json = json.dumps(edge_labels)
-        edge_colors_json = json.dumps(edge_colors)
-        path_values_json = json.dumps(path_values)
-        path_labels_json = json.dumps(path_labels)
-        path_colors_json = json.dumps(path_colors)
-        
-        html_parts.append(f'''
-            <div class="card" style="min-width: 350px;">
-                <h3 style="font-size: 1rem; margin-bottom: 10px;">Conservation at Threshold = {threshold}</h3>
-                <div style="display: flex; flex-wrap: wrap; gap: 10px; justify-content: center;">
-                    <div id="cons_edge_{threshold}" style="flex: 1; min-width: 160px; max-width: 200px; height: 220px;"></div>
-                    <div id="cons_path_{threshold}" style="flex: 1; min-width: 160px; max-width: 200px; height: 220px;"></div>
-                </div>
-                <div style="text-align: center; color: var(--secondary-color); font-size: 0.8rem; margin-top: 8px;">
-                    Edges: {ce}/{te} ({er:.1f}%) | Paths: {cp}/{tp} ({pr:.1f}%)
-                </div>
-            </div>
-            <script>
-                (function() {{
-                    const edgeValues = {edge_values_json};
-                    const edgeLabels = {edge_labels_json};
-                    const edgeColors = {edge_colors_json};
-                    const pathValues = {path_values_json};
-                    const pathLabels = {path_labels_json};
-                    const pathColors = {path_colors_json};
-                    
-                    if (edgeValues.length > 0) {{
-                        Plotly.newPlot('cons_edge_{threshold}', [{{
-                            values: edgeValues, 
-                            labels: edgeLabels,
-                            type: 'pie', 
-                            hole: 0.4, 
-                            marker: {{ colors: edgeColors }},
-                            textinfo: 'percent',
-                            textposition: 'inside',
-                            textfont: {{ size: 10 }},
-                            hoverinfo: 'label+value+percent'
-                        }}], {{ 
-                            title: {{ text: 'Edges', font: {{ size: 12 }} }}, 
-                            showlegend: false,
-                            margin: {{ t: 30, b: 10, l: 10, r: 10 }} 
-                        }}, {{responsive: true}});
-                    }} else {{
-                        document.getElementById('cons_edge_{threshold}').innerHTML = '<p style="text-align:center;color:#999;">No edge data</p>';
-                    }}
-                    
-                    if (pathValues.length > 0) {{
-                        Plotly.newPlot('cons_path_{threshold}', [{{
-                            values: pathValues, 
-                            labels: pathLabels,
-                            type: 'pie', 
-                            hole: 0.4, 
-                            marker: {{ colors: pathColors }},
-                            textinfo: 'percent',
-                            textposition: 'inside',
-                            textfont: {{ size: 10 }},
-                            hoverinfo: 'label+value+percent'
-                        }}], {{ 
-                            title: {{ text: 'Paths', font: {{ size: 12 }} }}, 
-                            showlegend: false,
-                            margin: {{ t: 30, b: 10, l: 10, r: 10 }} 
-                        }}, {{responsive: true}});
-                    }} else {{
-                        document.getElementById('cons_path_{threshold}').innerHTML = '<p style="text-align:center;color:#999;">No path data</p>';
-                    }}
-                }})();
-            </script>
-''')
+
+        html_parts.append(_render_conservation_donut_card(
+            str(threshold), f"Conservation at Threshold = {threshold}",
+            edge_values, edge_labels, edge_colors,
+            path_values, path_labels, path_colors,
+            te, ce, tp, cp))
     
     # Links to conserved graph visualizations
     html_parts.append('''
@@ -4199,6 +5313,233 @@ def _generate_conservation_section(analyzer, dataset_names: List[str], threshold
         </div>
     ''')
     return ''.join(html_parts)
+
+
+def _js_ident(key) -> str:
+    """Sanitize a comparison-point key into a valid JS identifier."""
+    import re
+    ident = re.sub(r'[^A-Za-z0-9_]', '_', str(key))
+    return ident or 'point'
+
+
+def _render_overlap_point_card(dom_key: str, title: str, labels: List[str],
+                               edge_overlap: list, path_overlap: list,
+                               chart_size: int = 450,
+                               active: bool = False) -> str:
+    """Render one overlap tab: edge/path Plotly heatmaps with a
+    count/proportion toggle.
+
+    Shared by the Standard per-threshold section (``dom_key`` = scalar
+    threshold) and the Custom per-query section (``dom_key`` = safe query
+    slug). DOM ids are ``overlap_tab_{dom_key}``, ``edge_overlap_{dom_key}``,
+    ``path_overlap_{dom_key}``; the toggle updater is
+    ``window.updateOverlapMode_{js_ident}``.
+    """
+    js_ident = _js_ident(dom_key)
+    edge_overlap_json = json.dumps(edge_overlap)
+    path_overlap_json = json.dumps(path_overlap)
+    labels_json = json.dumps(labels)
+    active_cls = 'active' if active else ''
+    return f'''
+            <div id="overlap_tab_{dom_key}" class="tab-content {active_cls}">
+                <div class="card">
+                    <h3>{html.escape(title)}</h3>
+                    <div style="margin-bottom: 15px; text-align: center;">
+                        <label style="margin-right: 20px; cursor: pointer;">
+                            <input type="radio" name="overlap_mode_{dom_key}" value="count" checked
+                                   onclick="updateOverlapMode_{js_ident}('count')"> Show Count
+                        </label>
+                        <label style="cursor: pointer;">
+                            <input type="radio" name="overlap_mode_{dom_key}" value="proportion"
+                                   onclick="updateOverlapMode_{js_ident}('proportion')"> Show Proportion
+                        </label>
+                    </div>
+                    <div style="display: flex; flex-wrap: wrap; gap: 30px; justify-content: center;">
+                        <div style="width: {chart_size}px;">
+                            <h5 style="text-align: center; margin-bottom: 8px; color: var(--secondary-color);">Edge Overlap</h5>
+                            <div id="edge_overlap_{dom_key}" style="width: {chart_size}px; height: {chart_size}px;"></div>
+                        </div>
+                        <div style="width: {chart_size}px;">
+                            <h5 style="text-align: center; margin-bottom: 8px; color: var(--secondary-color);">Path Overlap</h5>
+                            <div id="path_overlap_{dom_key}" style="width: {chart_size}px; height: {chart_size}px;"></div>
+                        </div>
+                    </div>
+                    <p style="font-size: 0.8em; color: #64748b; margin-top: 10px; text-align: center;">
+                        Read as: edges/paths from <strong>row</strong> dataset found in <strong>column</strong> dataset.
+                        Diagonal = total in that dataset.
+                    </p>
+                </div>
+            </div>
+            <script>
+                (function() {{
+                    const labels = {labels_json};
+                    const edgeOverlap = {edge_overlap_json};
+                    const pathOverlap = {path_overlap_json};
+
+                    // Compute proportion matrices (row-normalized: what % of row's edges/paths are in col)
+                    const edgeProportion = edgeOverlap.map((row, i) =>
+                        row.map((val, j) => {{
+                            const diag = edgeOverlap[i][i];
+                            return diag > 0 ? val / diag : 0;
+                        }})
+                    );
+                    const pathProportion = pathOverlap.map((row, i) =>
+                        row.map((val, j) => {{
+                            const diag = pathOverlap[i][i];
+                            return diag > 0 ? val / diag : 0;
+                        }})
+                    );
+
+                    // Create text annotations for count mode
+                    const edgeTextCount = edgeOverlap.map((row, i) =>
+                        row.map((val, j) => {{
+                            const diag = edgeOverlap[i][i];
+                            const pct = diag > 0 ? (val / diag * 100).toFixed(0) : 0;
+                            return i === j ? String(val) : val + ' (' + pct + '%)';
+                        }})
+                    );
+                    const pathTextCount = pathOverlap.map((row, i) =>
+                        row.map((val, j) => {{
+                            const diag = pathOverlap[i][i];
+                            const pct = diag > 0 ? (val / diag * 100).toFixed(0) : 0;
+                            return i === j ? String(val) : val + ' (' + pct + '%)';
+                        }})
+                    );
+
+                    // Create text annotations for proportion mode
+                    const edgeTextProp = edgeProportion.map((row, i) =>
+                        row.map((val, j) => (val * 100).toFixed(1) + '%')
+                    );
+                    const pathTextProp = pathProportion.map((row, i) =>
+                        row.map((val, j) => (val * 100).toFixed(1) + '%')
+                    );
+
+                    // Square matrix layout with fixed aspect ratio and no grid
+                    const baseLayout = {{
+                        xaxis: {{
+                            tickangle: -45,
+                            side: 'bottom',
+                            tickfont: {{size: 11}},
+                            constrain: 'domain',
+                            showgrid: false,
+                            zeroline: false
+                        }},
+                        yaxis: {{
+                            autorange: 'reversed',
+                            tickfont: {{size: 11}},
+                            scaleanchor: 'x',
+                            scaleratio: 1,
+                            showgrid: false,
+                            zeroline: false
+                        }},
+                        margin: {{ l: 100, r: 30, t: 30, b: 100 }},
+                        width: {chart_size},
+                        height: {chart_size},
+                        paper_bgcolor: 'rgba(0,0,0,0)',
+                        plot_bgcolor: 'rgba(0,0,0,0)'
+                    }};
+
+                    // Store current mode
+                    window.overlapMode_{js_ident} = 'count';
+
+                    // Update function for toggling modes
+                    window.updateOverlapMode_{js_ident} = function(mode) {{
+                        window.overlapMode_{js_ident} = mode;
+
+                        if (mode === 'count') {{
+                            // Count mode
+                            Plotly.react('edge_overlap_{dom_key}', [{{
+                                z: edgeOverlap,
+                                x: labels,
+                                y: labels,
+                                type: 'heatmap',
+                                colorscale: [[0, '#f8fafc'], [0.5, '#93c5fd'], [1, '#2563eb']],
+                                text: edgeTextCount,
+                                texttemplate: '%{{text}}',
+                                textfont: {{ size: 10 }},
+                                hovertemplate: '%{{y}} in %{{x}}: %{{z}} edges<extra></extra>',
+                                showscale: true,
+                                colorbar: {{ title: 'Count', len: 0.5 }}
+                            }}], baseLayout);
+
+                            Plotly.react('path_overlap_{dom_key}', [{{
+                                z: pathOverlap,
+                                x: labels,
+                                y: labels,
+                                type: 'heatmap',
+                                colorscale: [[0, '#f8fafc'], [0.5, '#c4b5fd'], [1, '#8b5cf6']],
+                                text: pathTextCount,
+                                texttemplate: '%{{text}}',
+                                textfont: {{ size: 10 }},
+                                hovertemplate: '%{{y}} in %{{x}}: %{{z}} paths<extra></extra>',
+                                showscale: true,
+                                colorbar: {{ title: 'Count', len: 0.5 }}
+                            }}], baseLayout);
+                        }} else {{
+                            // Proportion mode (row-normalized)
+                            Plotly.react('edge_overlap_{dom_key}', [{{
+                                z: edgeProportion,
+                                x: labels,
+                                y: labels,
+                                type: 'heatmap',
+                                colorscale: [[0, '#f8fafc'], [0.5, '#93c5fd'], [1, '#2563eb']],
+                                text: edgeTextProp,
+                                texttemplate: '%{{text}}',
+                                textfont: {{ size: 10 }},
+                                hovertemplate: '%{{y}} in %{{x}}: %{{z:.1%}} of row edges<extra></extra>',
+                                showscale: true,
+                                colorbar: {{ title: 'Proportion', len: 0.5, tickformat: '.0%' }},
+                                zmin: 0, zmax: 1
+                            }}], baseLayout);
+
+                            Plotly.react('path_overlap_{dom_key}', [{{
+                                z: pathProportion,
+                                x: labels,
+                                y: labels,
+                                type: 'heatmap',
+                                colorscale: [[0, '#f8fafc'], [0.5, '#c4b5fd'], [1, '#8b5cf6']],
+                                text: pathTextProp,
+                                texttemplate: '%{{text}}',
+                                textfont: {{ size: 10 }},
+                                hovertemplate: '%{{y}} in %{{x}}: %{{z:.1%}} of row paths<extra></extra>',
+                                showscale: true,
+                                colorbar: {{ title: 'Proportion', len: 0.5, tickformat: '.0%' }},
+                                zmin: 0, zmax: 1
+                            }}], baseLayout);
+                        }}
+                    }};
+
+                    // Initial plot in count mode
+                    Plotly.newPlot('edge_overlap_{dom_key}', [{{
+                        z: edgeOverlap,
+                        x: labels,
+                        y: labels,
+                        type: 'heatmap',
+                        colorscale: [[0, '#f8fafc'], [0.5, '#93c5fd'], [1, '#2563eb']],
+                        text: edgeTextCount,
+                        texttemplate: '%{{text}}',
+                        textfont: {{ size: 10 }},
+                        hovertemplate: '%{{y}} in %{{x}}: %{{z}} edges<extra></extra>',
+                        showscale: true,
+                        colorbar: {{ title: 'Count', len: 0.5 }}
+                    }}], baseLayout, {{responsive: false}});
+
+                    Plotly.newPlot('path_overlap_{dom_key}', [{{
+                        z: pathOverlap,
+                        x: labels,
+                        y: labels,
+                        type: 'heatmap',
+                        colorscale: [[0, '#f8fafc'], [0.5, '#c4b5fd'], [1, '#8b5cf6']],
+                        text: pathTextCount,
+                        texttemplate: '%{{text}}',
+                        textfont: {{ size: 10 }},
+                        hovertemplate: '%{{y}} in %{{x}}: %{{z}} paths<extra></extra>',
+                        showscale: true,
+                        colorbar: {{ title: 'Count', len: 0.5 }}
+                    }}], baseLayout, {{responsive: false}});
+                }})();
+            </script>
+'''
 
 
 def _generate_overlap_matrices_section(analyzer, dataset_names: List[str], thresholds: List[int],
@@ -4274,216 +5615,12 @@ def _generate_overlap_matrices_section(analyzer, dataset_names: List[str], thres
         except Exception as e:
             pass  # Path data may not be available
         
-        # Calculate chart size - make matrices larger (~1/3 page width) and square
-        # For a 1600px max-width container with padding, aim for ~450px per matrix
-        chart_size = 450  # Fixed size for square matrices
-        
+        # Render the count/proportion heatmap card through the shared
+        # helper so the Custom query section stays in lockstep.
         labels = [nickname_map[d] for d in available]
-        edge_overlap_json = json.dumps(edge_overlap)
-        path_overlap_json = json.dumps(path_overlap)
-        labels_json = json.dumps(labels)
-        
-        active = 'active' if i == 0 else ''
-        html_parts.append(f'''
-            <div id="overlap_tab_{threshold}" class="tab-content {active}">
-                <div class="card">
-                    <h3>Dataset Overlap at Threshold = {threshold}</h3>
-                    <div style="margin-bottom: 15px; text-align: center;">
-                        <label style="margin-right: 20px; cursor: pointer;">
-                            <input type="radio" name="overlap_mode_{threshold}" value="count" checked 
-                                   onclick="updateOverlapMode_{threshold}('count')"> Show Count
-                        </label>
-                        <label style="cursor: pointer;">
-                            <input type="radio" name="overlap_mode_{threshold}" value="proportion" 
-                                   onclick="updateOverlapMode_{threshold}('proportion')"> Show Proportion
-                        </label>
-                    </div>
-                    <div style="display: flex; flex-wrap: wrap; gap: 30px; justify-content: center;">
-                        <div style="width: {chart_size}px;">
-                            <h5 style="text-align: center; margin-bottom: 8px; color: var(--secondary-color);">Edge Overlap</h5>
-                            <div id="edge_overlap_{threshold}" style="width: {chart_size}px; height: {chart_size}px;"></div>
-                        </div>
-                        <div style="width: {chart_size}px;">
-                            <h5 style="text-align: center; margin-bottom: 8px; color: var(--secondary-color);">Path Overlap</h5>
-                            <div id="path_overlap_{threshold}" style="width: {chart_size}px; height: {chart_size}px;"></div>
-                        </div>
-                    </div>
-                    <p style="font-size: 0.8em; color: #64748b; margin-top: 10px; text-align: center;">
-                        Read as: edges/paths from <strong>row</strong> dataset found in <strong>column</strong> dataset.
-                        Diagonal = total in that dataset.
-                    </p>
-                </div>
-            </div>
-            <script>
-                (function() {{
-                    const labels_{threshold} = {labels_json};
-                    const edgeOverlap_{threshold} = {edge_overlap_json};
-                    const pathOverlap_{threshold} = {path_overlap_json};
-                    
-                    // Compute proportion matrices (row-normalized: what % of row's edges/paths are in col)
-                    const edgeProportion_{threshold} = edgeOverlap_{threshold}.map((row, i) => 
-                        row.map((val, j) => {{
-                            const diag = edgeOverlap_{threshold}[i][i];
-                            return diag > 0 ? val / diag : 0;
-                        }})
-                    );
-                    const pathProportion_{threshold} = pathOverlap_{threshold}.map((row, i) => 
-                        row.map((val, j) => {{
-                            const diag = pathOverlap_{threshold}[i][i];
-                            return diag > 0 ? val / diag : 0;
-                        }})
-                    );
-                    
-                    // Create text annotations for count mode
-                    const edgeTextCount_{threshold} = edgeOverlap_{threshold}.map((row, i) => 
-                        row.map((val, j) => {{
-                            const diag = edgeOverlap_{threshold}[i][i];
-                            const pct = diag > 0 ? (val / diag * 100).toFixed(0) : 0;
-                            return i === j ? String(val) : val + ' (' + pct + '%)';
-                        }})
-                    );
-                    const pathTextCount_{threshold} = pathOverlap_{threshold}.map((row, i) => 
-                        row.map((val, j) => {{
-                            const diag = pathOverlap_{threshold}[i][i];
-                            const pct = diag > 0 ? (val / diag * 100).toFixed(0) : 0;
-                            return i === j ? String(val) : val + ' (' + pct + '%)';
-                        }})
-                    );
-                    
-                    // Create text annotations for proportion mode
-                    const edgeTextProp_{threshold} = edgeProportion_{threshold}.map((row, i) => 
-                        row.map((val, j) => (val * 100).toFixed(1) + '%')
-                    );
-                    const pathTextProp_{threshold} = pathProportion_{threshold}.map((row, i) => 
-                        row.map((val, j) => (val * 100).toFixed(1) + '%')
-                    );
-                    
-                    // Square matrix layout with fixed aspect ratio and no grid
-                    const baseLayout = {{
-                        xaxis: {{ 
-                            tickangle: -45, 
-                            side: 'bottom', 
-                            tickfont: {{size: 11}}, 
-                            constrain: 'domain',
-                            showgrid: false,
-                            zeroline: false
-                        }},
-                        yaxis: {{ 
-                            autorange: 'reversed', 
-                            tickfont: {{size: 11}}, 
-                            scaleanchor: 'x', 
-                            scaleratio: 1,
-                            showgrid: false,
-                            zeroline: false
-                        }},
-                        margin: {{ l: 100, r: 30, t: 30, b: 100 }},
-                        width: {chart_size},
-                        height: {chart_size},
-                        paper_bgcolor: 'rgba(0,0,0,0)',
-                        plot_bgcolor: 'rgba(0,0,0,0)'
-                    }};
-                    
-                    // Store current mode
-                    window.overlapMode_{threshold} = 'count';
-                    
-                    // Update function for toggling modes
-                    window.updateOverlapMode_{threshold} = function(mode) {{
-                        window.overlapMode_{threshold} = mode;
-                        
-                        if (mode === 'count') {{
-                            // Count mode
-                            Plotly.react('edge_overlap_{threshold}', [{{
-                                z: edgeOverlap_{threshold},
-                                x: labels_{threshold},
-                                y: labels_{threshold},
-                                type: 'heatmap',
-                                colorscale: [[0, '#f8fafc'], [0.5, '#93c5fd'], [1, '#2563eb']],
-                                text: edgeTextCount_{threshold},
-                                texttemplate: '%{{text}}',
-                                textfont: {{ size: 10 }},
-                                hovertemplate: '%{{y}} in %{{x}}: %{{z}} edges<extra></extra>',
-                                showscale: true,
-                                colorbar: {{ title: 'Count', len: 0.5 }}
-                            }}], baseLayout);
-                            
-                            Plotly.react('path_overlap_{threshold}', [{{
-                                z: pathOverlap_{threshold},
-                                x: labels_{threshold},
-                                y: labels_{threshold},
-                                type: 'heatmap',
-                                colorscale: [[0, '#f8fafc'], [0.5, '#c4b5fd'], [1, '#8b5cf6']],
-                                text: pathTextCount_{threshold},
-                                texttemplate: '%{{text}}',
-                                textfont: {{ size: 10 }},
-                                hovertemplate: '%{{y}} in %{{x}}: %{{z}} paths<extra></extra>',
-                                showscale: true,
-                                colorbar: {{ title: 'Count', len: 0.5 }}
-                            }}], baseLayout);
-                        }} else {{
-                            // Proportion mode (row-normalized)
-                            Plotly.react('edge_overlap_{threshold}', [{{
-                                z: edgeProportion_{threshold},
-                                x: labels_{threshold},
-                                y: labels_{threshold},
-                                type: 'heatmap',
-                                colorscale: [[0, '#f8fafc'], [0.5, '#93c5fd'], [1, '#2563eb']],
-                                text: edgeTextProp_{threshold},
-                                texttemplate: '%{{text}}',
-                                textfont: {{ size: 10 }},
-                                hovertemplate: '%{{y}} in %{{x}}: %{{z:.1%}} of row edges<extra></extra>',
-                                showscale: true,
-                                colorbar: {{ title: 'Proportion', len: 0.5, tickformat: '.0%' }},
-                                zmin: 0, zmax: 1
-                            }}], baseLayout);
-                            
-                            Plotly.react('path_overlap_{threshold}', [{{
-                                z: pathProportion_{threshold},
-                                x: labels_{threshold},
-                                y: labels_{threshold},
-                                type: 'heatmap',
-                                colorscale: [[0, '#f8fafc'], [0.5, '#c4b5fd'], [1, '#8b5cf6']],
-                                text: pathTextProp_{threshold},
-                                texttemplate: '%{{text}}',
-                                textfont: {{ size: 10 }},
-                                hovertemplate: '%{{y}} in %{{x}}: %{{z:.1%}} of row paths<extra></extra>',
-                                showscale: true,
-                                colorbar: {{ title: 'Proportion', len: 0.5, tickformat: '.0%' }},
-                                zmin: 0, zmax: 1
-                            }}], baseLayout);
-                        }}
-                    }};
-                    
-                    // Initial plot in count mode
-                    Plotly.newPlot('edge_overlap_{threshold}', [{{
-                        z: edgeOverlap_{threshold},
-                        x: labels_{threshold},
-                        y: labels_{threshold},
-                        type: 'heatmap',
-                        colorscale: [[0, '#f8fafc'], [0.5, '#93c5fd'], [1, '#2563eb']],
-                        text: edgeTextCount_{threshold},
-                        texttemplate: '%{{text}}',
-                        textfont: {{ size: 10 }},
-                        hovertemplate: '%{{y}} in %{{x}}: %{{z}} edges<extra></extra>',
-                        showscale: true,
-                        colorbar: {{ title: 'Count', len: 0.5 }}
-                    }}], baseLayout, {{responsive: false}});
-                    
-                    Plotly.newPlot('path_overlap_{threshold}', [{{
-                        z: pathOverlap_{threshold},
-                        x: labels_{threshold},
-                        y: labels_{threshold},
-                        type: 'heatmap',
-                        colorscale: [[0, '#f8fafc'], [0.5, '#c4b5fd'], [1, '#8b5cf6']],
-                        text: pathTextCount_{threshold},
-                        texttemplate: '%{{text}}',
-                        textfont: {{ size: 10 }},
-                        hovertemplate: '%{{y}} in %{{x}}: %{{z}} paths<extra></extra>',
-                        showscale: true,
-                        colorbar: {{ title: 'Count', len: 0.5 }}
-                    }}], baseLayout, {{responsive: false}});
-                }})();
-            </script>
-''')
+        html_parts.append(_render_overlap_point_card(
+            str(threshold), f"Dataset Overlap at Threshold = {threshold}",
+            labels, edge_overlap, path_overlap, active=(i == 0)))
     
     html_parts.append(f"""
                 </div>
@@ -4552,19 +5689,28 @@ def _generate_statistics_section(analyzer, dataset_names: List[str], thresholds:
 
 
 def _generate_similarity_trends_2x2_plot(analyzer, dataset_names: List[str], thresholds: List[int],
-                                          nickname_map: Dict[str, str]) -> str:
+                                          nickname_map: Dict[str, str],
+                                          point_keys: List = None,
+                                          point_labels: List[str] = None,
+                                          point_similarities: Dict = None,
+                                          axis_title: str = 'Threshold',
+                                          card_title: str = 'Similarity Trends Across Thresholds') -> str:
     """
     Generate a 2x2 subplot showing all 4 similarity metrics across thresholds.
-    
+
     Layout:
         Row 1: Jaccard (set overlap) | Edge Rank (all-edge ranking)
         Row 2: Cosine (all-edge directional) | Spearman (shared-edge ranking)
+
+    Custom combination mode passes ``point_keys``/``point_similarities``
+    (query id -> cached pairwise similarity frame); the x axis is a category
+    axis in explicit query order, never a numeric threshold schedule.
     """
     from .metrics import ComparisonMetrics
     import json
-    
+
     metrics = ComparisonMetrics()
-    
+
     # Collect data for all 4 metrics
     # Structure: {metric_name: {(d1, d2): {threshold: value}}}
     all_pair_data = {
@@ -4573,7 +5719,7 @@ def _generate_similarity_trends_2x2_plot(analyzer, dataset_names: List[str], thr
         'cosine': {},
         'spearman': {}
     }
-    
+
     available_pairs = []
     for i, d1 in enumerate(dataset_names):
         for d2 in dataset_names[i+1:]:
@@ -4581,59 +5727,80 @@ def _generate_similarity_trends_2x2_plot(analyzer, dataset_names: List[str], thr
             available_pairs.append(pair_key)
             for metric in all_pair_data:
                 all_pair_data[metric][pair_key] = {}
-    
-    for threshold in thresholds:
-        aligned = analyzer.get_aligned_data(threshold)
-        if aligned.empty:
-            continue
-        
-        available = [d for d in dataset_names if d in aligned.columns]
-        
-        for i, d1 in enumerate(available):
-            for d2 in available[i+1:]:
-                pair_key = (d1, d2)
+
+    if point_similarities is not None:
+        point_keys = list(thresholds) if point_keys is None else list(point_keys)
+        if point_labels is None:
+            point_labels = [str(k) for k in point_keys]
+        for k in point_keys:
+            sim_df = point_similarities.get(k)
+            if sim_df is None or sim_df.empty:
+                continue
+            for _, row in sim_df.iterrows():
+                pair_key = (row['dataset_1'], row['dataset_2'])
                 if pair_key not in all_pair_data['jaccard']:
-                    pair_key = (d2, d1)
-                
-                # Jaccard (set overlap)
-                c1, c2 = aligned[d1], aligned[d2]
-                s1, s2 = set(aligned.index[c1 > 0]), set(aligned.index[c2 > 0])
-                inter, union = len(s1 & s2), len(s1 | s2)
-                jac = inter / union if union > 0 else 0
-                all_pair_data['jaccard'][pair_key][threshold] = jac
-                
-                # Get edge weights as Series
-                weights_a = aligned[d1].dropna()
-                weights_b = aligned[d2].dropna()
-                
-                # Edge Rank (all edges, 0 for missing)
-                edge_rank = metrics.calculate_edge_list_rank_correlation(weights_a, weights_b)
-                all_pair_data['edge_rank'][pair_key][threshold] = edge_rank
-                
-                # Cosine (all edges, 0 for missing)
-                cosine = metrics.calculate_cosine_similarity(weights_a, weights_b)
-                all_pair_data['cosine'][pair_key][threshold] = cosine
-                
-                # Spearman (shared edges only)
-                spearman = metrics.calculate_spearman_rank_correlation(weights_a, weights_b)
-                all_pair_data['spearman'][pair_key][threshold] = spearman
+                    pair_key = (row['dataset_2'], row['dataset_1'])
+                if pair_key not in all_pair_data['jaccard']:
+                    continue
+                all_pair_data['jaccard'][pair_key][k] = row.get('jaccard_similarity')
+                all_pair_data['edge_rank'][pair_key][k] = row.get('edge_rank_correlation')
+                all_pair_data['cosine'][pair_key][k] = row.get('cosine_similarity')
+                all_pair_data['spearman'][pair_key][k] = row.get('spearman_rank_correlation')
+    else:
+        for threshold in thresholds:
+            aligned = analyzer.get_aligned_data(threshold)
+            if aligned.empty:
+                continue
+
+            available = [d for d in dataset_names if d in aligned.columns]
+
+            for i, d1 in enumerate(available):
+                for d2 in available[i+1:]:
+                    pair_key = (d1, d2)
+                    if pair_key not in all_pair_data['jaccard']:
+                        pair_key = (d2, d1)
+
+                    # Jaccard (set overlap)
+                    c1, c2 = aligned[d1], aligned[d2]
+                    s1, s2 = set(aligned.index[c1 > 0]), set(aligned.index[c2 > 0])
+                    inter, union = len(s1 & s2), len(s1 | s2)
+                    jac = inter / union if union > 0 else 0
+                    all_pair_data['jaccard'][pair_key][threshold] = jac
+
+                    # Get edge weights as Series
+                    weights_a = aligned[d1].dropna()
+                    weights_b = aligned[d2].dropna()
+
+                    # Edge Rank (all edges, 0 for missing)
+                    edge_rank = metrics.calculate_edge_list_rank_correlation(weights_a, weights_b)
+                    all_pair_data['edge_rank'][pair_key][threshold] = edge_rank
+
+                    # Cosine (all edges, 0 for missing)
+                    cosine = metrics.calculate_cosine_similarity(weights_a, weights_b)
+                    all_pair_data['cosine'][pair_key][threshold] = cosine
+
+                    # Spearman (shared edges only)
+                    spearman = metrics.calculate_spearman_rank_correlation(weights_a, weights_b)
+                    all_pair_data['spearman'][pair_key][threshold] = spearman
     
     # Build Plotly subplot data
     colors = ['#3b82f6', '#f97316', '#22c55e', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899', '#eab308']
     
     # Helper function to create traces for a metric
     # Plotly subplot indices: row1col1=1, row1col2=2, row2col1=3, row2col2=4
-    def make_traces(metric_data, subplot_idx, show_legend=False):
+    def make_traces(metric_data, subplot_idx, show_legend=False, axis_keys=None):
         traces = []
         axis_suffix = '' if subplot_idx == 1 else str(subplot_idx)
-        
+        if axis_keys is None:
+            axis_keys = thresholds
+
         for idx, pair_key in enumerate(available_pairs):
             d1, d2 = pair_key
             n1, n2 = nickname_map.get(d1, d1), nickname_map.get(d2, d2)
-            
+
             x_vals = []
             y_vals = []
-            for t in thresholds:
+            for t in axis_keys:
                 if t in metric_data[pair_key]:
                     val = metric_data[pair_key][t]
                     if val is not None and not (isinstance(val, float) and np.isnan(val)):
@@ -4659,7 +5826,7 @@ def _generate_similarity_trends_2x2_plot(analyzer, dataset_names: List[str], thr
         # Add average trace
         avg_x = []
         avg_y = []
-        for t in thresholds:
+        for t in axis_keys:
             vals = [metric_data[pk].get(t) for pk in available_pairs if t in metric_data[pk]]
             vals = [v for v in vals if v is not None and not (isinstance(v, float) and np.isnan(v))]
             if vals:
@@ -4682,13 +5849,15 @@ def _generate_similarity_trends_2x2_plot(analyzer, dataset_names: List[str], thr
             })
         
         return traces
-    
+
+    axis_keys = point_keys if point_similarities is not None else thresholds
+
     # Build all traces (subplot indices: 1=top-left, 2=top-right, 3=bottom-left, 4=bottom-right)
     all_traces = []
-    all_traces.extend(make_traces(all_pair_data['jaccard'], 1, show_legend=True))   # Top-left: Jaccard
-    all_traces.extend(make_traces(all_pair_data['edge_rank'], 2, show_legend=False)) # Top-right: Edge Rank
-    all_traces.extend(make_traces(all_pair_data['cosine'], 3, show_legend=False))    # Bottom-left: Cosine
-    all_traces.extend(make_traces(all_pair_data['spearman'], 4, show_legend=False))  # Bottom-right: Spearman
+    all_traces.extend(make_traces(all_pair_data['jaccard'], 1, show_legend=True, axis_keys=axis_keys))   # Top-left: Jaccard
+    all_traces.extend(make_traces(all_pair_data['edge_rank'], 2, show_legend=False, axis_keys=axis_keys)) # Top-right: Edge Rank
+    all_traces.extend(make_traces(all_pair_data['cosine'], 3, show_legend=False, axis_keys=axis_keys))    # Bottom-left: Cosine
+    all_traces.extend(make_traces(all_pair_data['spearman'], 4, show_legend=False, axis_keys=axis_keys))  # Bottom-right: Spearman
     
     # Layout with 2x2 subplots
     layout = {
@@ -4706,10 +5875,10 @@ def _generate_similarity_trends_2x2_plot(analyzer, dataset_names: List[str], thr
         'xaxis2': {'title': '', 'type': 'category', 'domain': [0.55, 1]},
         'yaxis2': {'title': '', 'range': [-1, 1], 'domain': [0.55, 1]},
         # Bottom-left: Cosine [0, 1]
-        'xaxis3': {'title': 'Threshold', 'type': 'category', 'domain': [0, 0.45]},
+        'xaxis3': {'title': axis_title, 'type': 'category', 'domain': [0, 0.45]},
         'yaxis3': {'title': 'Similarity', 'range': [0, 1], 'domain': [0, 0.42]},
         # Bottom-right: Spearman [-1, 1]
-        'xaxis4': {'title': 'Threshold', 'type': 'category', 'domain': [0.55, 1]},
+        'xaxis4': {'title': axis_title, 'type': 'category', 'domain': [0.55, 1]},
         'yaxis4': {'title': '', 'range': [-1, 1], 'domain': [0, 0.42]},
         # Legend and margins
         'legend': {'orientation': 'h', 'y': -0.15, 'x': 0.5, 'xanchor': 'center'},
@@ -4726,9 +5895,9 @@ def _generate_similarity_trends_2x2_plot(analyzer, dataset_names: List[str], thr
     
     return f'''
         <div class="card" style="margin-top: 30px;">
-            <h3>Similarity Trends Across Thresholds</h3>
+            <h3>{html.escape(card_title)}</h3>
             <p style="color: var(--secondary-color); font-size: 0.85rem; margin-bottom: 15px;">
-                How similarity metrics change with increasing threshold. <strong>Edge Rank</strong> and <strong>Cosine</strong> compare 
+                How similarity metrics change across the comparison axis. <strong>Edge Rank</strong> and <strong>Cosine</strong> compare
                 all edges (assigning 0 to missing edges), while <strong>Spearman (shared)</strong> only compares edges present in both datasets.
                 The dashed line shows the average across all dataset pairs.
             </p>
@@ -5245,35 +6414,38 @@ def _generate_path_rank_correlation_plot(analyzer, dataset_names: List[str], thr
     '''
 
 
-def _generate_stats_table(analyzer, dataset_names: List[str], threshold: int,
-                           nickname_map: Dict[str, str]) -> str:
-    """Generate statistics tables with threshold indication."""
-    aligned = analyzer.get_aligned_data(threshold)
-    
-    if aligned.empty:
+def _stats_blocks_html(aligned: pd.DataFrame, dataset_names: List[str],
+                       nickname_map: Dict[str, str], title_suffix: str) -> str:
+    """Render the shared per-point statistics blocks.
+
+    Both modes use identical row semantics: the aligned edge count (>0),
+    total/mean-positive/max weight, and pairwise Jaccard + shared-edge rank
+    correlation computed from the aligned frame.
+    """
+    if aligned is None or aligned.empty:
         return '<p>No data available.</p>'
-    
+
     available = [d for d in dataset_names if d in aligned.columns]
     if not available:
         return '<p>No datasets available.</p>'
-    
-    html = [f'''<div class="card"><h3>Per-Dataset Statistics <span style="color: var(--primary-color);">(Threshold = {threshold})</span></h3>
+
+    parts = [f'''<div class="card"><h3>Per-Dataset Statistics <span style="color: var(--primary-color);">{html.escape(title_suffix)}</span></h3>
         <table><thead><tr><th>Dataset</th><th>Edge Count</th><th>Total Weight</th><th>Mean Weight</th><th>Max Weight</th></tr></thead><tbody>''']
-    
+
     for d in available:
         col = aligned[d]
         ec = int((col > 0).sum())
         tw = int(col.sum())
         mw = float(col[col > 0].mean()) if (col > 0).any() else 0
         mx = int(col.max()) if len(col) > 0 else 0
-        html.append(f'<tr><td>{nickname_map[d]}</td><td>{ec}</td><td>{tw}</td><td>{mw:.2f}</td><td>{mx}</td></tr>')
-    
-    html.append('</tbody></table></div>')
-    
+        parts.append(f'<tr><td>{nickname_map[d]}</td><td>{ec}</td><td>{tw}</td><td>{mw:.2f}</td><td>{mx}</td></tr>')
+
+    parts.append('</tbody></table></div>')
+
     # Pairwise similarities
-    html.append(f'''<div class="card"><h3>Pairwise Similarities <span style="color: var(--primary-color);">(Threshold = {threshold})</span></h3>
+    parts.append(f'''<div class="card"><h3>Pairwise Similarities <span style="color: var(--primary-color);">{html.escape(title_suffix)}</span></h3>
         <table><thead><tr><th>Dataset 1</th><th>Dataset 2</th><th>Jaccard</th><th>Rank Corr</th><th>Common</th></tr></thead><tbody>''')
-    
+
     from scipy.stats import spearmanr
     for i, d1 in enumerate(available):
         for d2 in available[i+1:]:
@@ -5290,10 +6462,18 @@ def _generate_stats_table(analyzer, dataset_names: List[str], threshold: int,
                 rank_corr = rank_corr if not np.isnan(rank_corr) else 0
             else:
                 rank_corr = 0
-            html.append(f'<tr><td>{nickname_map[d1]}</td><td>{nickname_map[d2]}</td><td>{jac:.3f}</td><td>{rank_corr:.3f}</td><td>{inter}</td></tr>')
-    
-    html.append('</tbody></table></div>')
-    return ''.join(html)
+            parts.append(f'<tr><td>{nickname_map[d1]}</td><td>{nickname_map[d2]}</td><td>{jac:.3f}</td><td>{rank_corr:.3f}</td><td>{inter}</td></tr>')
+
+    parts.append('</tbody></table></div>')
+    return ''.join(parts)
+
+
+def _generate_stats_table(analyzer, dataset_names: List[str], threshold: int,
+                           nickname_map: Dict[str, str]) -> str:
+    """Generate statistics tables with threshold indication."""
+    aligned = analyzer.get_aligned_data(threshold)
+    return _stats_blocks_html(aligned, dataset_names, nickname_map,
+                              f"(Threshold = {threshold})")
 
 
 def _generate_footer() -> str:

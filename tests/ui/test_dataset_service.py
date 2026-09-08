@@ -8,11 +8,18 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import ui.dataset_service as ds_mod
-from ui.config import DATASETS, DEFAULTS, FLYWIRE_DATASETS, NEUPRINT_DATASETS
+from ui.config import (
+    BANC_DATASETS,
+    DATASETS,
+    DEFAULTS,
+    FLYWIRE_DATASETS,
+    NEUPRINT_DATASETS,
+)
 from ui.dataset_service import (
     DatasetService,
     dataset_to_folder,
     folder_to_dataset,
+    is_banc_dataset,
     is_flywire_dataset,
 )
 
@@ -29,7 +36,8 @@ NEUPRINT_EXPECTED = {
     "fib19:v1.0",
     "mushroombody",
 }
-FLYWIRE_EXPECTED = {"flywire_FAFB_v783", "banc_v888", "banc_v626"}
+FLYWIRE_EXPECTED = {"flywire_FAFB_v783"}
+BANC_EXPECTED = {"banc_v888", "banc_v626"}
 
 
 class _PermissiveTokenManager:
@@ -51,10 +59,12 @@ class TestDatasetLists:
         assert set(NEUPRINT_DATASETS) == NEUPRINT_EXPECTED
         assert set(NEUPRINT_DATASETS) <= set(DATASETS)
         assert set(FLYWIRE_DATASETS) == FLYWIRE_EXPECTED
+        assert set(BANC_DATASETS) == BANC_EXPECTED
+        assert not set(FLYWIRE_DATASETS) & set(BANC_DATASETS)
 
     def test_banc_v888_not_supported_via_neuprint(self):
         # The NeuPrint server lists banc:v888 as hidden and not queryable;
-        # BANC is served through FlyWire/Codex instead.
+        # BANC is served by its own public-release source instead.
         assert "banc:v888" not in NEUPRINT_DATASETS
         assert "banc:v888" not in DATASETS
         assert "banc:v888" not in DatasetService.NEUPRINT_CANDIDATES
@@ -83,6 +93,11 @@ class TestDatasetNameConversion:
         assert dataset_to_folder("manc:v1.2.3") == "manc_v1_2_3"
         assert dataset_to_folder("hemibrain:v1.2.1") == "hemibrain_v1_2_1"
 
+    def test_legacy_banc_alias_uses_standalone_folder(self):
+        assert dataset_to_folder("flywire_BANC_v888") == "banc_v888"
+        assert folder_to_dataset("flywire_BANC_v888") == "banc_v888"
+        assert dataset_to_folder("banc:v888") == "banc_v888"
+
 
 class TestIsFlywireDataset:
     def test_positive(self):
@@ -90,9 +105,13 @@ class TestIsFlywireDataset:
             assert is_flywire_dataset(ds)
 
     def test_negative(self):
-        # banc:v888 must never be classified as the FlyWire BANC release.
-        for ds in ["banc:v888", "male-cns:v0.9", "hemibrain:v1.2.1", "manc:v1.0"]:
+        # BANC must never be classified as FAFB/FlyWire.
+        for ds in ["banc_v626", "banc_v888", "flywire_BANC_v888",
+                   "banc:v888", "male-cns:v0.9", "hemibrain:v1.2.1",
+                   "manc:v1.0"]:
             assert not is_flywire_dataset(ds)
+            if "banc" in ds.lower():
+                assert is_banc_dataset(ds)
 
 
 class TestHiddenDatasetFilter:

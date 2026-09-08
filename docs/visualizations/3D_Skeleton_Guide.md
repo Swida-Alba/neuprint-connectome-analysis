@@ -754,7 +754,7 @@ mesh_color=['red', 'green', 'blue']  # 'green' applies to all nested ROIs
 **Note:** Regex patterns use Python's `re` module. The pattern is automatically anchored (`^...$`).
 
 **FAFB/FlyWire Note:**
-FAFB/FlyWire datasets do not have native ROI meshes. When visualizing FAFB data,
+FAFB does not have native ROI meshes. When visualizing FAFB data,
 ROI meshes from male-cns are automatically transformed to FAFB coordinates.
 This allows ROI context visualization but may have minor alignment differences.
 

@@ -39,7 +39,8 @@ results = comparer.run()   # {"output_folder", "types_compared",
 - **vector_v2**: warms the per-dataset `SkeletonVectorCacheV2` via
   `vectors_for`; with `fetch_online=True` (default) cache misses are
   fetched through the API — `fetch_skeletons_on_demand_batch` on NeuPrint,
-  `load_flywire_skeletons_batch` (healed bundle → CAVE) on FlyWire/FAFB —
+  `load_flywire_skeletons_batch` (FAFB healed bundle → CAVE, or standalone
+  BANC public-release SWCs) on local releases —
   and re-vectorized with the cache's own `_vectorize_neuron`, mirroring
   Find Similar's cache-direct contract. It then scores the standardized +
   ZCA-whitened rows with

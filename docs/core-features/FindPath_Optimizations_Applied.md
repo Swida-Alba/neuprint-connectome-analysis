@@ -17,23 +17,26 @@ paths_2L_10snp/
 **New Structure:**
 ```
 L3_to_l-LNv/
-  └── paths_L2w10r0_0p0_0_20241215_123456/
+  └── paths_L2w10_20241215_123456/
       ├── all_attributes.json
       ├── parameters.txt
       ├── L3_to_l-LNv_path_info.xlsx
-      ├── Sankey_type_path_snp.html
-      ├── Sankey_type_path_ratio.html
-      ├── Sankey_type_path_prob.html
-      ├── Sankey_bodyId_path.html
-      ├── Network_type_path.html
-      └── Network_bodyId_path.html
+      ├── visualization/
+      │   ├── Network_<run>.html
+      │   ├── Heatmap_<run>.html
+      │   └── Sankey_<run>.html
+      └── bodyId_visualization/
+          ├── Network_<run>.html
+          ├── Heatmap_<run>.html
+          └── Sankey_<run>.html
 ```
 
 **Benefits:**
 - Base folder contains only source/target names (cleaner)
 - Parameters moved to subfolder name with timestamp
-- Decimal notation using `_` instead of `p` (0.01 → 0_0)
-- All parameters visible in folder name (L, w, r, p)
+- Ratio and probability annotations are omitted because those filters are
+  disabled for pathfinding; ratio/probability values remain readout columns.
+- Active path parameters remain visible in the folder name (L, w)
 
 ### 2. ✅ Configuration File Saving
 **Added Files:**
@@ -42,7 +45,9 @@ L3_to_l-LNv/
 
 **Contents:**
 - Source/target neuron names
-- All filter parameters (max_interlayer, min_synapse_num, min_ratio, min_traversal_probability, etc.)
+- All run parameters (max_interlayer, min_synapse_num, the compatibility
+  ratio/probability values, and other settings); ratio/probability remain
+  readout columns only in the Complete/Shortest path pipeline.
 - Visualization settings (colors, showfig)
 - Analysis timestamp
 
@@ -66,28 +71,34 @@ Removes redundant `_snp` suffix since parameters are now in folder name.
 
 ### 5. ✅ Three Sankey Visualizations
 **Type-Level Sankey Diagrams:**
-1. **Synapse Count** (`Sankey_type_path_snp.html`)
+1. **Synapse Count** (`visualization/Sankey_<run>.html`)
    - Link value = total synapses (weight)
    - Shows connection strength by synapse number
 
-2. **Connection Ratio** (`Sankey_type_path_ratio.html`)
+2. **Connection Ratio** (the run's ratio-specific Sankey artifact when
+   generated)
    - Link value = weighted average connection ratio
    - Shows connectivity proportion (0-1 range)
    - Uses weighted averaging: `Σ(ratio × weight) / Σ(weight)`
 
-3. **Traversal Probability** (`Sankey_type_path_prob.html`)
+3. **Traversal Probability** (the run's probability-specific Sankey artifact
+   when generated)
    - Link value = weighted average traversal probability
    - Shows path likelihood (0-1 range)
    - Uses weighted averaging: `Σ(prob × weight) / Σ(weight)`
 
 **BodyId-Level Sankey:**
-- `Sankey_bodyId_path.html`: Individual neuron connections (weight-based)
+- `bodyId_visualization/Sankey_<run>.html`: Individual neuron connections
+  (weight-based)
 
 ### 6. ✅ File Naming Cleanup
 **Updated Files:**
-- Network visualizations: `Network_type_path.html`, `Network_bodyId_path.html`
-- Sankey diagrams: `Sankey_bodyId_path.html` (removed `_snp` suffix)
-- All files now use consistent `_path` suffix instead of `_snp{number}`
+- Network visualizations: `visualization/Network_<run>.html` and
+  `bodyId_visualization/Network_<run>.html`
+- Sankey diagrams: `visualization/Sankey_<run>.html` and
+  `bodyId_visualization/Sankey_<run>.html`
+- Heatmaps and backing data use the same `<run>` naming contract. The level is
+  represented by the containing folder, not a different filename stem.
 
 ### 7. ✅ Enhanced Target Statistics Display
 **New Output Example:**

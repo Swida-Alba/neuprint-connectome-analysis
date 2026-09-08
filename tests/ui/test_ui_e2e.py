@@ -1042,7 +1042,7 @@ class TestRunner:
         sr = ScriptRunner()
         with tempfile.TemporaryDirectory() as tmpdir:
             old = Path(tmpdir) / "aMe12_to_aMe10"
-            new = Path(tmpdir) / "find-paths-complete_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_120000"
+            new = Path(tmpdir) / "find-paths-complete_MCNS_aMe12_to_aMe10_L2w3_20260801_120000"
             old.mkdir()
             new.mkdir()
             sr._run_logs = [
@@ -1099,7 +1099,7 @@ class TestRunner:
         from ui.runner import ScriptRunner
         sr = ScriptRunner()
         with tempfile.TemporaryDirectory() as tmpdir:
-            run = Path(tmpdir) / "find-paths-complete_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_120000"
+            run = Path(tmpdir) / "find-paths-complete_MCNS_aMe12_to_aMe10_L2w3_20260801_120000"
             run.mkdir()
             sr._run_logs = [("stdout", f"  📁 Created output folder: {run}")]
             assert sr._resolve_scan_dir(tmpdir) == str(run)
@@ -2336,8 +2336,9 @@ class TestDatasetService:
         assert dataset_to_folder("flywire_FAFB_v783") == "flywire_FAFB_v783"
 
     def test_flywire_identifier_does_not_match_neuprint_banc(self):
-        from ui.dataset_service import is_flywire_dataset
-        assert is_flywire_dataset("banc_v626") is True
+        from ui.dataset_service import is_banc_dataset, is_flywire_dataset
+        assert is_flywire_dataset("banc_v626") is False
+        assert is_banc_dataset("banc_v626") is True
         assert is_flywire_dataset("flywire_FAFB_v783") is True
         assert is_flywire_dataset("banc:v888") is False
 
@@ -2563,7 +2564,7 @@ class TestDatasetService:
         # The status line switched to the manual-download state (the guard
         # returned before any pull could start).
         assert any(
-            getattr(el, "text", "") == "Manual download required (FlyWire)"
+            getattr(el, "text", "") == "Manual download required (FAFB)"
             for el in client.elements.values()
         )
 
@@ -3118,13 +3119,13 @@ class TestDatasetService:
         assert reminder.visible is True
         assert "No API tokens configured" in text.text
         assert "required for NeuPrint datasets" in text.text
-        assert "only needed for FlyWire FAFB online fetching" in text.text
+        assert "only needed for FAFB online CAVE fetching" in text.text
 
         # only CAVE missing -> soft reminder marking it optional
         reminder, text = build("real-neuprint-token", "")
         assert reminder.visible is True
         assert "CAVE token not configured - optional" in text.text
-        assert "FlyWire FAFB online fetching" in text.text
+        assert "FAFB online CAVE fetching" in text.text
 
         # only NeuPrint missing -> required-token reminder
         reminder, text = build("", "real-cave-token")
@@ -4671,6 +4672,53 @@ class TestComponents:
 
         assert single._props.get("outlined") is True
         assert multi._props.get("outlined") is True
+
+    def test_native_multi_selects_clear_filter_text_after_chip_changes(self):
+        """Mouse-picked chips must not leave their search text in the editor."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.common import (
+            chip_list_input,
+            dataset_multi_selector,
+            multi_select_input,
+        )
+
+        client = Client(page("/native-select-clear-test"))
+        with client:
+            controls = [
+                chip_list_input(),
+                dataset_multi_selector(
+                    default=[],
+                    datasets=["demo:v1.0", "demo:v2.0"],
+                    show_local_status=False,
+                ),
+                multi_select_input("Mesh ROIs", ["AME", "ME"]),
+            ]
+            no_search = multi_select_input(
+                "No Search", ["AME", "ME"], with_search=False
+            )
+
+        for control in controls:
+            listeners = {
+                listener.type: listener
+                for listener in control._event_listeners.values()
+            }
+            assert "add" in listeners
+            assert "remove" in listeners
+
+            calls = []
+            control.run_method = lambda *args, **kwargs: calls.append((args, kwargs))
+            listeners["add"].handler(None)
+            listeners["remove"].handler(None)
+            assert calls == [
+                (("updateInputValue", ""), {}),
+                (("updateInputValue", ""), {}),
+            ]
+
+        assert not any(
+            listener.type in {"add", "remove"}
+            for listener in no_search._event_listeners.values()
+        )
 
     def test_neuron_list_input_uses_file_upload_not_list_paste(self):
         from nicegui import Client
@@ -6262,7 +6310,7 @@ class TestComponents:
         from ui.components.output_panel import OutputPanel
         from ui.runner import ScriptRunner
 
-        run_folder = tmp_path / "find-paths-complete_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_120000"
+        run_folder = tmp_path / "find-paths-complete_MCNS_aMe12_to_aMe10_L2w3_20260801_120000"
         run_folder.mkdir()
         (run_folder / "connections.csv").write_text("a,b\n1,2")
 
@@ -6430,7 +6478,7 @@ class TestApp:
             getattr(element, "_props", {})
             for element in client.elements.values()
             if getattr(element, "_props", {}).get("label")
-            in {"NeuPrint Token", "CAVE Token (for FlyWire)"}
+            in {"NeuPrint Token", "CAVE Token (for FAFB)"}
         ]
         assert len(input_props) == 2
         assert all(props.get("value", "") == "" for props in input_props)

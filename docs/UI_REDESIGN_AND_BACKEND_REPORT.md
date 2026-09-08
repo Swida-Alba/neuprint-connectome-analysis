@@ -79,7 +79,7 @@ flowchart TD
 | FindHomologs (script + UI) | `HomologFinder` | Two datasets, token/network/cache |
 | InterDatasetComparator (script + UI) | `ComparisonParameters` + `ComparisonAnalyzer` | 2+ datasets, token/network/cache |
 | NeuronBridge FindLines/FindNeuron/Colabel | `NeuronBridgeFinder` | NeuronBridge API (network), optional NeuPrint token for dataset pulls |
-| plot3dSkeleton (script + UI) | `VisualizeSkeleton` | NeuPrint token or FlyWire local files; Chrome/WebDriver for exports |
+| plot3dSkeleton (script + UI) | `VisualizeSkeleton` | NeuPrint token, FAFB local files, or the standalone BANC public bucket; Chrome/WebDriver for exports |
 | PlotPath (script + UI) | `VisualizePath` (vispath subproject) | A `*_allpaths_info` CSV/XLSX file from FindAllPath |
 | FlyLight_fetcher (script only) | `FlyLightDownloader` | Network (S3/CDN) |
 | Cache builders (scripts only) | `build_connection_cache` / `build_connectivity_profile_cache` | Token/network for first build |
@@ -216,7 +216,7 @@ Requirement: "integrated scripts (also implemented in the UI) must work independ
 ### 7.3 Remaining first-run caveats (by design)
 
 - NeuPrint datasets need a valid token and network for the first fetch; offline use requires pre-building `cache/<dataset>/`.
-- FlyWire FAFB/BANC need manually downloaded local files plus a CAVE token (documented in Settings).
+- FAFB needs manually downloaded local files and may use a CAVE token; standalone BANC prepares from its public release bucket and never uses CAVE (documented in Settings).
 - `export_views`/video exports in `VisualizeSkeleton` need Chrome + WebDriver (or Kaleido fallback).
 - NeuronBridge now uses the bundled Requests/Pillow client on every platform; legacy environments should be repaired with the one-click installer to remove the incompatible upstream distribution.
 

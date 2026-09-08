@@ -48,6 +48,22 @@
       "search_bytes": 4020754,
       "source": "male-cns_v1_0_allneurons_neuron_df.csv"
     },
+    "manc:v1.0": {
+      "dataset": "manc:v1.0",
+      "folder": "manc_v1_0",
+      "index_bytes": 5024057,
+      "rows": 102369,
+      "search_bytes": 1312577,
+      "source": "manc_v1_0_allneurons_neuron_df.csv"
+    },
+    "manc:v1.2.1": {
+      "dataset": "manc:v1.2.1",
+      "folder": "manc_v1_2_1",
+      "index_bytes": 3435182,
+      "rows": 102158,
+      "search_bytes": 1492430,
+      "source": "manc_v1_2_1_allneurons_neuron_df.csv"
+    },
     "manc_v1_2_3": {
       "dataset": "manc_v1_2_3",
       "folder": "manc_v1_2_3",
@@ -55,8 +71,16 @@
       "rows": 102158,
       "search_bytes": 1662503,
       "source": "manc_v1_2_3_allneurons_neuron_df.csv"
+    },
+    "optic-lobe:v1.1": {
+      "dataset": "optic-lobe:v1.1",
+      "folder": "optic-lobe_v1_1",
+      "index_bytes": 2118255,
+      "rows": 56435,
+      "search_bytes": 866092,
+      "source": "optic-lobe_v1_1_allneurons_neuron_df.csv"
     }
   },
-  "generated_utc": "2026-09-07T13:05:41Z",
+  "generated_utc": "2026-09-08T17:18:40Z",
   "index_dir": "neuron_indexes"
 }

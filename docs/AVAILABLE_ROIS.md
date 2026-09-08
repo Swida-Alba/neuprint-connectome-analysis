@@ -184,9 +184,9 @@ Extensive column ROIs for right hemisphere optic lobe:
 
 ---
 
-## flywire_FAFB_v783 (FlyWire/FAFB)
+## flywire_FAFB_v783 (FAFB local release)
 
-**Note:** FlyWire/FAFB does not have native ROI meshes in NeuPrint. ROI meshes are fetched from **male-cns:v0.9** and transformed to FLYWIRE coordinates.
+**Note:** FAFB does not have native ROI meshes in NeuPrint. ROI meshes are fetched from **male-cns:v0.9** and transformed to FLYWIRE coordinates.
 
 **Available ROIs:** Same as male-cns:v0.9 (see above)
 

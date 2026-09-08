@@ -85,9 +85,17 @@ except ImportError:
     from visualization_options import default_analysis_skeleton_mesh_simplification
 
 try:
-    from ..flywire_ids import is_flywire_dataset, is_banc_dataset
+    from ..flywire_ids import (
+        is_banc_dataset,
+        is_fafb_dataset,
+        is_local_connectome_dataset,
+    )
 except ImportError:
-    from flywire_ids import is_flywire_dataset, is_banc_dataset
+    from flywire_ids import (
+        is_banc_dataset,
+        is_fafb_dataset,
+        is_local_connectome_dataset,
+    )
 
 if TYPE_CHECKING:
     from .connectivity_profiler import ConnectivityStatus
@@ -2682,15 +2690,16 @@ class HomologFinder:
             if not dataset: return None
             if dataset in self.clients: return self.clients[dataset]
             
-            # FlyWire-family datasets (FAFB/BANC) live on FlyWire/Codex, not
-            # on the NeuPrint server.  Skip client creation instead of
+            # FAFB and standalone BANC live in local release stores, not on
+            # the NeuPrint server.  Skip client creation instead of
             # surfacing a misleading "dataset does not exist on the neuprint
             # server" warning.
-            if is_flywire_dataset(dataset):
+            if is_local_connectome_dataset(dataset):
                 if self.verbose:
+                    source = "BANC public release" if is_banc_dataset(dataset) else "FAFB local release"
                     print(
-                        f"[HomologFinder] {dataset} is a FlyWire dataset; "
-                        "no NeuPrint client needed (local/CAVE data)"
+                        f"[HomologFinder] {dataset} uses the {source}; "
+                        "no NeuPrint client needed"
                     )
                 return None
             
@@ -3743,15 +3752,15 @@ class HomologFinder:
         try:
             from ..coana import FindNeuronConnection
             
-            # Determine the dataset family: BANC is its own standalone
-            # source ('banc'), FlyWire/local is 'flywire', everything else
+            # Determine the exact dataset source: BANC is its own standalone
+            # source ('banc'), FAFB is 'flywire' for compatibility, everything else
             # is NeuPrint (§I of the integration plan — BANC must never
             # present itself as a NeuPrint client).
-            is_flywire = is_flywire_dataset(dataset)
+            is_fafb = is_fafb_dataset(dataset)
             is_banc = is_banc_dataset(dataset)
             if is_banc:
                 client_type = 'banc'
-            elif is_flywire:
+            elif is_fafb:
                 client_type = 'flywire'
             else:
                 client_type = 'neuprint'
@@ -8350,7 +8359,7 @@ class HomologFinder:
         dataset_name = str(options.get('dataset', '') or '').strip().lower()
         options.setdefault(
             'cache_neurons', (
-                True if is_flywire_dataset(dataset_name)
+                True if is_local_connectome_dataset(dataset_name)
                 else pipeline not in {
                     'fast', 'direct', 'artistic', 'fine_opt1'
                 }
@@ -8412,10 +8421,10 @@ class HomologFinder:
 
             # Source skeletons WITHOUT depending on self.clients: UI
             # subprocess runs may have no token-bound client at all.
-            # FlyWire/FAFB/BANC sources never have a NeuPrint client — their
-            # canonical pipeline is raw cache -> healed bundle -> CAVE
-            # (load_flywire_skeletons_batch). NeuPrint sources use the raw
-            # cache plus a NeuPrint fetch fallback.
+            # FAFB and standalone BANC sources never have a NeuPrint client.
+            # FAFB resolves through its local bundle/CAVE compatibility path;
+            # BANC resolves through the public-release SWC path. NeuPrint
+            # sources use the raw cache plus a NeuPrint fetch fallback.
             project_root = str(Path(__file__).resolve().parents[2])
 
             fetched = []
@@ -8430,7 +8439,7 @@ class HomologFinder:
                 fetched = [resolved[int(b)] for b in query_bodyids
                            if int(b) in resolved
                            and resolved[int(b)] is not None]
-            elif is_flywire_dataset(source_dataset):
+            elif is_fafb_dataset(source_dataset):
                 from morphology import load_flywire_skeletons_batch
                 resolved = load_flywire_skeletons_batch(
                     source_dataset, query_bodyids,

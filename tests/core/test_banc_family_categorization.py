@@ -1,15 +1,14 @@
-"""BANC-as-FlyWire-family categorization regressions (post-audit fixes).
+"""Standalone-BANC categorization regressions (post-audit fixes).
 
 Each test pins a site that predated the modern ``banc_*`` naming and
-mis-bucketed BANC — as NeuPrint, as non-family, or into the FAFB-only CAVE
-online paths (which fail silently for BANC):
+mis-bucketed BANC — as NeuPrint, as FAFB, or into the FAFB-only CAVE online
+paths (which fail silently for BANC):
 
-- ``DatasetConfig.is_flywire`` must use the shared family predicate, so
-  ``banc_v888`` is a local (FlyWire-family) dataset, not NeuPrint;
+- ``DatasetConfig`` must expose BANC as its own local source, not as FAFB;
 - the homolog renderer's ``cache_neurons`` default must treat BANC like
   FAFB (the sibling call sites already do);
 - the FAFB-vs-NeuPrint hemisphere warning must not fire for FAFB+BANC
-  mixes (BANC shares the FlyWire hemisphere convention);
+  mixes (both local releases use the same hemisphere convention);
 - coana's online fallbacks must never route BANC into the FAFB-only CAVE
   annotation/synapse tables: BANC metadata is local-table-only and its
   connections live only in the locally prepared merged table.
@@ -32,20 +31,22 @@ from comparison.profile_comparator import HomologFinder  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# DatasetConfig family classification
+# DatasetConfig source classification
 # ---------------------------------------------------------------------------
 
-def test_dataset_config_classifies_banc_as_flywire():
-    """``banc_v888`` is a FlyWire-family local dataset: is_flywire True and
-    is_neuprint False (it used to classify as NeuPrint via a stale
-    ``startswith('flywire')`` test)."""
+def test_dataset_config_classifies_banc_as_standalone_local_source():
+    """BANC is local and non-NeuPrint, but is not the FAFB release."""
     cfg = DatasetConfig(dataset="banc_v888")
-    assert cfg.is_flywire is True
+    assert cfg.is_flywire is False
+    assert cfg.is_fafb is False
+    assert cfg.is_banc is True
+    assert cfg.is_local is True
     assert cfg.is_neuprint is False
 
 
 def test_dataset_config_legacy_banc_name_and_neuprint_unchanged():
-    assert DatasetConfig(dataset="flywire_BANC_v888").is_flywire is True
+    assert DatasetConfig(dataset="flywire_BANC_v888").is_flywire is False
+    assert DatasetConfig(dataset="flywire_BANC_v888").is_banc is True
     assert DatasetConfig(dataset="flywire_FAFB_v783").is_flywire is True
     assert DatasetConfig(dataset="male-cns:v1.0").is_flywire is False
     assert DatasetConfig(dataset="male-cns:v1.0").is_neuprint is True
@@ -58,7 +59,7 @@ def test_dataset_config_legacy_banc_name_and_neuprint_unchanged():
 def test_homolog_renderer_caches_neurons_for_banc(tmp_path):
     """The renderer's cache_neurons default keyed on an inline
     ``startswith('flywire_')`` test, so banc_v888 fell to the pipeline-based
-    default (False under 'fast') while FAFB cached. The family predicate
+    default (False under 'fast') while FAFB cached. The local-source predicate
     must decide."""
     finder = HomologFinder(output_dir=str(tmp_path), verbose=False)
     options = finder._homolog_visualizer_kwargs(
@@ -78,8 +79,8 @@ def test_homolog_renderer_neuprint_default_unchanged(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_hemisphere_warning_not_raised_for_fafb_banc_mix(capsys):
-    """BANC counts as a FlyWire-side dataset: a FAFB+BANC mix must not
-    print the FAFB-vs-NeuPrint hemisphere reversal warning."""
+    """A FAFB+BANC mix must not print the FAFB-vs-NeuPrint hemisphere
+    reversal warning."""
     ComparisonParameters(datasets=["flywire_FAFB_v783", "banc_v888"])
     out = capsys.readouterr().out
     assert "hemisphere labels are reversed" not in out
@@ -203,7 +204,7 @@ def test_banc_prepare_failure_does_not_suggest_cave(
     import BANC_file_converter as bfc
 
     fnc = _banc_connection(tmp_path, monkeypatch)
-    # Route the prep call back onto the (BANC-aware) FlyWire branch the
+    # Route the prep call back onto the BANC-aware compatibility branch the
     # same way a legacy 'flywire' client_type configuration would.
     fnc.client_type = "flywire"
     monkeypatch.setattr(bfc, "ensure_banc_data",

@@ -1,11 +1,12 @@
-# FlyWire/FAFB/BANC Dataset Usage Guide
+# FAFB and Standalone BANC Dataset Usage Guide
 
-This toolkit supports analysis of FlyWire (FAFB) and BANC datasets using a
-**local file-based workflow**. Download the raw files from the Codex/FlyWire
-portal and place them in the exact `datasets/<dataset>/downloads/` directory;
-the toolkit then converts them to Parquet for analysis. FAFB also has an
-optional CAVE API path for workflows that explicitly request remote fetching;
-BANC remains local-file only.
+This toolkit supports analysis of FAFB and standalone BANC datasets using
+separate **local-release workflows**. FAFB raw files come from the
+Codex/FlyWire portal and are converted from `datasets/<dataset>/downloads/`.
+BANC metadata and connections are prepared on demand from its public release
+bucket, and BANC skeletons are fetched from that same bucket. FAFB alone has
+an optional CAVE API path for workflows that explicitly request remote
+fetching; BANC never uses CAVE.
 
 ## 1. Data Preparation
 
@@ -75,7 +76,7 @@ This script will:
 3.  Convert the data into optimized Parquet files (`.parquet`) for fast loading.
 4.  Save the processed files in the dataset folder.
 
-## 2. Using FlyWire/BANC Data in Analysis
+## 2. Using FAFB/BANC Data in Analysis
 
 Once the data is prepared, you can use it just like any other NeuPrint dataset.
 
@@ -104,7 +105,7 @@ Select the prepared dataset in the UI or in a direct `FindNeuronConnection`
 script. The first run automatically checks the matching `downloads/` folder
 and converts the raw files if the generated tables are absent.
 
-### Example: Visualizing Skeletons (FAFB Only)
+### Example: Visualizing Skeletons
 
 If you downloaded the `sk_lod1_783_healed.zip` file for FAFB, you can visualize 3D skeletons.
 
@@ -121,6 +122,10 @@ vs = VisualizeSkeleton(
 vs.plot_neurons()
 ```
 
+For BANC, select `banc_v626` or `banc_v888`; missing skeletons are fetched
+on demand from the public release bucket and cached as `.swc.zst` files in
+the BANC cache namespace. No CAVE token is involved.
+
 ### FAFB Tilt Correction
 The FAFB/FlyWire template mesh has a slight tilt relative to the standard view axes. By default (`FAFB_template_correction=True`), `VisualizeSkeleton` applies a rotation correction to align the brain:
 - **Z-axis rotation**: -4 degrees (corrects left-right tilt in front view)
@@ -128,10 +133,8 @@ The FAFB/FlyWire template mesh has a slight tilt relative to the standard view a
 
 This ensures that the brain appears straight in standard views (Front, Top, etc.). If you need the original raw coordinates (e.g., for alignment with other raw FAFB data), you can set `FAFB_template_correction=False`.
 
-**Note:** FlyWire-based BANC dataset does not currently support skeleton visualization.
-
 ## 3. Important Notes
 
 -   **Storage**: The converted Parquet files are much smaller and faster than the raw CSVs, but the initial raw files can be large. Ensure you have enough disk space.
 -   **Updates**: If you want to update the data, simply delete the files in the dataset folder and place new CSV files in the `downloads` folder. The converter will run again.
--   **IDs**: FlyWire/BANC use long integer Root IDs (e.g., `720575940...`). Ensure you use these IDs in your queries.
+-   **IDs**: FAFB and BANC use long integer Root IDs (e.g., `720575940...`). Ensure you use these IDs in your queries.

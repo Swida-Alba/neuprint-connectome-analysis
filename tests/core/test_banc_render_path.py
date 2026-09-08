@@ -696,6 +696,16 @@ class TestOverlayDropWarning:
 
 
 class TestResolutionKnob:
+    def test_banc_notice_is_not_the_fafb_mesh_cache_notice(self):
+        """The BANC render branch must identify its public SWC source."""
+        source = Path(visualize_skeleton.__file__).read_text(encoding='utf-8')
+        assert "BANC public release source selected" in source
+        assert "(SWC-first; public bucket; no CAVE token)." in source
+        assert (
+            'BANC public release source selected '
+            '(SWC-first; FAFB prepared mesh cache bypassed' not in source
+        )
+
     def test_resolver_uses_unified_chain(self, tmp_path, monkeypatch):
         """Source selection is removed: the resolver never forwards a
         resolution preference to the fetcher (unified L2->full->pcg)."""

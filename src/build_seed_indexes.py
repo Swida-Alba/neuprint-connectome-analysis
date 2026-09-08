@@ -11,6 +11,11 @@ zero-filled cache-progress flags, and refreshes
 Usage:
     python src/build_seed_indexes.py
     python src/build_seed_indexes.py --datasets male-cns:v1.0,flywire_FAFB_v783
+
+Without ``--datasets`` every local dataset folder with a recognizable neuron
+metadata table is discovered and prepared.  The committed seed list is used
+only when no local metadata folders are present (for example in a clean
+checkout before any dataset has been pulled).
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 from neuron_index_builder import (  # noqa: E402
     build_search_cache_frame,
     dataset_folder,
+    discover_metadata_datasets,
     is_search_cache_compatible,
     metadata_path,
     ordered_projection_columns,
@@ -40,7 +46,9 @@ from neuron_index_builder import (  # noqa: E402
     system_neuron_index_path,
 )
 
-# Datasets whose indexes are committed to the repository.
+# Fallback datasets whose indexes are committed to the repository.  Local
+# metadata discovery below is the normal path, so a new release does not need
+# to be added here just to receive an index.
 SEED_DATASETS = (
     "male-cns:v1.0",
     "flywire_FAFB_v783",
@@ -104,8 +112,17 @@ def build_seed_index(dataset: str, index_dir: Path) -> Optional[dict]:
     search_path = search_cache_path(index_path)
 
     frame = _seed_frame(source)
-    if frame.height == 0 or frame['bodyId'].is_null().all():
+    # Rows without a stable key cannot participate in search or coverage.
+    # Drop them before validating/writing so a malformed source never leaves
+    # an unusable index behind after a later duplicate/empty-key failure.
+    frame = frame.filter(
+        pl.col('bodyId').cast(pl.Utf8, strict=False)
+        .fill_null('').str.strip_chars() != ''
+    )
+    if frame.height == 0:
         raise ValueError(f'{dataset}: seed projection has no usable bodyIds')
+    if frame['bodyId'].n_unique() != frame.height:
+        raise ValueError(f'{dataset}: seed projection has duplicate bodyIds')
 
     _atomic_write_parquet(frame, index_path)
     _atomic_write_parquet(build_search_cache_frame(frame), search_path)
@@ -116,9 +133,6 @@ def build_seed_index(dataset: str, index_dir: Path) -> Optional[dict]:
         pl.read_parquet(search_path), frame.columns
     ):
         raise ValueError(f'{dataset}: built search sidecar failed validation')
-    if frame['bodyId'].n_unique() != frame.height:
-        raise ValueError(f'{dataset}: seed projection has duplicate bodyIds')
-
     return {
         'dataset': dataset,
         'folder': dataset_folder(dataset),
@@ -143,21 +157,44 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         '--datasets',
-        help='Comma-separated dataset ids to rebuild (default: all bundled)',
+        help=(
+            'Comma-separated dataset ids to rebuild (default: discover all '
+            'local metadata datasets; use the bundled seed list only when '
+            'none are present)'
+        ),
     )
     args = parser.parse_args()
 
     index_dir = _PROJECT_ROOT / 'neuron_indexes'
     index_dir.mkdir(parents=True, exist_ok=True)
 
-    datasets: List[str] = [
+    requested: List[str] = [
         item.strip()
         for item in (args.datasets or '').split(',')
         if item.strip()
-    ] or list(SEED_DATASETS)
+    ]
+    if requested:
+        datasets = requested
+    else:
+        datasets = discover_metadata_datasets(_PROJECT_ROOT / 'datasets')
+        if not datasets:
+            datasets = list(SEED_DATASETS)
+            print('No local metadata datasets discovered; using bundled seeds.')
 
+    previous = _read_manifest(index_dir)
+    previous_datasets = (
+        previous.get('datasets')
+        if isinstance(previous, dict)
+        else None
+    )
     entries: Dict[str, dict] = {}
-    print(f'Rebuilding bundled neuron indexes in {index_dir}:')
+    for dataset, entry in (previous_datasets or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        folder = str(entry.get('folder') or dataset_folder(dataset))
+        if (index_dir / folder / 'neuron_index.parquet').is_file():
+            entries[str(dataset)] = dict(entry)
+    print(f'Rebuilding neuron indexes in {index_dir}:')
     for dataset in datasets:
         print(f'- {dataset}')
         try:
@@ -167,6 +204,16 @@ def main() -> int:
             return 1
         if entry is None:
             continue
+        # Replace an old spelling of the same folder (the manifest historically
+        # mixed ``male-cns_v1_0`` and ``male-cns:v1.0`` keys) rather than
+        # leaving duplicate logical datasets behind.
+        for old_dataset, old_entry in list(entries.items()):
+            if (
+                old_dataset != dataset
+                and isinstance(old_entry, dict)
+                and old_entry.get('folder') == entry.get('folder')
+            ):
+                entries.pop(old_dataset, None)
         entries[dataset] = entry
         print(
             f'  ✓ {entry["rows"]:,} rows · index {entry["index_bytes"] / 1048576:.1f} MB · '

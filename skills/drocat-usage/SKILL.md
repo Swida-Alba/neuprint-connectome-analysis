@@ -106,7 +106,7 @@ expected outputs, and a runnable launcher command.
 
 ## Standard agent workflow
 
-1. **Clarify the analysis**: dataset (NeuPrint vs FlyWire local), source/target
+1. **Clarify the analysis**: dataset (NeuPrint vs FAFB/BANC local), source/target
    queries, direct vs multi-hop and max layers, thresholds and filters, desired
    output format (CSV/XLSX/HTML/images/PDF/PPTX), output folder, and whether cache
    may be used. If underspecified, make the smallest safe assumption and state it
@@ -124,7 +124,8 @@ expected outputs, and a runnable launcher command.
 
 - Validate dataset spelling against the configured dataset list before an API
   call. NeuPrint names include versions (`hemibrain:v1.2.1`, `male-cns:v0.9`);
-  FlyWire names include `flywire_FAFB_v783` and `banc_v888`.
+  FAFB uses `flywire_FAFB_v783`; standalone BANC uses `banc_v888` or
+  `banc_v626`.
 - Keep `use_cache=True` for repeat work. Use `cache_only=True` only after checking
   cache coverage.
 - Prefer CSV for large intermediate tables; use Excel only when the user needs

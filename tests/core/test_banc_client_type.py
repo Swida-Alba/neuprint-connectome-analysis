@@ -3,7 +3,7 @@ issue-report BANC-02 and BANC-09).
 
 Covers:
 * the BANC client-type normalization (default/'neuprint'/'banc' all land
-  on 'banc'; other values are rejected; FlyWire/NeuPrint datasets are
+  on 'banc'; other values are rejected; FAFB/NeuPrint datasets are
   untouched);
 * ``_ensure_complete_dataset`` early-returning for 'banc' (the doomed
   ``sv.pull_dataset`` per-init regression);

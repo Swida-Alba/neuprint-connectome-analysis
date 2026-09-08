@@ -216,7 +216,7 @@ Examples:
     # Build cache for specific neuron types
     python build_connection_cache.py hemibrain:v1.2.1 --types Mi1 T4a aMe12
     
-    # Build cache for FlyWire/FAFB (uses local files)
+    # Build cache for FAFB (uses local files)
     python build_connection_cache.py flywire_FAFB_v783
     
     # Show cache statistics

@@ -1005,6 +1005,7 @@ class CrossDatasetTypeMapper:
         self._flywire_annotation_primaries = {}
         self._flywire_primaries = {}
         self._banc_label_tables = {}
+        self._banc_label_table_paths = {}
         self._body_id_to_primary = {}
         for key in FLYWIRE_MAPPING_KEYS:
             path = self._flywire_neuron_df_paths.get(key)
@@ -1013,11 +1014,11 @@ class CrossDatasetTypeMapper:
             source = FLYWIRE_TYPE_SOURCES[key]
             columns = {'type', source['alt_column'], 'bodyId'}
             if key.startswith('banc_'):
-                columns.update(BANC_LABEL_COLUMNS)
-                columns.update({
-                    'fafb_match', 'manc_match', 'malecns_match',
-                    'hemibrain_match',
-                })
+                # Keep the large BANC label projection out of memory while
+                # the primary/annotation indexes are built.  The label
+                # overlay reads one narrow (type, label, optional match)
+                # projection at a time below.
+                columns = {'type', source['alt_column'], 'bodyId'}
             cached_path = self._cached_mapper_index_path(
                 path, source['dataset_dir'], {'type', source['alt_column']})
             if not os.path.exists(path) and cached_path is None:
@@ -1073,7 +1074,8 @@ class CrossDatasetTypeMapper:
                         self._dataset_types[key].add(primary)
                 self._body_id_to_primary[key] = body_to_type
             if key.startswith('banc_'):
-                self._banc_label_tables[key] = table
+                self._banc_label_table_paths[key] = (
+                    path, source['dataset_dir'])
             # §T3 (user 2026-09-06): a FAFB additional_type(s) cell may list
             # SEVERAL names; only the in-use ones (a FAFB primary, a male-cns
             # type name — the crosswalk's left side, e.g. APDN3 rows

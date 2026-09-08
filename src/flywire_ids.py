@@ -1,4 +1,4 @@
-"""Canonical FlyWire body-ID handling.
+"""Canonical FAFB/BANC body-ID handling.
 
 FlyWire root/body IDs are identifiers, not measurements.  They are commonly
 larger than JavaScript's safe-integer range, so DROCAT keeps them as exact
@@ -36,7 +36,7 @@ _INTEGRAL_DECIMAL = re.compile(r"^([0-9]+)\.0+$")
 
 
 class FlyWireBodyIdError(ValueError):
-    """Raised when a FlyWire body ID cannot be preserved exactly."""
+    """Raised when a FAFB/BANC body ID cannot be preserved exactly."""
 
 
 def is_banc_dataset(dataset: object) -> bool:
@@ -46,21 +46,35 @@ def is_banc_dataset(dataset: object) -> bool:
 
 
 def is_fafb_dataset(dataset: object) -> bool:
-    """Return whether *dataset* identifies the FlyWire FAFB release."""
+    """Return whether *dataset* identifies a FAFB release.
 
-    normalized = str(dataset or "").strip().lower()
-    return "fafb" in normalized and not is_banc_dataset(normalized)
+    ``flywire_*`` remains accepted for the FAFB release because that is the
+    historical identifier used by the Codex/FAFB files.  BANC is deliberately
+    excluded even when a legacy ``flywire_BANC_*`` alias is supplied.
+    """
+
+    normalized = canonical_dataset_name(str(dataset or "").strip()).lower()
+    if is_banc_dataset(normalized):
+        return False
+    return normalized in {"flywire", "fafb"} or "fafb" in normalized
 
 
 def is_flywire_dataset(dataset: object) -> bool:
-    """Return whether *dataset* belongs to the FlyWire family.
+    """Return whether *dataset* is the FAFB release.
 
-    FAFB and BANC are both FlyWire datasets.  Keeping this predicate here
-    prevents individual callers from accidentally handling only FAFB.
+    The function name is retained for API compatibility.  It is no longer a
+    family predicate: standalone BANC identifiers return ``False`` and
+    callers that need either local release must use
+    :func:`is_local_connectome_dataset`.
     """
 
-    normalized = str(dataset or "").strip().lower()
-    return any(token in normalized for token in ("flywire", "fafb", "banc"))
+    return is_fafb_dataset(dataset)
+
+
+def is_local_connectome_dataset(dataset: object) -> bool:
+    """Return whether *dataset* is a local FAFB or standalone BANC release."""
+
+    return is_fafb_dataset(dataset) or is_banc_dataset(dataset)
 
 
 def dataset_folder(dataset: object) -> str:

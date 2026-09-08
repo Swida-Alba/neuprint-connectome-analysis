@@ -159,7 +159,7 @@ Find **multi-hop pathways** connecting neurons through intermediate layers.
 fc = FindNeuronConnection(
     token='',
     output_dir='../local_data/connection_data',
-    dataset='flywire_FAFB_v783',     # NeuPrint or FlyWire dataset
+    dataset='flywire_FAFB_v783',     # NeuPrint or FAFB dataset
     
     # Neurons
     sourceNeurons=['CB0038'],
@@ -439,7 +439,7 @@ local_data/flylight/SS01015_{timestamp}/
 | `optic-lobe:v1.1`   | NeuPrint | Optic lobe detailed         |
 | `manc:v1.2.3`       | NeuPrint | Male ventral nerve cord     |
 | `flywire_FAFB_v783` | Local    | FlyWire female adult brain  |
-| `banc_v626` | Local    | FlyWire male VNC            |
+| `banc_v626` | Local    | Standalone BANC brain + nerve cord (public release) |
 
 ### Neuron Selection (Regex Support)
 

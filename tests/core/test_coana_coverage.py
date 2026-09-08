@@ -1097,6 +1097,7 @@ class TestFindPathPipeline:
 
         folder = Path(fc.path_folder)
         assert folder.name.startswith("find-paths-complete_")
+        assert "r0p0" not in folder.name
         assert (folder / "source_neurons.csv").exists()
         assert (folder / "target_neurons.csv").exists()
         assert (folder / "all_attributes.json").exists()
@@ -2569,4 +2570,3 @@ class TestFindAllPathReciprocal:
         folder = Path(fc.allpath_folder)
         assert (folder / "all_attributes.json").exists()
         coana.clear_findallpath_cache()
-

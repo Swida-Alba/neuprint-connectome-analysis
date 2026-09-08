@@ -90,7 +90,7 @@ results = finder.find_lines_batch(
 Key features:
 
 - **Weighted score ranking**: lines ranked by `weighted_score = avg_score × coverage_ratio`
-- **Multi-dataset search**: hemibrain, male-cns, FlyWire FAFB/BANC
+- **Multi-dataset search**: hemibrain, male-cns, FAFB, and standalone BANC
 - **Co-labeling analysis**: specificity and overlap between driver lines
 - **Automatic image download**: FlyLight imagery for top candidates
 

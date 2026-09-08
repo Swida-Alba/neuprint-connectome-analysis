@@ -309,7 +309,7 @@ class MorphologyProfileComparer:
         ``load_flywire_skeletons_batch`` (raw cache → healed FAFB bundle →
         CAVE fallback); BANC goes through the shared batch fetch too — its
         branch resolves each body via the official public-bucket SWC chain
-        (``fetch_banc_swc``), never the FlyWire CAVE machinery, which has
+        (``fetch_banc_swc``), never the FAFB CAVE machinery, which has
         no BANC products. Fetched neurons are re-vectorized with the
         cache's own vectorizer so rows land in the cache's exact schema.
         Returns the number of neurons vectorized."""

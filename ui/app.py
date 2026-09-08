@@ -2760,5 +2760,8 @@ def main():
     )
 
 
-if __name__ in {"__main__", "__mp_main__"}:
+# A spawned cross-dataset worker imports this file as ``__mp_main__``.  Do
+# not start a second NiceGUI server in that worker; it only needs to import
+# the picklable scan callback.
+if __name__ == "__main__":
     main()

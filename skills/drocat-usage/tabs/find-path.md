@@ -111,6 +111,9 @@ python skills/drocat-usage/scripts/run_direct.py \
   cap on unique edges rendered per HTML view — it never changes fetch/graph/paths,
   and a single complete path may exceed it to stay intact; type- and
   bodyId-level visualizations share the same cap.
+- `min_ratio` and `min_traversal_probability` are retained as compatibility
+  parameters and exported readout columns, but their filters are disabled in
+  Complete Paths; they do not add `r[]p[]` notes to the run folder name.
 - Every run writes a threshold/bottleneck provenance block to `parameters.txt`,
   `all_attributes.json`, and `data_details/parameters.csv`: `requested_threshold`,
   `applied_threshold`, `applied_threshold_source` ('requested' |

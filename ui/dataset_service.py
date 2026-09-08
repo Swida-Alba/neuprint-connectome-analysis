@@ -23,16 +23,35 @@ except ImportError:  # src not on sys.path; fall back to first-found tokens
 
 try:
     from src.utils.naming_utils import canonical_dataset_name
-except ImportError:  # src not on sys.path; legacy BANC names stay as-is
+    from src.flywire_ids import (
+        dataset_folder,
+        is_banc_dataset,
+        is_fafb_dataset,
+        is_local_connectome_dataset,
+    )
+except ImportError:  # src not on sys.path; keep the UI importable standalone
     def canonical_dataset_name(value):
         return str(value or "").strip()
+
+    def dataset_folder(value):
+        return canonical_dataset_name(value).replace(":", "_").replace(".", "_")
+
+    def is_banc_dataset(dataset):
+        return "banc" in str(dataset or "").strip().lower()
+
+    def is_fafb_dataset(dataset):
+        normalized = canonical_dataset_name(dataset).lower()
+        return "fafb" in normalized and not is_banc_dataset(normalized)
+
+    def is_local_connectome_dataset(dataset):
+        return is_fafb_dataset(dataset) or is_banc_dataset(dataset)
 
 
 @dataclass
 class DatasetInfo:
     """Information about a dataset."""
     name: str
-    source: str  # 'neuprint', 'flywire', 'local'
+    source: str  # 'neuprint', 'flywire' (FAFB), or 'banc' (standalone BANC)
     available: bool = False
     neuron_count: int = 0
     typed_count: int = 0
@@ -47,12 +66,10 @@ class DatasetInfo:
 # e.g. 'hemibrain_v1_2_1' <-> 'hemibrain:v1.2.1'
 def folder_to_dataset(folder_name: str) -> str:
     """Convert a folder name to a dataset identifier."""
-    # FlyWire datasets and the BANC releases keep their names as-is.
-    # (A BANC carve-out is required: the generic NeuPrint rule below would
-    # otherwise turn the folder 'banc_v626' into the identifier 'banc:v626'.)
-    normalized = str(folder_name or "").strip().lower()
-    if "flywire" in normalized or normalized.startswith("banc"):
-        return folder_name
+    # Local releases use their canonical folder spelling.  This also folds
+    # legacy ``flywire_BANC_*`` folders into the standalone BANC namespace.
+    if is_local_connectome_dataset(folder_name):
+        return dataset_folder(folder_name)
     # NeuPrint: first _ becomes :, remaining _ become .
     # e.g. hemibrain_v1_2_1 -> hemibrain:v1.2.1
     #      male-cns_v0_9 -> male-cns:v0.9
@@ -66,38 +83,21 @@ def folder_to_dataset(folder_name: str) -> str:
 
 def dataset_to_folder(dataset: str) -> str:
     """Convert a dataset identifier to a folder name."""
-    # FlyWire datasets and the BANC releases keep their names as-is
-    normalized = str(dataset or "").strip().lower()
-    if "flywire" in normalized or normalized.startswith("banc"):
-        return dataset
+    # Canonicalize both FAFB and standalone BANC to the same safe folder
+    # spelling used by the backend and cache builders.
+    if is_local_connectome_dataset(dataset):
+        return dataset_folder(dataset)
     # NeuPrint: : becomes _, . becomes _
     return dataset.replace(":", "_").replace(".", "_")
 
 
 def is_flywire_dataset(dataset: str) -> bool:
-    """Return whether *dataset* is a FlyWire-family local-table identifier.
+    """Compatibility alias for the FAFB-only FlyWire predicate.
 
-    Covers FAFB and the BANC releases (legacy ``flywire_BANC_*`` spellings
-    canonicalize to ``banc_*``).  The NeuPrint server metadata lists a hidden
-    dataset named ``banc:v888`` that is not queryable through the API; the
-    colon form never matches the canonical underscore names here, so it is
-    correctly excluded.
+    BANC is a standalone public-release source.  Use
+    :func:`is_local_connectome_dataset` when code needs either FAFB or BANC.
     """
-    normalized = canonical_dataset_name(str(dataset or "").strip()).lower()
-    return (normalized.startswith("flywire_")
-            or normalized.startswith("banc_")
-            or "fafb" in normalized)
-
-
-def is_banc_dataset(dataset: str) -> bool:
-    """Return whether *dataset* identifies a BANC release.
-
-    BANC remains listed in the general dataset catalog for supported
-    connectivity tools, but morphology/skeleton tabs use this predicate to
-    show the option as unavailable.
-    """
-
-    return "banc" in str(dataset or "").strip().lower()
+    return is_fafb_dataset(dataset)
 
 
 class DatasetService:
@@ -121,10 +121,14 @@ class DatasetService:
         "mushroombody",
     ]
 
-    # FlyWire/Codex datasets (from https://codex.flywire.ai/)
-    # These require local files + CAVE token for API access
+    # FAFB release datasets (the FlyWire/Codex-backed local source).
     FLYWIRE_DATASETS = [
         "flywire_FAFB_v783",
+    ]
+
+    # BANC release datasets. These are fetched from the public BANC bucket;
+    # they do not use FlyWire/Codex or a CAVE token.
+    BANC_DATASETS = [
         "banc_v888",
         "banc_v626",
     ]
@@ -132,8 +136,8 @@ class DatasetService:
     # Codex display info (fetched from codex.flywire.ai rendered page)
     CODEX_DATASETS = {
         "flywire_FAFB_v783": {"display": "FAFB v783 (CB)", "desc": "Female Adult Fly Brain", "neurons": 139255},
-        "banc_v888": {"display": "BANC v888 (CNS)", "desc": "Brain and Nerve Cord", "neurons": 158262},
-        "banc_v626": {"display": "BANC v626 (CNS)", "desc": "Brain and Nerve Cord (older)", "neurons": 115151},
+        "banc_v888": {"display": "BANC v888 (CNS)", "desc": "Brain and Nerve Cord — public BANC release", "neurons": 158262},
+        "banc_v626": {"display": "BANC v626 (CNS)", "desc": "Brain and Nerve Cord — public BANC release (older)", "neurons": 115151},
     }
 
     NEUPRINT_SERVER = "https://neuprint.janelia.org"
@@ -432,13 +436,13 @@ class DatasetService:
 
     def get_all_datasets(self) -> List[str]:
         """
-        Get list of all available datasets (NeuPrint + FlyWire).
+        Get list of all available datasets (NeuPrint + FAFB + BANC).
         If we have fetched from the server, includes ALL server datasets
         (including older versions like hemibrain:v1.1, fib19:v1.0, etc.).
         """
         if self._available_neuprint is not None:
-            return self._available_neuprint + self.FLYWIRE_DATASETS
-        return self.NEUPRINT_CANDIDATES + self.FLYWIRE_DATASETS
+            return self._available_neuprint + self.FLYWIRE_DATASETS + self.BANC_DATASETS
+        return self.NEUPRINT_CANDIDATES + self.FLYWIRE_DATASETS + self.BANC_DATASETS
 
     def get_neuprint_datasets(self) -> List[str]:
         """Get list of available NeuPrint datasets."""
@@ -447,8 +451,12 @@ class DatasetService:
         return self.NEUPRINT_CANDIDATES.copy()
 
     def get_flywire_datasets(self) -> List[str]:
-        """Get list of FlyWire datasets."""
+        """Get the FAFB datasets backed by the FlyWire/Codex release."""
         return self.FLYWIRE_DATASETS.copy()
+
+    def get_banc_datasets(self) -> List[str]:
+        """Get the standalone BANC public-release datasets."""
+        return self.BANC_DATASETS.copy()
 
     def check_dataset_availability(self, dataset: str) -> DatasetInfo:
         """
@@ -462,7 +470,9 @@ class DatasetService:
         self._load_tokens()
 
         # Determine source
-        if is_flywire_dataset(dataset):
+        if is_banc_dataset(dataset):
+            info = self._check_banc_dataset(dataset)
+        elif is_fafb_dataset(dataset):
             info = self._check_flywire_dataset(dataset)
         else:
             info = self._probe_neuprint_dataset(dataset)
@@ -476,18 +486,23 @@ class DatasetService:
             total, typed = self._load_local_neuron_counts(dataset)
             info.neuron_count = total
             info.typed_count = typed
-        if info.source == "flywire":
-            # FlyWire has no server-backed dataset status in this UI.  A
+        if info.source in ("flywire", "banc"):
+            # Release datasets have no server-backed dataset status in this
+            # UI.  A
             # directory (or a lone neuron table) is not enough to call it
             # available; both converter outputs must be present.
             info.available = info.local_prepared
             if not info.local_prepared:
-                info.error = "Local FlyWire neuron and connection tables are not both prepared."
+                source_name = "BANC" if info.source == "banc" else "FAFB"
+                info.error = (
+                    f"Local {source_name} neuron and connection tables are not "
+                    "both prepared."
+                )
 
         # Last resorts so every listed dataset still reports a count:
         # known FlyWire release sizes, a live NeuPrint count query, and
         # finally the local pull-cache index.
-        if info.neuron_count == 0 and info.source == "flywire":
+        if info.neuron_count == 0 and info.source in ("flywire", "banc"):
             codex = self.CODEX_DATASETS.get(dataset) or {}
             if codex.get("neurons"):
                 info.neuron_count = int(codex["neurons"])
@@ -515,7 +530,8 @@ class DatasetService:
 
     def fetch_codex_datasets(self) -> Dict[str, dict]:
         """
-        Fetch available FlyWire datasets from Codex (codex.flywire.ai).
+        Fetch available FAFB/BANC release names from the Codex catalog
+        (codex.flywire.ai).
         Returns dict of {dataset_name: {display, desc, neurons}}.
         Falls back to hardcoded CODEX_DATASETS if fetch fails.
         """
@@ -544,10 +560,16 @@ class DatasetService:
                 if found:
                     # Update our CODEX_DATASETS with fetched info
                     self.CODEX_DATASETS.update(found)
-                    # Also update FLYWIRE_DATASETS list
+                    # Keep the two release catalogs separate. BANC may be
+                    # advertised by Codex, but it is not a FlyWire source.
                     for k in found:
-                        if k not in self.FLYWIRE_DATASETS:
-                            self.FLYWIRE_DATASETS.append(k)
+                        target = (
+                            self.BANC_DATASETS
+                            if is_banc_dataset(k)
+                            else self.FLYWIRE_DATASETS
+                        )
+                        if k not in target:
+                            target.append(k)
                     return found
         except Exception:
             pass
@@ -626,8 +648,16 @@ class DatasetService:
         return 0, 0
 
     def _check_flywire_dataset(self, dataset: str) -> DatasetInfo:
-        """Check FlyWire dataset availability."""
-        info = DatasetInfo(name=dataset, source="flywire")
+        """Check FAFB local-release availability."""
+        return self._check_local_release_dataset(dataset, source="flywire")
+
+    def _check_banc_dataset(self, dataset: str) -> DatasetInfo:
+        """Check standalone BANC public-release availability."""
+        return self._check_local_release_dataset(dataset, source="banc")
+
+    def _check_local_release_dataset(self, dataset: str, source: str) -> DatasetInfo:
+        """Check a local release source without contacting NeuPrint/CAVE."""
+        info = DatasetInfo(name=dataset, source=source)
 
         local_path = self._get_dataset_path(dataset)
         if local_path and local_path.exists():
@@ -646,10 +676,17 @@ class DatasetService:
                 except Exception:
                     pass
         else:
-            info.error = (
-                "Local FlyWire dataset is not prepared. Put the raw Codex files "
-                "under datasets/<dataset>/downloads/ and run the converter."
-            )
+            if source == "banc":
+                info.error = (
+                    "Local BANC release is not prepared. DROCAT fetches the "
+                    "public BANC tables automatically; run the BANC converter "
+                    "or prepare the dataset from the public release bucket."
+                )
+            else:
+                info.error = (
+                    "Local FAFB release is not prepared. Put the raw Codex files "
+                    "under datasets/<dataset>/downloads/ and run the converter."
+                )
 
         return info
 
@@ -674,7 +711,7 @@ class DatasetService:
         """Check if dataset has local data files ready for analysis (not just cache)."""
         dataset_path = self._get_dataset_path(dataset)
         if dataset_path and dataset_path.exists():
-            if not is_flywire_dataset(dataset):
+            if not is_local_connectome_dataset(dataset):
                 # NeuPrint can legitimately use a local neuron table while
                 # connections remain server-backed; preserve that behavior.
                 return any(
@@ -683,8 +720,8 @@ class DatasetService:
                     for path in dataset_path.glob(pattern)
                 )
 
-            # A FlyWire conversion is usable only when both generated tables
-            # exist.  A neuron table by itself is not enough for pathfinding:
+            # A FAFB/BANC conversion is usable only when both generated
+            # tables exist.  A neuron table by itself is not enough for pathfinding:
             # the converter also writes the merged connection table.
             neuron_ready = any(
                 path
@@ -876,12 +913,16 @@ class DatasetService:
 
                 info = DatasetInfo(
                     name=name,
-                    source="flywire" if is_flywire_dataset(name) else "neuprint",
+                    source=(
+                        "banc" if is_banc_dataset(name)
+                        else "flywire" if is_fafb_dataset(name)
+                        else "neuprint"
+                    ),
                     local_cache=True,
                 )
 
                 # Keep the local listing consistent with
-                # check_dataset_availability().  In particular, a FlyWire
+                # check_dataset_availability().  In particular, a local
                 # directory containing only the neuron table is not ready for
                 # pathfinding until its merged connection table is present.
                 info.local_prepared = self._check_local_prepared(name)
@@ -907,7 +948,7 @@ class DatasetService:
     def refresh_availability(self, datasets: Optional[List[str]] = None) -> Dict[str, DatasetInfo]:
         """
         Refresh availability for all or specific datasets.
-        Also fetches FlyWire dataset list from Codex. A completed refresh is
+        Also fetches release names from Codex. A completed refresh is
         written to the persistent availability snapshot so the next Settings
         page load starts from this result instead of an older in-memory value.
         """
@@ -916,11 +957,11 @@ class DatasetService:
             self._cache.clear()
 
         if datasets is None:
-            # Fetch FlyWire datasets from Codex
+            # Fetch release names from Codex (FAFB and BANC remain separate).
             self.fetch_codex_datasets()
             # Fetch NeuPrint datasets from server
             neuprint_available = self.fetch_neuprint_datasets()
-            datasets = neuprint_available + self.FLYWIRE_DATASETS
+            datasets = neuprint_available + self.FLYWIRE_DATASETS + self.BANC_DATASETS
 
         results = {}
         for dataset in datasets:

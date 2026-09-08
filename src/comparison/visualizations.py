@@ -81,7 +81,8 @@ class ComparisonVisualizer:
         thresholds: List[int],
         figsize: Optional[Tuple[int, int]] = None,
         title: str = "Path Counts by Dataset and Threshold",
-        nickname_map: Dict[str, str] = None
+        nickname_map: Dict[str, str] = None,
+        x_label: str = "Weight Threshold"
     ) -> plt.Figure:
         """
         Plot bar chart of path counts across datasets and thresholds.
@@ -124,8 +125,8 @@ class ComparisonVisualizer:
             bars = ax.bar(x + offset, counts[i], width, label=label, 
                          color=self.default_colors[i % len(self.default_colors)])
             ax.bar_label(bars, padding=3, fontsize=8)
-        
-        ax.set_xlabel('Weight Threshold')
+
+        ax.set_xlabel(x_label)
         ax.set_ylabel('Number of Paths')
         ax.set_title(title)
         ax.set_xticks(x)
@@ -1973,6 +1974,10 @@ class ComparisonVisualizer:
         output_base_path: str = None,
         nickname_map: Dict[str, str] = None,
         path_presence_matrix: pd.DataFrame = None,
+        point_metadata_func=None,
+        point_label_func=None,
+        point_stem_func=None,
+        threshold_mode: str = 'standard',
         silent: bool = False
     ):
         """
@@ -1993,6 +1998,14 @@ class ComparisonVisualizer:
             output_base_path: Base path for reading original dataset data
             nickname_map: Dict mapping dataset names to short nicknames for display
             path_presence_matrix: Optional DataFrame with path presence across datasets and thresholds
+            point_metadata_func: Optional function returning requested/applied
+                provenance for one comparison point
+            point_label_func: Optional function returning a display label for
+                one comparison point
+            point_stem_func: Optional function returning a filesystem stem for
+                one comparison point (for example ``query_combo_001``)
+            threshold_mode: ``standard`` or ``combinations``; combination
+                points are query rows, not scalar thresholds
             silent: If True, suppress per-file messages and show summary instead
         """
         # Track saved files for summary
@@ -2013,9 +2026,93 @@ class ComparisonVisualizer:
         # Determine current threshold for labels
         if current_threshold is None:
             current_threshold = thresholds[len(thresholds) // 2] if thresholds else 1
+
+        def point_metadata(point):
+            if point_metadata_func is None:
+                return {}
+            try:
+                value = point_metadata_func(point) or {}
+                return value if isinstance(value, dict) else {}
+            except Exception:
+                return {}
+
+        def point_label(point):
+            if point_label_func is None:
+                return str(point)
+            try:
+                return str(point_label_func(point))
+            except Exception:
+                return str(point)
+
+        def point_stem(point):
+            if point_stem_func is None:
+                return str(point)
+            try:
+                return str(point_stem_func(point))
+            except Exception:
+                return str(point)
+
+        def point_threshold_value(point):
+            """Keep scalar ``threshold`` columns numeric in Standard mode.
+
+            A Custom combination row is a query identity, not a scalar
+            threshold. Its identity is carried by ``query_id`` below, so
+            query-keyed aggregate CSVs must not overload ``threshold`` with a
+            query string.
+            """
+            return point if threshold_mode != 'combinations' else None
+
+        def point_title(point):
+            """Axis/title fragment for one comparison point.
+
+            Standard points keep the historical scalar wording
+            ("Threshold=10"). Custom combination points display their query
+            label, never a numeric-threshold phrase.
+            """
+            if threshold_mode == 'combinations':
+                return point_label(point)
+            return f"Threshold={point}"
+
+        def add_point_fields(row, point):
+            # Keep the established Standard export schema unchanged.  Query
+            # identity and threshold scope are required only when the caller
+            # is exporting row-wise custom combinations; adding those columns
+            # to scalar exports would make downstream Standard consumers
+            # unnecessarily version-sensitive.
+            if threshold_mode != 'combinations':
+                return row
+            meta = point_metadata(point)
+            fields = {
+                'threshold_scope': meta.get('threshold_scope', threshold_mode),
+            }
+            fields.update({
+                'query_id': meta.get('query_id', point),
+                'query_label': meta.get('query_label', point_label(point)),
+            })
+            for dataset, value in (meta.get('requested_thresholds') or {}).items():
+                safe = str(dataset).replace(':', '_').replace('.', '_').replace('-', '_')
+                fields[f'requested_{safe}'] = value
+            for dataset, value in (meta.get('applied_thresholds') or {}).items():
+                safe = str(dataset).replace(':', '_').replace('.', '_').replace('-', '_')
+                fields[f'applied_{safe}'] = value
+            if isinstance(row, pd.DataFrame):
+                for key, value in fields.items():
+                    row[key] = value
+                return row
+            for key, value in fields.items():
+                row.setdefault(key, value)
+            return row
         
         # Path counts
-        fig = self.plot_path_counts(results, thresholds, nickname_map=nickname_map)
+        fig = self.plot_path_counts(
+            results, thresholds,
+            nickname_map=nickname_map,
+            title=("Path Counts by Dataset and Query"
+                   if threshold_mode == 'combinations'
+                   else "Path Counts by Dataset and Threshold"),
+            x_label=("Query" if threshold_mode == 'combinations'
+                     else "Weight Threshold"),
+        )
         self.save_figure(fig, os.path.join(output_dir, "path_counts.png"))
         plt.close(fig)
         
@@ -2025,7 +2122,11 @@ class ComparisonVisualizer:
             for threshold in thresholds:
                 df = results.get(dataset, {}).get(threshold, pd.DataFrame())
                 count = len(df) if not df.empty else 0
-                path_counts_data.append({'dataset': dataset, 'threshold': threshold, 'count': count})
+                path_counts_data.append(add_point_fields({
+                    'dataset': dataset,
+                    'threshold': point_threshold_value(threshold),
+                    'count': count,
+                }, threshold))
         pd.DataFrame(path_counts_data).to_csv(os.path.join(vis_data_dir, "path_counts.csv"), index=False)
         
         # Note: edge_heatmap.png removed (redundant with path/threshold comparison views)
@@ -2040,7 +2141,9 @@ class ComparisonVisualizer:
                     results, thresholds, align_func,
                     similarity_func=similarity_func,
                     path_data_func=path_data_func,
-                    title="Dataset Similarity at Each Threshold Level"
+                    title=("Dataset Similarity for Each Query Row"
+                           if threshold_mode == 'combinations'
+                           else "Dataset Similarity at Each Threshold Level")
                 )
                 self.save_figure(fig, os.path.join(output_dir, "similarity_per_threshold.png"))
                 plt.close(fig)
@@ -2068,8 +2171,15 @@ class ComparisonVisualizer:
                                 )
                         if sim_t is not None and not sim_t.empty:
                             sim_t = sim_t.copy()
-                            sim_t['threshold'] = threshold
+                            sim_t['threshold'] = point_threshold_value(threshold)
+                            add_point_fields(sim_t, threshold)
                             all_sim_data.append(sim_t)
+                            if threshold_mode == 'combinations':
+                                sim_t.to_csv(
+                                    os.path.join(
+                                        vis_data_dir,
+                                        f"similarity_{point_stem(threshold)}.csv"),
+                                    index=False)
                     except:
                         pass
                 if all_sim_data:
@@ -2081,18 +2191,40 @@ class ComparisonVisualizer:
             except Exception as e:
                 self._vprint(f"Warning: Could not create per-threshold similarity plot: {e}")
         
-        # Edge overlap data export (visualization removed - redundant with threshold_comparison)
-        if not aligned_data.empty:
-            available = [d for d in datasets if d in aligned_data.columns]
-            overlap_data = []
+        # Edge overlap data export (visualization removed - redundant with
+        # threshold_comparison).  Combination mode must retain one block per
+        # query; the old selected-middle-point export was misleading.
+        overlap_data = []
+        overlap_points = thresholds if align_func else [current_threshold]
+        for point in overlap_points:
+            try:
+                aligned_point = align_func(point) if align_func else aligned_data
+            except Exception as exc:
+                self._vprint(
+                    f"Warning: Could not align overlap point {point}: {exc}"
+                )
+                continue
+            if aligned_point is None or aligned_point.empty:
+                continue
+            available = [d for d in datasets if d in aligned_point.columns]
             for d in available:
-                present = set(aligned_data[aligned_data[d] > 0].index)
-                overlap_data.append({'dataset': d, 'edge_count': len(present)})
-            # Common edges
+                present = set(aligned_point[aligned_point[d] > 0].index)
+                overlap_data.append(add_point_fields({
+                    'threshold': point_threshold_value(point),
+                    'dataset': d,
+                    'edge_count': len(present),
+                }, point))
             if available:
-                common = set(aligned_data[(aligned_data[available] > 0).all(axis=1)].index)
-                overlap_data.append({'dataset': 'common_all', 'edge_count': len(common)})
-            pd.DataFrame(overlap_data).to_csv(os.path.join(vis_data_dir, "edge_overlap.csv"), index=False)
+                common = set(aligned_point[
+                    (aligned_point[available] > 0).all(axis=1)].index)
+                overlap_data.append(add_point_fields({
+                    'threshold': point_threshold_value(point),
+                    'dataset': 'common_all',
+                    'edge_count': len(common),
+                }, point))
+        if overlap_data:
+            pd.DataFrame(overlap_data).to_csv(
+                os.path.join(vis_data_dir, "edge_overlap.csv"), index=False)
         
         # Dataset overlap matrices per threshold (edge and path overlap)
         if align_func and path_data_func:
@@ -2135,15 +2267,16 @@ class ComparisonVisualizer:
                         for i2, d2 in enumerate(available_ds):
                             diag_edge = edge_overlap_matrix[i1][i1]
                             diag_path = path_overlap_matrix[i1][i1]
-                            overlap_matrices_data.append({
-                                'threshold': threshold,
+                            overlap_matrices_data.append(add_point_fields({
+                                'threshold': point_threshold_value(threshold),
+                                'threshold_label': point_label(threshold),
                                 'source_dataset': d1,
                                 'target_dataset': d2,
                                 'edge_count': edge_overlap_matrix[i1][i2],
                                 'edge_proportion': edge_overlap_matrix[i1][i2] / diag_edge if diag_edge > 0 else 0,
                                 'path_count': path_overlap_matrix[i1][i2],
                                 'path_proportion': path_overlap_matrix[i1][i2] / diag_path if diag_path > 0 else 0
-                            })
+                            }, threshold))
                 
                 if overlap_matrices_data:
                     pd.DataFrame(overlap_matrices_data).to_csv(
@@ -2178,15 +2311,19 @@ class ComparisonVisualizer:
                         weights = df['weight'].values if 'weight' in df.columns else [1] * len(df)
                         comparison_data.append({
                             'dataset': dataset,
-                            'threshold': threshold,
+                            'threshold': point_threshold_value(threshold),
                             'edge_count': len(df),
                             'mean_weight': np.mean(weights) if len(weights) > 0 else 0,
                             'max_weight': max(weights) if len(weights) > 0 else 0
                         })
+                        add_point_fields(comparison_data[-1], threshold)
             pd.DataFrame(comparison_data).to_csv(os.path.join(vis_data_dir, "threshold_comparison.csv"), index=False)
         
-        # Conservation across thresholds plot
-        if len(thresholds) > 1:
+        # Conservation across thresholds plot.  Standard only: the chart is a
+        # threshold-trend figure, and Custom query rows are not a monotone
+        # threshold schedule.  Per-query conservation rates are still exported
+        # via key_findings_per_threshold.csv below.
+        if len(thresholds) > 1 and threshold_mode != 'combinations':
             try:
                 fig, conservation_data = self.plot_conservation_across_thresholds(
                     results, thresholds, align_func,
@@ -2229,7 +2366,8 @@ class ComparisonVisualizer:
                     available_ds = [d for d in datasets if d in aligned_t.columns]
                     
                     # Calculate metrics for this threshold
-                    row_data = {'threshold': threshold}
+                    row_data = {'threshold': point_threshold_value(threshold)}
+                    add_point_fields(row_data, threshold)
                     
                     # Common edges
                     if available_ds:
@@ -2258,8 +2396,11 @@ class ComparisonVisualizer:
                         else:
                             row_data[f'unique_{safe_ds}'] = int((aligned_t[ds] > 0).sum())
                     
-                    # Similarity metrics
-                    sims = metrics.calculate_all_pairwise_similarities(aligned_t, datasets, threshold)
+                    # Similarity metrics.  The aligned frame is already
+                    # thresholded; combination rows carry no scalar
+                    # threshold, so apply the presence cut directly
+                    # (matching the per-query similarity exports).
+                    sims = metrics.calculate_all_pairwise_similarities(aligned_t, datasets, 1)
                     if not sims.empty:
                         row_data['avg_jaccard'] = float(sims['jaccard_similarity'].mean())
                         if 'svd_similarity' in sims.columns:
@@ -2289,17 +2430,26 @@ class ComparisonVisualizer:
                     if path_df is not None and not path_df.empty:
                         fig = self.plot_path_heatmap(
                             path_df, datasets,
-                            title=f"Path Min-Weight at Threshold={threshold}",
+                            title=f"Path Min-Weight at {point_title(threshold)}",
                             nickname_map=nickname_map
                         )
-                        self.save_figure(fig, os.path.join(output_dir, f"path_heatmap_{threshold}.png"))
+                        self.save_figure(fig, os.path.join(
+                            output_dir, f"path_heatmap_{point_stem(threshold)}.png"))
                         plt.close(fig)
                         
                         # Save data
-                        path_df.to_csv(os.path.join(vis_data_dir, f"path_heatmap_{threshold}.csv"))
+                        path_export = path_df.copy()
+                        if threshold_mode == 'combinations':
+                            add_point_fields(path_export, threshold)
+                        path_export.to_csv(os.path.join(
+                            vis_data_dir,
+                            f"path_heatmap_{point_stem(threshold)}.csv"))
                 
-                # All thresholds path heatmap
-                if len(thresholds) > 1:
+                # All thresholds path heatmap.  Skipped for Custom
+                # combinations: the per-query heatmaps above are the
+                # comparison artifacts, and a combined panel would present
+                # the raw-run schedule as a threshold axis.
+                if len(thresholds) > 1 and threshold_mode != 'combinations':
                     fig = self.plot_path_heatmap_all_thresholds(
                         path_data_func, thresholds, datasets,
                         title="Path Min-Weights Across All Thresholds",
@@ -2318,17 +2468,24 @@ class ComparisonVisualizer:
                     if not aligned_t.empty:
                         fig = self.plot_edge_weight_heatmap(
                             aligned_t, datasets,
-                            title=f"Edge Weights at Threshold={threshold}",
+                            title=f"Edge Weights at {point_title(threshold)}",
                             nickname_map=nickname_map
                         )
-                        self.save_figure(fig, os.path.join(output_dir, f"edge_heatmap_{threshold}.png"))
+                        self.save_figure(fig, os.path.join(
+                            output_dir, f"edge_heatmap_{point_stem(threshold)}.png"))
                         plt.close(fig)
                         
                         # Save edge heatmap data
-                        aligned_t.to_csv(os.path.join(vis_data_dir, f"edge_heatmap_{threshold}.csv"))
+                        edge_export = aligned_t.copy()
+                        if threshold_mode == 'combinations':
+                            add_point_fields(edge_export, threshold)
+                        edge_export.to_csv(os.path.join(
+                            vis_data_dir,
+                            f"edge_heatmap_{point_stem(threshold)}.csv"))
                 
-                # All thresholds edge heatmap
-                if len(thresholds) > 1:
+                # All thresholds edge heatmap (Standard only — see the path
+                # heatmap note above).
+                if len(thresholds) > 1 and threshold_mode != 'combinations':
                     fig = self.plot_edge_weight_heatmap_all_thresholds(
                         results, thresholds, align_func,
                         title="Edge Weights Across All Thresholds",
@@ -2407,8 +2564,13 @@ class ComparisonVisualizer:
             except Exception as e:
                 self._vprint(f"Warning: Could not create traversal probability heatmaps: {e}")
         
+        # Trend plots below are threshold-sensitivity figures.  Custom query
+        # rows have a display order, not a numeric schedule, so emitting them
+        # for combinations would dress query order up as a threshold axis
+        # (plan non-goal).  Pair-level metrics per query are already exported
+        # through the per-query similarity CSVs.
         # Generate Jaccard similarity trend plot
-        if align_func and len(thresholds) > 1:
+        if align_func and len(thresholds) > 1 and threshold_mode != 'combinations':
             try:
                 fig, jaccard_df = self.plot_jaccard_similarity_trend(
                     align_func, thresholds, datasets,
@@ -2424,7 +2586,7 @@ class ComparisonVisualizer:
                 self._vprint(f"Warning: Could not create Jaccard similarity plot: {e}")
         
         # Generate Edge Rank Correlation trend plot
-        if align_func and len(thresholds) > 1:
+        if align_func and len(thresholds) > 1 and threshold_mode != 'combinations':
             try:
                 fig, edge_rank_df = self.plot_edge_rank_correlation_trend(
                     align_func, thresholds, datasets,
@@ -2440,7 +2602,7 @@ class ComparisonVisualizer:
                 self._vprint(f"Warning: Could not create Edge Rank Correlation plot: {e}")
         
         # Generate Path Rank Correlation trend plot
-        if path_data_func and len(thresholds) > 1:
+        if path_data_func and len(thresholds) > 1 and threshold_mode != 'combinations':
             try:
                 fig, path_rank_df = self.plot_path_rank_correlation_trend(
                     path_data_func, thresholds, datasets,
@@ -2456,7 +2618,7 @@ class ComparisonVisualizer:
                 self._vprint(f"Warning: Could not create Path Rank Correlation plot: {e}")
         
         # Generate Cosine Similarity trend plot
-        if align_func and len(thresholds) > 1:
+        if align_func and len(thresholds) > 1 and threshold_mode != 'combinations':
             try:
                 fig, cosine_df = self.plot_cosine_similarity_trend(
                     align_func, thresholds, datasets,

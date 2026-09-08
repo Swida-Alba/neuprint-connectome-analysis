@@ -568,6 +568,21 @@ def test_seed_main_success(tmp_path, monkeypatch, capsys):
     assert "Manifest written" in output
 
 
+def test_seed_main_discovers_all_local_metadata_datasets(tmp_path, monkeypatch):
+    monkeypatch.setattr(bsi, "_PROJECT_ROOT", tmp_path)
+    _write_seed_csv(tmp_path, "manc:v1.0", [("1", "A")], header="bodyId,type")
+    _write_seed_csv(
+        tmp_path, "optic-lobe:v1.1", [("2", "B")], header="bodyId,type"
+    )
+    monkeypatch.setattr(sys, "argv", ["build_seed_indexes.py"])
+
+    assert bsi.main() == 0
+    manifest = json.loads(
+        (tmp_path / "neuron_indexes" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert set(manifest["datasets"]) == {"manc:v1.0", "optic-lobe:v1.1"}
+
+
 def test_seed_main_failure_returns_one(tmp_path, monkeypatch):
     monkeypatch.setattr(bsi, "_PROJECT_ROOT", tmp_path)
     _write_seed_csv(

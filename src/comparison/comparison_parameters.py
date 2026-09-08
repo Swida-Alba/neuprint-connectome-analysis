@@ -12,14 +12,15 @@ Workflow:
 """
 
 from dataclasses import dataclass, field
-from typing import List, Union, Optional, Any, Dict, TYPE_CHECKING
+from typing import List, Union, Optional, Any, Dict, Tuple, TYPE_CHECKING
 from datetime import datetime
 import os
+import warnings
 
 try:
-    from ..flywire_ids import is_fafb_dataset, is_flywire_dataset
+    from ..flywire_ids import is_fafb_dataset, is_local_connectome_dataset
 except ImportError:  # pragma: no cover - direct package imports
-    from flywire_ids import is_fafb_dataset, is_flywire_dataset
+    from flywire_ids import is_fafb_dataset, is_local_connectome_dataset
 
 try:
     from ..utils.naming_utils import canonical_dataset_name
@@ -178,20 +179,46 @@ class ComparisonParameters:
     
     # Analysis settings
     thresholds: List[int] = field(default_factory=lambda: [1, 3, 5, 10, 20])
-    """Min synapse count thresholds for comparison (bodyId level filtering).
-    After validation this is the sorted UNION of the global list and every
-    per-dataset override (dataset_thresholds), so report/export loops always
-    iterate a meaningful shared list."""
+    """Min synapse count thresholds for standard comparisons.
+
+    In ``threshold_mode='standard'`` each value is a same-threshold query
+    applied to every selected dataset.  In ``threshold_mode='combinations'``
+    this field is a derived, sorted union of the values used by the explicit
+    query rows and is retained for raw-run scheduling/backward compatibility;
+    it is not a comparison identity.
+    """
+
+    threshold_mode: str = 'standard'
+    """Threshold query mode: ``'standard'`` or ``'combinations'``.
+
+    Standard mode expands each scalar in ``thresholds`` to one query shared by
+    all selected datasets.  Combination mode uses one complete row in
+    ``threshold_combinations`` per query, with one requested threshold per
+    selected dataset.
+    """
+
+    threshold_combinations: Optional[List[Dict[str, Any]]] = None
+    """Explicit cross-dataset threshold query rows.
+
+    Each row has ``id``/``label`` (optional) and a ``thresholds`` mapping from
+    every selected dataset name to exactly one positive integer.  Combination
+    mode requires at least two selected datasets.  This is a query matrix,
+    not a per-dataset threshold schedule.
+    """
+
+    threshold_dataset_order: Optional[List[str]] = None
+    """Stable dataset-column order used by advanced threshold combinations."""
 
     dataset_thresholds: Optional[Dict[str, List[int]]] = None
-    """Per-dataset threshold overrides for the vertical comparison run mode
-    (Feature E, threshold-alignment spec §7). Maps dataset name -> its own
-    ascending threshold list; a dataset missing from the dict (or with an
-    empty list) falls back to the global `thresholds`. When set,
-    `thresholds` becomes the sorted union so every existing loop keeps
-    working; horizontal cross-dataset outputs simply have no content at
-    thresholds not shared by >= 2 datasets, and the threshold-alignment
-    files carry the cross-dataset comparison."""
+    """Deprecated legacy vertical threshold schedules.
+
+    This field is accepted only to read older saved configurations.  New UI
+    payloads and exports use ``threshold_mode`` and
+    ``threshold_combinations``.  When supplied directly, the legacy schedule
+    remains available through ``get_thresholds_for_dataset`` so historical
+    scripts do not silently change meaning; new code should use
+    ``get_threshold_queries``.
+    """
     
     source_labels: Union[str, List[str]] = ''
     """Unified label(s) for source group(s) - string or list matching group count"""
@@ -209,19 +236,21 @@ class ComparisonParameters:
     drawing limit, though it can affect report-derived summary plots."""
 
     graph_edge_limit_bodyid: Optional[int] = None
-    """Pan-graph edge limit for the bodyId-level graph in the path runs.
-    None = per-mode default (FindAllPath: 1,000,000, applied only for
-    max_interlayer >= 3; FindShortestPath: 0 = no trimming, since trimming
-    can inflate shortest distances). 0 = complete graph."""
+    """Edge Budget cap for the bodyId-level graph in path runs.
+    In ``all`` mode a positive value may apply a lossy weight floor when the
+    lossless-pruned cone exceeds the cap. In ``shortest`` mode the setting is
+    ignored: the graph is never floored because trimming can remove the only
+    shortest route and inflate reported distances. None uses the per-mode
+    default; 0 disables the Edge Budget."""
 
     max_paths_bodyid: Optional[int] = None
     """Path budget for the StrongestFirst enumerator (the default
     pathfinding): enumeration emits intact paths strongest-first and stops
     at the budget, draining ties, so the result is exactly "all intact
     paths with bottleneck >= the reported tau". None = per-mode default
-    (1,000,000 in 'all' mode); 0 = unlimited (complete MemoizedDFS
-    enumeration). With legacy enumerators this acts as the historical
-    arbitrary-order truncation cap."""
+    (1,000,000 in both path modes). A legacy unbounded enumerator is only
+    available to script/API callers that explicitly select a legacy
+    algorithm with no budget; the UI always uses StrongestFirst."""
 
     replay_paths: bool = True
     """Feature F (threshold-alignment spec §9): in path mode ('all'),
@@ -463,6 +492,15 @@ class ComparisonParameters:
     
     Note: Requires male-cns dataset to be initialized first for mapping file to exist."""
 
+    source_dataset: Optional[str] = None
+    """Optional explicit namespace for source/target type queries.
+
+    When set (for example ``male-cns:v0.9``), automatic type mapping keeps
+    that release as the queried source and can apply a registered release
+    alias downstream.  ``None`` preserves the historical priority-based
+    source detection.
+    """
+
     def __post_init__(self):
         """Validate and process parameters after initialization."""
         from .label_mapper import LabelMapper
@@ -598,15 +636,11 @@ class ComparisonParameters:
         elif not self.intermediate_labels:
             self.intermediate_labels = []
         
-        # Sort thresholds
-        self.thresholds = sorted(self.thresholds)
-
-        # Feature E: normalize per-dataset threshold overrides. Values are
-        # coerced to ints, deduped, sorted; empty/None entries are dropped
-        # (the dataset falls back to the global list). `thresholds` becomes
-        # the sorted union so every shared-loop consumer sees a meaningful
-        # list even in the per-dataset run mode.
-        self._normalize_dataset_thresholds()
+        # Normalize the threshold query contract.  This runs before the
+        # remaining validation because dataset names are already available
+        # from ``self.datasets`` and the derived raw-run schedule is needed by
+        # output-directory creation and the analyzer.
+        self._normalize_threshold_configuration()
         
         # Hemisphere analysis validation and enforcement
         # When separate_hemispheres=True, always enable symmetry_analysis
@@ -655,9 +689,11 @@ class ComparisonParameters:
         # Warn about FAFB hemisphere annotation when mixed datasets are used
         dataset_names = self.get_dataset_names()
         has_fafb = any(is_fafb_dataset(str(ds)) for ds in dataset_names)
-        # BANC shares the FlyWire hemisphere convention; only true NeuPrint
-        # datasets trigger the reversal warning.
-        has_neuprint = any(not is_flywire_dataset(str(ds)) for ds in dataset_names)
+        # BANC has the same hemisphere convention as the local FAFB release;
+        # only true NeuPrint datasets trigger the reversal warning.
+        has_neuprint = any(
+            not is_local_connectome_dataset(str(ds)) for ds in dataset_names
+        )
         if has_fafb and has_neuprint and len(dataset_names) > 1:
             print("\033[33m⚠️  FAFB hemisphere labels are reversed relative to NeuPrint datasets.\n"
                   "   Interpret L/R comparisons across FAFB vs NeuPrint with caution.\033[0m")
@@ -728,7 +764,13 @@ class ComparisonParameters:
             print(f"Find Reciprocal: {self.find_reciprocal}")
             print("===================================================\n")
         
-        if not self.thresholds:
+        if self.threshold_mode == 'combinations':
+            if not self.threshold_combinations:
+                raise ValueError(
+                    "At least one threshold combination row is required "
+                    "when threshold_mode='combinations'"
+                )
+        elif not self.thresholds:
             raise ValueError("At least one threshold is required")
         
         # Handle None and empty list for source/target neurons (similar to coana.py FindNeuronConnection)
@@ -800,48 +842,258 @@ class ComparisonParameters:
         """Get the cached timestamp string for this run."""
         return self._cached_timestamp
 
-    def _normalize_dataset_thresholds(self) -> None:
-        """Validate/coerce dataset_thresholds and fold it into thresholds.
+    @staticmethod
+    def _coerce_threshold_value(value: Any, field_name: str) -> int:
+        """Coerce one threshold value and reject ambiguous/non-positive input."""
+        if isinstance(value, bool) or value is None:
+            raise ValueError(f"{field_name} must contain positive integers")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{field_name} must contain positive integers; got {value!r}"
+            ) from exc
+        try:
+            if float(value) != float(parsed):
+                raise ValueError
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{field_name} must contain whole positive integers; got {value!r}"
+            ) from exc
+        if parsed <= 0:
+            raise ValueError(
+                f"{field_name} must contain positive integers; got {parsed}"
+            )
+        return parsed
 
-        Runs once from __post_init__ after the global list is sorted:
-        per-dataset entries become sorted, deduplicated int lists; unknown
-        dataset keys are dropped with a warning; `thresholds` is widened to
-        the sorted union of the global list and all overrides.
+    @classmethod
+    def _clean_threshold_list(cls, values: Any, field_name: str) -> List[int]:
+        """Normalize a user/API threshold list without changing row meaning."""
+        if values is None:
+            return []
+        if isinstance(values, (str, bytes)):
+            values = [part for part in str(values).replace(',', ' ').split() if part]
+        try:
+            return sorted({
+                cls._coerce_threshold_value(value, field_name)
+                for value in values
+                if value is not None and str(value).strip() != ''
+            })
+        except TypeError as exc:
+            raise ValueError(f"{field_name} must be a list of thresholds") from exc
+
+    def _normalize_threshold_configuration(self) -> None:
+        """Normalize standard and row-wise threshold query configuration.
+
+        ``dataset_thresholds`` is deliberately handled as a legacy mode.  It
+        is not converted into combination rows by position because unequal
+        old lists have no reliable pairing semantics.  New configuration is
+        always represented by complete query rows.
         """
-        if not self.dataset_thresholds:
-            self.dataset_thresholds = None
-            return
+        valid_modes = {'standard', 'combinations'}
+        mode = str(self.threshold_mode or 'standard').strip().lower()
+        if self.threshold_combinations is not None and mode == 'standard':
+            mode = 'combinations'
+        if self.dataset_thresholds and self.threshold_combinations is not None:
+            raise ValueError(
+                "Use threshold_combinations or legacy dataset_thresholds, not both"
+            )
 
-        known = set(self.get_dataset_names())
-        normalized: Dict[str, List[int]] = {}
-        for ds, values in self.dataset_thresholds.items():
-            if ds not in known:
-                if self.verbose:
-                    print(f"\033[33m⚠️  dataset_thresholds: ignoring unknown "
-                          f"dataset '{ds}' (not in the run selection)\033[0m")
-                continue
-            cleaned = sorted({int(v) for v in (values or []) if v is not None})
-            if not cleaned:
-                continue  # empty override -> global list
-            normalized[ds] = cleaned
+        known_order = list(self.get_dataset_names())
+        provided_order = self.threshold_dataset_order
+        if provided_order is None:
+            dataset_order = known_order
+        else:
+            dataset_order = list(dict.fromkeys(str(ds) for ds in provided_order))
+            if set(dataset_order) != set(known_order) or len(dataset_order) != len(known_order):
+                raise ValueError(
+                    "threshold_dataset_order must contain each selected dataset "
+                    "exactly once"
+                )
+        self.threshold_dataset_order = dataset_order
 
-        self.dataset_thresholds = normalized or None
+        if mode == 'combinations' and len(dataset_order) < 2:
+            raise ValueError(
+                "threshold_mode='combinations' requires at least two "
+                "selected datasets"
+            )
+
+        # The old field is kept as an explicit compatibility mode.  It is
+        # normalized exactly as historical callers expect and is not emitted
+        # by new standard/combination payloads.
         if self.dataset_thresholds:
-            self._global_thresholds = list(self.thresholds)
-            union = set(self.thresholds)
-            for values in self.dataset_thresholds.values():
+            self.threshold_mode = 'legacy_vertical'
+            self._global_thresholds = self._clean_threshold_list(
+                self.thresholds, 'thresholds')
+            normalized: Dict[str, List[int]] = {}
+            known = set(known_order)
+            for ds, values in self.dataset_thresholds.items():
+                if ds not in known:
+                    if self.verbose:
+                        print(
+                            f"\033[33m⚠️  dataset_thresholds: ignoring unknown "
+                            f"dataset '{ds}' (not in the run selection)\033[0m"
+                        )
+                    continue
+                cleaned = self._clean_threshold_list(
+                    values, f"dataset_thresholds[{ds}]")
+                if cleaned:
+                    normalized[ds] = cleaned
+            self.dataset_thresholds = normalized or None
+            union = set(self._global_thresholds)
+            for values in normalized.values():
                 union.update(values)
             self.thresholds = sorted(union)
+            self.threshold_combinations = None
+            return
+
+        self.dataset_thresholds = None
+        if mode not in valid_modes:
+            raise ValueError(
+                f"threshold_mode must be one of {sorted(valid_modes)}, got: {mode}"
+            )
+        self.threshold_mode = mode
+        self.thresholds = self._clean_threshold_list(self.thresholds, 'thresholds')
+
+        if mode == 'standard':
+            if self.threshold_combinations:
+                raise ValueError(
+                    "threshold_combinations is only valid with "
+                    "threshold_mode='combinations'"
+                )
+            self.threshold_combinations = None
+            return
+
+        rows = self.threshold_combinations or []
+        normalized_rows: List[Dict[str, Any]] = []
+        seen_ids = set()
+        seen_maps = set()
+        union = set()
+        for index, raw_row in enumerate(rows, start=1):
+            if not isinstance(raw_row, dict):
+                raise ValueError(
+                    f"threshold_combinations row {index} must be an object"
+                )
+            raw_values = (
+                raw_row.get('thresholds')
+                or raw_row.get('thresholds_by_dataset')
+                or raw_row.get('requested_thresholds')
+            )
+            if not isinstance(raw_values, dict):
+                raise ValueError(
+                    f"threshold_combinations row {index} must provide a "
+                    "thresholds mapping"
+                )
+            unknown = sorted(set(raw_values) - set(dataset_order))
+            missing = [ds for ds in dataset_order if ds not in raw_values]
+            if unknown:
+                raise ValueError(
+                    f"threshold_combinations row {index} has unknown datasets: "
+                    f"{', '.join(unknown)}"
+                )
+            if missing:
+                raise ValueError(
+                    f"threshold_combinations row {index} is missing thresholds "
+                    f"for: {', '.join(missing)}"
+                )
+            values = {
+                ds: self._coerce_threshold_value(
+                    raw_values[ds],
+                    f"threshold_combinations row {index} [{ds}]",
+                )
+                for ds in dataset_order
+            }
+            row_id = str(raw_row.get('id') or f'combo_{index:03d}').strip()
+            if not row_id:
+                row_id = f'combo_{index:03d}'
+            if row_id in seen_ids:
+                raise ValueError(
+                    f"threshold_combinations contains duplicate id '{row_id}'"
+                )
+            signature = tuple(values[ds] for ds in dataset_order)
+            if signature in seen_maps:
+                raise ValueError(
+                    f"threshold_combinations contains duplicate threshold row "
+                    f"at index {index}"
+                )
+            seen_ids.add(row_id)
+            seen_maps.add(signature)
+            union.update(values.values())
+            normalized_rows.append({
+                'id': row_id,
+                'label': str(raw_row.get('label') or f'Combination {index}'),
+                'thresholds': values,
+            })
+        self.threshold_combinations = normalized_rows
+        self.thresholds = sorted(union)
+
+    def get_threshold_queries(self) -> List[Dict[str, Any]]:
+        """Return normalized cross-dataset threshold queries in row order.
+
+        A query always has one requested threshold per selected dataset.  In
+        standard mode each scalar threshold becomes a same-threshold query.
+        Combination mode returns the explicit table rows.  The deprecated
+        legacy vertical mode returns standard-shaped rows only as a safe
+        compatibility view; its historical per-dataset schedule remains
+        available through :meth:`get_thresholds_for_dataset`.
+        """
+        order = list(self.threshold_dataset_order or self.get_dataset_names())
+        if self.threshold_mode == 'combinations':
+            return [
+                {
+                    'id': row['id'],
+                    'label': row.get('label', row['id']),
+                    'thresholds': {ds: int(row['thresholds'][ds]) for ds in order},
+                    'dataset_order': list(order),
+                }
+                for row in (self.threshold_combinations or [])
+            ]
+        if self.threshold_mode == 'legacy_vertical':
+            return [
+                {
+                    'id': f'threshold_{threshold}',
+                    'label': f'N={threshold}',
+                    'thresholds': {ds: int(threshold) for ds in order},
+                    'dataset_order': list(order),
+                }
+                for threshold in self.thresholds
+            ]
+        return [
+            {
+                'id': f'threshold_{threshold}',
+                'label': f'N={threshold}',
+                'thresholds': {ds: int(threshold) for ds in order},
+                'dataset_order': list(order),
+            }
+            for threshold in self.thresholds
+        ]
+
+    def get_unique_threshold_jobs(self) -> List[Tuple[str, int]]:
+        """Return deduplicated raw jobs required by the threshold queries."""
+        jobs = {
+            (dataset, int(query['thresholds'][dataset]))
+            for query in self.get_threshold_queries()
+            for dataset in (self.threshold_dataset_order or self.get_dataset_names())
+        }
+        return sorted(jobs, key=lambda item: (
+            (self.threshold_dataset_order or self.get_dataset_names()).index(item[0]),
+            item[1],
+        ))
 
     def get_thresholds_for_dataset(self, dataset: str) -> List[int]:
-        """Threshold list for one dataset: its override or the global list.
+        """Return the derived raw-run schedule for one dataset.
 
-        Feature E (vertical comparison): each dataset can carry its OWN
-        ascending threshold list; datasets without an override run at the
-        ORIGINAL global list (not the union — the union on `thresholds`
-        exists only so shared report/export loops iterate a meaningful
-        superset).
+        In combination mode this is the unique set of cell values used by
+        that dataset across all query rows.  It is an execution/cache helper,
+        not the comparison semantic.  The legacy vertical behavior is kept
+        only when ``dataset_thresholds`` was supplied by an older caller.
         """
+        if self.threshold_mode == 'combinations':
+            return sorted({
+                int(row['thresholds'][dataset])
+                for row in (self.threshold_combinations or [])
+                if dataset in row.get('thresholds', {})
+            })
         if self.dataset_thresholds:
             override = self.dataset_thresholds.get(dataset)
             if override:
@@ -1323,8 +1575,9 @@ class ComparisonParameters:
         # Main output folder
         os.makedirs(self.full_output_path, exist_ok=True)
 
-        # Dataset data folder and subfolders (per-dataset threshold lists,
-        # Feature E: each dataset gets folders for its OWN thresholds)
+        # Dataset data folder and subfolders.  In combination mode these are
+        # the deduplicated raw-run cell values required by the query rows;
+        # they are not independent comparison schedules.
         for dataset in self.get_dataset_names():
             for threshold in self.get_thresholds_for_dataset(dataset):
                 os.makedirs(self.get_dataset_output_path(dataset, threshold), exist_ok=True)
@@ -1368,7 +1621,7 @@ class ComparisonParameters:
         return {
             'metadata': {
                 'created_at': datetime.now().isoformat(),
-                'version': '2.2',
+                'version': '2.3',
                 'run_timestamp': self.run_timestamp,
                 'description': 'ComparisonParameters for cross-dataset analysis'
             },
@@ -1376,6 +1629,7 @@ class ComparisonParameters:
             # Dataset configuration
             'datasets': self.get_dataset_names(),
             'datasets_nickname': self.get_dataset_nicknames(),
+            'source_dataset': self.source_dataset,
             
             # Neuron configuration
             'source_neurons': self._ensure_flat_list(self.source_neurons),
@@ -1388,6 +1642,13 @@ class ComparisonParameters:
             
             # Analysis parameters
             'thresholds': self.thresholds,
+            'threshold_mode': self.threshold_mode,
+            'threshold_dataset_order': list(
+                self.threshold_dataset_order or self.get_dataset_names()),
+            'threshold_combinations': self.threshold_combinations,
+            # Deprecated compatibility field.  New UI/configuration uses the
+            # explicit mode and query rows above; legacy callers retain their
+            # original schedule so old saved runs remain readable.
             'dataset_thresholds': self.dataset_thresholds,
             'max_interlayer': self.max_interlayer,
             'top_edges': self.top_edges,
@@ -1519,6 +1780,115 @@ class ComparisonParameters:
         Returns:
             ComparisonParameters instance
         """
+        # The pre-query schema stored a list of thresholds per dataset under
+        # ``dataset_thresholds`` and had no mode/query identity.  A saved
+        # payload from that schema is only safely convertible when every
+        # selected dataset has an equally long list: position i then defines
+        # one complete cross-dataset query row.  Do this migration here (at
+        # the serialization boundary) while retaining the direct-constructor
+        # compatibility mode used by older Python callers.
+        legacy_dataset_thresholds = data.get('dataset_thresholds')
+        has_threshold_mode = (
+            'threshold_mode' in data
+            and data.get('threshold_mode') not in (None, '')
+        )
+        has_explicit_combinations = data.get('threshold_combinations') not in (
+            None, [])
+        migrated_threshold_mode = data.get('threshold_mode', 'standard')
+        migrated_threshold_combinations = data.get('threshold_combinations')
+        migrated_dataset_thresholds = legacy_dataset_thresholds
+        migrated_thresholds = data.get('thresholds', [1, 3, 5, 10, 20])
+        migrated_threshold_order = data.get('threshold_dataset_order')
+        if (legacy_dataset_thresholds and not has_threshold_mode
+                and not has_explicit_combinations):
+            raw_datasets = data.get('datasets', [])
+            if isinstance(raw_datasets, str):
+                raw_datasets = [raw_datasets]
+            dataset_order = [
+                ds.dataset if hasattr(ds, 'dataset') else str(ds)
+                for ds in (raw_datasets or [])
+            ]
+            if not dataset_order:
+                raise ValueError(
+                    "Cannot migrate legacy dataset_thresholds without selected datasets"
+                )
+            if not isinstance(legacy_dataset_thresholds, dict):
+                raise ValueError(
+                    "Legacy dataset_thresholds must be a dataset-to-list mapping"
+                )
+            unknown = sorted(set(legacy_dataset_thresholds) - set(dataset_order))
+            missing = [
+                dataset for dataset in dataset_order
+                if dataset not in legacy_dataset_thresholds
+            ]
+            if unknown or missing:
+                detail = []
+                if unknown:
+                    detail.append(f"unknown datasets: {', '.join(unknown)}")
+                if missing:
+                    detail.append(
+                        f"missing datasets: {', '.join(missing)}")
+                raise ValueError(
+                    "Legacy dataset_thresholds cannot be migrated safely; "
+                    + "; ".join(detail)
+                    + ". Provide explicit threshold_combinations instead."
+                )
+
+            cleaned_by_dataset = {
+                dataset: cls._clean_threshold_list(
+                    legacy_dataset_thresholds[dataset],
+                    f"dataset_thresholds[{dataset}]")
+                for dataset in dataset_order
+            }
+            lengths = {len(values) for values in cleaned_by_dataset.values()}
+            if len(lengths) != 1:
+                raise ValueError(
+                    "Legacy dataset_thresholds lists have unequal lengths; "
+                    "provide explicit threshold_combinations with one complete "
+                    "row per query instead."
+                )
+            row_count = lengths.pop()
+            if row_count == 0:
+                raise ValueError(
+                    "Legacy dataset_thresholds contains no threshold rows; "
+                    "provide explicit threshold_combinations instead."
+                )
+            migrated_threshold_order = dataset_order
+            if len(dataset_order) < 2:
+                # A one-dataset legacy schedule is equivalent to the
+                # standard scalar threshold list, not a cross-dataset query.
+                migrated_threshold_mode = 'standard'
+                migrated_threshold_combinations = None
+                migrated_thresholds = cleaned_by_dataset[dataset_order[0]]
+                migration_message = (
+                    "Migrated legacy dataset_thresholds to standard thresholds "
+                    "because Custom combination requires at least two datasets."
+                )
+            else:
+                migrated_threshold_mode = 'combinations'
+                migrated_threshold_combinations = [
+                    {
+                        'id': f'combo_{index:03d}',
+                        'label': f'Combination {index}',
+                        'thresholds': {
+                            dataset: cleaned_by_dataset[dataset][index - 1]
+                            for dataset in dataset_order
+                        },
+                    }
+                    for index in range(1, row_count + 1)
+                ]
+                migration_message = (
+                    "Migrated legacy dataset_thresholds positionally to "
+                    "threshold_mode='combinations'. Review the generated query "
+                    "rows; unequal or incomplete legacy lists are rejected."
+                )
+            migrated_dataset_thresholds = None
+            warnings.warn(
+                migration_message,
+                UserWarning,
+                stacklevel=2,
+            )
+
         # Extract nested settings with defaults
         verification = data.get('verification_settings', {})
         performance = data.get('performance_settings', {})
@@ -1527,6 +1897,7 @@ class ComparisonParameters:
             # Dataset configuration
             datasets=data.get('datasets', []),
             datasets_nickname=data.get('datasets_nickname'),
+            source_dataset=data.get('source_dataset'),
             
             # Neuron configuration
             source_neurons=data.get('source_neurons', []),
@@ -1536,8 +1907,11 @@ class ComparisonParameters:
             
             # Analysis parameters
             max_interlayer=data.get('max_interlayer', 2),
-            thresholds=data.get('thresholds', [1, 3, 5, 10, 20]),
-            dataset_thresholds=data.get('dataset_thresholds', None),
+            thresholds=migrated_thresholds,
+            threshold_mode=migrated_threshold_mode,
+            threshold_dataset_order=migrated_threshold_order,
+            threshold_combinations=migrated_threshold_combinations,
+            dataset_thresholds=migrated_dataset_thresholds,
             top_edges=data.get('top_edges', 50),
             graph_edge_limit_bodyid=data.get('graph_edge_limit_bodyid', None),
             max_paths_bodyid=data.get('max_paths_bodyid', None),
@@ -1656,7 +2030,10 @@ class ComparisonParameters:
                 continue
             
             # Try to find mapping
-            source_ds = self._auto_type_mapper._detect_type_source(neuron)
+            source_ds = (
+                self.source_dataset
+                or self._auto_type_mapper._detect_type_source(neuron)
+            )
             if source_ds:
                 mapped = self._auto_type_mapper.get_mapped_type(neuron, source_ds, dataset)
                 if mapped:
