@@ -33,6 +33,8 @@ from comparison.cross_dataset_type_mapper import (
 from ui.neuron_index import (
     collect_native_type_matches,
     enrich_native_type_matches,
+    load_cached_neuron_index,
+    pool_bridge_body_ids,
 )
 
 MCNS = 'male-cns:v1.0'
@@ -44,6 +46,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MCNS_CSV = REPO_ROOT / 'datasets' / 'male-cns_v1_0' / 'male-cns_v1_0_allneurons_neuron_df.csv'
 FAFB_CSV = REPO_ROOT / 'datasets' / 'flywire_FAFB_v783' / 'flywire_FAFB_v783_allneurons_neuron_df.csv'
 BANC_CSV = REPO_ROOT / 'datasets' / 'banc_v626' / 'banc_v626_allneurons_neuron_df.csv'
+BANC888_INDEX = (REPO_ROOT / 'neuron_indexes' / 'banc_v888'
+                 / 'neuron_index.parquet')
+BANC626_INDEX = (REPO_ROOT / 'neuron_indexes' / 'banc_v626'
+                 / 'neuron_index.parquet')
 
 pytestmark = pytest.mark.skipif(
     not (MCNS_CSV.exists() and FAFB_CSV.exists()),
@@ -53,6 +59,16 @@ pytestmark = pytest.mark.skipif(
 requires_banc = pytest.mark.skipif(
     not BANC_CSV.exists(),
     reason='real BANC v626 neuron table not available locally',
+)
+
+requires_banc_v888_index = pytest.mark.skipif(
+    not BANC888_INDEX.exists(),
+    reason='real BANC v888 cached neuron index not available locally',
+)
+
+requires_banc_release_indexes = pytest.mark.skipif(
+    not (BANC626_INDEX.exists() and BANC888_INDEX.exists()),
+    reason='real BANC v626/v888 cached neuron indexes not available locally',
 )
 
 
@@ -139,6 +155,78 @@ def test_known_fafb_renames(mapper):
         assert mapper.get_mapped_type(mcns_type, MCNS, FW) == fafb_type, mcns_type
 
 
+@requires_banc_v888_index
+def test_real_banc_label_bridges_use_independent_endpoint_coverage():
+    """FAFB/BANC and MCNS/BANC labels retain independent side coverage.
+
+    BANC v888 has six primary ``l-LNv`` rows.  Five carry the curated FAFB
+    label and one carries the curated MCNS label.  The optional match columns
+    must not reduce the unconstrained FAFB/MCNS endpoint populations or turn
+    the type bridge into a bodyId-to-bodyId join.
+    """
+    fafb = 'flywire_FAFB_v783'
+    banc = 'banc_v888'
+    mcns = 'male-cns:v1.0'
+    indexes = {
+        ds: load_cached_neuron_index(ds, enrich=False)
+        for ds in (fafb, banc, mcns)
+    }
+    assert all(indexes.values())
+
+    fafb_linker = [{
+        'column': 'fafb_cell_type', 'value': 'l-LNv', 'home': banc,
+        'kind': 'linker',
+    }]
+    forward = pool_bridge_body_ids(
+        fafb, banc, fafb_linker, 'l-LNv', 'l-LNv', indexes=indexes)
+    assert forward['granularity'] == '8 to 5'
+    assert len(forward['source_body_ids']) == 8
+    assert len(forward['target_body_ids']) == 5
+    assert forward['coverage'] == 'covered 5 of 6'
+    assert forward['source_coverage'] == 'covered 8 of 8'
+    assert forward['target_coverage'] == 'covered 5 of 6'
+    assert 'matched_body_ids' not in forward['per_linker'][0]
+
+    mcns_linker = [{
+        'column': 'malecns_cell_type', 'value': 'l-LNv', 'home': banc,
+        'kind': 'linker',
+    }]
+    mcns_forward = pool_bridge_body_ids(
+        mcns, banc, mcns_linker, 'l-LNv', 'l-LNv', indexes=indexes)
+    assert mcns_forward['granularity'] == '8 to 1'
+    assert mcns_forward['coverage'] == 'covered 1 of 6'
+    assert mcns_forward['source_coverage'] == 'covered 8 of 8'
+    assert mcns_forward['target_coverage'] == 'covered 1 of 6'
+    assert 'matched_body_ids' not in mcns_forward['per_linker'][0]
+
+
+@requires_banc_release_indexes
+def test_real_banc_release_bridge_uses_root_body_relation():
+    """BANC release bridges pool from root_626↔root_888, not type totals."""
+    from ui.neuron_index import pool_bridge_body_ids
+
+    left = 'banc_v626'
+    right = 'banc_v888'
+    indexes = {
+        left: load_cached_neuron_index(left, enrich=False),
+        right: load_cached_neuron_index(right, enrich=False),
+    }
+    linker = [{
+        'column': 'banc_release_crosswalk', 'value': 'L5',
+        'home': left, 'kind': 'linker',
+    }]
+    pool = pool_bridge_body_ids(
+        left, right, linker, 'L5', 'L5', indexes=indexes)
+
+    # The relation is not a complete type-total identity: it reaches 1,655
+    # v888 L5 bodyIds out of 1,683, while retaining 1,651 v626 roots.
+    assert pool['granularity'] == '1651 to 1655'
+    assert pool['coverage'] == 'covered 1655 of 1683'
+    assert pool['source_coverage'] == 'covered 1651 of 1651'
+    assert pool['target_coverage'] == 'covered 1655 of 1683'
+    assert 'matched_body_ids' not in pool['per_linker'][0]
+
+
 def test_ambiguous_renames_become_conflicts(mapper):
     # Each old name is listed under several FAFB primaries (a split), so no
     # single target can be chosen: no mapping, exact conflict recorded.
@@ -163,13 +251,15 @@ def test_comma_separated_crosswalk_cell_expands_to_conflict(mapper):
     # male-cns 'VS' lists eight flywire types in one cell -> 1-to-N conflict
     vs_targets = {f'VS{i}' for i in range(1, 9)}
     assert mapper.get_mapped_type('VS', MCNS, FW) is None
-    for fw_key in (FW, BANC):
-        assert any(
-            c.source_type == 'VS'
-            and c.target_dataset == fw_key
-            and c.target_types == vs_targets
-            for c in mapper.get_1_to_n_conflicts()
-        ), fw_key
+    assert any(
+        c.source_type == 'VS'
+        and c.target_dataset == FW
+        and c.target_types == vs_targets
+        for c in mapper.get_1_to_n_conflicts()
+    )
+    # MCNS flywireType is FAFB-only; BANC requires a BANC malecns_cell_type
+    # label and therefore has no fabricated VS mapping/conflict here.
+    assert mapper.get_mapped_type('VS', MCNS, BANC) is None
 
 
 def test_comma_separated_hemibrain_cell_expands_to_conflict(mapper):
@@ -537,47 +627,34 @@ def test_standardize_bridge_real_anchors(mapper):
     assert [(l['column'], l['value']) for l in linker_only] == [
         ('flywireType', 'LTe71'), ('additional_type(s)', 'LTe71')]
 
-    # MDN -> BANC same-name chain: its crosswalk verification linker
-    # (flywireType 'MDN' — the male-cns cell names the BANC type itself)
+    # MDN -> BANC uses BANC's curated MCNS label column.
     chain = mapper.get_type_bridges('MDN', MCNS, BANC)[0]
     linkers = [l for l in standardize_bridge(chain, MCNS, BANC)
                if l['kind'] == 'linker']
     assert [(l['column'], l['value']) for l in linkers] == [
-        ('flywireType', 'MDN')]
-    # registry-less (BANC) pairs flag every linker indirect — that is the
-    # designed honesty about the weaker evidence, not a defect
-    assert all(l['indirect'] for l in linkers)
+        ('malecns_cell_type', 'MDN')]
+    assert all(not l['indirect'] for l in linkers)
 
     # endpoints are always the two datasets' type identities
     assert chain[0]['column'] == 'type' and chain[0]['dataset'] == MCNS
     assert chain[-1]['dataset'] == BANC
 
 
-def test_banc_type_names_route_through_annotations(mapper):
-    """BANC type names map into male-cns through FAFB/BANC annotations.
-
-    DNp50 routes into male-cns MDN through the FAFB additional Type(S)
-    annotation (via='DNp50').  Under the bucket-curated BANC table the
-    second, BANC-Alternative-Cell-Type(s) chain from the Codex table is
-    gone (its curated alt no longer carries the DNp50 alias), so the
-    route is a single chain.
-    """
-    chains = mapper.get_type_bridges('DNp50', BANC, MCNS)
-    assert chains, 'DNp50 (BANC) must route into male-cns'
-    # every chain ends at a male-cns type identity — the arrival is either
-    # the type hop or (PREFERRED, §preference) the crosswalk-arrival hop
-    # whose cell names DNp50
-    for chain in chains:
-        assert chain[0]['dataset'] == BANC and chain[0]['column'] == 'type'
-        assert chain[-1]['dataset'] == MCNS
-        assert chain[-1]['column'] in ('type', 'flywireType'), chain
-    # §preference: the crosswalk-verified route wins over the bare
-    # same-name/type arrival
-    assert any(chain[-1]['column'] == 'flywireType' for chain in chains)
-    # the surviving chain routes through an annotation linker naming MDN
+def test_banc_type_names_route_through_direct_curated_labels(mapper):
+    """A BANC type with an MCNS label maps directly into MCNS."""
+    source_type = next(
+        source_type
+        for (source_key, source_type), edges
+        in mapper._banc_label_edges.items()
+        if source_key == BANC
+        and any(edge[0] == MCNS and edge[2] == 'malecns_cell_type'
+                for edge in edges)
+    )
+    chains = mapper.get_type_bridges(source_type, BANC, MCNS)
+    assert chains
+    assert all(chain[-1]['dataset'] == MCNS for chain in chains)
     assert any(
-        any(hop['column'] in ('additional_type(s)', 'Alternative Cell Type(s)')
-            and hop.get('via') == 'DNp50' for hop in chain)
+        any(hop['column'] == 'malecns_cell_type' for hop in chain[1:])
         for chain in chains)
 
 
@@ -628,26 +705,26 @@ def _entry(matches, dataset):
 
 
 def test_bridge_linker_text_values_and_hub_note(mapper):
-    """bridge_linker_text: values included, deduped, indirect (hub) linkers
-    last with the hub note."""
+    """bridge_linker_text: values are included and deduplicated.
+
+    MCNS→BANC now uses BANC's curated label columns directly, so the old
+    FAFB annotation-hub detour must not appear in this path.
+    """
     from comparison.cross_dataset_type_mapper import bridge_linker_text
 
     chains = mapper.get_type_bridges('CL125', MCNS, FW)
     info = bridge_linker_text(chains, MCNS, FW, 'APDN3')
-    # With direction-symmetric registry scoping, the MCNS~FAFB bridges
-    # stay two-namespace: the deduplicated linker text is the crosswalk
-    # standard (LMTe01) followed by the direct annotation evidence
-    # (CL125).
+    # The registry order keeps the crosswalk linker before the annotation
+    # linker; values within one column are deterministic lexical order.
     assert info['text'] == (
-        "flywireType 'LMTe01' + additional_type(s) 'LMTe01' "
-        "+ additional_type(s) 'CL125'")
+        "flywireType 'LMTe01' + additional_type(s) 'CL125' "
+        "+ additional_type(s) 'LMTe01'")
     assert [e['value'] for e in info['entries']] == [
-        'LMTe01', 'LMTe01', 'CL125']
+        'LMTe01', 'CL125', 'LMTe01']
     assert not any(e['indirect'] for e in info['entries'])
 
-    # the CL125 -> LTe71 (BANC) "hub chain" was pure transitivity noise
-    # (BANC LTe71's own Alternative cell names only itself) — pruned and
-    # stays pruned; indirect (hub-routed) linkers still occur on real pairs
+    # The former CL125 -> LTe71 (BANC) hub chain is pure transitivity noise;
+    # MCNS→BANC is direct-only under the curated BANC label policy.
     hub_chains = mapper.get_type_bridges('CL125', MCNS, BANC)
     assert not [c for c in hub_chains if c and c[-1]['value'] == 'LTe71']
     indirect_found = any(
@@ -655,7 +732,7 @@ def test_bridge_linker_text_values_and_hub_note(mapper):
             chain, MCNS, BANC))
         for type_name in ('l-LNv', 'DN1pA', 'CB3508')
         for chain in mapper.get_type_bridges(type_name, MCNS, BANC))
-    assert indirect_found
+    assert not indirect_found
 
 
 def test_mapping_sankey_vispath_backend(mapper):

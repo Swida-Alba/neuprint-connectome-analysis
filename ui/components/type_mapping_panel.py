@@ -52,7 +52,7 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
     (disabled with a tooltip until >= 2 selected datasets have cached
     neuron indexes).
     """
-    from ..neuron_index import load_cached_neuron_index
+    from ..neuron_index import neuron_index_path
 
     state: Dict[str, Any] = {"pair_flows": {}, "pools": {}, "meta": {},
                              "composed": None, "datasets": [],
@@ -61,7 +61,7 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
     def _ready() -> bool:
         datasets = list(get_datasets() or [])
         return len(datasets) >= 2 and all(
-            load_cached_neuron_index(ds) is not None for ds in datasets)
+            neuron_index_path(ds).is_file() for ds in datasets)
 
     # Same fixed window as the 'See available neurons' viewer: the backdrop
     # never dismisses it, the card is viewport-bounded with internal scroll,
@@ -195,6 +195,7 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
 
     def _pair_card(src: str, tgt: str, flows, pools: dict) -> None:
         from comparison.cross_dataset_type_mapper import bridge_linker_text
+        from comparison.mapping_visualization import get_mapping_pool
         from utils.naming_utils import dataset_abbrev
 
         stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -206,7 +207,7 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
             f_type = flow.get("foreign_type", "")
             info = bridge_linker_text(flow.get("bridges") or [], src, tgt,
                                       f_type)
-            pool = pools.get((s_type, f_type)) or {}
+            pool = get_mapping_pool(pools, flow)
             s_total = int(flow.get("source_count") or 0)
             t_total = int(flow.get("foreign_count") or 0)
             s_n = len(pool.get("source_body_ids") or [])
@@ -279,14 +280,17 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
         visible), reverse = each receiving type and the sources
         converging on it (N-to-1 visible).
         """
-        from comparison.mapping_visualization import build_type_coverage
+        from comparison.mapping_visualization import (
+            build_type_coverage,
+            mapping_pool_key,
+        )
 
-        pair_pools = {(f.get("source_type"), f.get("foreign_type")):
-                      pools[key]
-                      for f in flows
-                      for key in ((f.get("source_type"),
-                                   f.get("foreign_type")),)
-                      if key in pools}
+        pair_pools = {}
+        for flow in flows:
+            key = mapping_pool_key(
+                src, tgt, flow.get("source_type"), flow.get("foreign_type"))
+            if key in pools:
+                pair_pools[key] = pools[key]
         coverage = build_type_coverage({(src, tgt): flows}, pair_pools)
         forward = coverage.get("forward") or []
         reverse = coverage.get("reverse") or []
@@ -299,7 +303,8 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
             ui.label(
                 "Forward — each queried type: its neurons, the "
                 "targets it maps to, and how many of its bodyIds "
-                "the mapping reaches (x of y, per side)."
+                "are covered by the type-level evidence (x of y, per side). "
+                "No bodyId-to-bodyId pairing is inferred."
             ).classes("text-caption drocat-muted")
             ui.table(
                 columns=[
@@ -321,7 +326,8 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
             ui.label(
                 "Reverse — each receiving type and the sources that "
                 "map onto it: several sources make the N-to-1 "
-                "explicit; coverage is per side, x of y bodyIds."
+                "explicit; coverage is independent per side, x of y "
+                "bodyIds, with no bodyId pairing inferred."
             ).classes("text-caption drocat-muted")
             ui.table(
                 columns=[
@@ -468,6 +474,7 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
             preferred_bridge_chain,
             standardize_bridge,
         )
+        from comparison.mapping_visualization import mapping_pool_key
 
         for flow in flows:
             chains = [c for c in (flow.get("bridges") or [])
@@ -478,7 +485,8 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                 continue
             ordered = ([preferred]
                        + [c for c in chains if c is not preferred])[:2]
-            key = (flow.get("source_type"), flow.get("foreign_type"))
+            key = mapping_pool_key(
+                src, tgt, flow.get("source_type"), flow.get("foreign_type"))
             if key in pools:
                 continue
             foreign_index = indexes.get(tgt)
@@ -545,8 +553,12 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
             # heavy search starts
             await asyncio.sleep(0.05)
             loop = asyncio.get_running_loop()
+            from ..neuron_index import run_serialized_cross_dataset_scan
             outcome = await loop.run_in_executor(
-                None, lambda: _compute(queries, datasets, mode))
+                None,
+                lambda: run_serialized_cross_dataset_scan(
+                    _compute, queries, datasets, mode),
+            )
             _apply(outcome)
             _record_panel_history(queries, datasets, outcome)
         except Exception:
@@ -584,7 +596,7 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
         mode, chips = search.get_value()
         queries = [str(q).strip() for q in chips if str(q).strip()]
         datasets = [d for d in (get_datasets() or [])
-                    if load_cached_neuron_index(d) is not None]
+                    if neuron_index_path(d).is_file()]
         return queries, datasets, mode
 
     def _compute(queries, datasets, mode) -> Dict[str, Any]:
@@ -593,6 +605,8 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
             collect_native_type_matches,
             count_types_in_index,
             enrich_native_type_matches,
+            _load_cross_match_index,
+            _load_coverage_index,
             mapped_type_targets,
             resolve_type_matches,
         )
@@ -609,7 +623,29 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
         except Exception:
             mapper = None
 
-        indexes = {ds: load_cached_neuron_index(ds) for ds in datasets}
+        # Type mapping is a type-level operation. Keep bodyId/linker columns
+        # out of the resolver and its counts; they are only needed later to
+        # annotate a rendered type edge with coverage.
+        indexes = {ds: _load_cross_match_index(ds) for ds in datasets}
+        if any(indexes.get(ds) is None for ds in datasets):
+            raise RuntimeError(
+                "one or more selected type indexes could not be read")
+
+        # Coverage is intentionally separate from type matching. These
+        # compact projections contain only bodyId, type, and linker columns
+        # used to report an m-of-n coverage subset. They avoid the full wide
+        # metadata frames that caused the websocket to disappear.
+        coverage_indexes: Dict[str, Any] = {}
+
+        def _coverage_indexes_for(src: str, tgt: str) -> Dict[str, Any]:
+            selected: Dict[str, Any] = {}
+            for dataset in (src, tgt):
+                if dataset not in coverage_indexes:
+                    coverage_indexes[dataset] = _load_coverage_index(dataset)
+                index = coverage_indexes[dataset]
+                if index is not None:
+                    selected[dataset] = index
+            return selected
         # §12: resolve every chip under the ACTIVE FILTER MODE (exact /
         # startswith / contains / endswith / regex) against each selected
         # dataset's type column; no-hit chips fall back to the staged
@@ -640,7 +676,9 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                         flow["foreign_type"], 0)
                 pair_flows[(origin, target)] = \
                     pair_flows.get((origin, target), []) + flows
-                _pool_pair(flows, origin, target, indexes, pools)
+                _pool_pair(
+                    flows, origin, target,
+                    _coverage_indexes_for(origin, target), pools)
 
         # Zero-hit fallback chips: the previous staged native sweep
         # (substring types + taxonomy labels → pooled nodes).
@@ -668,7 +706,9 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                         continue
                     pair_flows[(ds, foreign)] = \
                         pair_flows.get((ds, foreign), []) + flows
-                    _pool_pair(flows, ds, foreign, indexes, pools)
+                    _pool_pair(
+                        flows, ds, foreign,
+                        _coverage_indexes_for(ds, foreign), pools)
 
         # One canonical entry per unordered pair (§12 mirror dedupe).
         pair_flows = dedupe_mirrored_pairs(pair_flows, origins.keys())

@@ -131,7 +131,8 @@ def test_bridges_csv_contract():
     text = build_bridges_csv(flows, pools={
         ('T2, X', 'T3'): {'source_body_ids': [1, 2],
                           'target_body_ids': [3, 4, 5],
-                          'coverage': 'covered 2 of 3'}})
+                          'source_coverage': 'covered 2 of 2',
+                          'target_coverage': 'covered 2 of 3'}})
     lines = text.strip().splitlines()
     assert lines[0] == ('dataset,entry_kind,matched_column,name,foreign_type,'
                         'neuron_count,mapped_kind,mapped_to,map_used,'
@@ -140,7 +141,7 @@ def test_bridges_csv_contract():
     assert 'male-cns:v1.0,type,type,T1,T1,4,mapped,T1,' in lines[1]
     # bare same-name row: empty bridge cell, pool coverage filled
     assert '"T2, X"' in lines[2] and 'same name' in lines[2]
-    assert lines[2].endswith('covered 2 of 3')
+    assert lines[2].endswith('source covered 2 of 2; target covered 2 of 3')
     assert build_bridges_csv([]) is None
 
 
@@ -255,6 +256,40 @@ def test_endpoint_pool_counts_union_not_max():
         'target_body_ids': ['12', '13']}
     _src, tgt = _endpoint_pool_counts(pools)
     assert tgt['APDN3'] == 13
+
+
+def test_mapping_pools_are_scoped_by_dataset_direction_and_type():
+    """The same type names in opposite directions must not swap coverage."""
+    from comparison.mapping_visualization import (
+        build_type_coverage,
+        get_mapping_pool,
+    )
+
+    forward = _flow(FAFB, 'l-LNv', BANC, 'l-LNv', 8, 6)
+    reverse = _flow(BANC, 'l-LNv', FAFB, 'l-LNv', 6, 8)
+    pair_flows = {(FAFB, BANC): [forward], (BANC, FAFB): [reverse]}
+    pools = {
+        (FAFB, BANC, 'l-LNv', 'l-LNv'): {
+            'source_body_ids': ['f1', 'f2'],
+            'target_body_ids': ['b1'],
+        },
+        (BANC, FAFB, 'l-LNv', 'l-LNv'): {
+            'source_body_ids': ['b1', 'b2', 'b3'],
+            'target_body_ids': ['f1', 'f2', 'f3', 'f4'],
+        },
+    }
+
+    assert get_mapping_pool(pools, forward)['source_body_ids'] == ['f1', 'f2']
+    assert get_mapping_pool(pools, reverse)['source_body_ids'] == [
+        'b1', 'b2', 'b3']
+
+    coverage = build_type_coverage(pair_flows, pools)
+    rows = {(row['dataset'], row['type']): row
+            for row in coverage['forward']}
+    assert rows[(FAFB, 'l-LNv')]['query_cov'] == '2 of 8'
+    assert rows[(FAFB, 'l-LNv')]['target_cov'] == '1 of 6'
+    assert rows[(BANC, 'l-LNv')]['query_cov'] == '3 of 6'
+    assert rows[(BANC, 'l-LNv')]['target_cov'] == '4 of 8'
 
 
 def test_type_coverage_forward_1_to_n_and_totals():

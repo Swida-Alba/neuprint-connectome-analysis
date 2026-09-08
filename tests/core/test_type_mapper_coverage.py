@@ -89,9 +89,9 @@ FAFB_RENAME_TABLE = (
 )
 
 BANC_RENAME_TABLE = (
-    "bodyId,type,instance,Alternative Cell Type(s)\n"
-    "b1,MDN,MDN_1,\n"
-    "b2,SOMEB,SOMEB_1,BOnly\n"
+    "bodyId,type,instance,Alternative Cell Type(s),malecns_cell_type,fafb_cell_type\n"
+    "b1,MDN,MDN_1,,MDNx,DNp50\n"
+    "b2,SOMEB,SOMEB_1,BOnly,Bonly1,\n"
 )
 
 
@@ -149,15 +149,16 @@ def test_flywire_primary_name_passthrough(rename_mapper):
 
 
 def test_fafb_banc_namespaces_resolve_independently(rename_mapper):
-    # FAFB renamed MDN -> DNp50; BANC still uses MDN as primary
+    # FAFB renamed MDN -> DNp50; BANC's curated columns independently
+    # identify the BANC MDN row from both MCNS and FAFB.
     assert rename_mapper.get_mapped_type('MDNx', MCNS, FW) == 'DNp50'
     assert rename_mapper.get_mapped_type('MDNx', MCNS, BANC) == 'MDN'
-    # FAFB <-> BANC stay connected through the shared male-cns crosswalk
+    # FAFB <-> BANC is direct label evidence, not a MCNS flywireType route.
     assert rename_mapper.get_mapped_type('DNp50', FW, BANC) == 'MDN'
     assert rename_mapper.get_mapped_type('MDN', BANC, FW) == 'DNp50'
 
-    # BANC-only rename: BOnly is additional in BANC (-> SOMEB) but unknown
-    # to FAFB, where the crosswalk name passes through.
+    # The MCNS→FAFB crosswalk remains independent of the MCNS→BANC label;
+    # BOnly is grounded by FAFB's own Alternative/primary table.
     assert rename_mapper.get_mapped_type('Bonly1', MCNS, BANC) == 'SOMEB'
     assert rename_mapper.get_mapped_type('Bonly1', MCNS, FW) == 'BOnly'
 
@@ -496,7 +497,9 @@ def test_warn_if_unsupported_dataset(mapper, capsys):
 
 def test_get_mapped_type_basic(mapper):
     assert mapper.get_mapped_type('aMe12', MCNS, FW) == 'MTe07'
-    assert mapper.get_mapped_type('aMe12', MCNS, BANC) == 'MTe07'
+    # MCNS flywireType no longer lands directly in BANC; a BANC row must
+    # carry the corresponding malecns_cell_type label to bridge this pair.
+    assert mapper.get_mapped_type('aMe12', MCNS, BANC) is None
     assert mapper.get_mapped_type('aMe12', MCNS, HB) == 'aMe12'
     assert mapper.get_mapped_type('aMe12', MCNS, MANC) == 'MN1'
     # reverse direction
@@ -512,9 +515,10 @@ def test_get_mapped_type_basic(mapper):
 def test_get_mapped_type_same_namespace_and_suffix(mapper):
     # same schema namespace -> native name returned
     assert mapper.get_mapped_type('aMe12', MCNS, 'male-cns:v1.0') == 'aMe12'
-    assert mapper.get_mapped_type('MTe07', FW, BANC) == 'MTe07'
-    # §version control: male-cns v0.9 is its own namespace — the v1.0
-    # crosswalk cannot verify its names, so nothing silently maps
+    assert mapper.get_mapped_type('MTe07', FW, BANC) is None
+    # §version control: male-cns v0.9 is its own native namespace.  With no
+    # v0.9 table in this hermetic fixture, it remains unavailable rather than
+    # borrowing v1.0 rows.
     assert mapper.get_mapped_type('aMe12', MCNS, 'male-cns:v0.9') is None
     # hemisphere suffix preserved on mapped name
     assert mapper.get_mapped_type('aMe12_L', MCNS, FW) == 'MTe07_L'

@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import html
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -96,10 +98,48 @@ class NeuronIndexPage:
 # by several UI clients.  Keep one process-local copy and invalidate it when
 # either the cache index or its optional metadata table changes.
 _INDEX_CACHE: Dict[Tuple, CachedNeuronIndex] = {}
+_INDEX_LOAD_LOCK = threading.RLock()
+
+# Cross-dataset expansion is intentionally off the NiceGUI event loop, but
+# that alone does not make it cheap: a cold expansion may initialize the type
+# mapper and scan several large Parquet projections.  More than one viewer
+# (or a stale request from the same viewer) can otherwise run that work at
+# once and retain several independent Polars/Pandas working sets.  Keep this
+# process-wide and re-entrant so callers can serialize a scan while also
+# allowing the public collector below to use the same guard.
+_CROSS_DATASET_SCAN_LOCK = threading.RLock()
+CROSS_SCAN_SUPERSEDED = object()
+
+
+def run_serialized_cross_dataset_scan(
+    callback,
+    *args,
+    is_current=None,
+    **kwargs,
+):
+    """Run one cross-dataset expansion under the process-wide single flight.
+
+    ``is_current`` is an optional cheap predicate owned by the UI caller.  It
+    is evaluated *after* acquiring the lock, so a queued stale request exits
+    without initializing another mapper/index working set.  The callback must
+    be UI-free because it normally runs in a worker thread.
+    """
+    with _CROSS_DATASET_SCAN_LOCK:
+        if is_current is not None and not is_current():
+            return CROSS_SCAN_SUPERSEDED
+        return callback(*args, **kwargs)
+
 
 def clear_neuron_index_cache() -> None:
     """Clear the process-local viewer cache (primarily useful for tests)."""
-    _INDEX_CACHE.clear()
+    with _INDEX_LOAD_LOCK:
+        _INDEX_CACHE.clear()
+        alias_cache = globals().get("_ALIAS_INDEX_CACHE")
+        if alias_cache is not None:
+            alias_cache.clear()
+        release_cache = globals().get("_banc_release_body_pairs")
+        if release_cache is not None:
+            release_cache.cache_clear()
 
 
 def neuron_index_path(dataset: str, cache_dir: Optional[Path] = None) -> Path:
@@ -258,7 +298,7 @@ def _enrich_identifiers(frame, dataset: str, datasets_dir: Optional[Path]):
     return frame, True
 
 
-def load_cached_neuron_index(
+def _load_cached_neuron_index(
     dataset: str,
     *,
     cache_dir: Optional[Path] = None,
@@ -397,6 +437,30 @@ def load_cached_neuron_index(
         if old_key != signature and old_key[0] == str(path):
             _INDEX_CACHE.pop(old_key, None)
     return result
+
+
+def load_cached_neuron_index(
+    dataset: str,
+    *,
+    cache_dir: Optional[Path] = None,
+    datasets_dir: Optional[Path] = None,
+    enrich: bool = True,
+) -> CachedNeuronIndex:
+    """Load one cached index while preventing duplicate concurrent loads.
+
+    A viewer opens the full metadata frame once, but a cross-dataset worker
+    can request the same frame at the same time while resolving value-driven
+    matches.  Serializing the cache boundary guarantees that both callers
+    share the same ``CachedNeuronIndex`` instead of briefly retaining two
+    multi-gigabyte Polars frames.
+    """
+    with _INDEX_LOAD_LOCK:
+        return _load_cached_neuron_index(
+            dataset,
+            cache_dir=cache_dir,
+            datasets_dir=datasets_dir,
+            enrich=enrich,
+        )
 
 
 def _match_expression(frame, columns: List[str], text: str, mode: str):
@@ -1335,6 +1399,7 @@ def query_neuron_index(
     focus_key: Optional[str] = None,
     include_all_keys: bool = False,
     include_all_rows: bool = False,
+    prefix_only_search: bool = False,
 ) -> NeuronIndexPage:
     """Filter, sort, and page a cached index without sending all rows to JS.
 
@@ -1362,6 +1427,11 @@ def query_neuron_index(
     ``include_all_rows`` skips the pagination slice and returns every row
     matching the current query (same filter, sort, and grouping) as one
     full page — the matched-rows CSV export uses it.
+
+    ``prefix_only_search`` applies only to the default global search and keeps
+    the strict prefix stage without expanding it to the potentially enormous
+    case-insensitive substring stage. The viewer uses this bounded mode for
+    an explicitly forced one-character query such as ``R``.
     """
     import polars as pl
 
@@ -1412,7 +1482,7 @@ def query_neuron_index(
             _match_expression(filtered, filter_columns, filter_text, filter_mode)
         )
 
-    def all_viewer_matches(source, text: str):
+    def all_viewer_matches(source, text: str, *, include_substrings: bool = True):
         """Return prefix rows followed by substring-only rows.
 
         The inline suggestion menu intentionally stops at the first useful
@@ -1428,7 +1498,11 @@ def query_neuron_index(
         if not stages:
             return source.filter(pl.lit(False)), None, None
         prefix_stage = stages[0]
-        substring_stage = stages[1] if len(stages) > 1 else None
+        substring_stage = (
+            stages[1]
+            if include_substrings and len(stages) > 1
+            else None
+        )
         prefix_rows = source.filter(
             _match_expression(source, list(prefix_stage.columns), text, "prefix")
         ).with_columns(pl.lit(0).alias("__match_kind_priority"))
@@ -1494,13 +1568,17 @@ def query_neuron_index(
                 index.search_frame,
                 search_columns,
                 search_text,
-                include_substrings=True,
+                include_substrings=not prefix_only_search,
             )
         if fast_matches is not None:
             filtered, fast_hit_entries, fast_membership_entries = fast_matches
             presorted_search = True
         else:
-            filtered, _, _ = all_viewer_matches(filtered, search_text)
+            filtered, _, _ = all_viewer_matches(
+                filtered,
+                search_text,
+                include_substrings=not prefix_only_search,
+            )
         staged_search = True
     elif active_column_filter:
         match_stage = SearchStage(filter_mode, tuple(filter_columns))
@@ -2516,6 +2594,95 @@ def _cell_contains(column_expr, value: str):
     )
 
 
+@lru_cache(maxsize=1)
+def _banc_release_body_pairs() -> Tuple[Tuple[str, str], ...]:
+    """Load the complete BANC v626↔v888 root relation once.
+
+    The relation is bodyId evidence, not a type-name crosswalk.  Keep every
+    row (including repeated roots) because one v626 root can legitimately
+    correspond to several v888 roots.  An unavailable relation returns an
+    empty tuple so ordinary type/annotation pooling remains usable.
+    """
+    import polars as pl
+
+    candidates = (
+        PROJECT_ROOT / "datasets" / "banc_v888" / "downloads"
+        / "banc_888_meta.feather",
+        PROJECT_ROOT / "datasets" / "banc_v626" / "downloads"
+        / "banc_888_meta.feather",
+        PROJECT_ROOT / "compiled_data" / "banc_v888"
+        / "banc_888_meta.feather",
+    )
+    path = next((candidate for candidate in candidates if candidate.is_file()),
+                None)
+    if path is None:
+        return ()
+    try:
+        relation = pl.read_ipc(
+            path, columns=["root_626", "root_888"], memory_map=False)
+    except Exception:
+        return ()
+    pairs: List[Tuple[str, str]] = []
+    for left, right in relation.iter_rows():
+        left_tokens = _match_body_id_tokens(left)
+        right_tokens = _match_body_id_tokens(right)
+        if left_tokens and right_tokens:
+            pairs.append((left_tokens[0], right_tokens[0]))
+    return tuple(pairs)
+
+
+def _banc_release_pairs_for_direction(
+        source_dataset: str, target_dataset: str
+) -> Tuple[Tuple[str, str], ...]:
+    """Return release body pairs oriented source → target."""
+    relation = _banc_release_body_pairs()
+    if (source_dataset, target_dataset) == ("banc_v626", "banc_v888"):
+        return relation
+    if (source_dataset, target_dataset) == ("banc_v888", "banc_v626"):
+        return tuple((right, left) for left, right in relation)
+    return ()
+
+
+def _match_body_id_tokens(value: Any) -> List[str]:
+    """Normalize one metadata match cell into candidate bodyId strings."""
+    if value is None:
+        return []
+    text = str(value).strip()
+    if not text or text.casefold() in {"nan", "none", "null"}:
+        return []
+    tokens = re.split(r"[,;|\s]+", text)
+    result: List[str] = []
+    for token in tokens:
+        token = token.strip().strip("'")
+        if not token or token.casefold() in {"nan", "none", "null"}:
+            continue
+        # Some CSV readers render integer-valued identifiers as ``123.0``;
+        # remove only that harmless suffix and never coerce large IDs through
+        # floating point (which would lose precision).
+        if re.fullmatch(r"-?\d+\.0", token):
+            token = token[:-2]
+        if token not in result:
+            result.append(token)
+    return result
+
+
+def _type_body_id_set(index: Optional["CachedNeuronIndex"],
+                      type_name: str) -> set:
+    """Return endpoint bodyIds for exact type validation."""
+    if index is None or "type" not in index.frame.columns:
+        return set()
+    import polars as pl
+
+    frame = index.frame.filter(pl.col("type") == type_name)
+    if "bodyId" not in frame.columns:
+        return set()
+    return {
+        str(body_id).strip()
+        for body_id in frame.get_column("bodyId").to_list()
+        if str(body_id).strip()
+    }
+
+
 def pool_bridge_body_ids(source_dataset: str, target_dataset: str,
                          linkers, source_type: str, foreign_type: str,
                          *, indexes: Optional[Dict[str,
@@ -2527,11 +2694,14 @@ def pool_bridge_body_ids(source_dataset: str, target_dataset: str,
     ``home``; same-name pass entries are ignored). Each linker pools the
     bodyIds on its home side: the rows of that side's endpoint type whose
     linker column carries the linker value (comma-split exact match).
-    For the male-cns↔manc pair the ``mancBodyid`` column additionally
-    joins bodyIds directly (99.7% resolution). Returns
-    ``{'per_linker': [...], 'source_body_ids': […], 'target_body_ids':
-    […], 'granularity': 'n to m', 'coverage': 'covered N of M'}`` —
-    strictly informational.
+    There is intentionally no bodyId-to-bodyId join here.  A side without
+    an independent linker uses the full endpoint type population, while a
+    side with a linker reports only the rows carrying that side's evidence.
+    Optional BANC match columns remain mapper provenance, not coverage
+    constraints.  The BANC release relation may provide participant pools
+    for release-coverage diagnostics, but its individual pairs are never
+    exposed as matched neurons. Returns independent source/target coverage
+    together with the legacy ``granularity``/``coverage`` aliases.
     """
     import polars as pl
 
@@ -2539,7 +2709,10 @@ def pool_bridge_body_ids(source_dataset: str, target_dataset: str,
     loaded = dict(indexes or {})
     for ds in datasets:
         if ds not in loaded:
-            loaded[ds] = load_cached_neuron_index(ds)
+            # Body IDs are needed here only to report coverage for an already
+            # resolved type-level edge.  Do not silently materialize the full
+            # wide viewer index when a caller omits an explicit projection.
+            loaded[ds] = _load_coverage_index(ds)
 
     side_type = {source_dataset: source_type, target_dataset: foreign_type}
 
@@ -2556,11 +2729,13 @@ def pool_bridge_body_ids(source_dataset: str, target_dataset: str,
                 (source_dataset, target_dataset), ()):
             if reg_column == column:
                 return reg_home
-        if claimed_home in datasets and column in loaded[
-                claimed_home].frame.columns:
+        if (claimed_home in datasets and loaded.get(claimed_home) is not None
+                and column in loaded[claimed_home].frame.columns):
             return claimed_home
-        source_has = column in loaded[source_dataset].frame.columns
-        target_has = column in loaded[target_dataset].frame.columns
+        source_has = (loaded.get(source_dataset) is not None
+                      and column in loaded[source_dataset].frame.columns)
+        target_has = (loaded.get(target_dataset) is not None
+                      and column in loaded[target_dataset].frame.columns)
         if source_has and not target_has:
             return source_dataset
         if target_has and not source_has:
@@ -2582,6 +2757,16 @@ def pool_bridge_body_ids(source_dataset: str, target_dataset: str,
         if not column or not value or home not in datasets:
             continue
         index = loaded.get(home)
+        if column == "banc_release_crosswalk":
+            # This is a relation-backed virtual linker: its evidence lives
+            # in banc_888_meta.feather rather than in a cell column of either
+            # neuron index.  Resolve it after all ordinary linkers so the
+            # complete type-pair relation can be filtered on both endpoints.
+            per_linker.append({
+                "column": column, "value": value, "home": home,
+                "body_ids": [], "coverage_basis": "release relation",
+            })
+            continue
         if index is None or column not in index.frame.columns:
             continue
         endpoint_type = side_type.get(home, "")
@@ -2596,13 +2781,54 @@ def pool_bridge_body_ids(source_dataset: str, target_dataset: str,
         per_linker.append({
             "column": column, "value": value, "home": home,
             "body_ids": body_ids,
+            "coverage_basis": "home-side linker rows",
         })
         if home == source_dataset:
+            # An existing linker with no matching endpoint rows is an
+            # observed zero-coverage result. Keep that empty pool instead of
+            # treating the side as unconstrained and substituting the whole
+            # type population.
             had_source_linker = True
-            source_pool = body_ids
+            source_pool.extend(body_ids)
         elif home == target_dataset:
             had_target_linker = True
-            target_pool = body_ids
+            target_pool.extend(body_ids)
+
+    release_entries = [
+        entry for entry in per_linker
+        if entry.get("column") == "banc_release_crosswalk"]
+    release_pairs = _banc_release_pairs_for_direction(
+        source_dataset, target_dataset)
+    if release_entries and release_pairs:
+        source_type_ids = _type_body_id_set(
+            loaded.get(source_dataset), source_type)
+        target_type_ids = _type_body_id_set(
+            loaded.get(target_dataset), foreign_type)
+        valid_pairs = [
+            (source_id, target_id)
+            for source_id, target_id in release_pairs
+            if source_id in source_type_ids and target_id in target_type_ids
+        ]
+        if valid_pairs:
+            source_pool = list(dict.fromkeys(
+                source_id for source_id, _ in valid_pairs))
+            target_pool = list(dict.fromkeys(
+                target_id for _, target_id in valid_pairs))
+            had_source_linker = True
+            had_target_linker = True
+            for entry in release_entries:
+                home = entry.get("home")
+                if home == target_dataset:
+                    entry["body_ids"] = target_pool
+                else:
+                    entry["home"] = source_dataset
+                    entry["body_ids"] = source_pool
+                entry["relation_rows"] = len(valid_pairs)
+                entry["coverage_basis"] = (
+                    "release relation participant coverage; no bodyId pairing")
+
+    source_pool = list(dict.fromkeys(source_pool))
+    target_pool = list(dict.fromkeys(target_pool))
 
     # Crosswalk-arrival chains (e.g. [DN1pB·type, flywireType 'DN1pB'])
     # and bare same-name chains have NO per-side linker on one or both
@@ -2628,40 +2854,25 @@ def pool_bridge_body_ids(source_dataset: str, target_dataset: str,
                 if str(b).strip()
             ]
 
-    # manc direct leg: male-cns rows carry the MANC bodyId itself, so the
-    # target pool can join on bodyIds instead of the value match.
-    mc_index = loaded.get("male-cns:v1.0")
-    if (mc_index is not None and source_dataset == "male-cns:v1.0"
-            and "mancBodyid" in mc_index.frame.columns):
-        mc_rows = mc_index.frame.filter(pl.col("type") == source_type)
-        if "mancBodyid" in mc_rows.columns:
-            direct = [
-                str(b).split(".")[0]
-                for b in mc_rows.select("mancBodyid").to_series().to_list()
-                if b is not None and str(b).strip() not in ("", "nan")
-            ]
-            manc_index = loaded.get(target_dataset)
-            if direct and manc_index is not None:
-                manc_ids = set(
-                    manc_index.frame.select("bodyId").to_series()
-                    .cast(pl.Utf8).to_list())
-                direct = [b for b in direct if b in manc_ids]
-            if direct:
-                target_pool = direct
-
     granularity = f"{len(source_pool)} to {len(target_pool)}"
-    foreign_total = count_type_in_index(
-        loaded.get(target_dataset), foreign_type) if loaded.get(
-        target_dataset) is not None else None
-    coverage = ""
-    if foreign_total:
-        coverage = f"covered {len(target_pool)} of {foreign_total}"
+    source_total = count_type_in_index(loaded.get(source_dataset), source_type)
+    target_total = count_type_in_index(loaded.get(target_dataset), foreign_type)
+    source_coverage = (
+        f"covered {len(source_pool)} of {source_total}"
+        if source_total is not None else "")
+    target_coverage = (
+        f"covered {len(target_pool)} of {target_total}"
+        if target_total is not None else "")
     return {
         "per_linker": per_linker,
         "source_body_ids": source_pool,
         "target_body_ids": target_pool,
         "granularity": granularity,
-        "coverage": coverage,
+        # ``coverage`` is retained as the historical target-side alias.
+        "coverage": target_coverage,
+        "source_coverage": source_coverage,
+        "target_coverage": target_coverage,
+        "coverage_basis": "independent endpoint pools; no bodyId pairing",
     }
 
 
@@ -2670,15 +2881,16 @@ def _load_alias_index(dataset: str) -> Optional["CachedNeuronIndex"]:
     path = neuron_index_path(dataset)
     if not path.is_file():
         return None
-    key = (dataset, path.stat().st_mtime_ns)
-    cached = _ALIAS_INDEX_CACHE.get(key)
-    if cached is None:
-        try:
-            cached = load_cached_neuron_index(dataset)
-        except Exception:
-            return None
-        _ALIAS_INDEX_CACHE[key] = cached
-    return cached
+    with _INDEX_LOAD_LOCK:
+        key = (dataset, path.stat().st_mtime_ns)
+        cached = _ALIAS_INDEX_CACHE.get(key)
+        if cached is None:
+            try:
+                cached = load_cached_neuron_index(dataset)
+            except Exception:
+                return None
+            _ALIAS_INDEX_CACHE[key] = cached
+        return cached
 
 
 # ---------------------------------------------------------------------------
@@ -2722,8 +2934,108 @@ def _native_label_columns(index: "CachedNeuronIndex") -> List[str]:
     return [column for _, column in found]
 
 
-def _native_type_matches(index: "CachedNeuronIndex", needle: str, cap: int):
-    """Substring type matches in one index, exact matches ranked first.
+def _load_cross_match_index(dataset: str) -> Optional["CachedNeuronIndex"]:
+    """Load only the columns needed for native cross-dataset matching.
+
+    The available-neurons table needs the full cached index, but a native
+    cross-dataset scan only inspects ``type`` and a small set of taxonomy
+    labels.  Reusing ``_load_alias_index`` here used to materialize every
+    metadata column and its search sidecar for every cached dataset.  That
+    duplicated the selected table's memory footprint during a mapping search
+    and could take down the NiceGUI websocket before results were rendered.
+
+    This helper intentionally does not memoize the projected frame.  The
+    caller keeps only the compact match summaries, allowing the projected
+    frames to be reclaimed before mapper enrichment starts.
+    """
+    import polars as pl
+
+    path = neuron_index_path(dataset)
+    if not path.is_file():
+        return None
+    try:
+        schema = pl.read_parquet_schema(path)
+        columns = list(schema)
+        needed = [
+            column
+            for column in columns
+            if column == "type"
+            or re.sub(r"[^a-z0-9]", "", str(column).casefold())
+            in _NATIVE_LABEL_COLUMNS
+        ]
+        if not needed:
+            return None
+        frame = pl.read_parquet(path, columns=needed)
+    except Exception:
+        return None
+    return CachedNeuronIndex(
+        dataset=str(dataset),
+        path=path,
+        frame=frame,
+        columns=tuple(frame.columns),
+        enriched=False,
+        search_frame=None,
+    )
+
+
+def _load_coverage_index(dataset: str) -> Optional["CachedNeuronIndex"]:
+    """Load the small bodyId/linker projection used for coverage only.
+
+    Type mapping must not use body IDs to decide which type names map.  The
+    preview still reports useful ``m-of-n`` coverage, though, so it needs a
+    narrow view of the endpoint rows.  Keep that view separate from both the
+    full available-neurons index and the type/taxonomy projection above.
+
+    The projection deliberately includes only the physical bridge columns
+    consumed by :func:`pool_bridge_body_ids`; optional bodyId match columns
+    are not needed for coverage.
+    It is not placed in ``_INDEX_CACHE``: coverage is an annotation for one
+    mapping request, not a second full viewer cache.
+    """
+    import polars as pl
+
+    path = neuron_index_path(dataset)
+    if not path.is_file():
+        return None
+    coverage_columns = {
+        "bodyId", "type",
+        # MCNS crosswalks and endpoint-side annotation columns.
+        "flywireType", "additional_type(s)", "Alternative Cell Type(s)",
+        "hemibrainType", "mancType",
+        # BANC's curated label bridges.
+        "fafb_cell_type", "malecns_cell_type", "manc_cell_type",
+        "hemibrain_cell_type",
+    }
+    try:
+        schema = pl.read_parquet_schema(path)
+        needed = [column for column in schema if column in coverage_columns]
+        if not {"bodyId", "type"}.issubset(needed):
+            return None
+        frame = pl.read_parquet(path, columns=needed)
+    except Exception:
+        return None
+    return CachedNeuronIndex(
+        dataset=str(dataset),
+        path=path,
+        frame=frame,
+        columns=tuple(frame.columns),
+        enriched=False,
+        search_frame=None,
+    )
+
+
+def _native_type_matches(
+    index: "CachedNeuronIndex",
+    needle: str,
+    cap: int,
+    *,
+    prefix_only: bool = False,
+):
+    """Type matches in one index, exact matches ranked first.
+
+    ``prefix_only`` keeps a deliberately short search bounded by matching
+    only names that start with the query.  The normal path remains a
+    case-insensitive substring search.
 
     Returns ``(matches, truncated)`` where matches are
     ``{'name', 'count', 'exact', 'matched_written'}`` dicts sorted by
@@ -2735,12 +3047,41 @@ def _native_type_matches(index: "CachedNeuronIndex", needle: str, cap: int):
     if "type" not in index.frame.columns:
         return [], 0
     folded = pl.col("type").cast(pl.Utf8, strict=False).str.to_lowercase()
-    hits = index.frame.filter(
-        folded.is_not_null() & folded.str.contains(needle.casefold(), literal=True)
+    folded_needle = needle.casefold()
+    match = (
+        folded.str.starts_with(folded_needle)
+        if prefix_only
+        else folded.str.contains(folded_needle, literal=True)
     )
+    hits = index.frame.filter(folded.is_not_null() & match)
     if hits.is_empty():
         return [], 0
-    grouped = hits.group_by("type").len().sort("type").to_dicts()
+    grouped_frame = hits.group_by("type").len()
+    total_types = grouped_frame.height
+    bounded_prefix = bool(prefix_only and cap < 10 ** 9)
+    if bounded_prefix:
+        # A deliberate one-character search is the safety valve for broad
+        # prefixes.  Rank in Polars and trim before converting to Python
+        # dicts; sorting/materializing every R* type defeats that bound.
+        grouped_frame = (
+            grouped_frame
+            .with_columns(
+                pl.col("type").cast(pl.Utf8, strict=False)
+                .str.to_lowercase()
+                .eq(folded_needle)
+                .cast(pl.Int8)
+                .alias("__exact")
+            )
+            .sort(
+                ["__exact", "len", "type"],
+                descending=[True, True, False],
+            )
+            .head(max(0, cap))
+            .drop("__exact")
+        )
+    else:
+        grouped_frame = grouped_frame.sort("type")
+    grouped = grouped_frame.to_dicts()
     matches = []
     for row in grouped:
         name = str(row["type"])
@@ -2755,11 +3096,19 @@ def _native_type_matches(index: "CachedNeuronIndex", needle: str, cap: int):
             "matched_written": name,
         })
     matches.sort(key=lambda m: (not m["exact"], -m["count"], m["name"].casefold()))
+    if bounded_prefix:
+        return matches, max(0, total_types - len(matches))
     return matches[:cap], max(0, len(matches) - cap)
 
 
-def _native_label_matches(index: "CachedNeuronIndex", needle: str, cap: int,
-                          types_cap: int):
+def _native_label_matches(
+    index: "CachedNeuronIndex",
+    needle: str,
+    cap: int,
+    types_cap: int,
+    *,
+    prefix_only: bool = False,
+):
     """Taxonomy-label matches in one index with their covered types.
 
     Returns ``(matches, truncated)`` where matches are
@@ -2771,23 +3120,40 @@ def _native_label_matches(index: "CachedNeuronIndex", needle: str, cap: int,
     folded_needle = needle.casefold()
     matches = []
     truncated_labels = 0
+    bounded_prefix = bool(prefix_only and cap < 10 ** 9)
+    total_matching_labels = 0
     for column in _native_label_columns(index):
         if column not in index.frame.columns:
             continue
         folded_col = pl.col(column).cast(pl.Utf8, strict=False).str.to_lowercase()
-        label_rows = index.frame.filter(
-            folded_col.is_not_null()
-            & folded_col.str.contains(folded_needle, literal=True)
+        match = (
+            folded_col.str.starts_with(folded_needle)
+            if prefix_only
+            else folded_col.str.contains(folded_needle, literal=True)
         )
+        label_rows = index.frame.filter(folded_col.is_not_null() & match)
         if label_rows.is_empty():
             continue
         # Ties broken by the label name: parallel group_by does not
         # guarantee an order, and the display cap must keep the same
         # labels on every run.
-        labels = (
-            label_rows.group_by(column).len()
-            .sort(["len", column], descending=[True, False]).to_dicts()
-        )
+        labels_frame = label_rows.group_by(column).len()
+        if bounded_prefix:
+            # The global display cap is safe to apply per column: every
+            # label that could survive the global top-cap is in the top cap
+            # of the column where it occurs.  Keep the bound in Polars so a
+            # broad prefix never creates a Python object for every label.
+            total_matching_labels += labels_frame.height
+            labels_frame = (
+                labels_frame
+                .sort(["len", column], descending=[True, False])
+                .head(max(0, cap))
+            )
+        else:
+            labels_frame = labels_frame.sort(
+                ["len", column], descending=[True, False]
+            )
+        labels = labels_frame.to_dicts()
         for row in labels:
             label = str(row[column])
             if folded_needle not in label.casefold():
@@ -2798,11 +3164,18 @@ def _native_label_matches(index: "CachedNeuronIndex", needle: str, cap: int,
             )
             # Same tie-break policy as the labels: parallel group_by is
             # unordered, and the covered-types cap must be reproducible.
-            type_groups = (
-                types_frame.group_by("type").len()
-                .sort(["len", "type"], descending=[True, False]).to_dicts()
-                if "type" in types_frame.columns else []
-            )
+            total_types = 0
+            if "type" in types_frame.columns:
+                type_groups_frame = types_frame.group_by("type").len()
+                total_types = type_groups_frame.height
+                type_groups = (
+                    type_groups_frame
+                    .sort(["len", "type"], descending=[True, False])
+                    .head(max(0, types_cap) if bounded_prefix else 10 ** 9)
+                    .to_dicts()
+                )
+            else:
+                type_groups = []
             covered = [
                 {"name": str(g["type"]), "count": int(g["len"])}
                 for g in type_groups if g["type"]
@@ -2812,17 +3185,26 @@ def _native_label_matches(index: "CachedNeuronIndex", needle: str, cap: int,
                 "column": column,
                 "count": int(row["len"]),
                 "matched_written": matched_written,
-                # The display keeps the cap, but the FULL covered list is
-                # retained (``covered_all``) so the type-mapping enrich
-                # transfers EVERY covered type — the display cap must not
-                # silently drop same-name types like l-LNv/s-LNv from the
-                # mapped-type view.
+                # Ordinary searches retain the FULL covered list
+                # (``covered_all``) so enrichment transfers every covered
+                # type.  Bounded one-character searches intentionally keep
+                # only the capped prefix subset here; retaining the hidden
+                # tail would recreate the resource spike this mode exists
+                # to prevent.
                 "covered_all": covered,
                 "types": covered[:types_cap],
-                "types_truncated": max(0, len(covered) - types_cap),
+                "types_truncated": (
+                    max(0, total_types - len(covered))
+                    if bounded_prefix
+                    else max(0, len(covered) - types_cap)
+                ),
             })
     matches.sort(key=lambda m: -m["count"])
-    truncated_labels = max(0, len(matches) - cap)
+    if bounded_prefix:
+        visible_labels = min(max(0, cap), len(matches))
+        truncated_labels = max(0, total_matching_labels - visible_labels)
+    else:
+        truncated_labels = max(0, len(matches) - cap)
     return matches[:cap], truncated_labels
 
 
@@ -2988,17 +3370,26 @@ def collect_native_type_matches(
     datasets: Optional[List[str]] = None,
     *,
     uncapped: bool = False,
+    prefix_only_search: bool = False,
 ) -> List[Dict[str, Any]]:
     """Native type-name expansion for a zero-hit viewer search.
 
     Mapper-free by design: the search text is matched as a case-insensitive
     substring against the ``type`` column and the taxonomy label columns of
-    every *other* locally cached dataset's index.  Results are name-similar
-    entries, not mapped equivalences, and stay strictly informational.
-    With ``uncapped=True`` every match is returned (used by the CSV export).
+    every *other* locally cached dataset's index.  With
+    ``prefix_only_search=True``, only case-insensitive starts-with matches are
+    returned; this is the bounded mode used for deliberate one-character
+    searches.  Results are name-similar entries, not mapped equivalences, and
+    stay strictly informational.  With ``uncapped=True`` every match is
+    returned (used by the CSV export).
     """
     search = str(search or "").strip()
-    if not search or search.isdigit() or "*" in search or len(search) < 2:
+    if (
+        not search
+        or search.isdigit()
+        or "*" in search
+        or len(search) < (1 if prefix_only_search else 2)
+    ):
         return []
     if datasets is None:
         datasets = datasets_with_cached_indexes()
@@ -3012,20 +3403,44 @@ def collect_native_type_matches(
     label_cap = 10 ** 9 if uncapped else NATIVE_LABEL_MATCH_CAP
     types_cap = 10 ** 9 if uncapped else NATIVE_LABEL_TYPES_CAP
     for ds in datasets:
-        index = _load_alias_index(ds)
+        index = _load_cross_match_index(ds)
         if index is None:
             continue
-        # ALWAYS compute the full match lists; the caps trim only the
-        # DISPLAY lists (``types`` / ``labels``).  Every data consumer
-        # (enrich, mapped-view provenance, flows, CSV) reads the
-        # ``*_all`` lists — a display cap must never shrink the mapping.
-        types_all, _ = _native_type_matches(index, search, 10 ** 9)
-        labels_all, _ = _native_label_matches(
-            index, search, 10 ** 9, types_cap)
+        # Normal searches keep complete lists in ``*_all`` because the
+        # mapped-type view and CSV export consume them.  A forced one-letter
+        # search is different: it is explicitly the bounded performance
+        # mode, so do not materialize/map the hidden tail just to discard it
+        # at render time.  An explicit uncapped CSV request still opts into
+        # the complete prefix result.
+        bounded_prefix = bool(prefix_only_search and not uncapped)
+        match_cap = type_cap if bounded_prefix else 10 ** 9
+        label_match_cap = label_cap if bounded_prefix else 10 ** 9
+        # Keep the full covered evidence for ordinary searches, while the
+        # helper still uses ``types_cap`` for the display list and its
+        # truncation flag.  In bounded prefix mode the helper also uses this
+        # finite cap to avoid retaining the hidden evidence tail at all.
+        covered_cap = types_cap
+        types_all, types_truncated = _native_type_matches(
+            index, search, match_cap, prefix_only=prefix_only_search
+        )
+        labels_all, labels_truncated = _native_label_matches(
+            index,
+            search,
+            label_match_cap,
+            covered_cap,
+            prefix_only=prefix_only_search,
+        )
         types = types_all[:type_cap]
         labels = labels_all[:label_cap]
-        types_truncated = max(0, len(types_all) - len(types))
-        labels_truncated = max(0, len(labels_all) - len(labels))
+        if bounded_prefix:
+            # ``_native_*_matches`` already applied the safety cap above;
+            # retain its full truncation count rather than reporting only
+            # the number hidden by the second display slice.
+            types_truncated = int(types_truncated)
+            labels_truncated = int(labels_truncated)
+        else:
+            types_truncated = max(0, len(types_all) - len(types))
+            labels_truncated = max(0, len(labels_all) - len(labels))
         if types or labels:
             matched_written = ""
             for cand in types_all:
@@ -3052,6 +3467,8 @@ def mapped_type_targets(mapper, foreign_type: str, foreign_ds: str,
                         selected_ds: str,
                         alias_cache: Optional[Dict[str,
                                                    Optional[Dict[str, Any]]]] = None,
+                        bridge_cache: Optional[Dict[Tuple[str, str, str],
+                                                      List[List[Dict[str, str]]]]] = None,
                         ) -> Optional[Dict[str, Any]]:
     """Canonical mapped-target resolution — THE shared backend (§backend
     unification, user 2026-09-07).
@@ -3098,11 +3515,17 @@ def mapped_type_targets(mapper, foreign_type: str, foreign_ds: str,
             ann = None
         if alias_cache is not None:
             alias_cache[foreign_type] = ann
-    try:
-        chains = mapper.get_type_bridges(
-            foreign_type, foreign_ds, selected_ds)
-    except Exception:
-        chains = []
+    bridge_key = (str(foreign_type), str(foreign_ds), str(selected_ds))
+    if bridge_cache is not None and bridge_key in bridge_cache:
+        chains = bridge_cache[bridge_key]
+    else:
+        try:
+            chains = mapper.get_type_bridges(
+                foreign_type, foreign_ds, selected_ds)
+        except Exception:
+            chains = []
+        if bridge_cache is not None:
+            bridge_cache[bridge_key] = chains
     ends = {
         str(c[-1]['value']) for c in (chains or [])
         if c and c[-1].get('value')
@@ -3144,18 +3567,25 @@ def enrich_native_type_matches(
         return
 
     cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    # A single expansion often sees the same type once as a native type and
+    # again under one or more taxonomy labels.  Keep graph walks keyed by
+    # direction as well as name; mapper results are immutable for the life of
+    # this worker and repeating the walk was a major R1 memory/time multiplier.
+    bridge_cache: Dict[Tuple[str, str, str], List[List[Dict[str, str]]]] = {}
 
     def _annotation_for(foreign_type: str, foreign_ds: str) \
             -> Optional[Dict[str, Any]]:
         return mapped_type_targets(
             mapper, foreign_type, foreign_ds, selected_dataset,
-            alias_cache=cache)
+            alias_cache=cache, bridge_cache=bridge_cache)
 
     for entry in native_matches:
         foreign_ds = entry.get("dataset", "")
         mapped_names = set()
-        # full lists: the display-capped types/labels must never shrink
-        # the mapped-type set (the l-LNv/DN1a regression class)
+        # Complete lists for ordinary searches (or the deliberately bounded
+        # prefix lists for a forced one-character search): the display cap
+        # must never shrink the mapped-type set (the l-LNv/DN1a regression
+        # class).
         types_iter = entry.get("types_all") or entry.get("types", [])
         labels_iter = entry.get("labels_all") or entry.get("labels", [])
 
@@ -3171,8 +3601,15 @@ def enrich_native_type_matches(
                     bridge_linker_text,
                 )
 
-                chains = mapper.get_type_bridges(
-                    local_target, selected_dataset, foreign_ds)
+                bridge_key = (
+                    str(local_target), str(selected_dataset), str(foreign_ds))
+                if bridge_key not in bridge_cache:
+                    try:
+                        bridge_cache[bridge_key] = mapper.get_type_bridges(
+                            local_target, selected_dataset, foreign_ds)
+                    except Exception:
+                        bridge_cache[bridge_key] = []
+                chains = bridge_cache[bridge_key]
                 info = bridge_linker_text(
                     chains, selected_dataset, foreign_ds, foreign_type)
             except Exception:
@@ -3188,8 +3625,9 @@ def enrich_native_type_matches(
                     for target in cand["mapped"]["targets"]
                 )
                 cand["bridges_by_target"] = {
-                    bridge_target: mapper.get_type_bridges(
-                        bridge_target, selected_dataset, foreign_ds)
+                    bridge_target: bridge_cache.get(
+                        (str(bridge_target), str(selected_dataset),
+                         str(foreign_ds)), [])
                     for bridge_target in cand["mapped"]["targets"]
                 }
         for label in labels_iter:
@@ -3207,8 +3645,9 @@ def enrich_native_type_matches(
                         for bridge_target in covered["mapped"]["targets"]
                     )
                     covered["bridges_by_target"] = {
-                        bridge_target: mapper.get_type_bridges(
-                            bridge_target, selected_dataset, foreign_ds)
+                        bridge_target: bridge_cache.get(
+                            (str(bridge_target), str(selected_dataset),
+                             str(foreign_ds)), [])
                         for bridge_target in covered["mapped"]["targets"]
                     }
         # Current-dataset type names this block's matches map to — the
@@ -3268,7 +3707,10 @@ def collect_alias_matches(
             "candidates": [],
         }
         if outcome == "matched":
-            index = _load_alias_index(ds)
+            # Alias counts only inspect the exact ``type`` column.  Keep the
+            # cross-dataset lookup projection-only; loading the full display
+            # index here can duplicate hundreds of megabytes per dataset.
+            index = _load_cross_match_index(ds)
             if index is None:
                 continue
             for cand in info.get("candidates", []):
@@ -3289,6 +3731,8 @@ def collect_zero_hit_matches(
     search: str,
     datasets: Optional[List[str]] = None,
     matched_values: Optional[List[tuple]] = None,
+    *,
+    prefix_only_search: bool = False,
 ) -> Dict[str, Any]:
     """Expansion tiers for a viewer search's cross-dataset panel.
 
@@ -3311,10 +3755,47 @@ def collect_zero_hit_matches(
     automatic mapping (cached but unmapped, or metadata not downloaded).
 
     All tiers are strictly informational.
+
+    ``prefix_only_search`` is used for an explicitly submitted
+    one-character query.  It applies the same starts-with-only guard to the
+    native cross-dataset tier so that enabling this panel cannot re-expand a
+    bounded local search into a broad substring scan.
+    """
+    # Keep the entire expansion single-flight.  The native projection is
+    # bounded, but mapper enrichment and value-driven fallback can still hold
+    # large temporary graph/index structures; overlapping requests were the
+    # path to the connection disappearing under R1 and other short queries.
+    return run_serialized_cross_dataset_scan(
+        _collect_zero_hit_matches,
+        dataset,
+        search,
+        datasets,
+        matched_values,
+        prefix_only_search=prefix_only_search,
+    )
+
+
+def _collect_zero_hit_matches(
+    dataset: str,
+    search: str,
+    datasets: Optional[List[str]] = None,
+    matched_values: Optional[List[tuple]] = None,
+    *,
+    prefix_only_search: bool = False,
+) -> Dict[str, Any]:
+    """Implementation for :func:`collect_zero_hit_matches`.
+
+    Kept separate so the public collector can enforce the single-flight
+    boundary without making the worker callback acquire a non-reentrant lock.
     """
     if datasets is None:
         datasets = datasets_with_cached_indexes()
-    native = collect_native_type_matches(dataset, search, datasets)
+    native = collect_native_type_matches(
+        dataset,
+        search,
+        datasets,
+        prefix_only_search=prefix_only_search,
+    )
     try:
         enrich_native_type_matches(native, dataset)
     except Exception:
@@ -3379,8 +3860,14 @@ def collect_value_mapped_matches(
         value = str(value or "").strip()
         if not column or not value:
             continue
-        if re.sub(r"[^a-z0-9]", "", column.casefold()) == "bodyid":
-            continue  # bodyIds are dataset-specific by definition
+        normalized_column = re.sub(r"[^a-z0-9]", "", column.casefold())
+        if normalized_column in {"bodyid", "type"}:
+            # bodyIds are dataset-specific, while type values already have a
+            # native cross-dataset tier.  This fallback is specifically for
+            # metadata/taxonomy values whose literal text is not itself a
+            # type query; remapping type groups here duplicates the mapper
+            # graph walk and was the R1 amplification path.
+            continue
         key = (column.casefold(), value.casefold())
         if key in seen_pairs:
             continue
@@ -3458,7 +3945,11 @@ def collect_value_mapped_matches(
         if not foreign:
             continue
         names = sorted(foreign, key=lambda name: (name.casefold(), name))
-        foreign_index = _load_alias_index(ds)
+        # Only exact type counts are needed to render value-driven matches.
+        # The selected dataset remains on its full index above because it is
+        # also used to resolve the matched value into local types; foreign
+        # datasets must stay projection-only to avoid a memory spike.
+        foreign_index = _load_cross_match_index(ds)
         types_all = [
             {
                 "name": name,
@@ -3532,6 +4023,8 @@ def build_matches_csv(
     search: str,
     datasets: Optional[List[str]] = None,
     matched_values: Optional[List[tuple]] = None,
+    *,
+    prefix_only_search: bool = False,
 ) -> str:
     """Build the CSV text of every matched entry for a zero-hit search.
 
@@ -3551,7 +4044,13 @@ def build_matches_csv(
 
     if datasets is None:
         datasets = datasets_with_cached_indexes()
-    native = collect_native_type_matches(dataset, search, datasets, uncapped=True)
+    native = collect_native_type_matches(
+        dataset,
+        search,
+        datasets,
+        uncapped=True,
+        prefix_only_search=prefix_only_search,
+    )
     enrich_native_type_matches(native, dataset)
     if matched_values:
         try:

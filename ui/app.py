@@ -238,6 +238,23 @@ body.body--dark {
         var(--drocat-canvas) !important;
 }
 
+/* Release selection guidance stays visible and keyboard-friendly in both
+   themes without changing the selector's value implicitly. */
+.drocat-release-notice {
+    margin-top: 6px;
+    padding: 8px 10px;
+    border: 1px solid color-mix(in srgb, var(--drocat-cobalt) 28%, var(--drocat-line));
+    border-radius: var(--drocat-radius-sm);
+    background: var(--drocat-cobalt-soft);
+    color: var(--drocat-navy);
+    font-size: 12px;
+    line-height: 1.35;
+}
+.drocat-release-notice-text { color: var(--drocat-navy); }
+.drocat-release-notice-muted { color: var(--drocat-muted); }
+.drocat-release-action .q-btn__content,
+.drocat-release-dismiss .q-btn__content { color: var(--drocat-cobalt); }
+
 /* Active group-tab accents need brighter hues on the dark tints. */
 body.body--dark .drocat-tint-visualization .drocat-group-tab.drocat-active { color: #2dd4bf !important; }
 body.body--dark .drocat-tint-similarity .drocat-group-tab.drocat-active { color: #f59e0b !important; }
@@ -358,6 +375,11 @@ html, body {
 .drocat-neuron-search-toolbar .drocat-neuron-search-field {
     background: var(--drocat-table-glass);
     border-radius: 10px;
+}
+.drocat-neuron-search-toolbar .drocat-neuron-search-submit {
+    /* The row uses bottom alignment; stretch the button to the query field's
+       full control height without changing its natural responsive width. */
+    align-self: stretch;
 }
 .drocat-neuron-search-toolbar .q-field--outlined .q-field__control {
     border-radius: 10px;

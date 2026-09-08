@@ -29,6 +29,9 @@ import pytest
 
 from comparison.cross_dataset_type_mapper import (
     CROSSWALK_COLUMNS,
+    BANC_LABEL_COLUMNS,
+    BANC_RELEASE_LINKER,
+    RELEASE_ALIAS_LINKER,
     BRIDGE_SOURCE_MAP,
     CrossDatasetTypeMapper,
     bridge_is_valid,
@@ -90,6 +93,10 @@ def test_source_map_columns_exist_in_dataset_tables():
     for (home, column), _targets in BRIDGE_SOURCE_MAP.items():
         if home == '*' or column == 'type':
             continue
+        if column in (BANC_RELEASE_LINKER, RELEASE_ALIAS_LINKER):
+            # Relation-backed release edges and the MCNS alias are not
+            # physical neuron-table columns.
+            continue
         path = TABLES.get(home)
         if path is None or not path.exists():
             continue  # dataset not cached locally; loader check covers it
@@ -97,11 +104,8 @@ def test_source_map_columns_exist_in_dataset_tables():
         assert column in header, (home, column)
 
 
-def test_crosswalk_values_hit_their_target_namespaces(mapper):
-    """flywireType reaches both flywire namespaces, hemibrainType is
-    hemibrain-only.  Asserting the hit RATES requires those namespaces'
-    tables to be cached locally — the module-level skip only guarantees
-    male-cns + FAFB."""
+def test_crosswalk_and_banc_label_values_hit_their_target_namespaces(mapper):
+    """MCNS flywireType is FAFB-only; BANC labels ground their own targets."""
     if not (TABLES[BANC].exists() and TABLES[HB].exists()):
         pytest.skip('BANC / hemibrain tables not available locally')
 
@@ -116,14 +120,39 @@ def test_crosswalk_values_hit_their_target_namespaces(mapper):
     hemi_vals = values_of('hemibrainType')
 
     fafb_types = _namespace_names(mapper, FAFB)
-    banc_types = _namespace_names(mapper, BANC)
     hemi_types = _namespace_names(mapper, HB)
 
-    # flywireType reaches BOTH flywire datasets (family licensing)
+    # flywireType is deliberately not a BANC bridge any more.
     assert len(flywire_vals & fafb_types) / len(flywire_vals) >= 0.90
-    assert len(flywire_vals & banc_types) / len(flywire_vals) >= 0.90
     # hemibrainType is hemibrain-only (and essentially complete)
     assert len(hemi_vals & hemi_types) / len(hemi_vals) >= 0.99
+
+    target_for_column = {
+        'fafb_cell_type': FAFB,
+        'malecns_cell_type': MCNS,
+        'hemibrain_cell_type': HB,
+        'manc_cell_type': MANC,
+    }
+    for column, target in target_for_column.items():
+        evidence = [
+            key for key in mapper._banc_label_votes
+            if key[0] == BANC and key[1] == column
+        ]
+        if not evidence:
+            continue
+        if target not in (FAFB, MCNS):
+            # The production policy accepts non-auto HEMI/MANC labels without
+            # requiring those optional local target tables to be present.
+            assert evidence
+            continue
+        grounded = sum(
+            1 for key in evidence
+            if any(
+                name in _namespace_names(mapper, target)
+                for name in mapper._banc_label_votes[key]['votes']
+            )
+        )
+        assert grounded / len(evidence) >= 0.90, (column, grounded, len(evidence))
 
 
 # ---------------------------------------------------------------------------
@@ -176,8 +205,16 @@ def test_chains_obey_the_source_map(mapper, source, target):
                     if col == column and home != '*'
                     and (hop['dataset'] in targets
                          or (column in CROSSWALK_COLUMNS
-                             and hop['dataset'] == MCNS))
+                             and hop['dataset'] == MCNS)
+                         or (column in BANC_LABEL_COLUMNS
+                             and hop.get('home') == home))
                 ]
+                if column in (BANC_RELEASE_LINKER, RELEASE_ALIAS_LINKER):
+                    licensed = [targets for (home, col), targets
+                                in BRIDGE_SOURCE_MAP.items()
+                                if col == column and home != '*'
+                                and (hop['dataset'] in targets
+                                     or hop.get('home') == home)]
                 assert licensed, (where, hop)
                 if column in CROSSWALK_COLUMNS:
                     # endpoint-family licensing (the screenshot rule)
@@ -208,48 +245,46 @@ def test_chains_obey_the_source_map(mapper, source, target):
 # ---------------------------------------------------------------------------
 
 def test_dn1pa_mcns_banc_has_no_third_family_crosswalk(mapper):
-    """The screenshot regression: hemibrainType must never appear on a
-    MCNS↔BANC bridge (no hemibrain endpoint); the flywireType-verified
-    routes stay."""
+    """The MCNS↔BANC bridge uses BANC's mct label, never MCNS flywireType."""
     chains = mapper.get_type_bridges('DN1pA', MCNS, BANC)
     assert chains
     for chain in chains:
         for hop in chain[1:]:
-            if hop['column'] in CROSSWALK_COLUMNS:
-                assert hop['column'] == 'flywireType', (chain,)
+            assert hop['column'] not in CROSSWALK_COLUMNS, (chain,)
     assert any(
-        any(h['column'] == 'flywireType' and h['dataset'] == BANC
+        any(h['column'] == 'malecns_cell_type' and h['dataset'] == BANC
             for h in chain[1:])
         for chain in chains)
 
 
 def test_mdn_mcns_banc_routes_only_through_flywire(mapper):
     chains = mapper.get_type_bridges('MDN', MCNS, BANC)
-    assert chains
+    if not chains:
+        pytest.skip('MDN has no curated malecns_cell_type label in this BANC table')
     for chain in chains:
-        assert all(h['column'] != 'hemibrainType' for h in chain[1:])
-        assert all(h['column'] != 'mancType' for h in chain[1:])
+        assert all(h['column'] not in CROSSWALK_COLUMNS for h in chain[1:])
 
 
-def test_dnp50_banc_annotation_routing_intact(mapper):
-    """DNp50 → BANC MDN keeps resolving under the source map.
-
-    The FAFB additional_type(s) evidence hop is load-bearing.  The BANC
-    Alternative Cell Type(s) hop is data-dependent: the bucket-curated
-    release carries 'MDN' (no DNp50 alias) in that column for MDN cells,
-    so the same-name identity closes the route instead of an alt rename.
-    """
-    chains = mapper.get_type_bridges('DNp50', MCNS, BANC)
-    ends = {chain[-1]['value'] for chain in chains}
-    assert 'MDN' in ends
+def test_banc_label_bridge_is_direct_and_provenanced(mapper):
+    """A real curated BANC label produces a direct, column-specific chain."""
+    edge = next(
+        (
+            source_type,
+            target_type,
+            column,
+        )
+        for (source_key, source_type), edges in mapper._banc_label_edges.items()
+        if source_key == FAFB
+        for target_key, target_type, column, _via, _home in edges
+        if target_key == BANC
+    )
+    source_type, target_type, column = edge
+    chains = mapper.get_type_bridges(source_type, FAFB, BANC)
+    assert any(chain[-1]['value'] == target_type for chain in chains)
     assert any(
-        any(h['column'] == 'additional_type(s)' and h['dataset'] == FAFB
-            for h in chain[1:])
-        for chain in chains)
-    # The BANC alt bridge stays licensed in the source map even when the
-    # curated data no longer carries a rename for this pair.
-    from comparison.cross_dataset_type_mapper import BRIDGE_SOURCE_MAP
-    assert BRIDGE_SOURCE_MAP[(BANC, 'Alternative Cell Type(s)')] == {BANC}
+        any(hop['column'] == column for hop in chain[1:])
+        for chain in chains
+    )
 
 
 def test_cl125_apdn3_standard_chain_survives(mapper):

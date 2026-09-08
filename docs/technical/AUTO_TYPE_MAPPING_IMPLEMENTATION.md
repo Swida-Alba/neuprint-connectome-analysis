@@ -1,7 +1,7 @@
 # Auto Type Mapping — Implementation Report
 
 *Technical reference for the cross-dataset auto type mapping engine as of
-2026-09-07. Companion to the user-facing `docs/AUTO_TYPE_MAPPING.md`; this
+2026-09-08. Companion to the user-facing `docs/AUTO_TYPE_MAPPING.md`; this
 report documents the implementation: components, the bridge-rule algebra,
 the derivation walk, resolution precedence, the shared UI backend, pooling,
 and the visualization contract.*
@@ -9,12 +9,15 @@ and the visualization contract.*
 ## 1. Components and data flow
 
 ```
-male-cns v1.0 neuron_df (crosswalk table)
+male-cns v1.0/v0.9 neuron_df (release-aware crosswalk tables)
         │  type / flywireType / hemibrainType / mancType cells
         ▼
 CrossDatasetTypeMapper                      src/comparison/cross_dataset_type_mapper.py
   ├─ _build_type_mappings()        stored 1-to-1 mappings + N-to-1 / 1-to-N conflicts
-  ├─ _load_flywire_type_tables()   per-release FAFB/BANC primary + additional-name tables
+  ├─ _load_flywire_type_tables()   per-release FAFB/BANC labels + additional-name tables
+  ├─ _apply_banc_label_overlay()   curated BANC per-dataset label votes
+  ├─ _apply_banc_release_overlay() root_626 ↔ root_888 type relation
+  ├─ _build_mcns_v09_mappings()    native v0.9 + explicit same-name alias
   ├─ _apply_annotation_bridge_overlay()   same-name identity + annotation-bridge pairs
   ├─ get_type_bridges()            derivation chains (the evidence algebra, §3)
   ├─ get_alias_candidates()        per-dataset alias candidates (rename / same name / one-of-N)
@@ -40,7 +43,7 @@ release's tables:
 | release | mapping namespace | tables |
 |---|---|---|
 | male-cns v1.0 | `male-cns:v1.0` | the crosswalk df |
-| male-cns v0.9 | `male-cns:v0.9` (own, empty) | — the v1.0 crosswalk cannot verify v0.9 names |
+| male-cns v0.9 | `male-cns:v0.9` (own native table) | v0.9 table; shared names alias explicitly to v1.0 |
 | FAFB v783 | `flywire_FAFB_v783` | `flywire_FAFB_v783_allneurons_neuron_df.csv` |
 | BANC v626 | `banc_v626` | `banc_v626_allneurons_neuron_df.csv` |
 | BANC v888 | `banc_v888` | `banc_v888_allneurons_neuron_df.csv` |
@@ -49,11 +52,20 @@ Consequences (user directive, 2026-09-07):
 
 - A `banc_v888` selection resolves **only** against the v888 tables —
   v626 names ("via banc v626") and v626 bodyId pools are impossible.
-- `male-cns:v0.9` never silently borrows the v1.0 crosswalk; without its
-  own crosswalk it simply has no verified mappings (same-name identity
-  still works).
-- No BANC↔BANC cross-release mapping: the overlay skips those pairs and
-  no licensed bridge form connects the two releases.
+- `male-cns:v0.9` never silently borrows the v1.0 table or body IDs. Shared
+  primary names use an explicit `release_alias` hop before downstream v1.0
+  mapping; v0.9-only names use only their own native `*Type` fallback.
+- BANC v626↔v888 has one narrow `banc_release_crosswalk` type bridge when
+  the relation is available, plus exact same-name type identity as a safe
+  fallback when it is not. Generic BANC↔BANC annotation/transitive paths
+  remain blocked.
+
+The v0.9 release probe records 176,379 common bodyIds, 163,130 same-name
+typed rows, 1,354 typed-row disagreements, and 11,597 shared primary names.
+`_release_alias_diagnostics["release_alias_disagreement"]` keeps the
+actionable source-side subset: 29 shared v0.9 names across 71 joined rows,
+with a bounded example list. A disagreement is visible to audit/reporting but
+does not rewrite the selected release's bodyId pool.
 
 ## 3. The bridge-rule algebra (derivation walk)
 
@@ -67,22 +79,27 @@ primary `type` of the target dataset. Every edge is licensed by
 ```
 HEMI  --hT--  MCNS                        MANC --mT-- MCNS
 MCNS  --fT--aT--  FAFB   |  MCNS --fT-- FAFB  |  MCNS --aT-- FAFB
-MCNS  --(fT)--ACT--  BANC |  MCNS --ACT-- BANC |  MCNS --(fT)-- BANC
-FAFB  --aT--ACT--  BANC  |  FAFB --aT-- BANC    |  FAFB --ACT-- BANC
+MCNS  --mct--  BANC       |  FAFB --aT--ACT-- BANC
+HEMI  --hemibrain_cell_type-- BANC
+MANC  --manc_cell_type-- BANC
+BANC v626 --banc_release_crosswalk-- BANC v888
 ```
 
 `hT/mT/fT` = hemibrainType/mancType/flywireType cells on the male-cns rows;
-`aT` = FAFB `additional_type(s)`; `ACT` = BANC `Alternative Cell Type(s)`.
+`mct` = BANC `malecns_cell_type`; `aT` = FAFB `additional_type(s)`;
+`ACT` = BANC `Alternative Cell Type(s)`. The BANC direct bridges also use
+`fafb_cell_type`, `hemibrain_cell_type`, and `manc_cell_type` for their named
+target namespaces. MCNS `flywireType` does not land in BANC.
 
 ### 3.2 Connector licenses (`ROUTE_MIDS`)
 
 A chain visits at most ONE intermediate namespace, and only from the
 licensed set:
 
-- male-cns connects {HEMI, MANC} ↔ {FAFB, BANC} and HEMI ↔ MANC;
-- FAFB connects male-cns ↔ BANC;
-- **BANC is never a connector** (never between male-cns and FAFB);
-- every other pair (male-cns↔FAFB, FAFB↔BANC) is direct-only.
+- male-cns is the controlled connector for the neuprint crosswalk families;
+- BANC label bridges and the BANC release relation are direct-only;
+- **BANC is never a connector** between unrelated endpoint pairs;
+- MCNS↔BANC is `malecns_cell_type`, not an fT/FAFB/ACT detour.
 
 This makes the BANC ban structural (a chain cannot even be built through
 it) and enforces the two-linker no-flip rule: a flipped `fT/aT` chain
@@ -96,7 +113,8 @@ hop order (the SAME bridge, not a flip).
 reverse-crosswalk, cross-namespace landing) **before** same-name
 membership edges, so the walk's visited race records the EVIDENCE chain
 for a pair. A same-name pair whose crosswalk cell names itself therefore
-derives through `flywireType '<name>'` (metadata verification), not the
+derives through the pair's registered metadata linker (for example
+`malecns_cell_type '<name>'` for MCNS↔BANC), not the
 bare name echo:
 
 ```
@@ -131,19 +149,22 @@ FAFB neurons → 42 v888 targets, 207 unique).
 
 ## 4. Production resolution precedence
 
-`_build_type_mappings` + `_apply_annotation_bridge_overlay` fill the
+`_build_type_mappings` + the release/BANC overlays +
+`_apply_annotation_bridge_overlay` fill the
 stored mappings consumed by `get_mapped_type`:
 
-1. **Crosswalk routes** (male-cns anchored, per release) — win when
+1. **BANC label/release overlays** — direct curated label votes and the
+   root relation fill their release-local slots; conflicts are never guessed.
+2. **Crosswalk routes** (male-cns anchored, per release) — win when
    present; several `flywireType` names per male-cns type become 1-to-N
    conflicts, never guesses.
-2. **Transitive mappings** — each release's male-cns anchor gains the
+3. **Transitive mappings** — each release's male-cns anchor gains the
    anchor's other targets.
-3. **Annotation-bridge overlay** — same-name identity, then the
+4. **Annotation-bridge overlay** — same-name identity, then the
    annotation bridge (exactly one candidate maps; several become a
-   1-to-N conflict with `origin` provenance). Overlay pairs are the
-   flywire-family pairs with a BANC endpoint; BANC↔BANC is skipped.
-4. Exports state the derivation: `mapping_origin` in
+   1-to-N conflict with `origin` provenance). BANC↔BANC annotation paths
+   are skipped.
+5. Exports state the derivation: `mapping_origin` in
    `auto_type_mapping.csv`, `origin` in the conflicts CSV.
 
 ## 5. Shared backend and surface parity
@@ -174,7 +195,24 @@ reported 243.
 home side's endpoint rows whose linker column carries the linker value;
 an unconstrained side pools the FULL endpoint type (crosswalk-arrival and
 bare same-name chains name that side's identity without a per-side cell).
-`mancBodyid` joins male-cns↔manc directly (99.7%).
+For BANC's curated label bridges, `fafb_match` and `malecns_match` are
+optional provenance diagnostics only. A locally observed match may be
+counted as verified or flagged as a conflict, but it never filters a
+type-label bridge and never joins bodyIds across datasets. Each endpoint
+therefore reports its own coverage pool, even when one type covers only a
+subset of the other type's population. Multiple linkers union independent
+home-side candidates. `mancBodyid` remains a release-local metadata field
+for its existing MANC evidence, not a requirement for general type mapping.
+The virtual `banc_release_crosswalk` linker is the corresponding exception
+for BANC v626↔v888: it reads the complete `root_626`↔`root_888` relation,
+filters both sides by their requested type, and preserves repeated roots.
+For example, the real `L5` bridge reaches 1,655 of 1,683 BANC v888 rows
+while retaining 1,651 v626 roots.
+
+Pool dictionaries used by the Type Mapping panel are keyed by
+`(source_dataset, target_dataset, source_type, foreign_type)`. This keeps
+same-named types and opposite directions independent; renderers retain a
+two-part-key fallback for older programmatic callers and tests.
 
 Pool fix: the crosswalk-arrival linker's value is the **cell content**
 (`via`) — the reverse leg's hop value is the arrival (male-cns) type
@@ -183,11 +221,12 @@ name while the cell carries the foreign token (MCNS rows typed
 arrival name emptied the target pool and blanked the coverage of rows
 like `5th-LNv → 5thsLNv_LNd6`. Post-fix all 44 circadian pairs pool.
 
-`granularity` ("n to m") and `coverage` ("covered n of m") carried the
-same two numbers — surfaces now show ONE `pool_coverage` column
-(`covered <target pool> of <target type total>`), filled even when one
-side's pool is empty. The pool dict keeps `granularity` for API
-compatibility.
+`granularity` ("n to m") remains a compatibility summary, while the pool
+now carries independent `source_coverage` and `target_coverage` strings
+(`covered <pool> of <endpoint type total>`). The historical `coverage`
+field remains the target-side alias for callers that still read it. Panel
+text and CSV output make clear that these are coverage counts, not
+bodyId-to-bodyId pairings.
 
 ## 7. Visualization contract
 
@@ -248,8 +287,8 @@ compatibility.
   skipped (the duplicated `FAFB (65)` / `FAFB: flywire_FAFB_v783` header
   rows are gone); linker columns join the same header row with their
   `LINKER_COLORS` swatch. The Sankey note uses the same chip shape.
-- **Bridges CSV**: one `pool_coverage` column (was `granularity`,
-  `coverage`).
+- **Bridges CSV**: independent source/target coverage in one
+  `pool_coverage` cell; the export never represents bodyId pairings.
 
 ## 8. Testing matrix
 
@@ -258,7 +297,10 @@ compatibility.
 | `tests/core/test_type_mapper_source_map.py` | declarative licensing vs the tables, per-pair sweeps |
 | `tests/core/test_type_mapper_bridge_rules.py` | the algebra: reverse crosswalk legs, connector licenses, BANC ban, no-flip order, untyped exclusion, real-data acceptance |
 | `tests/core/test_type_mapper_annotation_bridge.py` | overlay precedence, exports, release-name resolution |
-| `tests/core/test_type_mapper_real_datasets.py` | circadian parity (panel == viewer, 219 unique), linker layout + header legend chips, DNp50 crosswalk-verified route, two-linker cap, APDN3 pair weights == Sankey ribbons, APDN3 pool-union hover, Sankey no parallel links, edge-label size control |
+| `tests/core/test_type_mapper_real_datasets.py` | circadian parity (panel == viewer, 219 unique), linker layout + header legend chips, direct BANC label routes, two-linker cap, APDN3 pair weights == Sankey ribbons, APDN3 pool-union hover, Sankey no parallel links, edge-label size control |
+| `tests/core/test_banc_release_and_mcns_version.py` | BANC label votes/verification, auto-label exclusion, duplicated root relation, MCNS v0.9 alias/native fallback |
+| `tests/core/test_dataset_release_registry.py` | shared recommendation policy and unavailable-release behavior |
+| `tests/ui/test_dataset_release_notice.py` | explicit single/multi selector recommendation action and suppression |
 | `tests/core/test_type_mapping_composed.py` | bridges CSV `pool_coverage` contract, uniform widths, shared `pair_flow_weight` formula, pool-count union, forward 1-to-N + reverse N-to-1 coverage rows |
 | `tests/ui/test_alias_matches.py` | viewer enrichment, mapped-type view, pool granularity |
 
@@ -271,7 +313,10 @@ Probes under `local_data/`: `repro_two_flows.py` (surface parity),
 
 - `optic-lobe` and `manc:v1.2.3` are not in the male-cns crosswalk table
   and therefore have no verified mappings (same-name only).
-- `male-cns:v0.9` has no crosswalk of its own; giving it one is a data
-  task, not a code task.
+- BANC `fafb_alignment_cell_type` remains search/alignment-only and
+  `fanc_cell_type` remains deliberately unlicensed.
+- MCNS v0.9 is intentionally name-aliased to v1.0 only for shared primary
+  names. Its body IDs remain native, and v0.9-only fallback labels are lower
+  tier than the certified v1.0 crosswalk.
 - Multi-candidate evidence is never guessed: 1-to-N conflicts are
   exported for manual adjudication.

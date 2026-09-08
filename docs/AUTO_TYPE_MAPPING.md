@@ -29,7 +29,7 @@ The mapper uses the male-cns neuron DataFrame located at:
 
 Key columns used:
 - `type`: male-cns type name
-- `flywireType`: corresponding type in flywire (FAFB/BANC)
+- `flywireType`: corresponding FAFB v783 type (it is not a BANC bridge)
 - `hemibrainType`: corresponding type in hemibrain
 - `mancType`: corresponding type in MANC
 
@@ -68,6 +68,34 @@ Resolution rules:
   each keeps its own mapping namespace.
 - Missing dataset tables only disable the rename resolution; the mapper
   still works from the male-cns crosswalk alone.
+
+#### Curated BANC label bridges
+
+BANC v626 and v888 publish release-local, per-dataset labels. The mapper
+reads these columns directly and treats them as the authoritative direct
+bridge for the corresponding namespace:
+
+| BANC column | target namespace | verification |
+|---|---|---|
+| `fafb_cell_type` | FAFB v783 | `fafb_match` when the FAFB table is available |
+| `malecns_cell_type` | male-cns v1.0 | `malecns_match` when the MCNS table is available |
+| `hemibrain_cell_type` | hemibrain v1.2.1 | curated non-`auto:` label |
+| `manc_cell_type` | MANC v1.0/v1.2.1 | curated non-`auto:` label |
+
+The labels are voted per BANC primary type. A single candidate, or a
+candidate with more than half of the votes and at least twice the runner-up,
+wins; unresolved splits become a `TypeMappingConflict`. A known match-bodyId
+whose target `type` contradicts a FAFB/MCNS label removes that row's vote.
+`auto:` values, `Unknown`, empty labels, and bare numeric sentinels are never
+mapping evidence. These bridges are direct-only: BANC is not introduced as a
+connector between unrelated endpoint pairs.
+
+`fafb_alignment_cell_type` is retained for search/alignment metadata only; it
+does not create a type bridge. `fanc_cell_type` is intentionally unlicensed
+until a FANC namespace and evidence policy are added.
+
+`Alternative Cell Type(s)` remains an intra-BANC annotation column. It is not
+used as a substitute for the curated per-dataset label columns.
 
 #### The FAFB ↔ BANC annotation bridge (additional Type(S) ⇄ Alternative Cell Type(s))
 
@@ -122,11 +150,17 @@ one edge per `(home dataset, name column) -> {landing datasets}`:
 | home dataset | column | lands in |
 |---|---|---|
 | any | `type` | any namespace (same-name identity) |
-| male-cns | `flywireType` | FAFB **and** BANC (both flywire datasets; 96%/97% of cell values hit either namespace) |
+| male-cns | `flywireType` | FAFB only |
 | male-cns | `hemibrainType` | hemibrain only |
 | male-cns | `mancType` | manc only (the crosswalk was built against MANC v1.0) |
+| BANC v626/v888 | `fafb_cell_type` | FAFB only |
+| BANC v626/v888 | `malecns_cell_type` | male-cns v1.0 only |
+| BANC v626/v888 | `hemibrain_cell_type` | hemibrain only |
+| BANC v626/v888 | `manc_cell_type` | MANC v1.0/v1.2.1 only |
 | FAFB | `additional_type(s)` | FAFB only |
 | BANC | `Alternative Cell Type(s)` | BANC only |
+| BANC v626/v888 | `banc_release_crosswalk` | the other BANC release only; relation-backed when available, exact same-name fallback otherwise |
+| MCNS v0.9/v1.0 | `release_alias` | same-name MCNS release alias only |
 
 On top of the map, one endpoint rule applies: **a crosswalk hop is valid
 only when the bridge's endpoints include a namespace the column routes
@@ -167,10 +201,10 @@ implementation reference lives in
 - **Direct bridge forms** — the pair linkers above plus same-name
   identity everywhere.
 - **Connectors** (`ROUTE_MIDS`): a derivation chain visits at most ONE
-  intermediate namespace, and only a licensed one — male-cns connects
-  {hemibrain, manc} ↔ {FAFB, BANC} (and the two neuprint datasets
-  through itself); FAFB connects male-cns ↔ BANC; **BANC is never a
-  connector** (never between male-cns and FAFB). Every other pair is
+  intermediate namespace, and only a licensed one — male-cns connects the
+  neuprint families through its own crosswalks. BANC label bridges are
+  direct-only, and **BANC is never a connector**. MCNS↔BANC uses
+  `malecns_cell_type`, never `flywireType`; every other unregistered pair is
   direct-only.
 - **Bidirectional, no flips** — the reverse travel direction reverses
   the hop order (the SAME bridge, not a flip); a two-linker chain
@@ -192,9 +226,30 @@ implementation reference lives in
 
 BANC v626 and BANC v888 are separate mapping namespaces, each resolving
 against its OWN neuron tables — a `banc_v888` selection can never land
-v626 names or pool v626 bodyIds. `male-cns:v0.9` keeps its own (empty)
-namespace instead of silently borrowing the v1.0 crosswalk. No
-BANC↔BANC cross-release mapping exists.
+v626 names or pool v626 bodyIds. They have one narrow exception: the
+metadata-backed `root_626`↔`root_888` relation provides a direct
+`banc_release_crosswalk` type bridge. It retains duplicate `root_626` rows,
+uses `root_888` (never `banc_888_id`), and never falls back to equal numeric
+IDs. Generic BANC annotation/transitive paths remain forbidden.
+
+`male-cns:v0.9` also keeps its native table and bodyId space. For a shared
+primary name, the mapper emits `v0.9 type → release_alias → v1.0` and then
+uses the v1.0 crosswalk for the requested target. A v0.9-only name never
+borrows a fabricated v1.0 name; it can use its own `flywireType`,
+`hemibrainType`, and `mancType` columns as a lower-tier fallback.
+
+The dataset selector recommends `male-cns:v1.0` when v0.9 is selected. The
+notice is advisory and explicit: it does not silently replace the selection,
+and it is hidden when the newer release is already selected or unavailable
+in the current options. The shared policy lives in
+`src/utils/dataset_release_registry.py`; uncertified MANC release candidates
+remain non-recommended.
+
+The v0.9/v1.0 comparison is exposed in mapper diagnostics: the real local
+tables have 176,379 common bodyIds, 11,597 shared primary names, 1,354
+typed-row name disagreements, and a nested `release_alias_disagreement`
+record for the 29 shared v0.9 names affecting 71 joined rows. These are audit
+signals; they never substitute v1.0 bodyIds for a v0.9 query.
 
 #### One shared backend (viewer ⇄ panel parity)
 
@@ -341,6 +396,8 @@ mapper = CrossDatasetTypeMapper(
     # Optional: explicit FAFB/BANC neuron tables for rename resolution;
     # a None value disables it for that namespace
     flywire_neuron_df_paths=None,
+    # Optional: explicit MCNS v0.9 table for native release queries
+    mcns_v09_neuron_df_path=None,
 )
 
 # Load mappings (called automatically when needed)
@@ -512,13 +569,15 @@ If cross-dataset similarity seems too low:
 
 ## Threshold equivalence across datasets
 
-The analysis compares all datasets at the SAME threshold (horizontal
-comparison). Synapse-count conventions differ strongly between datasets —
+Standard mode compares all datasets at the SAME threshold (horizontal
+comparison); Custom combination mode lets one named query use a different
+requested threshold in each dataset. Synapse-count conventions differ strongly between datasets —
 the median number of synapses per neuron spans ~6x (BANC v626 ≈ 52 post,
 FAFB v783 ≈ 308 post, male-cns v1.0 ≈ 340 post / 490 pre+post) — so "BANC
 ≥ 3" and "FAFB ≥ 3" do NOT cut the connectomes at comparable sparsities.
-This section gives a rough, whole-dataset alignment; per-query alignment
-is computed automatically in every run (see below).
+This section gives a rough, whole-dataset alignment. The threshold-alignment
+files are raw-run density diagnostics; use the query manifest for the actual
+per-query comparison rows.
 
 ### Criterion
 
@@ -565,7 +624,7 @@ Every cross-dataset run exports threshold-alignment files (spec Feature C):
 
 - `comparison_results/threshold_alignment_best_matches.csv` — a bisection
   prober over each dataset's lowest-threshold extract finds the
-  best-matching threshold in every other dataset for the CURRENT query
+  best-matching density threshold in every other dataset
   (extended range, not limited to the typed thresholds). Primary metric:
   edge-count distance `|n_a − n_b| / max(n_a, n_b, 1)`; tolerance ≤ 0.10.
 - `comparison_results/threshold_alignment_matrix.csv` (+ heatmap) —
@@ -574,15 +633,22 @@ Every cross-dataset run exports threshold-alignment files (spec Feature C):
   `comparison_visualizations/edge_density_threshold_curves.png` — the
   density curves behind the matching (absolute + per-neuron).
 
-### Per-dataset thresholds (vertical comparison)
+### Threshold query modes
 
-The Cross-Dataset tab ▸ Advanced Settings ▸ **Per-dataset thresholds**
-assigns each dataset its OWN ascending threshold list (e.g.
-BANC@{3,5}, FAFB@{7,11}, male-cns@{8,15}) so each runs at its
-density-equivalent sparsity. `thresholds` in the parameters remains the
-sorted union; horizontal tables simply have no cross-dataset content at
-thresholds not shared by ≥ 2 datasets — in vertical mode the alignment
-files above ARE the cross-dataset comparison.
+Thresholds are edited in **Core Parameters**, not in Advanced Settings.
+Standard N-chip input creates same-threshold queries (for example, `N=3` is
+run at 3 in every selected dataset). Custom combination mode instead
+use a dataset-column table in which each row is one complete query, for
+example `BANC=3, FAFB=7, male-cns=8`. Every selected dataset must have a cell;
+the table is not an independent threshold schedule for each dataset.
+
+The sorted union of advanced cell values is only the deduplicated raw-run
+schedule. Query alignment and similarity keep the row identity and never
+substitute a scalar union value. The stable query/dataset join is exported as
+`comparison_results/threshold_combinations.csv` and mirrored in the
+`queries` block of `effective_thresholds.json`, including requested/applied
+threshold, StrongestFirst budget and tau, Edge Budget `w0`/`w1`, `w2`, `W*`,
+and `paths_complete`.
 
 ### Related run features
 

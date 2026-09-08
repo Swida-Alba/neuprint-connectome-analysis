@@ -470,18 +470,16 @@ class TestRealDataAcceptance:
             's-CPDN3A', FAFB_RELEASE, BANC_RELEASE)
         ends = {c[-1]['value'] for c in chains}
         assert {'CB1770', 'CB1791', 'SMP229'} <= ends
-        # Production view: no crosswalk route exists, so the
-        # multi-candidate annotation evidence becomes a 1-to-N conflict.
-        assert real_mapper.get_mapped_type(
-            's-CPDN3A', FAFB_RELEASE, BANC_RELEASE) is None
-        conflict = next(
-            (c for c in real_mapper._conflicts
-             if c.source_type == 's-CPDN3A'
-             and c.source_dataset == FAFB
-             and c.target_dataset == BANC), None)
-        assert conflict is not None
-        assert {'CB1770', 'CB1791', 'SMP229'} <= conflict.target_types
-        assert conflict.origin == 'annotation bridge'
+        # The curated BANC FAFB label is now a higher-priority direct bridge;
+        # annotation candidates remain visible in the derivation view but do
+        # not override the label winner.
+        mapped = real_mapper.get_mapped_type(
+            's-CPDN3A', FAFB_RELEASE, BANC_RELEASE)
+        assert mapped in {'CB1770', 'CB1791', 'SMP229'}
+        provenance = real_mapper._bridge_provenance[
+            (FAFB_RELEASE, 's-CPDN3A', BANC_RELEASE)]
+        assert provenance['kind'] == 'cross-dataset cell type'
+        assert provenance['column'] == 'fafb_cell_type'
 
     def test_no_untyped_conflict_targets(self, real_mapper):
         # Scope to overlay-origin conflicts: legacy crosswalk conflicts

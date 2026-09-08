@@ -19,7 +19,7 @@ and opening the browser is the caller's job.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import networkx as nx
 
@@ -52,6 +52,40 @@ def dataset_group_color(code: str) -> str:
         return DATASET_GROUP_COLORS[code]
     index = sum(ord(ch) for ch in code) % len(_FALLBACK_GROUP_COLORS)
     return _FALLBACK_GROUP_COLORS[index]
+
+
+def mapping_pool_key(source_dataset: str, target_dataset: str,
+                     source_type: str, foreign_type: str) -> Tuple[str, str,
+                                                                    str, str]:
+    """Return the direction- and dataset-scoped key for one bridge pool.
+
+    Type names are not globally unique: ``l-LNv`` occurs in FAFB, BANC and
+    other namespaces, and a bidirectional result can contain the same
+    ``(source_type, foreign_type)`` tuple in both directions.  Pool state must
+    therefore carry both dataset endpoints as well as the type endpoints.
+    """
+    return (str(source_dataset or ""), str(target_dataset or ""),
+            str(source_type or ""), str(foreign_type or ""))
+
+
+def get_mapping_pool(pools: Optional[Dict[tuple, Dict[str, Any]]],
+                     flow: Dict[str, Any]) -> Dict[str, Any]:
+    """Look up a flow's bodyId pool, accepting the legacy two-part key.
+
+    The two-part fallback keeps the renderer/API compatible with callers that
+    construct small synthetic pool dictionaries directly.  The UI stores the
+    four-part key so real multi-pair results cannot cross-contaminate.
+    """
+    if not pools:
+        return {}
+    full = mapping_pool_key(
+        flow.get("source_dataset", ""), flow.get("target_dataset", ""),
+        flow.get("source_type", ""), flow.get("foreign_type", ""))
+    pool = pools.get(full)
+    if pool is not None:
+        return pool
+    legacy = (flow.get("source_type", ""), flow.get("foreign_type", ""))
+    return pools.get(legacy) or {}
 
 
 def _dataset_groups(graph) -> List[Dict[str, str]]:
@@ -395,7 +429,7 @@ def dedupe_mirrored_pairs(pair_flows: Dict[tuple, list],
     return result
 
 
-def _endpoint_pool_counts(pools) -> tuple:
+def _endpoint_pool_counts(pools, *, include_datasets: bool = False) -> tuple:
     """Pooled bodyId counts per type on each side (user report).
 
     Returns ``(source_counts, target_counts)`` — type name → the UNIQUE
@@ -410,32 +444,38 @@ def _endpoint_pool_counts(pools) -> tuple:
     count, because the bodyId count is what the mapped granularity
     actually rests on.
     """
-    src_ids: Dict[str, set] = {}
-    tgt_ids: Dict[str, set] = {}
-    for (s_type, f_type), pool in (pools or {}).items():
+    src_ids: Dict[Any, set] = {}
+    tgt_ids: Dict[Any, set] = {}
+    for key, pool in (pools or {}).items():
+        if len(key) == 4:
+            s_ds, t_ds, s_type, f_type = key
+        else:
+            s_ds, t_ds = "", ""
+            s_type, f_type = key
+        source_key = ((s_ds, s_type) if include_datasets
+                      else s_type)
+        target_key = ((t_ds, f_type) if include_datasets
+                      else f_type)
         if pool.get("source_body_ids"):
-            src_ids.setdefault(s_type, set()).update(
+            src_ids.setdefault(source_key, set()).update(
                 str(b) for b in pool["source_body_ids"])
         if pool.get("target_body_ids"):
-            tgt_ids.setdefault(f_type, set()).update(
+            tgt_ids.setdefault(target_key, set()).update(
                 str(b) for b in pool["target_body_ids"])
     return ({t: len(v) for t, v in src_ids.items()},
             {t: len(v) for t, v in tgt_ids.items()})
 
 
 def pair_flow_weight(flow, pool: Optional[Dict[str, Any]] = None) -> int:
-    """The per-pair mapped-flow weight — ONE formula for every artifact.
+    """The per-pair coverage weight — ONE formula for every artifact.
 
     The Sankey ribbon, the network pair edge, the linker-path edges and
-    the composed-graph edges all render the same mapped pair, so they
-    must all carry the same number.  Per side: the pooled bodyId count
-    when a pool exists, else that side's neuron count (a side with no
-    data falls back to the other side's), collapsed by min — a pair
-    maps at most min(source, foreign) neurons, so a 12-neuron type
-    bridging a 4-neuron counterpart draws 4, not 12 (the old network
-    duplicated the SOURCE type's whole count onto every edge, the
-    linker graph fell back foreign-first, and only the pooled case
-    agreed).
+    the composed-graph edges all render the same type-level bridge, so they
+    must all carry the same number.  Per side: the independent pooled bodyId
+    count when a coverage pool exists, else that side's neuron count (a side
+    with no data falls back to the other side's), collapsed by min.  This is
+    a conservative visual coverage weight, not a count of matched bodyId
+    pairs; no bodyId-to-bodyId correspondence is inferred.
     """
     source_count = int(flow.get("source_count") or 0)
     foreign_count = int(flow.get("foreign_count") or 0)
@@ -467,8 +507,9 @@ def build_mapping_network_graph(flows, *,
 
     Layer 0 = current dataset types, layer 1 = foreign dataset types,
     layer 2 = matched query entries.  Pair-edge weight is the shared
-    ``pair_flow_weight`` (pooled granularity / min of the two sides) —
-    the same number the Sankey ribbon draws for the pair; coverage-edge
+    ``pair_flow_weight`` (independent endpoint coverage / min of the two
+    sides) — the same number the Sankey ribbon draws for the type bridge;
+    coverage-edge
     weight is the foreign count, summing to the entry label's total.
     With ``pools``, node hovers also carry the pooled bodyId count of
     the type on its side.
@@ -479,8 +520,10 @@ def build_mapping_network_graph(flows, *,
     note, so an unmapped type stays visible instead of silently
     disappearing.
     """
-    src_pool_ids, tgt_pool_ids = _endpoint_pool_counts(pools)
     pools = pools or {}
+    dataset_scoped = any(len(key) == 4 for key in pools)
+    src_pool_ids, tgt_pool_ids = _endpoint_pool_counts(
+        pools, include_datasets=dataset_scoped)
     graph = nx.DiGraph()
     ordered = sorted(
         flows,
@@ -499,15 +542,18 @@ def build_mapping_network_graph(flows, *,
         # the pair edge carries the SHARED per-pair flow weight (the same
         # number the Sankey ribbon draws) — never the source type's whole
         # count duplicated onto every edge it participates in
-        pair_weight = pair_flow_weight(
-            flow, pools.get((flow.get("source_type", ""),
-                             flow.get("foreign_type", ""))))
+        pool = get_mapping_pool(pools, flow)
+        pair_weight = pair_flow_weight(flow, pool)
         graph.add_node(src_id, node_type="source",
                        label=flow.get("source_type", ""),
                        title=(f"{flow.get('source_type', '')} · "
                               f"{flow.get('source_dataset', '')} "
                               f"({source_count or pair_weight} neurons)"
                               + _pool_title_suffix(
+                                  src_pool_ids.get((
+                                      flow.get("source_dataset", ""),
+                                      flow.get("source_type", "")), 0)
+                                  if dataset_scoped else
                                   src_pool_ids.get(
                                       flow.get("source_type", ""), 0))))
         graph.add_node(tgt_id, node_type="target",
@@ -516,6 +562,10 @@ def build_mapping_network_graph(flows, *,
                               f"{flow.get('target_dataset', '')} "
                               f"({foreign_count or pair_weight} neurons)"
                               + _pool_title_suffix(
+                                  tgt_pool_ids.get((
+                                      flow.get("target_dataset", ""),
+                                      flow.get("foreign_type", "")), 0)
+                                  if dataset_scoped else
                                   tgt_pool_ids.get(
                                       flow.get("foreign_type", ""), 0))))
         # the pair edge IS the mapping; its hover label carries the bridge
@@ -897,8 +947,11 @@ def build_bridge_linker_graph(flows, *, source_dataset: str,
     Paths run source types → linker nodes → target types, where each
     linker node is one standardized hop (``standardize_bridge``) colored
     by its matched column (``LINKER_COLORS``); same-name pass hops
-    collapse into the edges (no node).  ``pools`` optionally maps
-    ``(source_type, foreign_type)`` → ``pool_bridge_body_ids`` results;
+    collapse into the edges (no node).  ``pools`` optionally maps the
+    direction- and dataset-scoped
+    ``(source_dataset, target_dataset, source_type, foreign_type)`` key to
+    ``pool_bridge_body_ids`` results; the legacy two-part key is also
+    accepted for programmatic callers;
     when present, linker-node hover titles carry the pooled bodyId
     counts per side.  Layer 0 = current dataset types, layers 1..k = the
     linkers in registry order, last layer = target types.
@@ -910,7 +963,9 @@ def build_bridge_linker_graph(flows, *, source_dataset: str,
 
     graph = nx.DiGraph()
     pools = pools or {}
-    src_pool_ids, tgt_pool_ids = _endpoint_pool_counts(pools)
+    dataset_scoped = any(len(key) == 4 for key in pools)
+    src_pool_ids, tgt_pool_ids = _endpoint_pool_counts(
+        pools, include_datasets=dataset_scoped)
 
     ordered = sorted(
         flows,
@@ -926,14 +981,26 @@ def build_bridge_linker_graph(flows, *, source_dataset: str,
     # 1-linker chain place its additional_type(s) node in the SAME
     # column as another chain's flywireType nodes, and a shared linker
     # node's position was overwritten by whichever chain processed last.
-    column_order: List[str] = []
+    observed_columns: List[str] = []
     for flow in ordered:
         for chain in (flow.get("bridges") or [])[:2]:
             for linker in (l for l in standardize_bridge(
                     chain, source_dataset, target_dataset)
                     if l.get("kind") == "linker"):
-                if linker["column"] not in column_order:
-                    column_order.append(linker["column"])
+                if linker["column"] not in observed_columns:
+                    observed_columns.append(linker["column"])
+    from comparison.cross_dataset_type_mapper import BRIDGE_STANDARD
+    registry = (
+        BRIDGE_STANDARD.get((source_dataset, target_dataset))
+        or BRIDGE_STANDARD.get((target_dataset, source_dataset))
+        or ()
+    )
+    column_order = [
+        column for column, _home in registry if column in observed_columns
+    ]
+    column_order.extend(
+        column for column in observed_columns if column not in column_order
+    )
     column_layer = {column: index + 1
                     for index, column in enumerate(column_order)}
 
@@ -942,6 +1009,9 @@ def build_bridge_linker_graph(flows, *, source_dataset: str,
         title = (f"{type_name} · {dataset} "
                  f"({count or 0} neurons)"
                  + _pool_title_suffix(
+                     (src_pool_ids if side == 0 else tgt_pool_ids)
+                     .get((dataset, type_name), 0)
+                     if dataset_scoped else
                      (src_pool_ids if side == 0 else tgt_pool_ids)
                      .get(type_name, 0)))
         graph.add_node(
@@ -956,13 +1026,12 @@ def build_bridge_linker_graph(flows, *, source_dataset: str,
         foreign_type = flow.get("foreign_type", "")
         # the shared per-pair flow weight — the same number the Sankey
         # ribbon and the type-level network edge draw for this pair
-        count = pair_flow_weight(
-            flow, pools.get((source_type, foreign_type)))
+        pool = get_mapping_pool(pools, flow)
+        count = pair_flow_weight(flow, pool)
         src_id = _endpoint(0, flow.get("source_dataset", ""), source_type,
                            flow.get("source_count"))
         tgt_id = _endpoint(1, flow.get("target_dataset", ""), foreign_type,
                            flow.get("foreign_count"))
-        pool = pools.get((source_type, foreign_type)) or {}
         pool_note = ""
         if pool:
             pool_note = (
@@ -1027,9 +1096,15 @@ def build_bridge_linker_graph(flows, *, source_dataset: str,
 
 
 _LINKER_LEGEND_DESC = {
-    "flywireType": "male-cns crosswalk column (fT)",
+    "flywireType": "male-cns → FAFB crosswalk column (fT)",
     "hemibrainType": "male-cns crosswalk column (hT)",
     "mancType": "male-cns crosswalk column (mT)",
+    "fafb_cell_type": "BANC curated FAFB label",
+    "malecns_cell_type": "BANC curated MCNS label (mct)",
+    "hemibrain_cell_type": "BANC curated hemibrain label",
+    "manc_cell_type": "BANC curated MANC label",
+    "banc_release_crosswalk": "BANC root_626 ↔ root_888 relation",
+    "release_alias": "explicit MCNS release-name alias",
     "additional_type(s)": "FAFB additional-name cells (aT)",
     "Alternative Cell Type(s)":
         "BANC Alternative Cell Type(s) cells (ACT)",
@@ -1214,13 +1289,15 @@ def build_mapping_sankey_paths(flows, *, pools: Optional[Dict[tuple,
     """Path rows for the vispath-backend mapping Sankey.
 
     Returns ``[(node_names, hop_weights), ...]`` — one row per rendered
-    chain.  ``variant="type"`` aggregates each pair into a single
-    source→target hop at the pooled granularity (the smaller pooled
-    bodyId count); ``variant="linker"`` walks the standardized linker
-    bands (``flywireType``, ``additional_type(s)`` … in chain order).
-    Ribbon weights are the pooled bodyId counts per bridge when
-    ``pools`` ((source_type, foreign_type) → ``pool_bridge_body_ids``
-    result) is supplied, else the flow's neuron counts.  Flows are
+    chain.  ``variant="type"`` aggregates each type bridge into a single
+    source→target hop at the conservative endpoint-coverage weight (the
+    smaller independent pooled bodyId count); ``variant="linker"`` walks
+    the standardized linker bands (``flywireType``, ``additional_type(s)`` …
+    in chain order).  Ribbon weights are the independent endpoint coverage
+    counts per bridge when
+    ``pools`` (direction- and dataset-scoped keys, with a legacy
+    ``(source_type, foreign_type)`` fallback) is supplied, else the flow's
+    neuron counts.  Flows are
     capped at ``max_flows`` (the vispath default ``edgeN_limit`` of
     500); the full mapping lives in the CSV export.
 
@@ -1248,7 +1325,7 @@ def build_mapping_sankey_paths(flows, *, pools: Optional[Dict[tuple,
         # of the two sides), CONSTANT along the whole path: a shared
         # target must not flatten fan-in ribbons to its own (identical)
         # count, and the network edge for this pair draws the SAME number
-        pool = pools.get((source_type, foreign_type)) or {}
+        pool = get_mapping_pool(pools, flow)
         flow_weight = pair_flow_weight(flow, pool)
         src_name = f"{source_type} · {dataset_abbrev(source_ds)}"
         tgt_name = f"{foreign_type} · {dataset_abbrev(target_ds)}"
@@ -1324,7 +1401,11 @@ def build_type_coverage(pair_flows,
                 continue
             s_count = int(flow.get("source_count") or 0)
             f_count = int(flow.get("foreign_count") or 0)
-            pool = pools.get((s_type, f_type)) or {}
+            pool = get_mapping_pool(
+                pools,
+                {**flow,
+                 "source_dataset": flow.get("source_dataset") or src_ds,
+                 "target_dataset": flow.get("target_dataset") or tgt_ds})
             s_ids = set(pool.get("source_body_ids") or [])
             t_ids = set(pool.get("target_body_ids") or [])
             pooled = bool(pool)
@@ -1366,14 +1447,14 @@ def build_type_coverage(pair_flows,
     for row in forward.values():
         groups: Dict[str, List[str]] = {}
         query_union: set = set()
-        target_union = 0
+        target_union: set = set()
         target_total = 0
         for (t_ds, f_type), entry in sorted(row["targets"].items()):
             code = dataset_abbrev(t_ds) or t_ds
             groups.setdefault(code, []).append(f_type)
             if entry["pooled"]:
                 query_union |= entry["s_ids"]
-                target_union += len(entry["t_ids"])
+                target_union |= entry["t_ids"]
                 target_total += entry["t_total"]
         forward_rows.append({
             "dataset": row["dataset"],
@@ -1386,7 +1467,7 @@ def build_type_coverage(pair_flows,
             "relationship": ("1-to-N" if len(row["targets"]) > 1
                              else "1-to-1"),
             "query_cov": _cov(query_union, row["count"], row["any_pooled"]),
-            "target_cov": _cov(set(range(target_union)), target_total,
+            "target_cov": _cov(target_union, target_total,
                                row["any_pooled"]),
         })
     forward_rows.sort(key=lambda r: (-int(r["count"] or 0),
@@ -1615,13 +1696,12 @@ def render_source_map_network_html(
         '1. Same-name <code>type</code> identity connects any two '
         'datasets.<br>'
         '2. male-cns crosswalk columns route to their own family only: '
-        '<code>flywireType</code> → FAFB+BANC, '
+        '<code>flywireType</code> → FAFB, '
         '<code>hemibrainType</code> → hemibrain, <code>mancType</code> '
-        '→ manc — and a crosswalk hop is valid only when a routed '
-        'dataset is an ENDPOINT of the bridge (no hemibrainType on '
-        'male-cns↔BANC bridges).<br>'
+        '→ manc. BANC uses direct curated label columns and the narrow '
+        '<code>banc_release_crosswalk</code>; it is never a connector.<br>'
         '3. <code>additional_type(s)</code> maps to FAFB only; '
-        '<code>Alternative Cell Type(s)</code> only to BANC.<br>'
+        '<code>Alternative Cell Type(s)</code> only within BANC.<br>'
         'Docs: <code>docs/AUTO_TYPE_MAPPING.md</code> · Regenerate: '
         '<code>python scripts/render_source_map_network.py</code>'
         '</div>')
@@ -1896,11 +1976,13 @@ def infer_bridge_columns(flows) -> List[str]:
     """Standardized linker columns of one pair's flows, first-appearance
     order — the ``bridge-<column>`` fields that pair's CSV carries."""
     from comparison.cross_dataset_type_mapper import (
+        BRIDGE_STANDARD,
         preferred_bridge_chain,
         standardize_bridge,
     )
 
     columns: List[str] = []
+    observed: List[str] = []
     for flow in flows or []:
         src_ds = flow.get("source_dataset", "")
         tgt_ds = flow.get("target_dataset", "")
@@ -1909,8 +1991,20 @@ def infer_bridge_columns(flows) -> List[str]:
         linkers = [l for l in standardize_bridge(chain or [], src_ds, tgt_ds)
                    if l.get("kind") == "linker"] if chain else []
         for linker in linkers:
-            if linker["column"] not in columns:
-                columns.append(linker["column"])
+            if linker["column"] not in observed:
+                observed.append(linker["column"])
+    if flows:
+        source_dataset = flows[0].get("source_dataset", "")
+        target_dataset = flows[0].get("target_dataset", "")
+        registry = (
+            BRIDGE_STANDARD.get((source_dataset, target_dataset))
+            or BRIDGE_STANDARD.get((target_dataset, source_dataset))
+            or ()
+        )
+        columns.extend(
+            column for column, _home in registry if column in observed
+        )
+    columns.extend(column for column in observed if column not in columns)
     return columns
 
 
@@ -1922,7 +2016,8 @@ def build_bridges_csv(flows, *, pools=None,
     One row per (source type, target type, linker path) in the §9.3
     uniform base schema plus one ``bridge-<column>`` cell per
     standardized linker column (``; ``-joined values, ``(via hub)`` note
-    on indirect linkers) and the pooled ``granularity`` / ``coverage``.
+    on indirect linkers) and independent source/target pool coverage.  The
+    export never represents a bodyId-to-bodyId pairing.
     Uniform field counts, proper quoting.  Returns None when there is
     nothing to export.
 
@@ -1980,12 +2075,18 @@ def build_bridges_csv(flows, *, pools=None,
             else "type"
         src_type = flow.get("source_type", "")
         foreign = flow.get("foreign_type", "")
-        pool = pools.get((src_type, foreign)) or {}
-        # §dedupe (user 2026-09-07): one pool_coverage column — the pool's
-        # own ``covered <target pool> of <target type total>`` (fills even
-        # when one side's pool is empty; the old granularity/coverage pair
-        # carried the same two numbers and blanked together).
-        pool_coverage = pool.get("coverage") or ""
+        pool = get_mapping_pool(pools, flow)
+        # Keep one compact CSV field, but expose BOTH independent sides.
+        # ``coverage`` remains the historical target-side alias for old
+        # callers and synthetic fixtures.
+        source_coverage = pool.get("source_coverage") or ""
+        target_coverage = pool.get("target_coverage") or pool.get(
+            "coverage") or ""
+        if source_coverage and target_coverage:
+            pool_coverage = (
+                f"source {source_coverage}; target {target_coverage}")
+        else:
+            pool_coverage = target_coverage or source_coverage
         row = [src_ds, entry_kind, matched_column, src_type, foreign,
                flow.get("source_count") or flow.get("foreign_count") or 0,
                "same name" if not linkers else "mapped", foreign,
@@ -2000,4 +2101,3 @@ def build_bridges_csv(flows, *, pools=None,
         row.extend([pool_coverage])
         writer.writerow(row)
     return buffer.getvalue()
-

@@ -30,12 +30,22 @@
       for every threshold.</li>
   </ol>
 
+  <div class="callout info">
+    <b>Release recommendation:</b> if you select
+    <code>male-cns:v0.9</code> while <code>male-cns:v1.0</code> is available,
+    the selector shows an in-page notice recommending the newer release for
+    current type mapping. Choose <b>Use male-cns:v1.0</b> deliberately to
+    replace it, or keep v0.9 for legacy/reproducible runs. The notice never
+    changes a selection silently and disappears when v1.0 is already selected
+    or is not available in the current options.
+  </div>
+
   <h2>Inputs &amp; examples</h2>
   <table>
     <tr><th>Example</th><th>Behavior</th></tr>
     <tr><td>Datasets: male-cns:v0.9, hemibrain:v1.2.1</td><td>Two datasets compared using their automatic display names</td></tr>
     <tr><td>Thresholds: <code>3, 5, 10</code></td><td>Separate analyses per threshold</td></tr>
-    <tr><td style="white-space:nowrap">Rough equivalence</td><td>Whole-dataset hint (connection-pair density per neuron): BANC ≥ 3 ≈ FAFB ≥ ~6–7 ≈ male-cns ≥ ~7–9; BANC ≥ 5 ≈ FAFB ≥ ~9–11 ≈ male-cns ≥ ~12–15. Query-specific alignment is exported per run in <code>threshold_alignment_*.csv</code></td></tr>
+    <tr><td style="white-space:nowrap">Rough equivalence</td><td>Whole-dataset hint (connection-pair density per neuron): BANC ≥ 3 ≈ FAFB ≥ ~6–7 ≈ male-cns ≥ ~7–9; BANC ≥ 5 ≈ FAFB ≥ ~9–11 ≈ male-cns ≥ ~12–15. The <code>threshold_alignment_*.csv</code> files are raw-run density diagnostics (and are marked as such in combination mode); actual advanced comparisons use the query manifest.</td></tr>
     <tr><td>Mode: <code>edge</code></td><td>Edges compared by weight only</td></tr>
     <tr><td>Mode: <code>path</code> (default)</td><td>Edges discovered through paths</td></tr>
     <tr><td>Path Enumeration: <code>shortest</code></td><td>Per-dataset runs keep only per-pair minimum-hop paths (all ties)</td></tr>
@@ -50,7 +60,8 @@
     <tr><td>Edge Budget</td><td>1,000,000</td><td>Fix D (budget-fit search): after the lossless prunes, discovery cones exceeding this many bodyId edges are floored at the weakest weight tier whose lossless-closed cone still fits the cap — exactly equivalent to raising the threshold; the applied floor is reported as <code>edge_weight_floor</code> with the residual slack and probe trace. 0 = off; shortest mode never floors</td></tr>
     <tr><td>Visualization Edge Limit</td><td>500</td><td>Caps edges drawn in each network/Sankey/heatmap visualization; it does not alter fetched connections or pathfinding</td></tr>
     <tr><td>Max Paths (BodyId)</td><td>0 = auto (1M)</td><td>StrongestFirst path budget: when the search exceeds it, ALL paths above the achieved strength cutoff (tau) are kept and tau is reported. StrongestFirst is the built-in 'all'-mode algorithm (the selector was removed); see the <a href="pathfinding_algorithms.html">pathfinding algorithms guide</a>.</td></tr>
-    <tr><td>Per-dataset thresholds</td><td>off</td><td>Advanced: assign each dataset its OWN ascending threshold list (vertical comparison, e.g. BANC@{3,5} + FAFB@{7,11}); empty rows fall back to the global list. The threshold_alignment files carry the cross-dataset comparison at unmatched thresholds</td></tr>
+    <tr><td>Threshold mode: Standard</td><td>default</td><td>Each entered chip is one query and the same requested N is applied to every selected dataset.</td></tr>
+    <tr><td>Threshold mode: Custom combination</td><td>off</td><td>Requires at least two selected datasets. Core Parameters shows a table with datasets as columns and query rows. Every row is one complete comparison identity, such as BANC=3 + FAFB=7; it is not an independent threshold list per dataset. The sorted union is used only to deduplicate raw jobs.</td></tr>
     <tr><td>Replay Paths</td><td>on</td><td>Path mode 'all': enumerate once at the lowest threshold and materialize higher thresholds from the bottleneck-annotated path set (identical outputs, no re-enumeration). With a tau collapse, folders exist only for real thresholds — the tau folder is materialized fresh (tau denominators) and collapsed thresholds alias it. Shortest mode is never replayed</td></tr>
     <tr><td>Auto-extend Collapsed Thresholds</td><td>off</td><td>F7: when a run's effective tau collapses asked thresholds, extend each dataset with k × τ_ref points (τ_ref = max per-dataset tau) while ≤ 2× the max asked threshold — the schedule is global, so the expanded points stay shared across datasets</td></tr>
     <tr><td>Search Columns</td><td>auto</td><td>Columns searched when resolving source/target names in every dataset: <code>auto</code> = all columns (bodyId → type → instance → flywireType/hemibrainType/…), or restrict to <code>type</code> / <code>instance</code> / <code>bodyId</code>. Use <code>auto</code> when names come from a cross-dataset type column (e.g. <code>MTe07</code> in <code>flywireType</code> on male-cns v1.0).</td></tr>
@@ -59,10 +70,69 @@
     <tr><td>Output Format</td><td>csv</td><td>csv or xlsx</td></tr>
   </table>
 
+  <h2>Threshold query table</h2>
+  <p>Use <b>Standard</b> for the historical same-threshold
+    comparison. Switch to <b>Custom combination</b> when one
+    cross-dataset query needs different thresholds. It requires at least two
+    selected datasets. The query editor uses one column per selected dataset and one row per query; every cell must be a
+    positive integer. Rows receive stable IDs such as <code>combo_001</code>.
+    This replaces the old Advanced Settings per-dataset schedule. A dataset's
+    cells across rows are not a custom schedule to compare independently: the
+    row is the unit of alignment, similarity, report, and provenance.</p>
+  <p>The raw jobs are deduplicated across rows. For example, rows
+    <code>(BANC=3, FAFB=7)</code> and <code>(BANC=5, FAFB=7)</code> reuse the
+    FAFB@7 raw run but remain two distinct comparison queries.</p>
+
+  <h2>Release-aware type mapping</h2>
+  <p>BANC v626 and v888 remain separate type/bodyId namespaces. Their
+    curated columns provide direct evidence: <code>malecns_cell_type</code>
+    for MCNS, <code>fafb_cell_type</code> for FAFB,
+    <code>hemibrain_cell_type</code> for hemibrain, and
+    <code>manc_cell_type</code> for MANC. MCNS <code>flywireType</code> maps to
+    FAFB only; it is not a BANC bridge. The two BANC releases additionally
+    use the metadata-backed <code>root_626</code> ↔ <code>root_888</code>
+    relation as the narrow <code>banc_release_crosswalk</code> bridge.</p>
+  <p>For a shared type queried in <code>male-cns:v0.9</code>, the mapping
+    report shows <code>v0.9 type → release_alias → v1.0</code> before any
+    downstream cross-dataset linker. v0.9-only names use only their native
+    <code>*Type</code> fallback and never borrow v1.0 body IDs.</p>
+
+  <h2>Pathfinding threshold &amp; bottleneck provenance</h2>
+  <p>Every pathfinding row records both the threshold the user requested and
+    the threshold that actually describes the materialized output. These are
+    not interchangeable:</p>
+  <table>
+    <tr><th>Value</th><th>Meaning</th></tr>
+    <tr><td><code>requested_threshold</code></td><td>The entered Min Synapse Count before any budget effect.</td></tr>
+    <tr><td><code>applied_threshold</code></td><td>The canonical equivalent Min Synapse Count: for a complete run it is the requested value; after a StrongestFirst budget bite it is <code>w2 + 1</code> (<code>tau_canonical</code>), the minimal threshold that reproduces the materialized path set.</td></tr>
+    <tr><td><code>applied_threshold_source</code></td><td><code>requested</code>, <code>strongest_first_budget</code>, <code>edge_budget</code>, or <code>strongest_first_budget+edge_budget</code>.</td></tr>
+    <tr><td><code>tau</code> / <code>strongest_first_tau</code></td><td>The StrongestFirst landing/collapse bound: the weakest retained path bottleneck at the path budget boundary. A complete run reports its natural weakest emitted-path bottleneck.</td></tr>
+    <tr><td><code>strongest_first_budget</code></td><td>The effective path-output budget (0/empty uses the 1,000,000 auto default); <code>strongest_first_budget_bitten</code> says whether it was reached.</td></tr>
+    <tr><td><code>w0</code> / <code>edge_weight_floor</code></td><td>The lossy Edge Budget floor applied to the graph in <code>all</code> mode. It is a threshold raise before path enumeration.</td></tr>
+    <tr><td><code>w1</code> / <code>edge_budget_landing</code></td><td>The strongest edge-weight tier whose admission would exceed the Edge Budget; the floor lands just above it.</td></tr>
+    <tr><td><code>w2</code> / <code>strongest_dropped_bottleneck</code></td><td>The strongest path bottleneck excluded by the StrongestFirst budget. The gap <code>[w2 + 1, tau]</code> is equivalent, so <code>w2 + 1</code> is canonical.</td></tr>
+    <tr><td><code>W*</code> / <code>strongest_retained_bottleneck</code></td><td>The widest-path ceiling after lossless pruning; lossless pruning does not change it.</td></tr>
+    <tr><td><code>paths_complete</code></td><td>Whether all intact paths within the search/depth bound were emitted; false means a budget affected the materialized set.</td></tr>
+  </table>
+  <p>The same block is exported in each <code>dataset_data/.../minsyn_N/</code>
+    folder (<code>parameters.txt</code>, <code>all_attributes.json</code>, and
+    <code>data_details/parameters.csv</code>). The comparison root also writes
+    <code>effective_thresholds.json</code> for the UI notice and one row per
+    dataset/threshold in
+    <code>comparison_results/pathfinding_provenance.csv</code>. Combination
+    mode additionally writes
+    <code>comparison_results/threshold_combinations.csv</code>, one row per
+    <code>query_id</code> and dataset, so the requested threshold map and the
+    dataset-specific applied threshold are never confused.</p>
+
   <h2>Similarity score formulas</h2>
   <p>The cross-dataset comparison writes one row per dataset pair and
     per threshold into
-    <code>similarity_matrices/similarity_threshold_{N}.csv</code>. Let E1, E2
+    <code>similarity_matrices/similarity_threshold_{N}.csv</code> in Standard
+    mode, or <code>similarity_matrices/similarity_query_{query_id}.csv</code>
+    (where the filename uses a filesystem-safe query-ID slug) and
+    <code>similarity_by_query.csv</code> in Custom combination mode. The manifest and
+    table columns retain the original query ID. Let E1, E2
     be the thresholded edge sets (edges with <code>weight ≥ N</code>) and W1,
     W2 the corresponding edge-weight vectors over the union of edges (missing
     edges = 0).</p>
@@ -96,9 +166,8 @@
       the standardized cross-dataset labels are resolved (post
       label-mapping). Comparison-level records land in
       <code>comparison_results/untyped_dropped_records.csv</code>, while each
-      per-dataset pathfinding run records its own
-      <code>data_details/untyped_dropped_records.csv</code>; counts are
-      appended to <code>user_warning_notes.txt</code>.</li>
+      delegated per-dataset pathfinding folder intentionally keeps raw rows;
+      counts are appended to <code>user_warning_notes.txt</code>.</li>
     <li><b>Hemisphere analysis</b>: L/R separation, symmetry, conserved
       edges, reciprocal graphs.</li>
   </ul>
@@ -120,9 +189,10 @@
       Mapped to, Neurons (<code>source → foreign</code>), Map used (the
       derivation linkers, e.g. <code>flywireType 'LMTe01' +
       additional_type(s) 'LMTe01'</code>), and <b>Pool coverage</b>
-      (<code>covered &lt;target pool&gt; of &lt;target type total&gt;</code>
-      — the merged granularity/coverage column, filled even when one
-      side's bodyId pool is empty).</li>
+      (<code>source covered &lt;source pool&gt; of &lt;source type total&gt;;
+      target covered &lt;target pool&gt; of &lt;target type total&gt;</code>).
+      Coverage is measured independently per endpoint; the mapper does not
+      infer bodyId-to-bodyId pairings.</li>
     <li><b>Same-name pairs</b>: a pair sharing its name derives through its
       metadata bridge when one exists (e.g.
       <code>flywireType 'DN1a'</code> — the male-cns crosswalk cell
@@ -136,8 +206,10 @@
     <li><b>Legends</b>: the artifact header carries one chip per entry in
       the <code>CODE: full name (count)</code> format — datasets (with
       node counts) and the bridge linker columns (color-coded:
-      <code>flywireType</code> male-cns crosswalk, <code>additional_type(s)</code>
-      FAFB cells, <code>Alternative Cell Type(s)</code> BANC cells,
+      <code>flywireType</code> male-cns→FAFB crosswalk,
+      <code>additional_type(s)</code> FAFB cells, curated BANC label columns,
+      <code>Alternative Cell Type(s)</code> BANC cells,
+      <code>banc_release_crosswalk</code>, and
       <code>hemibrainType</code>/<code>mancType</code> crosswalks). The
       linker network lays out ONE column per linker (e.g.
       <code>MCNS type → flywireType → additional_type(s) → FAFB type</code>
@@ -153,7 +225,8 @@
     <code>cross-dataset_aMe12_to_PPL101_MFB_v626B_v888_20260815_142812/</code>
     (male-cns v1.0 + FAFB v783 + BANC v626 + BANC v888):</p>
   <pre><code>{output_dir}/cross-dataset_{source}_to_{target}_{dataset_codes}_{timestamp}/
-  comparison_report.html, comparison_report.txt   # interactive + text report
+  comparison_report.html, comparison_report.txt   # same full report shell for
+                                                   # Standard and Custom queries
   label_map.json, parameters.json
   dataset_metadata_comparison.csv
   auto_type_mapping.csv, auto_type_mapping_conflicts.csv
@@ -168,18 +241,25 @@
     degree_in.csv, degree_out.csv, degree_statistics.csv
     neuron_counts_by_type.csv, neuron_counts_summary.csv
     motif_analysis.csv
-    threshold_sensitivity.csv   # per threshold: edge_count, retention,
-                                # asked vs applied_threshold, tau,
-                                # paths_complete, skipped, duplicate_of,
-                                # pruned, edge_weight_floor
-    effective_thresholds.json (run root)  # written on a tau collapse:
-                                # the asked → applied mapping behind the
-                                # in-app banner
+    threshold_combinations.csv    # combination-mode query/provenance manifest
+  threshold_sensitivity.csv   # standard: edge_count/retention; advanced:
+                                # query_id/query_label query-cell diagnostics
+    pathfinding_provenance.csv  # full provenance; advanced rows also carry
+                                # query_id/query_label
+    edge_presence_matrix_query_{query_id}.csv
+    path_presence_matrix_query_{query_id}.csv
+    untyped_dropped_records.csv # comparison-level dropped rows, when any
+  effective_thresholds.json (run root)  # UI notice for every path run:
+                                # requested → applied plus tau/w0/w1/w2/W*
     dataset_metadata_comparison.csv
   comparison_visualizations/              # edge/path heatmap PNGs + data
     edge_heatmap_{N}.png, path_heatmap_{N}.png, path_counts.png
-    by_ratio/..., by_probability/..., visualization_data/...
+    query-keyed edge_heatmap_query_{query_id}.png and
+    path_heatmap_query_{query_id}.png; visualization_data/...
+    (no by_ratio/by_probability for pathfinding comparisons)
   similarity_matrices/similarity_threshold_{N}.csv
+  similarity_matrices/similarity_query_{query_id}.csv
+  similarity_matrices/similarity_by_query.csv
   dataset_data/{dataset_folder}/minsyn_{N}/...   # per-dataset FindAllPath
                                                  # outputs (see Complete
                                                  # Paths guide), incl.
@@ -207,14 +287,17 @@ result sets are nested: paths kept at t=10 also exist at t=5 and t=3.
 Runs are bounded by StrongestFirst's <strong>Max Paths</strong> budget
 and the lossy <strong>Edge Budget</strong> floor; a clamped run at
 threshold t is exactly a complete run at its reported
-<strong>tau</strong> (or <code>edge_weight_floor</code> when the floor
-fired — effective cutoff = max(tau, w0)). Compare runs at equal tau.
-When a tau collapses asked thresholds, the run shows a persistent
-banner with the asked → applied mapping per dataset
-(<code>effective_thresholds.json</code>), materializes folders only for
-real thresholds, and marks collapsed rows
-<code>skipped</code>/<code>duplicate_of</code> in
-<code>threshold_sensitivity.csv</code>.</p>
+<strong>applied_threshold</strong>. The landing <strong>tau</strong> is the
+StrongestFirst collapse bound, not necessarily the minimal equivalent
+threshold: when a budget bite leaves a gap, <code>w2 + 1</code> is the
+canonical applied threshold. The Edge Budget acts first on the graph at
+<code>w0</code> (with landing tier <code>w1</code>), and the path budget then
+acts on output paths; <code>W*</code> records the strongest retained path
+bottleneck. Shortest mode can be tau-bounded by Max Paths but is never
+Edge-Budget-floored. The same explanation and values appear in
+<code>effective_thresholds.json</code> and
+<code>pathfinding_provenance.csv</code>; collapsed rows additionally carry
+<code>skipped</code>/<code>duplicate_of</code> markers.</p>
 </div>
 </body>
 </html>

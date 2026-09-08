@@ -426,6 +426,174 @@ class TestNeuronIndexData:
         )
         assert [row["type"] for row in targeted_prefix.rows] == ["aMe1", "aMe2"]
 
+    def test_one_character_cross_dataset_matches_are_prefix_only(self):
+        """The bounded one-character mode also constrains mapping scans."""
+        import ui.neuron_index as neuron_index
+
+        index = neuron_index.CachedNeuronIndex(
+            dataset="foreign:v1.0",
+            path=None,
+            frame=pl.DataFrame(
+                {
+                    "type": ["R7", "R8", "APL_R", "OR1"],
+                    "Class": ["R neuron", "olfactory_R", "R2", "other"],
+                }
+            ),
+            columns=("type", "Class"),
+        )
+
+        prefix_types, _ = neuron_index._native_type_matches(
+            index, "R", 100, prefix_only=True
+        )
+        assert {item["name"] for item in prefix_types} == {"R7", "R8"}
+        capped_types, types_truncated = neuron_index._native_type_matches(
+            index, "R", 1, prefix_only=True
+        )
+        assert len(capped_types) == 1
+        assert types_truncated == 1
+
+        prefix_labels, _ = neuron_index._native_label_matches(
+            index, "R", 100, 100, prefix_only=True
+        )
+        assert {item["label"] for item in prefix_labels} == {
+            "R neuron", "R2"
+        }
+        capped_labels, labels_truncated = neuron_index._native_label_matches(
+            index, "R", 1, 100, prefix_only=True
+        )
+        assert len(capped_labels) == 1
+        assert labels_truncated == 1
+
+        # The one-character safety bound must also apply to the covered type
+        # evidence kept behind each taxonomy label.  Retaining the hidden
+        # tail here would let a broad label recreate the crash during mapping
+        # enrichment even though the visible label list is capped.
+        coverage_index = neuron_index.CachedNeuronIndex(
+            dataset="coverage:v1.0",
+            path=None,
+            frame=pl.DataFrame(
+                {
+                    "type": ["R7", "R8", "R9"],
+                    "Class": ["R neuron", "R neuron", "R neuron"],
+                }
+            ),
+            columns=("type", "Class"),
+        )
+        bounded_labels, _ = neuron_index._native_label_matches(
+            coverage_index, "R", 100, 1, prefix_only=True
+        )
+        assert bounded_labels[0]["covered_all"] == [
+            {"name": "R7", "count": 1}
+        ]
+        assert bounded_labels[0]["types_truncated"] == 2
+
+        substring_types, _ = neuron_index._native_type_matches(index, "R", 100)
+        assert "APL_R" in {item["name"] for item in substring_types}
+
+    def test_cross_match_loader_projects_only_match_columns(
+        self, isolated_index_root
+    ):
+        """Native mapping must not materialize the full display index."""
+        import ui.neuron_index as neuron_index
+
+        dataset = "projected:v1.0"
+        folder = dataset.replace(":", "_").replace(".", "_")
+        cache_dir = isolated_index_root / "neuron_indexes" / folder
+        cache_dir.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "bodyId": ["1", "2"],
+                "type": ["R7", "R8"],
+                "instance": ["R7_L", "R8_R"],
+                "Class": ["visual", "visual"],
+                "cell_class": ["retina", "retina"],
+                "post": [1, 2],
+            }
+        ).write_parquet(cache_dir / "neuron_index.parquet")
+
+        index = neuron_index._load_cross_match_index(dataset)
+
+        assert index is not None
+        assert set(index.frame.columns) == {"type", "Class", "cell_class"}
+        assert index.search_frame is None
+
+    def test_zero_hit_mapping_forwards_prefix_only_mode(self, monkeypatch):
+        """Cross-dataset collection keeps the forced-search safety flag."""
+        import ui.neuron_index as neuron_index
+
+        calls = []
+        monkeypatch.setattr(
+            neuron_index,
+            "collect_native_type_matches",
+            lambda *args, **kwargs: calls.append(kwargs) or [],
+        )
+        monkeypatch.setattr(
+            neuron_index,
+            "enrich_native_type_matches",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            neuron_index,
+            "collect_alias_matches",
+            lambda *args, **kwargs: [],
+        )
+
+        result = neuron_index.collect_zero_hit_matches(
+            "selected:v1.0",
+            "R",
+            datasets=["foreign:v1.0"],
+            prefix_only_search=True,
+        )
+
+        assert result["native"] == []
+        assert calls == [{"prefix_only_search": True}]
+
+    def test_cross_dataset_scan_is_single_flight_and_rejects_stale_work(self):
+        """Queued mapper scans cannot multiply the worker memory footprint."""
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        import time
+
+        from ui.neuron_index import (
+            CROSS_SCAN_SUPERSEDED,
+            run_serialized_cross_dataset_scan,
+        )
+
+        state = {"active": 0, "peak": 0}
+        state_lock = threading.Lock()
+        entered = threading.Event()
+        release = threading.Event()
+
+        def callback(name):
+            with state_lock:
+                state["active"] += 1
+                state["peak"] = max(state["peak"], state["active"])
+            entered.set()
+            assert release.wait(3)
+            with state_lock:
+                state["active"] -= 1
+            return name
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(
+                run_serialized_cross_dataset_scan, callback, "first")
+            assert entered.wait(3)
+            second = pool.submit(
+                run_serialized_cross_dataset_scan, callback, "second")
+            time.sleep(0.02)
+            assert not second.done()
+            release.set()
+            assert first.result() == "first"
+            assert second.result() == "second"
+
+        assert state["peak"] == 1
+        called = []
+        assert run_serialized_cross_dataset_scan(
+            lambda: called.append(True),
+            is_current=lambda: False,
+        ) is CROSS_SCAN_SUPERSEDED
+        assert called == []
+
     def test_viewer_search_text_needs_two_characters(self):
         from ui.components.neuron_index_viewer import _effective_search_text
 
@@ -434,6 +602,8 @@ class TestNeuronIndexData:
         assert _effective_search_text("   ") == ""
         assert _effective_search_text("a") == ""
         assert _effective_search_text(" a ") == ""
+        assert _effective_search_text("R", force=True) == "R"
+        assert _effective_search_text(" R ", force=True) == "R"
         assert _effective_search_text("aM") == "aM"
         assert _effective_search_text("  aMe12  ") == "aMe12"
 
@@ -1381,6 +1551,147 @@ class TestNeuronIndexViewer:
             "Showing 1–50 of 300 matched names"
         ]
 
+    def test_live_search_dispatches_index_query_off_event_loop(
+        self, isolated_index_root, monkeypatch
+    ):
+        """A real app-loop search must yield while the index is queried."""
+        import asyncio
+        import inspect
+
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.components.neuron_index_viewer as viewer
+        from ui.components.neuron_index_viewer import create_neuron_index_viewer_link
+
+        dataset, _, _ = _write_index(isolated_index_root)
+        monkeypatch.setattr(viewer, "PROJECT_ROOT", isolated_index_root)
+
+        client = Client(page("/neuron-index-viewer-async-search"))
+        with client:
+            link = create_neuron_index_viewer_link(lambda: dataset)
+        self._click(link)
+
+        search_input = next(
+            element for element in client.elements.values()
+            if getattr(element, "_props", {}).get("label")
+            == "Search identities & taxonomy"
+        )
+        # Set the bound value without firing the callback; the callback is
+        # driven explicitly below inside a real asyncio loop.
+        setattr(search_input, "___value", "aMe")
+        search_input._props["model-value"] = "aMe"
+        event = SimpleNamespace(
+            sender=search_input,
+            client=client,
+            value="aMe",
+            previous_value="",
+        )
+        change_handler = search_input._change_handlers[0]
+
+        async def drive_search():
+            with search_input.parent_slot:
+                refresh = change_handler(event)
+                assert inspect.isawaitable(refresh)
+                await refresh
+
+        asyncio.run(drive_search())
+
+        full_table = next(
+            element for element in client.elements.values()
+            if type(element).__name__ == "Table"
+            and element._props["columns"][0]["name"] == "bodyId"
+        )
+        assert [row["type"] for row in full_table._props["rows"]] == [
+            "aMe10", "aMe12"
+        ]
+
+    def test_search_button_forces_one_character_query(
+        self, isolated_index_root, monkeypatch
+    ):
+        """Typing stays guarded, while Search can submit a one-character query."""
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.components.neuron_index_viewer as viewer
+        from ui.components.neuron_index_viewer import create_neuron_index_viewer_link
+
+        dataset = "single-character:v1.0"
+        folder = dataset.replace(":", "_").replace(".", "_")
+        cache_dir = isolated_index_root / "neuron_indexes" / folder
+        cache_dir.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "bodyId": ["1", "2", "3"],
+                "type": ["R7", "R8", "APL"],
+                "instance": ["R7_L", "R8_R", "APL_R"],
+                "post": [1, 2, 3],
+            }
+        ).write_parquet(cache_dir / "neuron_index.parquet")
+        monkeypatch.setattr(viewer, "PROJECT_ROOT", isolated_index_root)
+        query_calls = []
+        original_query = viewer.query_neuron_index
+
+        def tracked_query(*args, **kwargs):
+            query_calls.append(kwargs.get("search", ""))
+            return original_query(*args, **kwargs)
+
+        monkeypatch.setattr(viewer, "query_neuron_index", tracked_query)
+
+        client = Client(page("/neuron-index-viewer-forced-search"))
+        with client:
+            link = create_neuron_index_viewer_link(lambda: dataset)
+        self._click(link)
+        query_count_after_render = len(query_calls)
+
+        search_input = next(
+            element for element in client.elements.values()
+            if getattr(element, "_props", {}).get("label")
+            == "Search identities & taxonomy"
+        )
+        search_listener = next(iter(search_input._event_listeners.values()))
+        search_input._handle_event({
+            "listener_id": search_listener.id,
+            "args": "R",
+        })
+        assert len(query_calls) == query_count_after_render
+        warning = next(
+            element for element in client.elements.values()
+            if "drocat-neuron-search-warning" in getattr(
+                element, "_classes", set()
+            )
+        )
+        assert "starts-with matches only" in warning.text
+        assert "press Search" in warning.text
+        assert "hidden" not in warning.classes
+        full_table = next(
+            element for element in client.elements.values()
+            if type(element).__name__ == "Table"
+            and element._props["columns"][0]["name"] == "bodyId"
+        )
+        assert len(full_table._props["rows"]) == 3
+
+        search_button = next(
+            element for element in client.elements.values()
+            if type(element).__name__ == "Button"
+            and getattr(element, "text", "") == "Search"
+        )
+        self._click(search_button)
+
+        assert [row["type"] for row in full_table._props["rows"]] == [
+            "R7", "R8"
+        ]
+        assert "press Search" not in warning.text
+        assert "Cross-dataset mapping" in warning.text
+
+        # The debounced input event may arrive after the click. It describes
+        # the same submitted query and must not launch a second full-index
+        # scan.
+        query_count_after_button = len(query_calls)
+        search_input._handle_event({
+            "listener_id": search_listener.id,
+            "args": "R",
+        })
+        assert len(query_calls) == query_count_after_button
+
     def _rows_select(self, client):
         select = next(
             element for element in client.elements.values()
@@ -2199,6 +2510,76 @@ class TestBridgeBodyIdPooling:
         assert pool["source_body_ids"] == ["1"]
         assert pool["target_body_ids"] == ["2"]
         assert pool["per_linker"] == []
+
+    def test_existing_linker_with_no_rows_reports_zero_coverage(
+            self, isolated_index_root, tmp_path):
+        """A real linker with no endpoint rows is 0 of N, not unconstrained."""
+        from ui.neuron_index import pool_bridge_body_ids
+
+        source = self._index(tmp_path, "zero_source:v1.0", {
+            "bodyId": ["1", "2"], "type": ["A", "A"],
+            "bridge": ["W", "W"],
+        })
+        target = self._index(tmp_path, "zero_target:v1.0", {
+            "bodyId": ["11", "12", "13"], "type": ["B", "B", "B"],
+            "bridge": ["X", "X", "X"],
+        })
+        pool = pool_bridge_body_ids(
+            "zero_source:v1.0", "zero_target:v1.0", [{
+                "column": "bridge", "value": "W",
+                "home": "zero_target:v1.0", "kind": "linker",
+            }], "A", "B",
+            indexes={"zero_source:v1.0": source,
+                     "zero_target:v1.0": target})
+        assert pool["granularity"] == "2 to 0"
+        assert pool["coverage"] == "covered 0 of 3"
+
+    def test_banc_label_match_ids_do_not_refine_the_opposite_side(
+            self, isolated_index_root, tmp_path):
+        """Curated BANC labels pool each endpoint independently.
+
+        The target has three rows of the requested type, while its optional
+        match column names only two distinct source bodyIds.  Coverage must
+        still report the full unconstrained source type and the three
+        target-side label rows; match IDs are diagnostics, never a join.
+        """
+        from ui.neuron_index import pool_bridge_body_ids
+
+        source = self._index(tmp_path, "label_source:v1.0", {
+            "bodyId": ["f1", "f2", "f3", "f4"],
+            "type": ["l-LNv"] * 4,
+        })
+        target = self._index(tmp_path, "label_target:v1.0", {
+            "bodyId": ["b1", "b2", "b3", "other"],
+            "type": ["l-LNv", "l-LNv", "l-LNv", "other"],
+            "fafb_cell_type": ["l-LNv", "l-LNv", "l-LNv", "l-LNv"],
+            "fafb_match": ["f1", "f2", "f2", "f3"],
+        })
+        linker = [{
+            "column": "fafb_cell_type", "value": "l-LNv",
+            "home": "label_target:v1.0", "kind": "linker",
+        }]
+        indexes = {"label_source:v1.0": source,
+                   "label_target:v1.0": target}
+
+        forward = pool_bridge_body_ids(
+            "label_source:v1.0", "label_target:v1.0", linker,
+            "l-LNv", "l-LNv",
+            indexes=indexes)
+        assert forward["granularity"] == "4 to 3"
+        assert forward["source_body_ids"] == ["f1", "f2", "f3", "f4"]
+        assert forward["target_body_ids"] == ["b1", "b2", "b3"]
+        assert forward["source_coverage"] == "covered 4 of 4"
+        assert forward["target_coverage"] == "covered 3 of 3"
+        assert "matched_body_ids" not in forward["per_linker"][0]
+
+        reverse = pool_bridge_body_ids(
+            "label_target:v1.0", "label_source:v1.0", linker,
+            "l-LNv", "l-LNv",
+            indexes=indexes)
+        assert reverse["granularity"] == "3 to 4"
+        assert reverse["source_body_ids"] == ["b1", "b2", "b3"]
+        assert reverse["target_body_ids"] == ["f1", "f2", "f3", "f4"]
 
 
 def test_mapped_csv_extras_dedupe_and_via_note():

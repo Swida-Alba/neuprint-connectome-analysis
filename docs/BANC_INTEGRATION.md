@@ -24,7 +24,9 @@ automatically from the public bucket (`~134 MB`, one time):
 
 - **Neuron metadata** from `compiled_data/banc_888/banc_888_meta.feather`
   (188,508 neurons; ids, curated `cell_type`, `Alternative Cell Type(s)`,
-  classes, neurotransmitters, proofread flags).
+  `fafb_cell_type`, `malecns_cell_type`, `hemibrain_cell_type`,
+  `manc_cell_type`, match bodyIds, classes, neurotransmitters, proofread
+  flags).
 - **Connections** from `neuron_connectivity/<version>/synapses_v1_..._
   connectioncountsperneuropil_countthresh3.parquet` (per-neuropil pair
   counts; synapse size >= 3 and connection count >= 3 thresholds are baked
@@ -35,6 +37,35 @@ offline. The written `metadata.json` records `source: banc_public_gcs`.
 Preparation also fills the neuron table's `post` column (post-synaptic
 counts) from the merged connections, matching what the manual Codex path
 produced.
+
+## Cross-dataset type bridges
+
+The auto type mapper treats `banc_v626` and `banc_v888` as separate release
+namespaces. Their curated labels are direct evidence for the matching target
+dataset:
+
+| BANC column | bridge target |
+|---|---|
+| `fafb_cell_type` | FAFB v783 |
+| `malecns_cell_type` | male-cns v1.0 |
+| `hemibrain_cell_type` | hemibrain v1.2.1 |
+| `manc_cell_type` | MANC v1.0/v1.2.1 |
+
+`auto:` labels are excluded. FAFB/MCNS match bodyIds are checked against the
+target table when available only as optional provenance diagnostics;
+contradictory rows are recorded as conflicts, not removed from the curated
+type-label vote. The mapper records the winning label, vote counts, verified
+votes, verification conflicts, and alternates in bridge provenance. BANC
+labels are direct-only and never turn BANC into a connector between unrelated
+datasets.
+
+The two BANC releases have one explicit type bridge from
+`datasets/banc_v888/downloads/banc_888_meta.feather` (or the compiled local
+copy): the full `root_626` ↔ `root_888` relation. Duplicate `root_626` rows
+are retained, `root_888` is the type relation key, and equal numeric IDs are
+not treated as proof. This bridge is labeled `banc_release_crosswalk`; it
+provides independent release coverage participants but never exposes a
+bodyId-to-bodyId pairing or licenses generic BANC↔BANC annotation paths.
 
 ### Manual downloads are no longer needed
 
@@ -205,6 +236,8 @@ vs.plot_neurons()
 * **Synapse coordinates**: BANC per-synapse tables are nanometres; the local
   merged-connections table aggregates weights per neuropil, so precise
   synapse-site rendering for BANC is a future item.
-* The v626 metadata carries a `root_626` -> `banc_888_id` crosswalk (cached
-  at `cache/<dataset>/banc_id_crosswalk.parquet`); skeletons are always
-  fetched by their 888-namespace file name.
+* The v626 metadata also carries a `root_626` -> `banc_888_id` skeleton
+  resolution crosswalk (cached at `cache/<dataset>/banc_id_crosswalk.parquet`);
+  skeletons are always fetched by their 888-namespace file name. This
+  skeleton helper is separate from the type mapper's full `root_626` ↔
+  `root_888` relation and must not be used as type-mapping evidence.

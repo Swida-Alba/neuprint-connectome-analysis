@@ -21,6 +21,8 @@ import platform
 import subprocess
 import weakref
 
+from src.utils.dataset_release_registry import get_release_recommendation
+
 from .. import group_history
 from ..config import (
     PROJECT_ROOT,
@@ -430,6 +432,107 @@ def _resolve_default_dataset(
     return options[0] if options else None
 
 
+def _attach_release_recommendation_notice(selector, options, multiple=False):
+    """Attach an inline, action-oriented release recommendation.
+
+    The selector's public return value and option values stay unchanged.  The
+    notice is a sibling element so all existing callers keep their current
+    NiceGUI bindings while old release selections receive an explicit, user-
+    initiated upgrade path.
+    """
+    notice = ui.element("div").classes("w-full drocat-release-notice")
+    notice.props(
+        'data-testid="dataset-release-notice" role="status" '
+        'aria-live="polite"'
+    )
+    state = {"dismissed": None}
+    option_values = tuple(str(value) for value in options)
+
+    def _selected_values():
+        value = selector.value
+        if multiple:
+            if value is None:
+                return []
+            if isinstance(value, (tuple, list, set)):
+                return [str(item) for item in value]
+            return [str(value)]
+        return [str(value)] if value not in (None, "") else []
+
+    def _recommendations(selected):
+        selected_set = set(selected)
+        records = []
+        for dataset in selected:
+            record = get_release_recommendation(dataset, option_values)
+            if not record:
+                continue
+            # Selecting both releases is intentional and should not nag the
+            # user; the newer release is already part of the comparison.
+            if record["target"] in selected_set:
+                continue
+            records.append(record)
+        return records
+
+    def _render(_event=None):
+        selected = _selected_values()
+        current_key = tuple(selected)
+        records = _recommendations(selected)
+        notice.clear()
+        if not records or state["dismissed"] == current_key:
+            notice.set_visibility(False)
+            return
+
+        notice.set_visibility(True)
+        with notice:
+            with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                ui.icon("info").classes("text-primary")
+                if len(records) == 1:
+                    record = records[0]
+                    ui.label(record["message"]).classes("drocat-release-notice-text")
+                    if record.get("actionable"):
+                        def _use_newer(record=record):
+                            replacement = record["target"]
+                            if multiple:
+                                values = _selected_values()
+                                values = [
+                                    replacement if value == record["source"] else value
+                                    for value in values
+                                ]
+                                selector.set_value(values)
+                            else:
+                                selector.set_value(replacement)
+                            state["dismissed"] = None
+                            _render()
+
+                        ui.button(
+                            f"Use {record['target']}",
+                            on_click=_use_newer,
+                        ).props("flat dense").classes("drocat-release-action")
+                    else:
+                        ui.label("Access or prepare the newer release first.").classes(
+                            "drocat-release-notice-muted"
+                        )
+                else:
+                    labels = ", ".join(
+                        f"{record['source']} → {record['target']}"
+                        for record in records
+                    )
+                    ui.label(
+                        f"Newer supported releases are available: {labels}."
+                    ).classes("drocat-release-notice-text")
+                ui.button(
+                    "Keep current",
+                    on_click=lambda: (
+                        state.__setitem__("dismissed", current_key), _render()
+                    ),
+                ).props("flat dense").classes("drocat-release-dismiss")
+
+    selector._drocat_release_notice = notice
+    selector._drocat_release_notice_render = _render
+    selector.on_value_change(_render)
+    _render()
+    return notice
+
+
 def dataset_selector(
     label: str = "Dataset",
     default: Optional[str] = None,
@@ -470,6 +573,7 @@ def dataset_selector(
     ).props("outlined").classes("w-full drocat-select").tooltip(hint)
     if show_local_status:
         _register_dataset_selector(sel, options, service)
+    _attach_release_recommendation_notice(sel, options, multiple=False)
     if disable_banc:
         # NiceGUI converts its Python option mapping to QSelect options with
         # ``label`` and an internal index.  Use the rendered label as the
@@ -541,8 +645,10 @@ def dataset_multi_selector(
     ).props("outlined").classes("w-full drocat-select").props(
         "use-chips use-input"
     ).tooltip(hint)
+    _clear_native_select_editor_after_selection(sel)
     if show_local_status:
         _register_dataset_selector(sel, options, service)
+    _attach_release_recommendation_notice(sel, options, multiple=True)
     return sel
 
 
@@ -2509,6 +2615,21 @@ def sync_output_dir_fields(source, value: str, force: bool = False) -> None:
 # Chip List Input
 # =============================================================================
 
+def _clear_native_select_editor_after_selection(select: ui.select) -> None:
+    """Clear a QSelect's filter text after a chip is added or removed.
+
+    Quasar clears the editor for keyboard commits, but a mouse selection in a
+    multiple QSelect can leave the text used to find the option in the editor.
+    Query-like controls should expose that text only while searching, not as a
+    second value beside the newly-created chip.
+    """
+
+    def clear_editor(_event) -> None:
+        select.run_method("updateInputValue", "")
+
+    select.on("add", clear_editor)
+    select.on("remove", clear_editor)
+
 def chip_list_input(
     label: str = "Items",
     placeholder: str = "Type and press Enter to add",
@@ -2523,6 +2644,7 @@ def chip_list_input(
         multiple=True,
     ).classes("w-full drocat-select drocat-chip-input").props('use-chips use-input new-value-mode="add-unique"').tooltip(hint)
     sel.props('input-debounce="0"')
+    _clear_native_select_editor_after_selection(sel)
     return sel
 
 
@@ -2542,6 +2664,7 @@ def multi_select_input(
     ).classes("w-full drocat-select")
     if with_search:
         sel.props("use-input use-chips")
+        _clear_native_select_editor_after_selection(sel)
     if hint:
         sel.tooltip(hint)
     return sel

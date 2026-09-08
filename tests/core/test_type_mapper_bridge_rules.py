@@ -4,13 +4,15 @@ Rules under test:
 
   HEMI --hT-- MCNS;  MANC --mT-- MCNS
   MCNS --fT--aT-- FAFB | --fT-- | --aT--
-  MCNS --(fT)--ACT-- BANC | --ACT-- | --(fT)--
+  MCNS --mct-- BANC | --mct--
   FAFB --aT--ACT-- BANC | --aT-- | --ACT--
+  HEMI --hemibrain_cell_type-- BANC
+  MANC --manc_cell_type-- BANC
   + same-name identity everywhere.
 
-  Connectors: MCNS connects {HEMI, MANC} <-> {FAFB, BANC} (and the two
-  neuprint datasets through itself); FAFB connects MCNS <-> BANC; BANC is
-  NEVER a connector between MCNS and FAFB.  All bridges are bidirectional
+  Connectors: MCNS connects the neuprint datasets through itself; BANC label
+  columns are direct-only evidence and BANC is NEVER a connector. All bridges
+  are bidirectional
   (the reverse travel direction reverses the hop order — the SAME bridge,
   not a flip) and a two-linker chain cannot flip its linker order.
 
@@ -60,6 +62,9 @@ def _bare_mapper():
     m._alias_n_to_1_cache = None
     m._crosswalk_parts_cache = {}
     m._crosswalk_reverse_cache = {}
+    m._banc_label_edges = {}
+    m._banc_release_edges = {}
+    m._mcns_v09_shared_names = set()
     return m
 
 
@@ -159,8 +164,8 @@ def test_banc_is_never_a_connector_for_mcns_fafb():
             assert hop['column'] != 'Alternative Cell Type(s)', chain
 
 
-def test_fafb_connects_mcns_and_banc():
-    """MCNS --fT-- FAFB --ACT-- BANC: the licensed FAFB-connector route."""
+def test_mcns_banc_uses_the_direct_mct_label_bridge():
+    """MCNS↔BANC uses ``malecns_cell_type`` directly, never fT→FAFB→ACT."""
     m = _bare_mapper()
     _seed_flywire(
         m,
@@ -173,15 +178,30 @@ def test_fafb_connects_mcns_and_banc():
         FAFB: {'T1': {'b1'}},
         BANC: {'P1': {'b1'}},
     }
+    m._banc_label_edges = {
+        (MCNS, 'M1'): [
+            (BANC, 'P1', 'malecns_cell_type', 'P1', BANC),
+        ],
+        (BANC, 'P1'): [
+            (MCNS, 'M1', 'malecns_cell_type', 'M1', BANC),
+        ],
+    }
     m._crosswalk_parts_cache = {('flywireType', 'M1'): ['T1']}
     chains = m.get_type_bridges('M1', MCNS, BANC)
-    assert routes(chains), 'the FAFB connector route must exist'
-    assert (MCNS, FAFB, BANC) in routes(chains)
+    assert chains
+    assert routes(chains) == [(MCNS, BANC)]
+    assert all(
+        all(hop['column'] != 'flywireType' for hop in chain[1:])
+        for chain in chains
+    )
+    assert any(
+        any(hop['column'] == 'malecns_cell_type' for hop in chain[1:])
+        for chain in chains
+    )
 
 
-def test_hemi_reaches_banc_only_through_mcns():
-    """HEMI -> BANC: MCNS is the connector; every route stays inside
-    {HEMI, MCNS, BANC} and at least one route uses MCNS."""
+def test_hemi_banc_uses_the_direct_curated_label_bridge():
+    """HEMI↔BANC is direct ``hemibrain_cell_type`` evidence."""
     m = _bare_mapper()
     _seed_flywire(
         m,
@@ -193,11 +213,22 @@ def test_hemi_reaches_banc_only_through_mcns():
         HEMI: {'H1': {'b1'}},
         BANC: {'P1': {'b1'}},
     }
+    m._banc_label_edges = {
+        (HEMI, 'H1'): [
+            (BANC, 'P1', 'hemibrain_cell_type', 'P1', BANC),
+        ],
+        (BANC, 'P1'): [
+            (HEMI, 'H1', 'hemibrain_cell_type', 'H1', BANC),
+        ],
+    }
     m._crosswalk_reverse_cache = {'hemibrainType': {'H1': {'M1'}}}
     chains = m.get_type_bridges('H1', HEMI, BANC)
     assert chains
-    assert all(set(r) <= {HEMI, MCNS, BANC} for r in routes(chains))
-    assert (HEMI, MCNS, BANC) in routes(chains)
+    assert routes(chains) == [(HEMI, BANC)]
+    assert all(
+        any(hop['column'] == 'hemibrain_cell_type' for hop in chain[1:])
+        for chain in chains
+    )
 
 
 def test_fafb_banc_pair_has_no_mcns_detour():
@@ -216,7 +247,16 @@ def test_fafb_banc_pair_has_no_mcns_detour():
         FAFB: {'T1': {'b1'}},
         BANC: {'P1': {'b1'}, 'T2': {'b1'}},
     }
+    m._banc_label_edges = {
+        (FAFB, 'T1'): [
+            (BANC, 'P1', 'fafb_cell_type', 'P1', BANC),
+        ],
+        (BANC, 'P1'): [
+            (FAFB, 'T1', 'fafb_cell_type', 'T1', BANC),
+        ],
+    }
     chains = m.get_type_bridges('T1', FAFB, BANC)
+    assert chains
     assert all(set(r) <= {FAFB, BANC} for r in routes(chains))
 
 
@@ -369,13 +409,24 @@ class TestRealBridgeRules:
             for c in chains)
 
     def test_hemi_banc_routes_stay_licensed(self, mapper):
-        chains = mapper.get_type_bridges('lLN7', HEMI, BANC)
+        # Select a real HEMI label edge rather than assuming a particular
+        # cell type is curated in every BANC release.
+        source_type = None
+        for (source_key, candidate), edges in mapper._banc_label_edges.items():
+            if source_key != HEMI:
+                continue
+            if any(edge[0] == BANC for edge in edges):
+                source_type = candidate
+                break
+        if source_type is None:
+            pytest.skip('no grounded hemibrain_cell_type BANC edge locally')
+        chains = mapper.get_type_bridges(source_type, HEMI, BANC)
         assert chains
         for chain in chains:
             for hop in chain[1:]:
-                assert hop['dataset'] in (HEMI, MCNS, BANC), chain
+                assert hop['dataset'] in (HEMI, BANC), chain
         assert any(
-            (HEMI, MCNS, BANC) in routes([c]) for c in chains)
+            (HEMI, BANC) == routes([c])[0] for c in chains)
 
     def test_no_untyped_chain_targets(self, mapper):
         for t in ('MDN', 'CL125', 'APDN3', 'DN1pA', 'lLN7', 'ADNM1 MN'):
