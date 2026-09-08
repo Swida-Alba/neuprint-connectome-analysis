@@ -224,17 +224,22 @@ class TestVerbosityHelpers:
 
     def test_get_effective_mesh_color(self):
         vis = make_vis(brain_mesh_color='auto', vnc_mesh_color='auto')
-        assert vis._get_effective_mesh_color('brain') == 'rgba(200, 230, 240, 0.02)'
+        assert vis._get_effective_mesh_color('brain') == 'rgba(200, 230, 240, 0.05)'
         vis.background_color = 'black'
-        assert vis._get_effective_mesh_color('brain') == 'rgba(60, 60, 70, 0.02)'
-        assert vis._get_effective_mesh_color('vnc') == 'rgba(60, 60, 70, 0.02)'
+        assert vis._get_effective_mesh_color('brain') == 'rgba(60, 60, 70, 0.05)'
+        assert vis._get_effective_mesh_color('vnc') == 'rgba(60, 60, 70, 0.05)'
         vis.brain_mesh_color = 'rgba(1, 2, 3, 0.5)'
         vis.vnc_mesh_color = 'rgba(4, 5, 6, 0.5)'
         assert vis._get_effective_mesh_color('brain') == 'rgba(1, 2, 3, 0.5)'
         assert vis._get_effective_mesh_color('vnc') == 'rgba(4, 5, 6, 0.5)'
         vis.background_color = 'white'
         vis.vnc_mesh_color = 'auto'
-        assert vis._get_effective_mesh_color('vnc') == 'rgba(200, 230, 240, 0.02)'
+        assert vis._get_effective_mesh_color('vnc') == 'rgba(200, 230, 240, 0.05)'
+
+    def test_mesh_opacity_defaults(self):
+        assert vs_module.DEFAULT_BRAIN_VNC_MESH_ALPHA == 0.05
+        assert vs_module.DEFAULT_ROI_MESH_ALPHA == 0.1
+        assert VisualizeSkeleton.mesh_alpha == 0.1
 
     def test_get_html_size_cap(self):
         assert make_vis(html_size_cap=42, export_method='kaleido')._get_html_size_cap() == 42
@@ -488,15 +493,15 @@ class TestColorNormalization:
 
     def test_standardize_mesh_color_input(self):
         vis = make_vis(mesh_roi=['A', 'B'])
-        assert vis._standardize_mesh_color_input('red') == 'rgba(255, 0, 0, 0.05)'
-        assert vis._standardize_mesh_color_input('nope') == 'rgba(100, 100, 100, 0.05)'
-        assert vis._standardize_mesh_color_input((0, 255, 0)) == 'rgba(0, 255, 0, 0.05)'
+        assert vis._standardize_mesh_color_input('red') == 'rgba(255, 0, 0, 0.1)'
+        assert vis._standardize_mesh_color_input('nope') == 'rgba(100, 100, 100, 0.1)'
+        assert vis._standardize_mesh_color_input((0, 255, 0)) == 'rgba(0, 255, 0, 0.1)'
         got = vis._standardize_mesh_color_input(['red', 'blue'])
-        assert got == ['rgba(255, 0, 0, 0.05)', 'rgba(0, 0, 255, 0.05)']
+        assert got == ['rgba(255, 0, 0, 0.1)', 'rgba(0, 0, 255, 0.1)']
         seq = ['#000000', '#444444', '#888888', '#cccccc']
         cont = vis._standardize_mesh_color_input(seq, continuous=True)
         assert len(cont) == 2  # sampled to mesh_roi count
-        assert vis._standardize_mesh_color_input(12345) == 'rgba(100, 100, 100, 0.05)'
+        assert vis._standardize_mesh_color_input(12345) == 'rgba(100, 100, 100, 0.1)'
 
     def test_is_custom_mesh_color_specified(self):
         assert make_vis(mesh_color=(100, 100, 100))._is_custom_mesh_color_specified() is False
@@ -1871,10 +1876,10 @@ class TestColorStandardizationExtras:
 
     def test_standardize_mesh_color_input_variants(self):
         vis = make_vis(mesh_roi=['A', 'B', 'C'])
-        assert vis._standardize_mesh_color_input('red') == 'rgba(255, 0, 0, 0.05)'
-        assert vis._standardize_mesh_color_input('nope') == 'rgba(100, 100, 100, 0.05)'
+        assert vis._standardize_mesh_color_input('red') == 'rgba(255, 0, 0, 0.1)'
+        assert vis._standardize_mesh_color_input('nope') == 'rgba(100, 100, 100, 0.1)'
         assert vis._standardize_mesh_color_input(np.array([10, 20, 30])) == \
-            'rgba(10, 20, 30, 0.05)'
+            'rgba(10, 20, 30, 0.1)'
         # continuous sampling over mesh_roi count
         out = vis._standardize_mesh_color_input(
             ['rgba(255, 0, 0, 0.1)', 'rgba(0, 0, 255, 0.1)'],
@@ -1883,12 +1888,12 @@ class TestColorStandardizationExtras:
         # invalid 3-tuple falls through to per-element handling
         assert vis._standardize_mesh_color_input(
             ('nope1', 'nope2', 'nope3')) == [
-            'rgba(100, 100, 100, 0.05)'] * 3
+            'rgba(100, 100, 100, 0.1)'] * 3
         # list of colors
         assert vis._standardize_mesh_color_input(['red', 'blue']) == [
-            'rgba(255, 0, 0, 0.05)', 'rgba(0, 0, 255, 0.05)']
+            'rgba(255, 0, 0, 0.1)', 'rgba(0, 0, 255, 0.1)']
         # final fallback
-        assert vis._standardize_mesh_color_input(99) == 'rgba(100, 100, 100, 0.05)'
+        assert vis._standardize_mesh_color_input(99) == 'rgba(100, 100, 100, 0.1)'
 
     def test_is_custom_mesh_color_specified(self):
         vis = make_vis(mesh_color=(100, 100, 100))

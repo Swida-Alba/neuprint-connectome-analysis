@@ -231,8 +231,8 @@ VNC_MESH_LEGEND_RANK = 200_000_001
 
 # Default mesh opacities. ROI meshes provide local anatomical context,
 # while the brain/VNC envelopes are intentionally lighter scene scaffolding.
-DEFAULT_ROI_MESH_ALPHA = 0.05
-DEFAULT_BRAIN_VNC_MESH_ALPHA = 0.02
+DEFAULT_ROI_MESH_ALPHA = 0.1
+DEFAULT_BRAIN_VNC_MESH_ALPHA = 0.05
 
 # Legend modes. 'tree' renders exactly like 'type' (same native legend,
 # used by static exports) and additionally tags traces so the exported
@@ -2856,14 +2856,14 @@ class VisualizeSkeleton:
     Supported Formats
     -----------------
     - **'auto'** (default): Automatically selects optimal color based on background_color:
-        • White background: 'rgba(200, 230, 240, 0.02)' (light blue, 2% opacity)
-        • Black background: 'rgba(60, 60, 70, 0.02)' (dark gray, 2% opacity)
+        • White background: 'rgba(200, 230, 240, 0.05)' (light blue, 5% opacity)
+        • Black background: 'rgba(60, 60, 70, 0.05)' (dark gray, 5% opacity)
     - **Named colors**: 'lightblue', 'gray', etc.
     - **Hex colors**: '#RGB', '#RGBA', '#RRGGBB', '#RRGGBBAA'
     - **RGB(A) tuples/lists**: 0-255 integers or normalized 0-1 floats
     - **CSS rgb/rgba and hsl/hsla strings**, including percentage alpha
 
-    An explicit alpha overrides the mesh default (0.02); a color without alpha
+    An explicit alpha overrides the mesh default (0.05); a color without alpha
     uses that default.
     
     Recommendations
@@ -2874,8 +2874,8 @@ class VisualizeSkeleton:
     Examples
     --------
     >>> brain_mesh_color = 'auto'  # Adaptive (default)
-    >>> brain_mesh_color = 'rgba(200, 230, 240, 0.02)'  # Light blue, 2% opacity
-    >>> brain_mesh_color = (60, 60, 70, 0.02)  # Dark gray tuple
+    >>> brain_mesh_color = 'rgba(200, 230, 240, 0.05)'  # Light blue, 5% opacity
+    >>> brain_mesh_color = (60, 60, 70, 0.05)  # Dark gray tuple
     >>> brain_mesh_color = 'rgba(40, 40, 50, 0.05)'  # Very subtle for dark backgrounds
     '''
     
@@ -2899,14 +2899,14 @@ class VisualizeSkeleton:
     Supported Formats
     -----------------
     - **'auto'** (default): Automatically selects optimal color based on background_color:
-        • White background: 'rgba(200, 230, 240, 0.02)' (light green, 2% opacity)
-        • Black background: 'rgba(60, 60, 70, 0.02)' (dark green-gray, 2% opacity)
+        • White background: 'rgba(200, 230, 240, 0.05)' (light green, 5% opacity)
+        • Black background: 'rgba(60, 60, 70, 0.05)' (dark green-gray, 5% opacity)
     - **Named colors**: 'lightgreen', 'gray', etc.
     - **Hex colors**: '#RGB', '#RGBA', '#RRGGBB', '#RRGGBBAA'
     - **RGB(A) tuples/lists**: 0-255 integers or normalized 0-1 floats
     - **CSS rgb/rgba and hsl/hsla strings**, including percentage alpha
 
-    An explicit alpha overrides the mesh default (0.02); a color without alpha
+    An explicit alpha overrides the mesh default (0.05); a color without alpha
     uses that default.
     
     Note: Default 'auto' uses slightly different hue from brain_mesh_color to distinguish.
@@ -2931,10 +2931,10 @@ class VisualizeSkeleton:
         return {
             'light': (
                 f'rgba(200, 230, 240, {DEFAULT_BRAIN_VNC_MESH_ALPHA})'
-            ),  # Light blue, 2% opacity
+            ),  # Light blue, 5% opacity
             'dark': (
                 f'rgba(60, 60, 70, {DEFAULT_BRAIN_VNC_MESH_ALPHA})'
-            ),  # Subtle dark gray, 2% opacity
+            ),  # Subtle dark gray, 5% opacity
         }
 
     def _get_effective_mesh_color(self, mesh_type='brain'):
@@ -6779,7 +6779,7 @@ class VisualizeSkeleton:
             )
         
         # Standardize brain_mesh_color and vnc_mesh_color if not 'auto'.
-        # Their default mesh opacity is 0.02; an explicit alpha in any
+        # Their default mesh opacity is 0.05; an explicit alpha in any
         # supported color format overrides it.
         if str(self.brain_mesh_color).strip().lower() != 'auto':
             self.brain_mesh_color = standardize_color(

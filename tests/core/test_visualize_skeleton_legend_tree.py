@@ -53,7 +53,7 @@ def _tagged_figure():
 
     mesh = go.Mesh3d(
         x=[0, 1, 0], y=[0, 0, 1], z=[0, 0, 0], i=[0], j=[1], k=[2],
-        color='#c8e6f0', opacity=0.02, name='Brain mesh', showlegend=True,
+        color='#c8e6f0', opacity=0.05, name='Brain mesh', showlegend=True,
     )
     mesh.legendrank = visualize_skeleton.BRAIN_MESH_LEGEND_RANK
     fig.add_trace(mesh)
