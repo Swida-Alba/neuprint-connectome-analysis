@@ -1,0 +1,7 @@
+interface:
+  display_name: "Repository Audit"
+  short_description: "Audit code, docs, exports, templates & skills"
+  default_prompt: "Use $repository-audit to audit this project and update a traceable findings report."
+
+policy:
+  allow_implicit_invocation: true

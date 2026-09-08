@@ -1,0 +1,30 @@
+{
+  "audit": {
+    "project": "",
+    "project_root": "",
+    "audit_date": "",
+    "status": "in_progress",
+    "report_path": ""
+  },
+  "scope": {
+    "included": [],
+    "excluded": [],
+    "limitations": []
+  },
+  "counts": {
+    "findings_total": 0,
+    "p0": 0,
+    "p1": 0,
+    "p2": 0,
+    "p3": 0,
+    "confirmed": 0,
+    "open": 0,
+    "verified": 0
+  },
+  "findings": [],
+  "traceability_gaps": [],
+  "validation": {
+    "commands": [],
+    "results": []
+  }
+}

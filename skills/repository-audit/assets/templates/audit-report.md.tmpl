@@ -1,0 +1,79 @@
+# Audit report — {{PROJECT}}
+
+- Audit date: {{AUDIT_DATE}}
+- Project root: `{{PROJECT_ROOT}}`
+- Report: `{{REPORT_PATH}}`
+- Status: `in_progress`
+- Scope: {{SCOPE}}
+- Exclusions: {{EXCLUSIONS}}
+
+## Executive summary
+
+{{SUMMARY}}
+
+### Priority findings
+
+| ID | Severity | Confidence | Status | Area | Finding |
+|---|---|---|---|---|---|
+| {{FINDING_ID}} | {{SEVERITY}} | {{CONFIDENCE}} | {{STATUS}} | {{AREA}} | {{TITLE}} |
+
+## Inventory and source-of-truth map
+
+| Artifact family | Paths inspected | Source of truth | Derived/consumer artifacts | Coverage/notes |
+|---|---|---|---|---|
+| Code |  |  |  |  |
+| Tests |  |  |  |  |
+| Documentation/instructions |  |  |  |  |
+| UI/HTML |  |  |  |  |
+| Templates/exports |  |  |  |  |
+| Skills |  |  |  |  |
+
+## Audit sections
+
+### {{SECTION_NAME}}
+
+- Inspected: {{INSPECTED}}
+- Evidence: {{EVIDENCE}}
+- Findings added/updated: {{FINDINGS}}
+- Unmatched information: {{GAPS}}
+- Limitations: {{LIMITATIONS}}
+- Next: {{NEXT}}
+
+## Finding details
+
+### {{FINDING_ID}} — {{TITLE}}
+
+- Severity: {{SEVERITY}}
+- Confidence: {{CONFIDENCE}}
+- Status: {{STATUS}}
+- Area: {{AREA}}
+- Statement: {{STATEMENT}}
+- Evidence: {{EVIDENCE}}
+- Impact: {{IMPACT}}
+- Affected artifacts: {{AFFECTED_ARTIFACTS}}
+- Reproduction: {{REPRODUCTION}}
+- Fixation proposal: {{PROPOSAL}}
+- Validation: {{VALIDATION}}
+
+## Traceability gaps
+
+| Trace ID | Behavior/contract | Source | Test | UI/API | Instructions | Template/schema | Export | State | Gap/note | Findings |
+|---|---|---|---|---|---|---|---|---|---|---|
+| {{TRACE_ID}} |  |  |  |  |  |  |  |  |  |  |
+
+## Validation record
+
+| Date | Command/check/render | Result | Scope/fixture | Limitations |
+|---|---|---|---|---|
+| {{VALIDATION_DATE}} |  |  |  |  |
+
+## Residual uncertainty and blocked checks
+
+{{UNCERTAINTY}}
+
+## Audit completion statement
+
+{{COMPLETION_STATEMENT}}
+
+No implementation code was modified by this audit unless explicitly stated
+above.
