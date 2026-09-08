@@ -212,9 +212,9 @@ COLUMN_GLOSSARY = {
     "applied_threshold": ("The CANONICAL (minimal) threshold that reproduces "
                           "this run's output: w2 + 1 for a budget-bitten run "
                           "(w2 = strongest dropped path bottleneck — every "
-                          "threshold in [w2+1, tau] yields the identical set), "
+                          "threshold in [w2+1, τ] yields the identical set), "
                           "else the asked threshold for complete runs (whose "
-                          "natural tau equals it). See applied_threshold_source "
+                          "natural τ equals it). See applied_threshold_source "
                           "for which mechanism(s) set it.", "integer"),
     "applied_threshold_source": ("Which mechanism(s) determined "
                                  "applied_threshold: 'requested' (no budget "
@@ -227,18 +227,18 @@ COLUMN_GLOSSARY = {
                                "user left Max Paths at 0).", "integer"),
     "strongest_first_budget_bitten": ("True when the StrongestFirst path "
                                       "budget was reached and the output was "
-                                      "tau-bounded.", "boolean"),
-    "strongest_first_tau": ("StrongestFirst budget LANDING tau (same value as "
-                            "the tau column).", "number"),
+                                      "τ-bounded.", "boolean"),
+    "strongest_first_tau": ("StrongestFirst budget LANDING τ (same value as "
+                            "the τ column).", "number"),
     "tau_canonical": ("The minimal threshold that reproduces this run's "
                       "materialized path set: w2 + 1 when a budget bite left "
-                      "a gap in [w2+1, tau]; the natural tau otherwise. "
-                      "Distinct from the landing tau, which is only the "
+                      "a gap in [w2+1, τ]; the natural τ otherwise. "
+                      "Distinct from the landing τ, which is only the "
                       "collapse bound.", "integer"),
     "strongest_dropped": ("w2 — the strongest path bottleneck NOT in the "
                           "output (budget-bitten runs): lowering the threshold "
                           "to w2 or below admits new paths; any value in "
-                          "[w2+1, tau] changes nothing. Empty for complete "
+                          "[w2+1, τ] changes nothing. Empty for complete "
                           "runs.", "number"),
     "strongest_dropped_bottleneck": ("w2 — the strongest path bottleneck NOT "
                                      "emitted after the StrongestFirst budget "
@@ -284,25 +284,25 @@ COLUMN_GLOSSARY = {
                           "threshold. Empty when no floor was applied.", "number"),
     "conservation": ("Number/fraction of datasets in which the edge is present.", "text"),
     "conserved_at_lowest": ("Edge present in every dataset at the lowest threshold.", "boolean"),
-    "tau": ("StrongestFirst budget LANDING: the weakest kept path's "
+    "tau": ("StrongestFirst budget LANDING τ: the weakest kept path's "
            "bottleneck — the maximal threshold equivalent to this run (the "
            "collapse bound; every threshold up to this value yields the "
-           "identical set). For COMPLETE runs this is the natural tau — the "
+           "identical set). For COMPLETE runs this is the natural τ — the "
            "weakest emitted path's bottleneck, which is also the canonical "
            "minimal threshold.", "number"),
     "paths_complete": ("True when the path set is complete; False when a budget "
                        "cutoff applied.", "boolean"),
     "skipped": ("Feature G (duplicate-threshold skipping): True when this input "
                 "threshold was NOT re-enumerated — its path set is identical to the "
-                "earlier run it duplicates (every threshold up to that run's tau "
+                "earlier run it duplicates (every threshold up to that run's τ "
                 "yields the same set). 'all' path mode only.", "boolean"),
     "duplicate_of": ("For skipped thresholds: the earlier input threshold (or "
-                     "the tau folder, applied_folder) whose run this row "
+                     "the τ folder, applied_folder) whose run this row "
                      "duplicates.", "integer"),
-    "applied_folder": ("F5 tau-folder discipline: the minsyn_{N} folder holding "
+    "applied_folder": ("F5 τ-folder discipline: the minsyn_{N} folder holding "
                        "this threshold's real output. Collapsed thresholds have "
                        "no folder of their own — their frames alias this "
-                       "folder's materialization (fresh tau denominators).", "integer"),
+                       "folder's materialization (fresh τ denominators).", "integer"),
     "max_paths_bodyid": ("Path budget for StrongestFirst enumeration (0 = unlimited "
                          "or algorithm default).", "integer"),
     "jaccard_similarity": ("Jaccard similarity of the two datasets' edge sets: "
@@ -729,7 +729,7 @@ _PATHFINDING_EXPLANATION = [
             "lossless hop/dead-end pruning (never changes which paths exist)",
             "optional Edge Budget floor w0 ('all' mode only — a graph "
             "budget, exactly equivalent to raising the threshold)",
-            "StrongestFirst path-budget ordering and tau (a path-output "
+            "StrongestFirst path-budget ordering and τ (a path-output "
             "budget; applies in both Complete and Shortest Paths)",
             "applied threshold / retained path set",
             "visualization-only edge limit (drawing only — never affects "
@@ -743,7 +743,7 @@ _PATHFINDING_EXPLANATION = [
             "weakest link. All budgeted outputs are strength-bounded path "
             "sets: the StrongestFirst enumerator emits intact paths in "
             "descending bottleneck order, so a budgeted result is exactly "
-            "'all intact paths with bottleneck >= tau', never an arbitrary "
+            "'all intact paths with bottleneck >= τ', never an arbitrary "
             "first-N truncation. The This-run column shows the value this "
             "run actually produced (— = the mechanism did not apply).",
         ],
@@ -752,9 +752,9 @@ _PATHFINDING_EXPLANATION = [
             ["W*", "strongest_retained_bottleneck",
              "Widest-path ceiling after lossless pruning; pruning must not "
              "change it."],
-            ["tau", "strongest_first_tau",
+            ["τ", "strongest_first_tau",
              "StrongestFirst landing: all intact paths with bottleneck at "
-             "least tau are retained when the path budget bites. For a "
+             "least τ are retained when the path budget bites. For a "
              "complete run it is the natural weakest emitted-path "
              "bottleneck."],
             ["w2", "strongest_dropped_bottleneck",
@@ -784,32 +784,32 @@ _PATHFINDING_EXPLANATION = [
         "heading": "How the thresholds relate",
         "paragraphs": [
             "Once the run is known the pruning levels form a strict chain: "
-            "w0 <= w2 < tau_canonical <= tau <= W*. The Edge Budget acts on "
+            "w0 <= w2 < tau_canonical <= τ <= W*. The Edge Budget acts on "
             "the GRAPH — it raises the effective threshold to w0, one tier "
             "above the landing tier w1 (the strongest tier whose admission "
             "would exceed the budget) — while the StrongestFirst budget "
             "acts on the OUTPUT — it bounds the emitted paths at the "
-            "landing tau and excludes everything weaker than w2. "
+            "landing τ and excludes everything weaker than w2. "
             "applied_threshold collapses both mechanisms into the single "
             "number that matters for interpretation.",
             "Read applied_threshold as the EQUIVALENT Min Synapse Count: a "
             "complete run at that threshold produces exactly this path "
-            "set. tau alone is only the landing/collapse bound — when the "
+            "set. τ alone is only the landing/collapse bound — when the "
             "budget bite leaves a gap in the bottleneck distribution, "
-            "every threshold in [w2+1, tau] yields the identical set and "
+            "every threshold in [w2+1, τ] yields the identical set and "
             "w2+1 (tau_canonical) is the minimal one.",
         ],
         "table": [
-            ["Run state", "applied_threshold", "tau", "Reading"],
+            ["Run state", "applied_threshold", "τ", "Reading"],
             ["Complete (no budget bit)", "requested_threshold",
              "natural weakest emitted bottleneck (= tau_canonical)",
-             "Every Min Synapse Count up to tau yields this identical "
+             "Every Min Synapse Count up to τ yields this identical "
              "set."],
             ["StrongestFirst budget bit", "w2 + 1 (= tau_canonical)",
              "landing bound of the drained tie group",
              "The strongest excluded path is w2; every threshold in "
-             "[w2+1, tau] gives the same set."],
-            ["Edge Budget floor only ('all' mode)", "natural tau (>= w0)",
+             "[w2+1, τ] gives the same set."],
+            ["Edge Budget floor only ('all' mode)", "natural τ (>= w0)",
              "natural weakest emitted bottleneck",
              "The graph was floored at w0 first; flooring cannot inflate "
              "hop distances — it only removes weak routes."],
@@ -821,19 +821,19 @@ _PATHFINDING_EXPLANATION = [
         "pipeline": None,
     },
     {
-        "heading": "Reading tau vs applied_threshold",
+        "heading": "Reading τ vs applied_threshold",
         "paragraphs": [
-            "tau is a landing/collapse bound: the maximal threshold "
+            "τ is a landing/collapse bound: the maximal threshold "
             "equivalent to this run. It is not always the minimal one — "
             "when the budget bite leaves a gap in the bottleneck "
-            "distribution, every threshold in [w2+1, tau] yields the "
+            "distribution, every threshold in [w2+1, τ] yields the "
             "identical set, and w2+1 (tau_canonical) is the minimal "
             "equivalent threshold. applied_threshold reports that canonical "
             "minimal value with its source; for an unbounded/complete run "
-            "it stays at the requested threshold and the natural tau is "
+            "it stays at the requested threshold and the natural τ is "
             "reported separately.",
             "Shortest Paths can take the StrongestFirst path budget (and "
-            "reports the same tau metadata) but is NEVER floored: the Edge "
+            "reports the same τ metadata) but is NEVER floored: the Edge "
             "Budget does not apply in shortest mode because trimming edges "
             "could remove the only shortest route.",
             "bodyId-level and type-level visualizations share the same "
@@ -1222,7 +1222,7 @@ TOOL_GUIDE_SPECS = {
             {"pattern": "comparison_results/motif_analysis.csv",
              "description": "Network motif analysis."},
             {"pattern": "comparison_results/threshold_sensitivity.csv",
-             "description": "Per-dataset edge counts per threshold with retention vs the previous threshold (unique source-target pairs). tau/paths_complete state whether a run was complete (tau = natural weakest-path bottleneck) or budget-bounded; skipped/duplicate_of mark Feature G τ-collapsed thresholds whose path set is identical to the duplicated run."},
+             "description": "Per-dataset edge counts per threshold with retention vs the previous threshold (unique source-target pairs). tau/paths_complete state whether a run was complete (τ = natural weakest-path bottleneck) or budget-bounded; skipped/duplicate_of mark Feature G τ-collapsed thresholds whose path set is identical to the duplicated run."},
             {"pattern": "comparison_results/threshold_alignment_best_matches.csv",
              "description": "Feature C: per (dataset pair, anchor threshold) the "
                             "best-matching threshold in the other dataset, found by a "
@@ -1733,7 +1733,7 @@ _APPLIED_ROWS = (
      "requested_threshold"),
     ("applied threshold (equivalent Min Synapse Count)", "applied_threshold"),
     ("source", "applied_threshold_source"),
-    ("tau (StrongestFirst landing / natural bottleneck)",
+    ("τ (StrongestFirst landing / natural bottleneck)",
      "strongest_first_tau"),
     ("tau_canonical (minimal equivalent threshold)", "tau_canonical"),
     ("w2 (strongest dropped path bottleneck)",
@@ -1756,7 +1756,7 @@ def _applied_headline(applied: dict) -> str:
                 f"Min Synapse Count = "
                 f"{_format_applied_value(applied.get('requested_threshold'))}.")
         if tau is not None:
-            head += (f" The natural tau (weakest emitted-path bottleneck) "
+            head += (f" The natural τ (weakest emitted-path bottleneck) "
                      f"is {_format_applied_value(tau)} — every Min Synapse "
                      "Count up to it yields this identical set.")
         return head
@@ -1783,7 +1783,7 @@ def _format_dataset_threshold_banner(by_dataset: dict) -> list:
                 f"{t}->{applied}" for t, applied in sorted(
                     collapsed.items(), key=lambda kv: str(kv[0]))) + ")"
         tau = info.get("tau")
-        tau_txt = f", tau {_format_applied_value(tau)}" \
+        tau_txt = f", τ {_format_applied_value(tau)}" \
             if tau is not None else ""
         lines.append(f"  {ds}: asked [{asked}] -> applied [{effective}]"
                      f"{collapse_txt}{tau_txt}")
@@ -2197,7 +2197,7 @@ def render_html(content: dict) -> str:
                             collapsed.items(), key=lambda kv: str(kv[0]))) \
                         + ")"
                 tau = info.get("tau")
-                tau_txt = f", tau {_format_applied_value(tau)}" \
+                tau_txt = f", τ {_format_applied_value(tau)}" \
                     if tau is not None else ""
                 parts.append(
                     f"<tr><td><code>{_html_escape(ds)}</code></td><td>"

@@ -50,7 +50,7 @@ def test_explanation_pipeline_order():
     assert "requested threshold" in text
     assert "lossless hop/dead-end pruning" in text
     assert "Edge Budget floor w0" in text
-    assert "StrongestFirst path-budget ordering and tau" in text
+    assert "StrongestFirst path-budget ordering and τ" in text
     assert "applied threshold / retained path set" in text
     assert "visualization-only edge limit" in text
     # reader order: threshold before floor before budget before drawing cap
@@ -62,7 +62,7 @@ def test_explanation_vocabulary_table():
     sections = og.TOOL_GUIDE_SPECS["find_shortest"]["explanation"]
     table = next(s for s in sections if s.get("table"))["table"]
     flat = " ".join(str(cell) for row in table for cell in row)
-    for token in ("W*", "tau", "w2", "w1", "w0", "applied_threshold",
+    for token in ("W*", "τ", "w2", "w1", "w0", "applied_threshold",
                   "paths_complete", "pruned", "bottleneck"):
         assert token in flat, token
 
@@ -93,16 +93,19 @@ def test_explanation_renders_in_all_formats(tmp_path):
     assert "Pathfinding model" in html
     assert "How the path set was produced" in html
     assert "Drop Untyped Neurons" in html
+    assert "StrongestFirst path-budget ordering and τ" in html
 
     md = og.render_markdown(content)
     assert "## Pathfinding model" in md
     assert "requested threshold" in md
     assert "| W* |" in md
+    assert "StrongestFirst path-budget ordering and τ" in md
 
     txt = og.render_txt(content)
     assert "PATHFINDING MODEL" in txt
     assert "-> requested threshold" in txt
     assert "W*" in txt
+    assert "StrongestFirst path-budget ordering and τ" in txt
 
 
 def test_write_run_guide_contains_model(tmp_path):
@@ -225,7 +228,8 @@ def test_vocabulary_table_shows_this_run_values(tmp_path):
     html = og.render_html(content)
     assert "<th>This run</th>" in html
     # tau row shows this run's landing tau; w2 row shows the dropped value
-    assert "<td>StrongestFirst landing" in html
+    assert "<td>τ" in html
+    assert "StrongestFirst landing" in html
     assert "<code>7</code>" in html
     # 'pruned' maps onto edge_budget_applied for the run state
     assert "<code>False</code>" in html
