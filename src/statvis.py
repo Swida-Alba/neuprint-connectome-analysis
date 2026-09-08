@@ -6921,7 +6921,7 @@ def Vis3S(data_df,**kwargs):
         "mesh_roi"   : None,
         "roi_range"  : 'primary_rois', # {"primary_rois", "all_rois"}, see more details in neuprint.
         "mesh_color"    : [0.1,0.1,0.1],
-        "mesh_alpha"    : 0.1,
+        "mesh_alpha"    : 0.05,
         "confidence"    : 0,
         "synapseRadius" : 100,
         "synpase_file_path" : None,

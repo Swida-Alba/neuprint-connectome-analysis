@@ -346,7 +346,7 @@ def skeleton_visualization_settings(
             )
             fields["mesh_alpha"] = number_input(
                 "ROI Mesh Opacity",
-                0.1,
+                0.05,
                 0,
                 1,
                 0.05,

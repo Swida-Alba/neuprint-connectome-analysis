@@ -660,7 +660,7 @@ vs = VisualizeSkeleton(
     mesh_color=['red', 'green', 'blue'],# Per-ROI colors
     
     # Transparency for ROI meshes
-    mesh_alpha=0.1,                     # 0.0=transparent, 1.0=opaque (default: 0.1)
+    mesh_alpha=0.05,                    # 0.0=transparent, 1.0=opaque (default: 0.05)
 )
 ```
 

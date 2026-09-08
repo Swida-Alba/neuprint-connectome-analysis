@@ -24,7 +24,7 @@ def _mesh_figure():
     # _apply_plotly_trace_color stores on the trace.
     fig.add_trace(go.Mesh3d(
         x=[0, 1, 0], y=[0, 0, 1], z=[0, 0, 0], i=[0], j=[1], k=[2],
-        color='#c8e6f0', opacity=0.1,
+        color='#c8e6f0', opacity=0.02,
     ))
     # An explicit user mesh color must never be flipped by the switch.
     fig.add_trace(go.Mesh3d(
@@ -37,16 +37,16 @@ def _mesh_figure():
 
 def test_auto_mesh_theme_colors_pair():
     colors = VisualizeSkeleton._auto_mesh_theme_colors()
-    assert colors['light'] == 'rgba(200, 230, 240, 0.1)'
-    assert colors['dark'] == 'rgba(60, 60, 70, 0.1)'
+    assert colors['light'] == 'rgba(200, 230, 240, 0.02)'
+    assert colors['dark'] == 'rgba(60, 60, 70, 0.02)'
 
 
 def test_effective_mesh_color_follows_background():
     white = _make_visualizer('white')
     black = _make_visualizer('black')
-    assert white._get_effective_mesh_color('brain') == 'rgba(200, 230, 240, 0.1)'
-    assert black._get_effective_mesh_color('brain') == 'rgba(60, 60, 70, 0.1)'
-    assert black._get_effective_mesh_color('vnc') == 'rgba(60, 60, 70, 0.1)'
+    assert white._get_effective_mesh_color('brain') == 'rgba(200, 230, 240, 0.02)'
+    assert black._get_effective_mesh_color('brain') == 'rgba(60, 60, 70, 0.02)'
+    assert black._get_effective_mesh_color('vnc') == 'rgba(60, 60, 70, 0.02)'
 
 
 def test_collect_adaptive_mesh_indices_matches_only_auto_colors():

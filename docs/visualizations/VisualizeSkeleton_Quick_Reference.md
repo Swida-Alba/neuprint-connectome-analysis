@@ -83,7 +83,7 @@ vs = VisualizeSkeleton(
     neuron_layers=['EB', 'PB'],
     mesh_roi=['EB', 'PB', 'FB', 'NO'],  # Central complex
     mesh_color='gray',                   # Color for ROI meshes
-    mesh_alpha=0.1,                      # Transparency (0.0-1.0)
+    mesh_alpha=0.05,                     # Transparency (0.0-1.0; default: 0.05)
 )
 vs.plot_neurons()
 ```
@@ -213,7 +213,7 @@ vs = VisualizeSkeleton(
     dataset='hemibrain:v1.2.1',
     neuron_layers=['EB'],
     brain_mesh='whole',  # Requires transform confirmation
-    brain_mesh_color='rgba(200, 230, 240, 0.1)'
+    brain_mesh_color='rgba(200, 230, 240, 0.02)'
 )
 vs.plot_neurons()
 ```

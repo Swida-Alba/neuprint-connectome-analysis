@@ -996,7 +996,7 @@ def color_swatch_picker(
             format_input = ui.input(
                 label="Color format",
                 value="#3b82f6",
-                placeholder="rgba(200, 230, 240, 0.1)",
+                placeholder="rgba(200, 230, 240, 0.02)",
             ).props("dense outlined").classes("flex-grow").tooltip(
                 COLOR_FORMAT_HINT
             )

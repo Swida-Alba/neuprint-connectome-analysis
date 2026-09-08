@@ -504,11 +504,10 @@ def create_skeleton_tab():
                         "Brain Mesh Color", value="#94a3b8",
                     ).props("dense").classes("drocat-input").style("width: 11rem")
                     brain_mesh_color_opacity = number_input(
-                        "Opacity", 0.05, 0, 1, 0.05,
+                        "Opacity", 0.02, 0, 1, 0.01,
                         hint=(
                             "Outline opacity for the picked color. Defaults "
-                            "to 0.05 — half the original auto setting's 10% "
-                            "subtlety (1 = opaque). Only used when Auto is off."
+                            "to 0.02 (2%); only used when Auto is off."
                         ),
                     ).props("dense").classes("drocat-input").style("width: 7rem")
                     brain_mesh_color_auto = checkbox_input(
@@ -771,7 +770,7 @@ def create_skeleton_tab():
                         )
                     with param_grid(1):
                         mesh_alpha = number_input(
-                            "ROI Mesh Opacity", 0.1, 0, 1, 0.05,
+                            "ROI Mesh Opacity", 0.05, 0, 1, 0.05,
                             hint=(
                                 "Global fallback opacity for ROI meshes. A color with an "
                                 "explicit opacity channel overrides it; colors without "

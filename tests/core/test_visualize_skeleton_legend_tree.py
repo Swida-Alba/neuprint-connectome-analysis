@@ -53,7 +53,7 @@ def _tagged_figure():
 
     mesh = go.Mesh3d(
         x=[0, 1, 0], y=[0, 0, 1], z=[0, 0, 0], i=[0], j=[1], k=[2],
-        color='#c8e6f0', opacity=0.1, name='Brain mesh', showlegend=True,
+        color='#c8e6f0', opacity=0.02, name='Brain mesh', showlegend=True,
     )
     mesh.legendrank = visualize_skeleton.BRAIN_MESH_LEGEND_RANK
     fig.add_trace(mesh)
@@ -132,19 +132,29 @@ def test_legend_tree_html_contains_panel_and_markers():
     assert 'navigator.webdriver' in html
     # panel sits on the right, below the theme switch
     assert 'position:fixed;right:10px;top:60px;' in html
+    assert '"brainMeshRank": 200000000' in html
+    assert '"vncMeshRank": 200000001' in html
+    assert 'width:280px;max-width:calc(100vw - 20px);' in html
+    assert 'overflow:auto;box-sizing:border-box;' in html
+    assert '.drocat-lt-items{padding-left:16px;min-width:max-content;}' in html
     # manual detector matches Plotly 6.4.0's native doubleClickDelay default
     assert '"doubleClickMs": 300' in html
     assert 'isDoubleClick' in html
     # the exported panel explains the configured timing to users
     assert 'Double-click window: under ' in html
     assert 'CONFIG.doubleClickMs' in html
-    # triangle caret that rotates when a group expands
+    # explicit closed/open caret glyphs keep the direction in sync with state
     assert '\\u25B6' in html
-    assert '.drocat-lt-expanded .drocat-lt-caret{transform:rotate(90deg);}' in html
+    assert r"caret.textContent = open ? '\u25BC' : '\u25B6';" in html
+    assert "row.setAttribute('aria-expanded', open ? 'true' : 'false');" in html
+    # ROI meshes share an expandable group; brain and VNC remain root rows.
+    assert "panel, 'ROI meshes'" in html
+    assert 'm.rank < CONFIG.brainMeshRank' in html
     # pre/post site traces get leaf rows; long item lists are scroll-capped
     assert 'addSiteLeaves' in html
     assert "children.length > 10" in html
     assert '.drocat-lt-items.drocat-lt-scroll{max-height:224px;' in html
+    assert 'min-width:0;overflow:auto;}' in html
 
 
 def test_write_plotly_html_embeds_tree_only_when_requested(tmp_path):

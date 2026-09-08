@@ -229,6 +229,11 @@ ROI_MESH_LEGEND_RANK_BASE = 100_000_000
 BRAIN_MESH_LEGEND_RANK = 200_000_000
 VNC_MESH_LEGEND_RANK = 200_000_001
 
+# Default mesh opacities. ROI meshes provide local anatomical context,
+# while the brain/VNC envelopes are intentionally lighter scene scaffolding.
+DEFAULT_ROI_MESH_ALPHA = 0.05
+DEFAULT_BRAIN_VNC_MESH_ALPHA = 0.02
+
 # Legend modes. 'tree' renders exactly like 'type' (same native legend,
 # used by static exports) and additionally tags traces so the exported
 # interactive HTML can embed a collapsible type -> neuron legend panel.
@@ -2513,7 +2518,7 @@ class VisualizeSkeleton:
     >>> mesh_color = [(255, 0, 0, 0.2), (0, 0, 255, 0.2)]  # Red and blue for 2 ROIs
     '''
 
-    mesh_alpha: float = 0.1
+    mesh_alpha: float = DEFAULT_ROI_MESH_ALPHA
     '''Alpha (transparency) for ROI meshes. 0.0 = transparent, 1.0 = opaque.
     
     This is a single value applied uniformly to all ROI meshes.
@@ -2851,26 +2856,26 @@ class VisualizeSkeleton:
     Supported Formats
     -----------------
     - **'auto'** (default): Automatically selects optimal color based on background_color:
-        • White background: 'rgba(200, 230, 240, 0.1)' (light blue, 10% opacity)
-        • Black background: 'rgba(60, 60, 70, 0.1)' (dark gray, 10% opacity)
+        • White background: 'rgba(200, 230, 240, 0.02)' (light blue, 2% opacity)
+        • Black background: 'rgba(60, 60, 70, 0.02)' (dark gray, 2% opacity)
     - **Named colors**: 'lightblue', 'gray', etc.
     - **Hex colors**: '#RGB', '#RGBA', '#RRGGBB', '#RRGGBBAA'
     - **RGB(A) tuples/lists**: 0-255 integers or normalized 0-1 floats
     - **CSS rgb/rgba and hsl/hsla strings**, including percentage alpha
 
-    An explicit alpha overrides the mesh default (0.1); a color without alpha
+    An explicit alpha overrides the mesh default (0.02); a color without alpha
     uses that default.
     
     Recommendations
     ---------------
-    - White background: Light blue/gray with 5-15% opacity
-    - Black background: Dark gray with 5-15% opacity to avoid mesh fragment highlights
+    - White background: Light blue/gray with 2-10% opacity
+    - Black background: Dark gray with 2-10% opacity to avoid mesh fragment highlights
     
     Examples
     --------
     >>> brain_mesh_color = 'auto'  # Adaptive (default)
-    >>> brain_mesh_color = 'rgba(200, 230, 240, 0.1)'  # Light blue, 10% opacity
-    >>> brain_mesh_color = (60, 60, 70, 0.1)  # Dark gray tuple
+    >>> brain_mesh_color = 'rgba(200, 230, 240, 0.02)'  # Light blue, 2% opacity
+    >>> brain_mesh_color = (60, 60, 70, 0.02)  # Dark gray tuple
     >>> brain_mesh_color = 'rgba(40, 40, 50, 0.05)'  # Very subtle for dark backgrounds
     '''
     
@@ -2894,14 +2899,14 @@ class VisualizeSkeleton:
     Supported Formats
     -----------------
     - **'auto'** (default): Automatically selects optimal color based on background_color:
-        • White background: 'rgba(200, 230, 240, 0.1)' (light green, 10% opacity)
-        • Black background: 'rgba(60, 60, 70, 0.1)' (dark green-gray, 10% opacity)
+        • White background: 'rgba(200, 230, 240, 0.02)' (light green, 2% opacity)
+        • Black background: 'rgba(60, 60, 70, 0.02)' (dark green-gray, 2% opacity)
     - **Named colors**: 'lightgreen', 'gray', etc.
     - **Hex colors**: '#RGB', '#RGBA', '#RRGGBB', '#RRGGBBAA'
     - **RGB(A) tuples/lists**: 0-255 integers or normalized 0-1 floats
     - **CSS rgb/rgba and hsl/hsla strings**, including percentage alpha
 
-    An explicit alpha overrides the mesh default (0.1); a color without alpha
+    An explicit alpha overrides the mesh default (0.02); a color without alpha
     uses that default.
     
     Note: Default 'auto' uses slightly different hue from brain_mesh_color to distinguish.
@@ -2924,8 +2929,12 @@ class VisualizeSkeleton:
         theme toggle (viewing time) so the two can never drift apart.
         """
         return {
-            'light': 'rgba(200, 230, 240, 0.1)',  # Light blue, 10% opacity
-            'dark': 'rgba(60, 60, 70, 0.1)',  # Subtle dark gray, 10% opacity
+            'light': (
+                f'rgba(200, 230, 240, {DEFAULT_BRAIN_VNC_MESH_ALPHA})'
+            ),  # Light blue, 2% opacity
+            'dark': (
+                f'rgba(60, 60, 70, {DEFAULT_BRAIN_VNC_MESH_ALPHA})'
+            ),  # Subtle dark gray, 2% opacity
         }
 
     def _get_effective_mesh_color(self, mesh_type='brain'):
@@ -3699,14 +3708,19 @@ class VisualizeSkeleton:
         site traces; synapse-group and mesh traces get their own rows,
         with meshes pinned last.
         """
-        baked = {'meshRankBase': ROI_MESH_LEGEND_RANK_BASE,
-                 'doubleClickMs': TREE_DOUBLE_CLICK_INTERVAL_MS}
+        baked = {
+            'meshRankBase': ROI_MESH_LEGEND_RANK_BASE,
+            'brainMeshRank': BRAIN_MESH_LEGEND_RANK,
+            'vncMeshRank': VNC_MESH_LEGEND_RANK,
+            'doubleClickMs': TREE_DOUBLE_CLICK_INTERVAL_MS,
+        }
         panel_html = '<div id="drocat-legend-tree" style="display:none"></div>'
         style_html = (
             '<style>'
             '#drocat-legend-tree{position:fixed;right:10px;top:60px;'
-            'z-index:9999;max-width:280px;max-height:65vh;overflow-y:auto;'
-            'overflow-x:hidden;font:12px/1.6 -apple-system,BlinkMacSystemFont,'
+            'z-index:9999;width:280px;max-width:calc(100vw - 20px);'
+            'max-height:65vh;overflow:auto;box-sizing:border-box;'
+            'font:12px/1.6 -apple-system,BlinkMacSystemFont,'
             'Segoe UI,sans-serif;border-radius:8px;padding:6px 8px;'
             'background:rgba(255,255,255,0.92);color:#000;'
             'border:1px solid rgba(0,0,0,0.25);user-select:none;'
@@ -3716,16 +3730,15 @@ class VisualizeSkeleton:
             'border-color:rgba(255,255,255,0.28);}'
             '.drocat-lt-row{display:flex;align-items:center;gap:6px;'
             'padding:1px 2px;border-radius:4px;cursor:pointer;'
-            'white-space:nowrap;}'
+            'white-space:nowrap;min-width:max-content;}'
             '.drocat-lt-row:hover{background:rgba(128,128,128,0.18);}'
             '.drocat-lt-caret{width:10px;flex:0 0 auto;font-size:9px;'
-            'display:inline-block;transition:transform .15s;}'
-            '.drocat-lt-expanded .drocat-lt-caret{transform:rotate(90deg);}'
+            'display:inline-block;}'
+            '.drocat-lt-items{padding-left:16px;min-width:max-content;}'
             '.drocat-lt-swatch{width:11px;height:11px;border-radius:2px;'
             'flex:0 0 auto;display:inline-block;}'
-            '.drocat-lt-swatch-item{width:8px;height:8px;margin-left:10px;}'
-            '.drocat-lt-label{overflow:hidden;text-overflow:ellipsis;'
-            'flex:1 1 auto;}'
+            '.drocat-lt-swatch-item{width:8px;height:8px;}'
+            '.drocat-lt-label{flex:0 0 auto;white-space:nowrap;}'
             '.drocat-lt-count{opacity:.6;font-size:10px;flex:0 0 auto;}'
             '.drocat-lt-eye{flex:0 0 auto;font-size:10px;opacity:.85;}'
             '.drocat-lt-group-row{font-weight:600;}'
@@ -3736,7 +3749,7 @@ class VisualizeSkeleton:
             '.drocat-lt-header .drocat-lt-eye{cursor:pointer;font-size:11px;}'
             '.drocat-lt-help{opacity:.62;padding:0 2px 4px;font-size:10px;}'
             '.drocat-lt-items.drocat-lt-scroll{max-height:224px;'
-            'overflow-y:auto;overflow-x:hidden;}'
+            'min-width:0;overflow:auto;}'
             '.drocat-lt-section{font-weight:600;opacity:.65;'
             'margin:6px 0 2px 2px;font-size:10px;text-transform:uppercase;'
             'letter-spacing:.4px;}'
@@ -3993,6 +4006,7 @@ class VisualizeSkeleton:
     row.appendChild(label);
     row.appendChild(countEl);
     row.appendChild(eye);
+    row.setAttribute('aria-expanded', 'false');
     groupEl.appendChild(row);
     var itemsEl = makeEl('div', 'drocat-lt-items');
     itemsEl.style.display = 'none';
@@ -4016,6 +4030,8 @@ class VisualizeSkeleton:
       var open = itemsEl.style.display === 'none';
       itemsEl.style.display = open ? 'block' : 'none';
       groupEl.classList.toggle('drocat-lt-expanded', open);
+      caret.textContent = open ? '\\u25BC' : '\\u25B6';
+      row.setAttribute('aria-expanded', open ? 'true' : 'false');
     }
     caret.addEventListener('click', toggleExpand);
     label.addEventListener('click', toggleExpand);
@@ -4140,9 +4156,41 @@ class VisualizeSkeleton:
     }
     if (model.meshOrder.length) {
       panel.appendChild(makeEl('div', 'drocat-lt-section', 'Meshes'));
+      var roiMeshes = [];
+      var rootMeshes = [];
       model.meshOrder.forEach(function(name) {
         var m = model.meshes[name];
-        addToggleRow(panel, name, m.color || '#7f7f7f', m.indices);
+        /* Mesh ranks are assigned in separate bands by the Python renderer:
+           ROI meshes are grouped, while the brain and VNC envelopes remain
+           direct children of the Meshes section. */
+        if (m.rank < CONFIG.brainMeshRank) {
+          roiMeshes.push({name: name, mesh: m});
+        } else {
+          rootMeshes.push({name: name, mesh: m});
+        }
+      });
+      if (roiMeshes.length) {
+        var roiIndices = [];
+        roiMeshes.forEach(function(entry) {
+          roiIndices = roiIndices.concat(entry.mesh.indices);
+        });
+        var roiItems = attachExpandable(
+          panel, 'ROI meshes',
+          roiMeshes[0].mesh.color || '#7f7f7f',
+          roiMeshes.length, roiIndices
+        );
+        roiMeshes.forEach(function(entry) {
+          addToggleRow(
+            roiItems, entry.name,
+            entry.mesh.color || '#7f7f7f', entry.mesh.indices
+          );
+        });
+      }
+      rootMeshes.forEach(function(entry) {
+        addToggleRow(
+          panel, entry.name,
+          entry.mesh.color || '#7f7f7f', entry.mesh.indices
+        );
       });
     }
     /* Cap long item lists (a KCg-d-sized type holds hundreds of neurons):
@@ -6731,15 +6779,15 @@ class VisualizeSkeleton:
             )
         
         # Standardize brain_mesh_color and vnc_mesh_color if not 'auto'.
-        # Their default mesh opacity is 0.1; an explicit alpha in any
+        # Their default mesh opacity is 0.02; an explicit alpha in any
         # supported color format overrides it.
         if str(self.brain_mesh_color).strip().lower() != 'auto':
             self.brain_mesh_color = standardize_color(
-                self.brain_mesh_color, default_alpha=0.1
+                self.brain_mesh_color, default_alpha=DEFAULT_BRAIN_VNC_MESH_ALPHA
             )
         if str(self.vnc_mesh_color).strip().lower() != 'auto':
             self.vnc_mesh_color = standardize_color(
-                self.vnc_mesh_color, default_alpha=0.1
+                self.vnc_mesh_color, default_alpha=DEFAULT_BRAIN_VNC_MESH_ALPHA
             )
         
         # Ensure enough colors for all layers by expanding if needed
@@ -11809,10 +11857,6 @@ class VisualizeSkeleton:
                 legend_color_map = {}  # legend_group -> (color, should_show)
 
                 for trace, neuron_id, source_index, neuron_color in trace_entries:
-                    # Enforce opacity for lines if not already set or if we want to override
-                    if self.skeleton_mode == 'line':
-                        trace.opacity = self._extract_alpha_from_color(neuron_color)
-
                     # When custom colors forced one-neuron-at-a-time plotting,
                     # ``neuron_color`` is already the bodyId-resolved value
                     # passed to navis. Re-resolving from a generic trace name
@@ -11822,6 +11866,15 @@ class VisualizeSkeleton:
                         neuron_color = self._resolve_neuron_color(neuron_id, i)
                     if neuron_color != self.neuron_colors[i]:
                         self._apply_plotly_trace_color(trace, neuron_color)
+                    else:
+                        # navis rounds embedded Plotly color alpha to one
+                        # decimal place. Preserve low opacities such as 0.03
+                        # by keeping the generated RGB and applying opacity
+                        # through Plotly's separate trace property.
+                        self._apply_plotly_trace_opacity(
+                            trace,
+                            self._extract_alpha_from_color(neuron_color),
+                        )
 
                     if self.legend_mode == 'layer':
                         # Group all neurons in layer under one legend entry
@@ -14000,7 +14053,7 @@ class VisualizeSkeleton:
         return ['rgba(128, 128, 128, 1.0)']
     
     def _standardize_mesh_color_input(
-        self, color, default_alpha=0.1, continuous=False
+        self, color, default_alpha=DEFAULT_ROI_MESH_ALPHA, continuous=False
     ):
         """
         Standardize mesh_color input (can be single color or list of colors).
@@ -14546,10 +14599,10 @@ class VisualizeSkeleton:
             return override
         return color
 
-    def _apply_plotly_trace_color(self, trace, neuron_color):
-        """Apply a resolved neuron color to a Plotly trace."""
-        color_hex = self._rgba_to_hex(neuron_color)
-        color_alpha = self._extract_alpha_from_color(neuron_color)
+    def _apply_plotly_trace_color(self, trace, color):
+        """Apply a resolved color and exact opacity to a Plotly trace."""
+        color_hex = self._rgba_to_hex(color)
+        color_alpha = self._extract_alpha_from_color(color)
 
         if hasattr(trace, 'color'):
             try:
@@ -14561,6 +14614,60 @@ class VisualizeSkeleton:
         if hasattr(trace, 'marker') and trace.marker is not None:
             trace.marker.color = color_hex
         trace.opacity = color_alpha
+
+    def _apply_plotly_trace_opacity(self, trace, opacity):
+        """Apply exact opacity without inheriting embedded color alpha.
+
+        ``navis.plot3d`` formats volume colors with one decimal place in its
+        Plotly backend.  Consequently an opacity such as ``0.03`` can arrive
+        as ``rgba(..., 0.0)`` and become fully invisible before Plotly sees
+        the trace.  Keep the trace's existing RGB values, strip any embedded
+        alpha from string colors, and apply the requested value through
+        Plotly's separate ``opacity`` property.
+        """
+        try:
+            exact_opacity = min(1.0, max(0.0, float(opacity)))
+        except (TypeError, ValueError):
+            exact_opacity = 1.0
+
+        def opaque_color(value):
+            if isinstance(value, str):
+                try:
+                    return color_to_hex(value)
+                except (TypeError, ValueError):
+                    return value
+            if isinstance(value, (list, tuple)) and value and all(
+                isinstance(item, str) for item in value
+            ):
+                converted = [opaque_color(item) for item in value]
+                return tuple(converted) if isinstance(value, tuple) else converted
+            return value
+
+        owners = [trace]
+        for child_name in ('line', 'marker'):
+            try:
+                child = getattr(trace, child_name, None)
+            except Exception:
+                child = None
+            if child is not None:
+                owners.append(child)
+
+        for owner in owners:
+            for color_name in ('color', 'facecolor', 'vertexcolor'):
+                try:
+                    current = getattr(owner, color_name, None)
+                    if isinstance(current, str) or (
+                        isinstance(current, (list, tuple)) and current
+                        and all(isinstance(item, str) for item in current)
+                    ):
+                        setattr(owner, color_name, opaque_color(current))
+                except Exception:
+                    pass
+
+        try:
+            trace.opacity = exact_opacity
+        except Exception:
+            pass
 
     def _apply_k3d_object_color(self, obj, neuron_color):
         """Apply a resolved neuron color to a k3d object when supported."""
@@ -16489,6 +16596,12 @@ class VisualizeSkeleton:
                     with self._suppress_output():
                         fig_mesh = navis.plot3d(roiunits[roi_i], backend='plotly', color=color_hex, alpha=alpha)
                     mesh_traces = fig_mesh.data
+
+                    # navis' volume-to-Plotly adapter formats embedded alpha
+                    # to one decimal place, so reapply the exact requested
+                    # ROI color and opacity after it creates the traces.
+                    for trace in mesh_traces:
+                        self._apply_plotly_trace_color(trace, color_str)
                     
                     roi_name = roi_names[roi_i]
                     _configure_roi_mesh_traces(
@@ -16501,6 +16614,10 @@ class VisualizeSkeleton:
                         with self._suppress_output():
                             temp_plot = navis.plot3d(roiunits[roi_i], backend='k3d', inline=False, color=color_hex, alpha=alpha)
                         for obj in temp_plot.objects:
+                            # Keep K3D in the same exact-alpha path as the
+                            # brain/VNC meshes; this avoids relying on
+                            # backend-specific alpha handling in navis.
+                            self._apply_k3d_object_color(obj, color_str)
                             obj.name = f'brain region [{roi_names[roi_i]}]'
                             self.fig_3d += obj
                     except Exception as e:
