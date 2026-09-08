@@ -13,12 +13,18 @@ from that table to fill blank ``type``/``instance`` values.
 
 from __future__ import annotations
 
+import atexit
+import asyncio
 import html
+import multiprocessing
 import re
 import threading
+import weakref
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -40,20 +46,26 @@ from .search_logic import (
 try:
     from src.neuron_index_builder import (
         build_search_cache_frame,
+        dataset_identifier_from_folder,
         is_search_cache_compatible,
+        metadata_candidates as builder_metadata_candidates,
         metadata_columns,
         ordered_projection_columns,
         read_metadata_projection,
         search_cache_path,
+        viewer_search_columns,
     )
 except ImportError:
     from neuron_index_builder import (
         build_search_cache_frame,
+        dataset_identifier_from_folder,
         is_search_cache_compatible,
+        metadata_candidates as builder_metadata_candidates,
         metadata_columns,
         ordered_projection_columns,
         read_metadata_projection,
         search_cache_path,
+        viewer_search_columns,
     )
 
 
@@ -110,6 +122,99 @@ _INDEX_LOAD_LOCK = threading.RLock()
 _CROSS_DATASET_SCAN_LOCK = threading.RLock()
 CROSS_SCAN_SUPERSEDED = object()
 
+# A cold type-mapper load is CPU- and memory-heavy even when called from a
+# NiceGUI worker thread: pandas parsing and the mapper's Python graph build
+# still contend with the event loop in the UI process.  Keep a separate,
+# explicitly-spawned process for this workload.  One worker is intentional:
+# two cold mapper instances can otherwise multiply the peak RSS and recreate
+# the connection loss this guard is meant to prevent.  The worker stays alive
+# after its first scan, so later searches reuse its warm mapper.
+_CROSS_DATASET_PROCESS_POOL: Optional[ProcessPoolExecutor] = None
+_CROSS_DATASET_PROCESS_POOL_LOCK = threading.Lock()
+_CROSS_DATASET_PROCESS_ASYNC_LOCKS = weakref.WeakKeyDictionary()
+_CROSS_DATASET_PROCESS_ASYNC_LOCKS_LOCK = threading.Lock()
+
+
+def _cross_dataset_process_pool() -> ProcessPoolExecutor:
+    """Return the one-process pool used by cold cross-dataset scans."""
+    global _CROSS_DATASET_PROCESS_POOL
+    with _CROSS_DATASET_PROCESS_POOL_LOCK:
+        if _CROSS_DATASET_PROCESS_POOL is None:
+            # ``spawn`` keeps the UI process's large Polars/Pandas allocations
+            # out of the worker.  It also avoids forking a live asyncio/
+            # websocket process, which is unsafe on Unix.
+            context = multiprocessing.get_context("spawn")
+            _CROSS_DATASET_PROCESS_POOL = ProcessPoolExecutor(
+                max_workers=1, mp_context=context)
+        return _CROSS_DATASET_PROCESS_POOL
+
+
+def shutdown_cross_dataset_process_pool() -> None:
+    """Stop the dedicated mapper worker during app shutdown or test cleanup."""
+    global _CROSS_DATASET_PROCESS_POOL
+    with _CROSS_DATASET_PROCESS_POOL_LOCK:
+        pool = _CROSS_DATASET_PROCESS_POOL
+        _CROSS_DATASET_PROCESS_POOL = None
+    if pool is not None:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+atexit.register(shutdown_cross_dataset_process_pool)
+
+
+def _cross_dataset_process_async_lock() -> asyncio.Lock:
+    """Get the single-flight lock belonging to the current event loop."""
+    loop = asyncio.get_running_loop()
+    with _CROSS_DATASET_PROCESS_ASYNC_LOCKS_LOCK:
+        lock = _CROSS_DATASET_PROCESS_ASYNC_LOCKS.get(loop)
+        if lock is None:
+            lock = asyncio.Lock()
+            _CROSS_DATASET_PROCESS_ASYNC_LOCKS[loop] = lock
+        return lock
+
+
+async def run_cross_dataset_scan_in_process(
+    callback,
+    *args,
+    is_current=None,
+    **kwargs,
+):
+    """Run one picklable cross-dataset callback outside the UI process.
+
+    The callback must be a module-level function and return only picklable
+    data.  The async lock prevents the viewer and Type Mapping preview from
+    submitting competing cold scans, while ``is_current`` lets a queued
+    request disappear before its process allocates mapper/index state.
+    """
+    lock = _cross_dataset_process_async_lock()
+    async with lock:
+        if is_current is not None and not is_current():
+            return CROSS_SCAN_SUPERSEDED
+        loop = asyncio.get_running_loop()
+        pool = _cross_dataset_process_pool()
+        try:
+            return await loop.run_in_executor(
+                pool, partial(callback, *args, **kwargs))
+        except BrokenProcessPool:
+            # Do not fall back to a UI-process thread after the worker dies:
+            # that would reintroduce the websocket starvation.  The caller
+            # renders a recoverable error and a later search creates a fresh
+            # worker.
+            shutdown_cross_dataset_process_pool()
+            raise
+
+
+def is_type_mapper_loaded() -> bool:
+    """Return mapper readiness without triggering its lazy initialization."""
+    try:
+        from comparison import cross_dataset_type_mapper
+
+        mapper = getattr(cross_dataset_type_mapper,
+                         "_global_type_mapper", None)
+        return bool(mapper is not None and getattr(mapper, "_loaded", False))
+    except Exception:
+        return False
+
 
 def run_serialized_cross_dataset_scan(
     callback,
@@ -160,34 +265,10 @@ def neuron_index_state_path(dataset: str, cache_dir: Optional[Path] = None) -> P
 
 
 def _metadata_candidates(dataset: str, datasets_dir: Optional[Path]) -> List[Path]:
-    """Find generated metadata files, preferring the pulled CSV source."""
+    """Find generated metadata using the shared index-prep discovery rules."""
     if datasets_dir is None:
         datasets_dir = PROJECT_ROOT / "datasets"
-    folder = Path(datasets_dir) / dataset_to_folder(str(dataset).strip())
-    if not folder.is_dir():
-        return []
-
-    safe = folder.name
-    exact = [
-        folder / f"{safe}_allneurons_neuron_df.csv",
-        folder / f"{safe}_neuron_df.csv",
-        folder / f"{safe}_allneurons_neuron_df.parquet",
-        folder / f"{safe}_neuron_df.parquet",
-    ]
-    discovered = sorted(
-        [
-            p
-            for pattern in ("*_allneurons_neuron_df.csv", "*_neuron_df.csv",
-                            "*_allneurons_neuron_df.parquet", "*_neuron_df.parquet")
-            for p in folder.glob(pattern)
-        ],
-        key=lambda p: p.name,
-    )
-    result: List[Path] = []
-    for path in exact + discovered:
-        if path.is_file() and path not in result:
-            result.append(path)
-    return result
+    return builder_metadata_candidates(str(dataset).strip(), Path(datasets_dir))
 
 
 def _metadata_signature(dataset: str, datasets_dir: Optional[Path]) -> Optional[Tuple[str, int]]:
@@ -725,7 +806,7 @@ def _presorted_search_matches(
     def _explode_combined_cells(column_frame):
         """Split comma-joined cells into one searchable name per part.
 
-        FlyWire datasets pack several alternative type names into one
+        FAFB/BANC release datasets pack several alternative type names into one
         ``additional_type(s)`` cell (``'vDeltaB, vDeltaC, ...'``).  The
         joined string is not a real neuron name, so match and report each
         part individually — otherwise match groups (and any query value a
@@ -2469,14 +2550,29 @@ _ALIAS_INDEX_CACHE: Dict[Tuple[str, int], "CachedNeuronIndex"] = {}
 
 
 def datasets_with_cached_indexes(cache_dir: Optional[Path] = None) -> List[str]:
-    """Datasets from the static list that have a local neuron index."""
+    """Return every known or locally indexed dataset.
+
+    Keep the configured list first for stable UI ordering, then discover
+    additional index folders so a newly pulled release participates in
+    cross-dataset search without requiring a code/config update.
+    """
     from .config import DATASETS
 
-    return [
+    root = Path(cache_dir) if cache_dir is not None else PROJECT_ROOT / "neuron_indexes"
+    datasets = [
         dataset
         for dataset in DATASETS
         if neuron_index_path(dataset, cache_dir).is_file()
     ]
+    if not root.is_dir():
+        return datasets
+    for folder in sorted(root.iterdir(), key=lambda path: path.name):
+        if not folder.is_dir() or not (folder / "neuron_index.parquet").is_file():
+            continue
+        dataset = dataset_identifier_from_folder(folder.name)
+        if dataset and dataset not in datasets:
+            datasets.append(dataset)
+    return datasets
 
 
 def count_type_in_index(index: "CachedNeuronIndex", type_name: str) -> Optional[int]:
@@ -2484,6 +2580,19 @@ def count_type_in_index(index: "CachedNeuronIndex", type_name: str) -> Optional[
     if index is None or "type" not in index.frame.columns:
         return None
     import polars as pl
+
+    search_frame = getattr(index, "search_frame", None)
+    if search_frame is not None and {
+            "search_column", "search_value", "__neuron_rows"}.issubset(
+                set(search_frame.columns)):
+        rows = search_frame.filter(
+            (pl.col("search_column") == "type")
+            & (pl.col("search_value") == str(type_name))
+        )
+        if rows.is_empty():
+            return 0
+        return int(rows.select(
+            pl.col("__neuron_rows").list.len().sum()).item())
 
     return int(index.frame.filter(pl.col("type") == type_name).height)
 
@@ -2500,6 +2609,27 @@ def count_types_in_index(index: "CachedNeuronIndex",
     if index is None or not names or "type" not in index.frame.columns:
         return {}
     import polars as pl
+
+    search_frame = getattr(index, "search_frame", None)
+    if search_frame is not None and {
+            "search_column", "search_value", "__neuron_rows"}.issubset(
+                set(search_frame.columns)):
+        rows = (
+            search_frame
+            .filter(
+                (pl.col("search_column") == "type")
+                & pl.col("search_value").is_in(names)
+            )
+            .with_columns(
+                pl.col("__neuron_rows").list.len().alias("__count"))
+            .group_by("search_value")
+            .agg(pl.col("__count").sum())
+            .to_dicts()
+        )
+        return {
+            str(row["search_value"]): int(row["__count"])
+            for row in rows
+        }
 
     rows = (
         index.frame
@@ -2700,8 +2830,22 @@ def pool_bridge_body_ids(source_dataset: str, target_dataset: str,
     Optional BANC match columns remain mapper provenance, not coverage
     constraints.  The BANC release relation may provide participant pools
     for release-coverage diagnostics, but its individual pairs are never
-    exposed as matched neurons. Returns independent source/target coverage
-    together with the legacy ``granularity``/``coverage`` aliases.
+    exposed as matched neurons.
+
+    Returns the independent per-side pools plus:
+
+    * ``source_coverage`` / ``target_coverage`` — human-readable
+      ``covered <pool> of <total> (<pct>)`` strings (shared formatter;
+      ``coverage`` stays the historical target-side alias, ``""`` when
+      that side could not be measured);
+    * ``source_pool_size`` / ``source_type_total`` / ``target_pool_size``
+      / ``target_type_total`` — the same numbers machine-readable (the
+      totals are ``None`` for an unmeasurable side);
+    * ``source_basis`` / ``target_basis`` — WHICH pool state produced the
+      numbers: ``"linker rows"`` (measured subset), ``"full population"``
+      (unconstrained side), ``"release relation participants"``, or
+      ``"unmeasured"`` (coverage index unavailable);
+    * ``granularity`` (``"n to m"``) and ``coverage_basis``.
     """
     import polars as pl
 
@@ -2774,10 +2918,9 @@ def pool_bridge_body_ids(source_dataset: str, target_dataset: str,
             continue
         frame = index.frame.filter(pl.col("type") == endpoint_type)
         frame = frame.filter(_cell_contains(pl.col(column), value))
-        body_ids = [
+        body_ids = list(dict.fromkeys(
             str(b) for b in frame.select("bodyId").to_series().to_list()
-            if str(b).strip()
-        ]
+            if str(b).strip()))
         per_linker.append({
             "column": column, "value": value, "home": home,
             "body_ids": body_ids,
@@ -2799,6 +2942,7 @@ def pool_bridge_body_ids(source_dataset: str, target_dataset: str,
         if entry.get("column") == "banc_release_crosswalk"]
     release_pairs = _banc_release_pairs_for_direction(
         source_dataset, target_dataset)
+    release_pools = False
     if release_entries and release_pairs:
         source_type_ids = _type_body_id_set(
             loaded.get(source_dataset), source_type)
@@ -2810,6 +2954,7 @@ def pool_bridge_body_ids(source_dataset: str, target_dataset: str,
             if source_id in source_type_ids and target_id in target_type_ids
         ]
         if valid_pairs:
+            release_pools = True
             source_pool = list(dict.fromkeys(
                 source_id for source_id, _ in valid_pairs))
             target_pool = list(dict.fromkeys(
@@ -2857,12 +3002,29 @@ def pool_bridge_body_ids(source_dataset: str, target_dataset: str,
     granularity = f"{len(source_pool)} to {len(target_pool)}"
     source_total = count_type_in_index(loaded.get(source_dataset), source_type)
     target_total = count_type_in_index(loaded.get(target_dataset), foreign_type)
+    # Shared formatter: thousands separators + the share in parentheses,
+    # matching the rendered coverage cells (user 2026-09-09).
+    from comparison.mapping_visualization import format_coverage
+
     source_coverage = (
-        f"covered {len(source_pool)} of {source_total}"
+        f"covered {format_coverage(len(source_pool), source_total)}"
         if source_total is not None else "")
     target_coverage = (
-        f"covered {len(target_pool)} of {target_total}"
+        f"covered {format_coverage(len(target_pool), target_total)}"
         if target_total is not None else "")
+    def _side_basis(had_linker: bool, dataset: str) -> str:
+        # One of four pool states per side: the release relation supplied
+        # participants, a linker measured a subset, the unconstrained
+        # fallback used the full endpoint type population, or the side's
+        # coverage index was unavailable so nothing was measured at all.
+        if release_pools:
+            return "release relation participants"
+        if had_linker:
+            return "linker rows"
+        if loaded.get(dataset) is None:
+            return "unmeasured"
+        return "full population"
+
     return {
         "per_linker": per_linker,
         "source_body_ids": source_pool,
@@ -2872,8 +3034,39 @@ def pool_bridge_body_ids(source_dataset: str, target_dataset: str,
         "coverage": target_coverage,
         "source_coverage": source_coverage,
         "target_coverage": target_coverage,
+        # Numeric pool/total pairs for machine-readable exports and the
+        # basis-aware coverage cells (None total = side not measurable).
+        "source_pool_size": len(source_pool),
+        "source_type_total": source_total,
+        "target_pool_size": len(target_pool),
+        "target_type_total": target_total,
+        "source_basis": _side_basis(had_source_linker, source_dataset),
+        "target_basis": _side_basis(had_target_linker, target_dataset),
         "coverage_basis": "independent endpoint pools; no bodyId pairing",
     }
+
+
+def chain_is_supported(pool: Dict[str, Any], target_dataset: str) -> bool:
+    """False when a pooled bridge chain carries no target-side evidence.
+
+    A chain whose standardized linkers all home on the TARGET dataset yet
+    every one pooled zero rows on the reached type derives nothing
+    observable: the walk followed an annotation name graph whose token
+    never appears on the reached type's rows.  Such a chain would render a
+    mapping whose own coverage reads ``0 of N`` — dropped by the pooling
+    callers as a safety net on top of the mapper's derivation licensing.
+    Chains without any target-home linker (same-name / crosswalk arrival
+    with full-population pools) and chains whose target side could not be
+    measured (``target_basis == "unmeasured"``) are supported by default.
+    """
+    if not pool or pool.get("target_basis") == "unmeasured":
+        return True
+    target_linkers = [
+        linker for linker in (pool.get("per_linker") or [])
+        if linker.get("home") == target_dataset]
+    if not target_linkers:
+        return True
+    return any(linker.get("body_ids") for linker in target_linkers)
 
 
 def _load_alias_index(dataset: str) -> Optional["CachedNeuronIndex"]:
@@ -2926,7 +3119,29 @@ def _native_label_columns(index: "CachedNeuronIndex") -> List[str]:
     priority = ("class", "subclass", "superclass",
                 "cellclass", "celltype", "group")
     found = []
-    for column in index.frame.columns:
+    # Cross-dataset scans may keep only the ``type`` column in ``frame`` and
+    # answer taxonomy lookups from the compact search sidecar.  Derive the
+    # available label names from that sidecar in its stored priority order;
+    # falling back to the frame keeps old/test indexes working unchanged.
+    columns = list(index.frame.columns)
+    search_frame = getattr(index, "search_frame", None)
+    if search_frame is not None and {
+            "search_column", "search_priority"}.issubset(
+                set(search_frame.columns)):
+        try:
+            columns = [
+                str(row["search_column"])
+                for row in (
+                    search_frame
+                    .select(["search_column", "search_priority"])
+                    .unique(subset=["search_column"], maintain_order=True)
+                    .sort("search_priority")
+                    .to_dicts()
+                )
+            ]
+        except Exception:
+            columns = list(index.frame.columns)
+    for column in columns:
         norm = re.sub(r"[^a-z0-9]", "", str(column).casefold())
         if norm in _NATIVE_LABEL_COLUMNS:
             found.append((priority.index(norm), column))
@@ -2944,6 +3159,12 @@ def _load_cross_match_index(dataset: str) -> Optional["CachedNeuronIndex"]:
     duplicated the selected table's memory footprint during a mapping search
     and could take down the NiceGUI websocket before results were rendered.
 
+    When a compatible ``neuron_index_search.parquet`` sidecar exists, native
+    matching uses that distinct-value index and loads only the ``type`` column
+    for the small row-ordinal-to-type join used by label coverage.  The old
+    projected-column path remains the fallback for legacy indexes without a
+    sidecar.
+
     This helper intentionally does not memoize the projected frame.  The
     caller keeps only the compact match summaries, allowing the projected
     frames to be reclaimed before mapper enrichment starts.
@@ -2956,6 +3177,70 @@ def _load_cross_match_index(dataset: str) -> Optional["CachedNeuronIndex"]:
     try:
         schema = pl.read_parquet_schema(path)
         columns = list(schema)
+        search_path = search_cache_path(path)
+        if "type" in columns and search_path.is_file():
+            sidecar_schema = pl.read_parquet_schema(search_path)
+            required_sidecar = {
+                "__neuron_rows", "search_column", "search_priority",
+                "search_value", "search_value_folded",
+            }
+            expected_search_columns = viewer_search_columns(columns)
+            sidecar_compatible = required_sidecar.issubset(
+                set(sidecar_schema))
+            if sidecar_compatible:
+                try:
+                    priority_rows = (
+                        pl.scan_parquet(search_path)
+                        .select(["search_column", "search_priority"])
+                        .unique(subset=["search_column"],
+                                maintain_order=True)
+                        .sort("search_priority")
+                        .collect()
+                        .to_dicts()
+                    )
+                    actual_search_columns = [
+                        str(row.get("search_column") or "")
+                        for row in priority_rows
+                    ]
+                    actual_priorities = [
+                        int(row.get("search_priority"))
+                        for row in priority_rows
+                    ]
+                    sidecar_compatible = (
+                        actual_search_columns == expected_search_columns
+                        and actual_priorities == list(
+                            range(len(expected_search_columns)))
+                    )
+                except Exception:
+                    sidecar_compatible = False
+            if sidecar_compatible:
+                native_columns = [
+                    column for column in columns
+                    if column == "type"
+                    or re.sub(r"[^a-z0-9]", "", str(column).casefold())
+                    in _NATIVE_LABEL_COLUMNS
+                ]
+                # Predicate-push the sidecar read and discard unrelated
+                # searchable metadata (bodyId, instance, and arbitrary type
+                # fields).  The full sidecar is only a few MB on disk but its
+                # list column can be tens of MB when decoded.
+                search_frame = (
+                    pl.scan_parquet(search_path)
+                    .filter(pl.col("search_column").is_in(native_columns))
+                    .collect()
+                )
+                # ``__neuron_rows`` in the sidecar are ordinals into this
+                # exact parquet row order.  No bodyId or wide metadata is
+                # needed for native type/label matching.
+                frame = pl.read_parquet(path, columns=["type"])
+                return CachedNeuronIndex(
+                    dataset=str(dataset),
+                    path=path,
+                    frame=frame,
+                    columns=("type",),
+                    enriched=False,
+                    search_frame=search_frame,
+                )
         needed = [
             column
             for column in columns
@@ -3046,17 +3331,44 @@ def _native_type_matches(
 
     if "type" not in index.frame.columns:
         return [], 0
-    folded = pl.col("type").cast(pl.Utf8, strict=False).str.to_lowercase()
     folded_needle = needle.casefold()
-    match = (
-        folded.str.starts_with(folded_needle)
-        if prefix_only
-        else folded.str.contains(folded_needle, literal=True)
-    )
-    hits = index.frame.filter(folded.is_not_null() & match)
-    if hits.is_empty():
-        return [], 0
-    grouped_frame = hits.group_by("type").len()
+    search_frame = getattr(index, "search_frame", None)
+    grouped_frame = None
+    if search_frame is not None and {
+            "search_column", "search_value", "search_value_folded",
+            "__neuron_rows"}.issubset(set(search_frame.columns)):
+        type_rows = search_frame.filter(pl.col("search_column") == "type")
+        if not type_rows.is_empty():
+            folded = pl.col("search_value_folded").cast(
+                pl.Utf8, strict=False)
+            match = (
+                folded.str.starts_with(folded_needle)
+                if prefix_only
+                else folded.str.contains(folded_needle, literal=True)
+            )
+            hits = type_rows.filter(folded.is_not_null() & match)
+            if not hits.is_empty():
+                # The sidecar has one row per distinct written type and keeps
+                # the matching source ordinals as a list, so counting the
+                # list length is the indexed equivalent of grouping the wide
+                # metadata table by ``type``.
+                grouped_frame = hits.select(
+                    pl.col("search_value").alias("type"),
+                    pl.col("__neuron_rows").list.len().alias("len"),
+                )
+            else:
+                return [], 0
+    if grouped_frame is None:
+        folded = pl.col("type").cast(pl.Utf8, strict=False).str.to_lowercase()
+        match = (
+            folded.str.starts_with(folded_needle)
+            if prefix_only
+            else folded.str.contains(folded_needle, literal=True)
+        )
+        hits = index.frame.filter(folded.is_not_null() & match)
+        if hits.is_empty():
+            return [], 0
+        grouped_frame = hits.group_by("type").len()
     total_types = grouped_frame.height
     bounded_prefix = bool(prefix_only and cap < 10 ** 9)
     if bounded_prefix:
@@ -3101,6 +3413,105 @@ def _native_type_matches(
     return matches[:cap], max(0, len(matches) - cap)
 
 
+def _native_label_matches_from_sidecar(
+    index: "CachedNeuronIndex",
+    needle: str,
+    cap: int,
+    types_cap: int,
+    *,
+    prefix_only: bool = False,
+):
+    """Search taxonomy values from the compact distinct-value sidecar.
+
+    The sidecar stores source row ordinals per value.  Only rows belonging to
+    the few displayed labels are looked up in the narrow ``type`` frame, so a
+    broad one-character prefix never scans or materializes the wide index.
+    """
+    import polars as pl
+
+    search_frame = index.search_frame
+    folded_needle = needle.casefold()
+    matches = []
+    bounded_prefix = bool(prefix_only and cap < 10 ** 9)
+    total_matching_labels = 0
+    type_by_row = None
+    if "type" in index.frame.columns:
+        type_by_row = index.frame.with_row_index("__neuron_row").select(
+            ["__neuron_row", "type"])
+
+    for column in _native_label_columns(index):
+        label_rows = search_frame.filter(
+            pl.col("search_column") == column)
+        if label_rows.is_empty():
+            continue
+        folded = pl.col("search_value_folded").cast(
+            pl.Utf8, strict=False)
+        match = (
+            folded.str.starts_with(folded_needle)
+            if prefix_only
+            else folded.str.contains(folded_needle, literal=True)
+        )
+        labels_frame = (
+            label_rows
+            .filter(folded.is_not_null() & match)
+            .with_columns(
+                pl.col("__neuron_rows").list.len().alias("len"))
+            .select(["search_value", "__neuron_rows", "len"])
+        )
+        if labels_frame.is_empty():
+            continue
+        total_matching_labels += labels_frame.height
+        if bounded_prefix:
+            labels_frame = labels_frame.sort(
+                ["len", "search_value"], descending=[True, False]
+            ).head(max(0, cap))
+        else:
+            labels_frame = labels_frame.sort(
+                ["len", "search_value"], descending=[True, False])
+
+        for label, row_ids, count in labels_frame.iter_rows():
+            label = str(label or "")
+            if not label or folded_needle not in label.casefold():
+                continue
+            covered = []
+            total_types = 0
+            if type_by_row is not None and row_ids:
+                types_frame = type_by_row.filter(
+                    pl.col("__neuron_row").is_in(row_ids))
+                type_groups_frame = types_frame.group_by("type").len()
+                total_types = type_groups_frame.height
+                type_groups = (
+                    type_groups_frame
+                    .sort(["len", "type"], descending=[True, False])
+                    .head(max(0, types_cap) if bounded_prefix else 10 ** 9)
+                    .to_dicts()
+                )
+                covered = [
+                    {"name": str(group["type"]),
+                     "count": int(group["len"])}
+                    for group in type_groups if group["type"]
+                ]
+            matches.append({
+                "label": label,
+                "column": column,
+                "count": int(count),
+                "matched_written": label,
+                "covered_all": covered,
+                "types": covered[:types_cap],
+                "types_truncated": (
+                    max(0, total_types - len(covered))
+                    if bounded_prefix
+                    else max(0, len(covered) - types_cap)
+                ),
+            })
+    matches.sort(key=lambda item: -item["count"])
+    if bounded_prefix:
+        visible_labels = min(max(0, cap), len(matches))
+        return matches[:cap], max(
+            0, total_matching_labels - visible_labels)
+    return matches[:cap], max(0, len(matches) - cap)
+
+
 def _native_label_matches(
     index: "CachedNeuronIndex",
     needle: str,
@@ -3116,6 +3527,13 @@ def _native_label_matches(
     'types_truncated'}`` sorted by count (descending).
     """
     import polars as pl
+
+    search_frame = getattr(index, "search_frame", None)
+    if search_frame is not None and {
+            "__neuron_rows", "search_column", "search_value",
+            "search_value_folded"}.issubset(set(search_frame.columns)):
+        return _native_label_matches_from_sidecar(
+            index, needle, cap, types_cap, prefix_only=prefix_only)
 
     folded_needle = needle.casefold()
     matches = []
@@ -3767,6 +4185,29 @@ def collect_zero_hit_matches(
     # path to the connection disappearing under R1 and other short queries.
     return run_serialized_cross_dataset_scan(
         _collect_zero_hit_matches,
+        dataset,
+        search,
+        datasets,
+        matched_values,
+        prefix_only_search=prefix_only_search,
+    )
+
+
+def collect_zero_hit_matches_in_process(
+    dataset: str,
+    search: str,
+    datasets: Optional[List[str]] = None,
+    matched_values: Optional[List[tuple]] = None,
+    *,
+    prefix_only_search: bool = False,
+) -> Dict[str, Any]:
+    """Pickle-safe process entry point for the viewer's mapper expansion.
+
+    Keep this as a module-level function so ``spawn`` can import it without
+    serializing a UI closure.  The process-local mapper and index caches stay
+    in the dedicated worker and never compete with the websocket process.
+    """
+    return _collect_zero_hit_matches(
         dataset,
         search,
         datasets,

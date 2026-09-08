@@ -39,8 +39,8 @@ flywire types becomes a 1-to-N conflict instead of a bogus joined name).
 
 #### Renamed FlyWire types (additional Type(S) columns)
 
-FlyWire datasets publish an extra additional-type column that records type
-renames between releases:
+FAFB and BANC releases publish release-specific additional-type columns that
+record type renames between releases:
 
 - FAFB v783: `additional_type(s)` in
   `datasets/flywire_FAFB_v783/flywire_FAFB_v783_allneurons_neuron_df.csv`
@@ -88,7 +88,11 @@ wins; unresolved splits become a `TypeMappingConflict`. A known match-bodyId
 whose target `type` contradicts a FAFB/MCNS label removes that row's vote.
 `auto:` values, `Unknown`, empty labels, and bare numeric sentinels are never
 mapping evidence. These bridges are direct-only: BANC is not introduced as a
-connector between unrelated endpoint pairs.
+connector between unrelated endpoint pairs. A label hop is also a
+**derivation endpoint**: once it lands in the target namespace, the chain
+ends there — the label cell names the reached type exactly, and continuing
+into that namespace's annotation graph would only drift onto unrelated
+primaries (see the cross-reference rule below).
 
 `fafb_alignment_cell_type` is retained for search/alignment metadata only; it
 does not create a type bridge. `fanc_cell_type` is intentionally unlicensed
@@ -114,6 +118,17 @@ though no crosswalk row connects them. The derivation walk lands the
 shared token in the other namespace (a dedicated hop) and continues over
 that namespace's own annotation edges, so every chain carries the full
 evidence (both annotation columns appear as linkers).
+
+**Cross-reference rule (within one namespace)**: a primary type's
+annotation cell that names *another primary of the same namespace* is a
+cross-reference, not a rename — BANC's `Alternative Cell Type(s)`
+concatenates the other datasets' curated labels, so such a token usually
+describes how a neuron is called ELSEWHERE. The walk therefore never hops
+from a primary to another primary via that primary's own annotation cell.
+This closes the name-graph wander where one oddly-labeled neuron bridged a
+circadian type (`l-LNv`) onto every primary sharing its `BM_InOm` label
+(1,212 interommatidial bristle neurons) with zero supporting rows on the
+reached types.
 
 Production resolution applies the bridge as an overlay with this
 precedence:
@@ -219,6 +234,19 @@ implementation reference lives in
   annotation continuation is a two-linker registry-standard privilege
   (male-cns↔FAFB etc.); BANC pairs cannot wander their annotation
   classes after landing.
+- **Curated label / release / alias hops end the derivation** — when one
+  of these linkers lands in the target namespace, nothing may follow it
+  (the reached type's rows carry the evidence themselves); when it lands
+  in a licensed intermediate (BANC `malecns_cell_type` → male-cns), only
+  the licensed hub leg may continue, never an annotation hop.
+- **Primary→annotation-primary hops are refused** — a primary's
+  annotation cell naming another primary of the SAME namespace is a
+  cross-reference (see above), not a rename edge; the derivation never
+  hops through it.
+- **Zero-evidence chains are dropped at pooling** — as a safety net, a
+  chain whose target-side linkers all pool zero rows on the reached type
+  never renders (its own coverage would read `0 of n`); the UI logs the
+  drop instead of showing an unsupported derivation.
 - **Untyped labels** (`Unknown`, empty, bare numbers) never become
   bridge nodes or targets.
 
@@ -226,7 +254,9 @@ implementation reference lives in
 
 BANC v626 and BANC v888 are separate mapping namespaces, each resolving
 against its OWN neuron tables — a `banc_v888` selection can never land
-v626 names or pool v626 bodyIds. They have one narrow exception: the
+v626 names or pool v626 bodyIds. Both releases sit in the mapper's
+`DATASET_PRIORITY` walk (v888 right after v626), so a v888-only type name
+auto-detects its own namespace instead of falling through to "unknown". They have one narrow exception: the
 metadata-backed `root_626`↔`root_888` relation provides a direct
 `banc_release_crosswalk` type bridge. It retains duplicate `root_626` rows,
 uses `root_888` (never `banc_888_id`), and never falls back to equal numeric
@@ -503,6 +533,7 @@ Type mappings are available for:
 - `male-cns:v0.9` (canonical reference)
 - `flywire_FAFB_v783`
 - `banc_v626`
+- `banc_v888`
 - `hemibrain:v1.2.1`
 - `manc:v1.0` / `manc:v1.2.1`
 

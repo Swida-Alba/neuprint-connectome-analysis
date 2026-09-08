@@ -176,10 +176,25 @@ def test_global_search_composes_the_selection(panel_client):
         'Type coverage — flywire_FAFB_v783 → male-cns:v1.0' in label
         and 'bidirectional' in label
         for label in labels)
+    # 2026-09-09: the second view is "Backward" (not "Reverse"), and both
+    # views name their coverage columns by DATASET so nothing reads as
+    # flipped
+    assert any(label.startswith('Backward —') for label in labels)
+    assert not any(label.startswith('Reverse —') for label in labels)
+    coverage_tables = [
+        e for e in client.elements.values()
+        if type(e).__name__ == 'Table'
+        and any('side (bodyIds)' in c.get('label', '')
+                for c in e._props.get('columns', []))]
+    assert coverage_tables, 'dataset-named coverage columns missing'
+    for table in coverage_tables:
+        column_labels = {c['label'] for c in table._props['columns']}
+        assert 'flywire_FAFB_v783 side (bodyIds)' in column_labels
+        assert 'male-cns:v1.0 side (bodyIds)' in column_labels
     # artifact + CSV actions of the per-pair card are present
     for action in ('Sankey (type-level)', 'Sankey (linker)',
                    'Network (type-level)', 'Network (linker)',
-                   'Export bridges (CSV)'):
+                   'Export mapping'):
         assert any(action in str(getattr(b, 'text', ''))
                    for b in _buttons(client)), action
     # the confirmed search is recorded in the panel's OWN history store —

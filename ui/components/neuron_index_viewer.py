@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-import threading
 import time
 from pathlib import Path
-from typing import Callable, List
+from typing import Any, Callable, Dict, List, Optional
 
 from nicegui import run, ui
 
@@ -18,13 +17,19 @@ from ..neuron_index import (
     NO_DERIVATION_TEXT,
     build_matches_csv,
     collect_zero_hit_matches,
+    collect_zero_hit_matches_in_process,
     count_types_in_index,
+    is_type_mapper_loaded,
     load_cached_neuron_index,
     mapped_csv_extras,
     neuron_index_path,
+    chain_is_supported,
     pool_bridge_body_ids,
     query_match_group_subtypes,
     query_neuron_index,
+    run_cross_dataset_scan_in_process,
+    run_serialized_cross_dataset_scan,
+    CROSS_SCAN_SUPERSEDED,
 )
 
 
@@ -38,53 +43,24 @@ MATCH_GROUP_PAGE_SIZE = 50
 # delayed table update. Cover the maximum scroll-settle plus notification
 # lifetime so that these events can never start a second focus animation.
 FOCUS_DEDUP_SECONDS = 3.2
-# The viewer's table search ignores single-character input: one letter would
-# re-filter the whole index on every keystroke with mostly noise, while the
-# standard query inputs keep their own first-character suggestion menu.
+# The viewer's automatic table search ignores single-character input: one
+# letter would re-filter the whole index on every keystroke with mostly noise.
+# The explicit Search button can still submit a deliberate one-character query.
 MIN_SEARCH_CHARS = 2
 
 
-def _effective_search_text(raw: str) -> str:
+def _effective_search_text(raw: str, *, force: bool = False) -> str:
     """Return the search text this box sends to the backend.
 
     Queries shorter than :data:`MIN_SEARCH_CHARS` (measured after stripping)
-    stay unfiltered, so the first typed character alone never matches.
+    stay unfiltered during automatic refreshes, so the first typed character
+    alone never matches. An explicit Search button can set ``force`` to allow
+    a deliberate one-character query.
     """
     text = str(raw or "").strip()
-    if len(text) < MIN_SEARCH_CHARS:
+    if not text or (not force and len(text) < MIN_SEARCH_CHARS):
         return ""
     return text
-
-
-_ALIAS_MAPPER_PREWARM_STARTED = False
-
-
-def _prewarm_alias_mapper() -> None:
-    """Load the cross-dataset type mapper in a background thread, once.
-
-    The alias panel uses it for zero-hit searches.  Loading it lazily at
-    the first zero-hit search would freeze that refresh for seconds (the
-    male-cns + FAFB + BANC tables are read and indexed), so the viewer
-    starts the load as soon as an index is displayed.
-    """
-    global _ALIAS_MAPPER_PREWARM_STARTED
-    if _ALIAS_MAPPER_PREWARM_STARTED:
-        return
-    _ALIAS_MAPPER_PREWARM_STARTED = True
-
-    def _load() -> None:
-        try:
-            from comparison.cross_dataset_type_mapper import get_type_mapper
-
-            get_type_mapper()
-        except Exception:
-            # A failed prewarm only delays the expansion to the first
-            # zero-hit search, where collect_alias_matches retries.
-            pass
-
-    threading.Thread(
-        target=_load, daemon=True, name="drocat-alias-mapper-prewarm"
-    ).start()
 
 
 def _normalized_focus_keys(keys) -> tuple[str, ...]:
@@ -191,8 +167,8 @@ def _render_missing_cache(content, dataset: str, path: Path) -> None:
             language="bash",
         ).classes("w-full")
         ui.label(
-            "NeuPrint datasets need a configured token. FlyWire datasets must be "
-            "prepared locally first; follow the matching preparation guide in Settings."
+            "NeuPrint datasets need a configured token. FAFB must be prepared "
+            "locally and BANC uses its public release; follow the matching guide in Settings."
         ).classes("text-caption drocat-muted")
 
 
@@ -248,10 +224,6 @@ def _render_index(
         with content:
             ui.label("The cached neuron index is empty.").classes("text-body2 drocat-warn")
         return
-
-    # The alias panel needs the type mapper; start its one-time load now so
-    # a later zero-hit search does not stall on it.
-    _prewarm_alias_mapper()
 
     if header_meta is not None:
         with header_meta:
@@ -361,8 +333,9 @@ def _render_index(
                         refresh_query_preview()
                 ui.label(
                     "Search returns all matches across bodyId, type, instance, and useful "
-                    "type/taxonomy fields once the query has at least two characters; a "
-                    "single character never filters the table. Strict case-sensitive "
+                    "type/taxonomy fields once the query has at least two characters; "
+                    "typing a single character does not auto-filter, but Search can "
+                    "force a safe prefix-only search for it. Strict case-sensitive "
                     "prefixes come first, followed by case-insensitive substring "
                     "matches. Choose a target column and match mode to apply that rule "
                     "directly to this search box (Contains matches anywhere, without "
@@ -375,8 +348,9 @@ def _render_index(
         else:
             ui.label(
                 "Search returns all matches across bodyId, type, instance, and useful "
-                "type/taxonomy fields once the query has at least two characters; a "
-                "single character never filters the table. Strict case-sensitive "
+                "type/taxonomy fields once the query has at least two characters; "
+                "typing a single character does not auto-filter, but Search can "
+                "force a safe prefix-only search for it. Strict case-sensitive "
                 "prefixes come first, followed by case-insensitive substring matches. "
                 "Choose a target column and match mode to apply that rule directly to "
                 "this search box (Contains matches anywhere, without starts-with "
@@ -392,6 +366,11 @@ def _render_index(
                 placeholder="e.g. aMe12 or 5813",
             ).props("outlined clearable input-debounce=180").classes(
                 "flex-grow drocat-input drocat-neuron-search-field"
+            )
+            search_button = ui.button("Search", icon="search").props(
+                "unelevated color=primary"
+            ).classes("drocat-neuron-search-submit").tooltip(
+                "Run this query, including a deliberate one-character search"
             )
             filter_options = {"__none__": "No column filter"}
             filter_options.update({column: _column_label(column) for column in columns})
@@ -445,6 +424,11 @@ def _render_index(
                 "drocat-select drocat-neuron-search-field"
             ).style("min-width: 120px")
 
+        single_char_warning = ui.label("").classes(
+            "text-caption drocat-warn drocat-neuron-search-warning"
+        )
+        single_char_warning.set_visibility(False)
+
         filter_operator.set_enabled(False)
 
         # Cross-dataset search panel: always rendered on a zero-hit query,
@@ -457,16 +441,27 @@ def _render_index(
         ) as alias_section:
             alias_container = ui.element("div").classes("w-full")
         alias_section.set_visibility(False)
-        # Generation counter for the alias scan: every new query or hidden
+        # Current-key state for the alias scan: every new query or hidden
         # panel voids the result of a scan still running in the background,
         # so a stale scan can never overwrite newer UI state. The last
         # completed scan is cached per query, so paging and display changes
         # never re-run the mapper.
         alias_scan = {
-            "generation": 0,
             "cache": {"key": None, "matches": None},
             "expanded": False,
+            # The input change and the explicit Search button can describe
+            # the same query.  Coalesce that request while the cold mapper
+            # scan is running instead of queueing a second copy.
+            "current_key": None,
+            "inflight_key": None,
         }
+        # Search/filter events can arrive faster than the indexed query can
+        # finish. Keep a monotonically increasing generation so an older
+        # worker result can never repaint a newer query.
+        refresh_generation = {"value": 0}
+        # A forced one-character query remains active for paging and display
+        # changes until the user edits the search text again.
+        search_state = {"forced_text": None}
 
         initial = query_neuron_index(index, page_size=50)
         match_columns = [
@@ -595,7 +590,56 @@ def _render_index(
                 keys.update(group_members.get(value, set()))
             return keys
 
-        def current_query_kwargs() -> dict:
+        def current_search_text(*, force_search: bool = False) -> str:
+            raw_text = str(search_input.value or "").strip()
+            forced = bool(raw_text) and search_state["forced_text"] == raw_text
+            return _effective_search_text(
+                raw_text,
+                force=force_search or forced,
+            )
+
+        def current_prefix_only_search(*, force_search: bool = False) -> bool:
+            """Keep an explicit one-character global search to prefix hits.
+
+            A letter such as ``L`` appears in the hemisphere suffix of most
+            instances. Expanding that deliberate one-character search to all
+            case-insensitive substrings creates a result set large enough to
+            overwhelm the websocket and the process. Prefix hits still cover
+            names such as ``R7`` and ``R8`` across every searchable field.
+            """
+            raw_text = str(search_input.value or "").strip()
+            forced = bool(raw_text) and search_state["forced_text"] == raw_text
+            return bool(
+                raw_text
+                and len(raw_text) == 1
+                and (force_search or forced)
+            )
+
+        def update_single_char_warning() -> None:
+            """Explain the bounded behavior of a one-character query."""
+            raw_text = str(search_input.value or "").strip()
+            if len(raw_text) != 1:
+                single_char_warning.set_visibility(False)
+                return
+            forced = search_state["forced_text"] == raw_text
+            if forced:
+                single_char_warning.text = (
+                    "Warning: this one-character search returns starts-with "
+                    "matches only for performance; substring matches are not "
+                    "searched. Cross-dataset mapping, when enabled, follows "
+                    "the same starts-with-only rule."
+                )
+            else:
+                single_char_warning.text = (
+                    "Warning: one-character searches use starts-with matches "
+                    "only for performance; press Search to run this query. "
+                    "Cross-dataset mapping, when enabled, follows the same "
+                    "starts-with-only rule."
+                )
+            single_char_warning.update()
+            single_char_warning.set_visibility(True)
+
+        def current_query_kwargs(*, force_search: bool = False) -> dict:
             """Return the search/filter/sort kwargs shared by page and key queries."""
             requested_sort = sort_column.value
             if requested_sort == "__match_value__":
@@ -605,17 +649,20 @@ def _render_index(
                     "__match_value__" if direction.value == "desc" else None
                 )
             return {
-                "search": _effective_search_text(search_input.value),
+                "search": current_search_text(force_search=force_search),
                 "search_column": target_column.value,
                 "search_operator": filter_operator.value,
                 "sort_by": requested_sort,
                 "descending": direction.value == "desc",
+                "prefix_only_search": current_prefix_only_search(
+                    force_search=force_search
+                ),
             }
 
-        def query_kwargs_with_mapped() -> dict:
+        def query_kwargs_with_mapped(*, force_search: bool = False) -> dict:
             """Query kwargs; in mapped view the type set replaces the search."""
             if not mapped_view.get("active"):
-                return current_query_kwargs()
+                return current_query_kwargs(force_search=force_search)
             requested_sort = sort_column.value
             if requested_sort in (None, "", "__match_value__"):
                 requested_sort = "type"
@@ -942,7 +989,7 @@ def _render_index(
             )
             focus_keys = match_member_keys(focus_value)
             if selected_rows and focus_keys:
-                request_focus(focus_keys, anchor_key=focus_keys[0])
+                return request_focus(focus_keys, anchor_key=focus_keys[0])
             else:
                 refresh_table_selection()
 
@@ -976,8 +1023,7 @@ def _render_index(
             if bool(args.get("selected")):
                 focus_keys = match_member_keys(value)
                 if focus_keys:
-                    request_focus(focus_keys, anchor_key=focus_keys[0])
-                    return
+                    return request_focus(focus_keys, anchor_key=focus_keys[0])
             refresh_table_selection()
 
         def build_subtype_entry(group) -> dict:
@@ -1488,7 +1534,7 @@ def _render_index(
 
         def _hide_alias_panel() -> None:
             """Hide the panel and void any alias scan still in flight."""
-            alias_scan["generation"] += 1
+            alias_scan["current_key"] = None
             alias_section.set_visibility(False)
 
         def _export_matches_csv() -> None:
@@ -1501,7 +1547,8 @@ def _render_index(
             try:
                 csv_text = build_matches_csv(
                     dataset, str(search_input.value or "").strip(),
-                    matched_values=list(last_matched_values))
+                    matched_values=list(last_matched_values),
+                    prefix_only_search=current_prefix_only_search())
             except Exception:
                 csv_text = ""
             if not csv_text:
@@ -1588,7 +1635,7 @@ def _render_index(
                 mapped_view.clear()
                 _restore_map_columns()
                 mapped_warning_section.set_visibility(False)
-                refresh(reset_page=True)
+                return _dispatch_refresh(reset_page=True)
             else:
                 # reset_and_refresh clears the mapped view via the value
                 # change handler.
@@ -1613,23 +1660,26 @@ def _render_index(
             same scan as a collapsed expansion above the results. The auto
             type mapper initializes lazily and its first scan can take a
             while, so the panel shows an explicit status immediately and the
-            scan runs in a daemon thread. The generation counter voids
+            scan runs in a dedicated worker (a spawned process for a cold
+            mapper, otherwise a thread). The current-key check voids
             results superseded by a newer query or a hidden panel; the last
             completed scan is cached per query so paging and display changes
-            never re-run it.
+            never re-run it. A forced one-character query carries the same
+            starts-with-only bound into the native cross-dataset scan.
             """
             query_text = str(search_input.value or "").strip()
+            prefix_only_search = current_prefix_only_search()
             zero_hit = last_result_total["value"] == 0
             matched_pairs = list(last_matched_values)
-            alias_scan["generation"] += 1
-            generation = alias_scan["generation"]
-
             cache_key = (
                 dataset,
                 query_text,
+                prefix_only_search,
+                zero_hit,
                 tuple(sorted((c.casefold(), v.casefold())
                              for c, v in matched_pairs)),
             )
+            alias_scan["current_key"] = cache_key
 
             def _apply(matches) -> None:
                 native = (matches or {}).get("native", [])
@@ -1992,16 +2042,57 @@ def _render_index(
                 _apply(cached["matches"])
                 return
 
+            if alias_scan["inflight_key"] == cache_key:
+                # A newer table refresh rebuilt the footer while the same
+                # expansion is still running.  Keep one visible busy row and
+                # let the existing worker publish its result for this key.
+                _render_alias_status(
+                    f"Checking the other cached datasets for '{query_text}'…",
+                    busy=True,
+                )
+                return
+
+            alias_scan["inflight_key"] = cache_key
+
             async def _scan_async() -> None:
                 # Heavy scan off the event loop; NiceGUI elements are only
-                # touched here, back on the loop, after the await.
+                # touched here, back on the loop, after the await.  A cold
+                # mapper is process-isolated because its pandas/Python load
+                # can starve the websocket even from a thread.
                 try:
-                    matches = await run.io_bound(
-                        collect_zero_hit_matches, dataset, query_text,
-                        matched_values=matched_pairs)
+                    # The generation check belongs inside the process-wide
+                    # single-flight boundary: stale workers may be queued
+                    # behind a cold R1 scan, and checking only after the call
+                    # still lets each stale worker allocate its own mapper /
+                    # Parquet working set.
+                    if not is_type_mapper_loaded():
+                        matches = await run_cross_dataset_scan_in_process(
+                            collect_zero_hit_matches_in_process,
+                            dataset,
+                            query_text,
+                            matched_values=matched_pairs,
+                            prefix_only_search=prefix_only_search,
+                            is_current=lambda: (
+                                alias_scan["current_key"] == cache_key),
+                        )
+                    else:
+                        matches = await run.io_bound(
+                            run_serialized_cross_dataset_scan,
+                            collect_zero_hit_matches,
+                            dataset,
+                            query_text,
+                            matched_values=matched_pairs,
+                            prefix_only_search=prefix_only_search,
+                            is_current=lambda: (
+                                alias_scan["current_key"] == cache_key),
+                        )
                 except Exception:
                     matches = None
-                if alias_scan["generation"] != generation:
+                if alias_scan["inflight_key"] == cache_key:
+                    alias_scan["inflight_key"] = None
+                if matches is CROSS_SCAN_SUPERSEDED:
+                    return
+                if alias_scan["current_key"] != cache_key:
                     return  # a newer query or a hidden panel superseded this
                 if matches is None:
                     _render_alias_status(
@@ -2015,16 +2106,31 @@ def _render_index(
                     _apply(matches)
 
             if zero_hit:
-                _render_alias_status(
-                    f"No matches for '{query_text}' in {dataset}. Mapping other "
-                    "datasets — initializing the auto type mapper…",
-                    busy=True,
-                )
+                if is_type_mapper_loaded():
+                    status = (
+                        f"No matches for '{query_text}' in {dataset}. Mapping "
+                        "other datasets…"
+                    )
+                else:
+                    status = (
+                        f"No matches for '{query_text}' in {dataset}. Warming "
+                        "the isolated auto type mapper; the app stays "
+                        "responsive…"
+                    )
+                _render_alias_status(status, busy=True)
             else:
-                _render_alias_status(
-                    f"Checking the other cached datasets for '{query_text}'…",
-                    busy=True,
-                )
+                if is_type_mapper_loaded():
+                    status = (
+                        f"Checking the other cached datasets for "
+                        f"'{query_text}'…"
+                    )
+                else:
+                    status = (
+                        f"Checking the other cached datasets for "
+                        f"'{query_text}' — warming the isolated auto type "
+                        "mapper; the app stays responsive…"
+                    )
+                _render_alias_status(status, busy=True)
             # On the app loop (production), scan off-loop and render the
             # result back on the loop; without a running loop (direct /
             # test invocation) execute inline so results land
@@ -2110,7 +2216,7 @@ def _render_index(
             _restore_map_columns()
             mapped_warning_section.set_visibility(False)
             if was_active:
-                refresh(reset_page=True)
+                return _dispatch_refresh(reset_page=True)
 
         def _mapping_flows_and_pools(entry) -> tuple:
             """Flows + per-bridge bodyId pools for one foreign block.
@@ -2136,8 +2242,12 @@ def _render_index(
             foreign_ds = entry.get("dataset", "")
             if foreign_ds:
                 try:
-                    from ..neuron_index import load_cached_neuron_index
-                    foreign_index = load_cached_neuron_index(foreign_ds)
+                    # Mapping artifacts need only endpoint bodyIds, types,
+                    # and linker columns for coverage.  Loading the foreign
+                    # wide display index here duplicated the largest table
+                    # precisely when the user opened an R1 mapped view.
+                    from ..neuron_index import _load_coverage_index
+                    foreign_index = _load_coverage_index(foreign_ds)
                 except Exception:
                     foreign_index = None
             for flow in flows:
@@ -2153,15 +2263,19 @@ def _render_index(
                     continue
                 linkers = standardize_bridge(chain, dataset, foreign_ds)
                 try:
-                    pools[(flow["source_type"], flow["foreign_type"])] = (
-                        pool_bridge_body_ids(
-                            dataset, foreign_ds, linkers,
-                            flow["source_type"], flow["foreign_type"],
-                            indexes={dataset: index,
-                                     foreign_ds: foreign_index}
-                            if foreign_index is not None else None))
+                    pool = pool_bridge_body_ids(
+                        dataset, foreign_ds, linkers,
+                        flow["source_type"], flow["foreign_type"],
+                        indexes={dataset: index,
+                                 foreign_ds: foreign_index}
+                        if foreign_index is not None else None)
                 except Exception:
                     continue
+                if not chain_is_supported(pool, foreign_ds):
+                    # zero target-side evidence on the reached type — the
+                    # artifacts must not weight an unsupported derivation
+                    continue
+                pools[(flow["source_type"], flow["foreign_type"])] = pool
             return flows, pools
 
         def _render_mapping_artifact(kind: str, variant: str,
@@ -2269,11 +2383,23 @@ def _render_index(
                 # Provenance per (local target, foreign type) pair, deduplicated
                 # and built from the standardized linkers so every dataset
                 # behaves identically (values included, hub routes flagged).
-                from comparison.cross_dataset_type_mapper import (
-                    bridge_linker_text,
-                    get_type_mapper,
-                )
-                mapper = get_type_mapper()
+                from comparison.cross_dataset_type_mapper import bridge_linker_text
+
+                # Cold cross-dataset scans run in an isolated worker.  Their
+                # result already carries the bridge chains needed for this
+                # view; loading the mapper again in the websocket process
+                # would put the original cold-start failure back on the
+                # user's click.  Warm, in-process results retain the fallback
+                # for compatibility with older callers.
+                mapper = None
+                mapper_loaded = is_type_mapper_loaded()
+                if mapper_loaded:
+                    try:
+                        from comparison.cross_dataset_type_mapper import get_type_mapper
+
+                        mapper = get_type_mapper()
+                    except Exception:
+                        mapper = None
                 for item in items:
                     ann = item.get("mapped")
                     if not ann:
@@ -2283,10 +2409,16 @@ def _render_index(
                         if pair_key in provenance_pairs:
                             continue
                         provenance_pairs.add(pair_key)
-                        try:
-                            chains = mapper.get_type_bridges(
-                                target, dataset, foreign)
-                        except Exception:
+                        stored_bridges = item.get("bridges_by_target") or {}
+                        if target in stored_bridges:
+                            chains = stored_bridges.get(target) or []
+                        elif mapper is not None:
+                            try:
+                                chains = mapper.get_type_bridges(
+                                    target, dataset, foreign)
+                            except Exception:
+                                chains = []
+                        else:
                             chains = []
                         linker_info = bridge_linker_text(
                             chains, dataset, foreign, item["name"])
@@ -2345,7 +2477,7 @@ def _render_index(
                 "pools": pools,
             })
             _apply_map_columns()
-            refresh(reset_page=True)
+            return _dispatch_refresh(reset_page=True)
 
         # A QTable gesture may emit both a value-click and a selection event.
         # Coalesce those duplicate events by their exact anchor while still
@@ -2472,6 +2604,10 @@ def _render_index(
         match_previous_button.set_enabled(match_state["page"] > 1)
         match_next_button.set_enabled(match_state["page"] < pages)
 
+    def _next_refresh_generation() -> int:
+        refresh_generation["value"] += 1
+        return refresh_generation["value"]
+
     def refresh(
         _event=None,
         *,
@@ -2479,8 +2615,13 @@ def _render_index(
         focus_key: str | None = None,
         focus_keys=None,
         focus_anchor_key: str | None = None,
+        force_search: bool = False,
+        _result=None,
+        _generation: int | None = None,
     ):
         nonlocal full_table_all_keys
+        if _generation is None:
+            _next_refresh_generation()
         if reset_page:
             state["page"] = 1
             match_state["page"] = 1
@@ -2492,20 +2633,23 @@ def _render_index(
         # Selecting every row needs the complete result set; fetching it here
         # would make every keystroke build the whole key map, so it stays lazy.
         full_table_all_keys = None
-        def run_query(requested_page: int, requested_focus_key: str | None = None):
-            return query_neuron_index(
-                index,
-                **query_kwargs_with_mapped(),
-                page=requested_page,
-                page_size=current_page_size,
-                focus_key=requested_focus_key,
-            )
+        if _result is None:
+            def run_query(requested_page: int, requested_focus_key: str | None = None):
+                return query_neuron_index(
+                    index,
+                    **query_kwargs_with_mapped(force_search=force_search),
+                    page=requested_page,
+                    page_size=current_page_size,
+                    focus_key=requested_focus_key,
+                )
 
-        result = run_query(state["page"], focus_key)
-        if focus_key and result.focus_page and result.focus_page != result.page:
-            # The first pass computes the sorted position; the second fetches
-            # only the page containing that position.
-            result = run_query(result.focus_page)
+            result = run_query(state["page"], focus_key)
+            if focus_key and result.focus_page and result.focus_page != result.page:
+                # The first pass computes the sorted position; the second fetches
+                # only the page containing that position.
+                result = run_query(result.focus_page)
+        else:
+            result = _result
         state["page"] = result.page
         current_rows[:] = list(result.rows)
         if mapped_view.get("active"):
@@ -2626,7 +2770,7 @@ def _render_index(
         elif (
             cross_mapping_mode is not None
             and cross_mapping_mode.get("enabled")
-            and _effective_search_text(search_input.value)
+            and current_search_text()
         ):
             # Cross-dataset type mapping mode: the native rows stay, and the
             # cross-dataset scan co-displays as a collapsed expansion above
@@ -2636,6 +2780,102 @@ def _render_index(
         else:
             _hide_alias_panel()
             mapped_warning_section.set_visibility(False)
+
+    async def refresh_async(
+        _event=None,
+        *,
+        reset_page: bool = False,
+        focus_key: str | None = None,
+        focus_keys=None,
+        focus_anchor_key: str | None = None,
+        force_search: bool = False,
+    ):
+        """Run an interactive index query away from NiceGUI's event loop.
+
+        Polars does the heavy filtering and match-group construction in
+        ``query_neuron_index``. Running it inline blocks websocket heartbeats;
+        a search on a large cached index can then look like a disconnected
+        app. Capture the request before yielding to the worker and discard
+        results superseded by a later event.
+        """
+        nonlocal full_table_all_keys
+        generation = _next_refresh_generation()
+        if reset_page:
+            state["page"] = 1
+            match_state["page"] = 1
+        try:
+            current_page_size = int(page_size.value or 50)
+        except (TypeError, ValueError):
+            current_page_size = 50
+        state["page_size"] = current_page_size
+        full_table_all_keys = None
+        query_kwargs = query_kwargs_with_mapped(force_search=force_search)
+
+        async def run_query(requested_page: int,
+                            requested_focus_key: str | None = None):
+            return await run.io_bound(
+                query_neuron_index,
+                index,
+                **query_kwargs,
+                page=requested_page,
+                page_size=current_page_size,
+                focus_key=requested_focus_key,
+            )
+
+        try:
+            result = await run_query(state["page"], focus_key)
+            if result is None or refresh_generation["value"] != generation:
+                return
+            if focus_key and result.focus_page and result.focus_page != result.page:
+                # The first pass computes the sorted position; the second
+                # fetches only the page containing that position.
+                result = await run_query(result.focus_page)
+                if result is None:
+                    return
+        except asyncio.CancelledError:
+            return
+
+        if refresh_generation["value"] != generation:
+            return
+        refresh(
+            reset_page=reset_page,
+            focus_key=focus_key,
+            focus_keys=focus_keys,
+            focus_anchor_key=focus_anchor_key,
+            force_search=force_search,
+            _result=result,
+            _generation=generation,
+        )
+
+    def _dispatch_refresh(
+        *,
+        reset_page: bool = False,
+        focus_key: str | None = None,
+        focus_keys=None,
+        focus_anchor_key: str | None = None,
+        force_search: bool = False,
+    ):
+        """Use the worker-backed refresh for app events, sync fallback for tests."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # NiceGUI's direct test client has no running app loop. Keep this
+            # deterministic path synchronous so existing component tests can
+            # invoke event listeners without an application server.
+            return refresh(
+                reset_page=reset_page,
+                focus_key=focus_key,
+                focus_keys=focus_keys,
+                focus_anchor_key=focus_anchor_key,
+                force_search=force_search,
+            )
+        return refresh_async(
+            reset_page=reset_page,
+            focus_key=focus_key,
+            focus_keys=focus_keys,
+            focus_anchor_key=focus_anchor_key,
+            force_search=force_search,
+        )
 
     def _view_active_mapping(kind: str, variant: str) -> None:
         """Mapped-view banner dispatch: render the stored flows + pools
@@ -2678,7 +2918,7 @@ def _render_index(
         elif (
             cross_mapping_mode is not None
             and cross_mapping_mode.get("enabled")
-            and _effective_search_text(search_input.value)
+            and current_search_text()
         ):
             render_alias_matches()
         else:
@@ -2687,19 +2927,59 @@ def _render_index(
     if cross_mapping_mode is not None:
         cross_mapping_mode["refresh"] = refresh_result_panels
 
-    def reset_and_refresh(_event=None):
-        # Any query change leaves the mapped-type view: the expansion panel
-        # re-evaluates from scratch on the next refresh.
+    def _clear_mapped_view_for_query() -> None:
         if mapped_view.get("active"):
             mapped_view.clear()
             _restore_map_columns()
             mapped_warning_section.set_visibility(False)
-        refresh(reset_page=True)
+
+    def handle_search_change(_event=None):
+        """Handle automatic search without launching a one-character query.
+
+        A single character is intentionally not an automatic search. Returning
+        before dispatching a refresh is important for large indexes: even an
+        otherwise unfiltered refresh needlessly competes with the websocket
+        while the user is still deciding whether to press Search.
+        """
+        _clear_mapped_view_for_query()
+        raw_text = str(search_input.value or "").strip()
+        if raw_text and search_state["forced_text"] == raw_text:
+            # An explicit Search click can be followed by the input's
+            # debounced value event for the same text.  The click already
+            # submitted this query; suppressing the duplicate avoids a
+            # second full-index scan while the first R1 request is warming
+            # the cross-dataset mapper.
+            update_single_char_warning()
+            return None
+        search_state["forced_text"] = None
+        update_single_char_warning()
+        if raw_text and not _effective_search_text(raw_text):
+            # Do not leave a completed cross-dataset expansion for the prior
+            # query visible while the user is composing this guarded input.
+            _hide_alias_panel()
+            return None
+        return _dispatch_refresh(reset_page=True)
+
+    def reset_and_refresh(_event=None, *, clear_forced_search: bool = True):
+        # Any query change leaves the mapped-type view: the expansion panel
+        # re-evaluates from scratch on the next refresh.
+        _clear_mapped_view_for_query()
+        if clear_forced_search:
+            search_state["forced_text"] = None
+        update_single_char_warning()
+        return _dispatch_refresh(reset_page=True)
+
+    def force_search(_event=None):
+        """Submit the current text, including a deliberate one-character query."""
+        _clear_mapped_view_for_query()
+        search_state["forced_text"] = str(search_input.value or "").strip() or None
+        update_single_char_warning()
+        return _dispatch_refresh(reset_page=True, force_search=True)
 
     def display_refresh(_event=None):
         """Sort / Order / Rows are display controls, not query changes:
         the mapped-type view is a display state and must survive them."""
-        refresh(reset_page=True)
+        return _dispatch_refresh(reset_page=True)
 
     def request_focus(focus_keys, anchor_key: str | None = None) -> None:
         """Run one page-jump/focus request for one user action.
@@ -2725,7 +3005,7 @@ def _render_index(
             return
         focus_request["requested_at"] = now
         focus_request["anchor"] = anchor
-        refresh(
+        return _dispatch_refresh(
             focus_key=anchor,
             focus_keys=normalized,
             focus_anchor_key=anchor,
@@ -2741,23 +3021,26 @@ def _render_index(
         # click chooses the same anchor every time.
         member_keys = tuple(sorted(group_members.get(value, ())))
         if member_keys:
-            request_focus(member_keys, anchor_key=member_keys[0])
+            return request_focus(member_keys, anchor_key=member_keys[0])
 
-    search_input.on_value_change(reset_and_refresh)
+    search_input.on_value_change(handle_search_change)
+    search_button.on_click(force_search)
     def handle_filter_column_change(event):
         has_target = target_column.value not in {None, "", "__none__"}
         filter_operator.set_enabled(has_target)
-        reset_and_refresh(event)
+        return reset_and_refresh(event, clear_forced_search=False)
 
     target_column.on_value_change(handle_filter_column_change)
-    filter_operator.on_value_change(reset_and_refresh)
+    filter_operator.on_value_change(
+        lambda event: reset_and_refresh(event, clear_forced_search=False)
+    )
     sort_column.on_value_change(display_refresh)
     direction.on_value_change(display_refresh)
     page_size.on_value_change(display_refresh)
 
     def change_page(delta):
         state["page"] = max(1, state["page"] + delta)
-        refresh()
+        return _dispatch_refresh()
 
     def change_match_page(delta):
         match_state["page"] = max(1, match_state["page"] + delta)

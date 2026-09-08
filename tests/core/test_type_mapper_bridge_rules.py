@@ -435,3 +435,78 @@ class TestRealBridgeRules:
                 for chain in mapper.get_type_bridges(t, src, tgt):
                     assert not CrossDatasetTypeMapper._is_untyped_value(
                         chain[-1]['value']), (t, src, tgt, chain)
+
+
+# ---------------------------------------------------------------------------
+# BANC label-hop terminality (user 2026-09-09: the l-LNv -> BM_* fan-out)
+# ---------------------------------------------------------------------------
+
+def test_label_hop_and_primary_valued_alt_are_derivation_dead_ends():
+    """The FAFB l-LNv -> BANC BM_* screenshot regression.
+
+    Real shape (BANC v888): one l-LNv neuron carries curated
+    malecns_cell_type 'BM_InOm', so l-LNv's Alternative Cell Type(s)
+    lists 'BM_InOm' — ANOTHER BANC primary.  Composing the l-LNv label
+    bridge with BANC-internal annotation hops used to derive
+    l-LNv -> every primary whose cells list 'BM_InOm' (BM_InOm's 1,212
+    neurons included) with zero supporting rows on the reached types.
+
+    Two dead ends close this:
+
+    * curated label hops (fafb_cell_type et al.) are derivation
+      ENDPOINTS — nothing may follow them;
+    * a primary's annotation listing another primary's name is a
+      cross-reference, not a rename, so no primary->alt edge may hop to
+      a primary-valued token.
+    """
+    m = _bare_mapper()
+    m._dataset_types = {
+        FAFB: {},
+        BANC: {'l-LNv': {'b1'}, 'BM_InOm': {'b2'}, 'BM_MaPa': {'b3'}},
+    }
+    _seed_flywire(m, fafb_primaries=('l-LNv',),
+                  banc_primaries=('l-LNv', 'BM_InOm', 'BM_MaPa'))
+    # l-LNv(BANC)'s ACT lists 'BM_InOm' (another primary); the BM_* types'
+    # own cells list 'BM_InOm' as well.
+    m._flywire_primary_to_alts[BANC] = {'l-LNv': {'BM_InOm'}}
+    m._flywire_alt_to_primary[BANC] = {'BM_InOm': {'l-LNv', 'BM_MaPa'}}
+    # Curated label evidence: BANC l-LNv rows carry fafb_cell_type
+    # 'l-LNv' — a direct, supported 1-hop bridge in both directions.
+    m._banc_label_edges = {
+        (BANC, 'l-LNv'): [(FAFB, 'l-LNv', 'fafb_cell_type', 'l-LNv', BANC)],
+        (FAFB, 'l-LNv'): [(BANC, 'l-LNv', 'fafb_cell_type', 'l-LNv', BANC)],
+    }
+
+    forward = m.get_type_bridges('l-LNv', FAFB, BANC)
+    assert {chain[-1]['value'] for chain in forward} == {'l-LNv'}
+    label_chain = (
+        (FAFB, 'type', 'l-LNv'),
+        (BANC, 'fafb_cell_type', 'l-LNv'),
+    )
+    assert label_chain in {chain_key(c) for c in forward}
+
+    reverse = m.get_type_bridges('l-LNv', BANC, FAFB)
+    assert {chain[-1]['value'] for chain in reverse} == {'l-LNv'}
+
+    # BM_MaPa has no route into FAFB: its own cells list 'BM_InOm', but
+    # that token is a BANC primary, so the primary->alt hop is refused.
+    assert m.get_type_bridges('BM_MaPa', BANC, FAFB) == []
+
+
+def test_designed_fafb_at_to_banc_act_standard_survives():
+    """The legit annotation standard keeps deriving: a FAFB primary's
+    additional_type(s) token 'X' that is NOT itself a primary lands in
+    BANC's ACT cells and reaches the BANC primaries annotated with X."""
+    m = _bare_mapper()
+    m._dataset_types = {FAFB: {}, BANC: {'Q1': {'b1'}, 'Q2': {'b2'}}}
+    _seed_flywire(
+        m, fafb_primaries=('P1',), banc_primaries=('Q1', 'Q2'),
+        fafb_ann={'X': {'P1'}},           # P1's rows list old name 'X'
+        banc_ann={'X': {'Q1', 'Q2'}},     # BANC ACT cells listing 'X'
+    )
+    chains = m.get_type_bridges('P1', FAFB, BANC)
+    assert {chain[-1]['value'] for chain in chains} == {'Q1', 'Q2'}
+    for chain in chains:
+        columns = [h['column'] for h in chain[1:]]
+        assert columns == ['additional_type(s)', 'Alternative Cell Type(s)',
+                           'Alternative Cell Type(s)'], chain

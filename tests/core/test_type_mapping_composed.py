@@ -131,17 +131,23 @@ def test_bridges_csv_contract():
     text = build_bridges_csv(flows, pools={
         ('T2, X', 'T3'): {'source_body_ids': [1, 2],
                           'target_body_ids': [3, 4, 5],
-                          'source_coverage': 'covered 2 of 2',
-                          'target_coverage': 'covered 2 of 3'}})
+                          'source_coverage': 'covered 2 of 2 (100.0%)',
+                          'target_coverage': 'covered 2 of 3 (66.7%)'}})
     lines = text.strip().splitlines()
-    assert lines[0] == ('dataset,entry_kind,matched_column,name,foreign_type,'
-                        'neuron_count,mapped_kind,mapped_to,map_used,'
-                        'bridge-flywireType,pool_coverage')
-    # linker-bearing row: bridge cell filled, quoting handles the comma
-    assert 'male-cns:v1.0,type,type,T1,T1,4,mapped,T1,' in lines[1]
-    # bare same-name row: empty bridge cell, pool coverage filled
+    assert lines[0] == (
+        'source_dataset,source_entry,matched_column,source_type,'
+        'target_dataset,target_type,relationship,source_neurons,'
+        'target_neurons,bridge,bridge_columns,mapping_origin,'
+        'source_pool,source_total,target_pool,target_total,'
+        'pool_coverage,pool_coverage_basis')
+    # linker-bearing row: explicit endpoints, matched entry + column
+    assert lines[1].startswith(
+        'male-cns:v1.0,T1,type,T1,flywire_FAFB_v783,T1,1-to-1,4,4,')
+    assert 'flywireType' in lines[1] and ',mapped,' in lines[1]
+    # bare same-name row: no linker columns, same-name origin, pool
+    # coverage filled (quoting handles the comma in the type name)
     assert '"T2, X"' in lines[2] and 'same name' in lines[2]
-    assert lines[2].endswith('source covered 2 of 2; target covered 2 of 3')
+    assert 'source covered 2 of 2 (100.0%); target covered 2 of 3 (66.7%)' in lines[2]
     assert build_bridges_csv([]) is None
 
 
@@ -167,34 +173,25 @@ def test_zero_count_endpoints_still_render_labeled():
 
 
 def test_combined_bridges_csv_uniform_width():
-    """All-pairs combined export: one header, uniform field counts —
-    pairs with different linker sets pad to the bridge-column union
-    (the Tablecruncher ragged-rows bug)."""
+    """All-pairs combined export: one fixed-width schema for every pair —
+    the per-pair CSVs are plain header + rows concatenations (the old
+    pivoted bridge-<column> fields needed a union-of-columns hack to
+    avoid the Tablecruncher ragged-rows bug)."""
     import csv
     import io
 
-    from comparison.mapping_visualization import infer_bridge_columns
-
     pair_a = [_flow(MCNS, 'T1', FAFB, 'T1', 4, 4)]                # flywireType linker
     pair_b = [_flow(FAFB, 'T9', BANC, 'T9', 2, 2, linkers=False)]  # bare same-name
-    union = list(dict.fromkeys(
-        infer_bridge_columns(pair_a) + infer_bridge_columns(pair_b)))
-    assert union == ['flywireType']
 
+    headers = set()
     widths = set()
-    for text in (build_bridges_csv(pair_a, bridge_columns=union),
-                 build_bridges_csv(pair_b, bridge_columns=union)):
+    for text in (build_bridges_csv(pair_a), build_bridges_csv(pair_b)):
         rows = list(csv.reader(io.StringIO(text)))
-        assert {len(r) for r in rows} == {11}
-        assert rows[0][-2:] == ['bridge-flywireType',
-                                'pool_coverage']
-        widths.add(len(rows[0]))
-    assert len(widths) == 1
-    # the bare pair pads the missing bridge column with an empty cell
-    rows_b = list(csv.reader(io.StringIO(
-        build_bridges_csv(pair_b, bridge_columns=union))))
-    assert rows_b[1][9] == ''
-    assert rows_b[1][-2:] == ['', '']
+        headers.add(tuple(rows[0]))
+        widths.update(len(r) for r in rows)
+    assert len(headers) == 1
+    assert widths == {18}
+    assert headers.pop()[:2] == ('source_dataset', 'source_entry')
 
 
 def test_pair_flow_weight_shared_formula():
@@ -286,10 +283,10 @@ def test_mapping_pools_are_scoped_by_dataset_direction_and_type():
     coverage = build_type_coverage(pair_flows, pools)
     rows = {(row['dataset'], row['type']): row
             for row in coverage['forward']}
-    assert rows[(FAFB, 'l-LNv')]['query_cov'] == '2 of 8'
-    assert rows[(FAFB, 'l-LNv')]['target_cov'] == '1 of 6'
-    assert rows[(BANC, 'l-LNv')]['query_cov'] == '3 of 6'
-    assert rows[(BANC, 'l-LNv')]['target_cov'] == '4 of 8'
+    assert rows[(FAFB, 'l-LNv')]['query_cov'] == '2 of 8 (25.0%)'
+    assert rows[(FAFB, 'l-LNv')]['target_cov'] == '1 of 6 (16.7%)'
+    assert rows[(BANC, 'l-LNv')]['query_cov'] == '3 of 6 (50.0%)'
+    assert rows[(BANC, 'l-LNv')]['target_cov'] == '4 of 8 (50.0%)'
 
 
 def test_type_coverage_forward_1_to_n_and_totals():
@@ -321,15 +318,15 @@ def test_type_coverage_forward_1_to_n_and_totals():
     assert row['relationship'] == '1-to-N'
     assert row['maps_to'] == 'MCNS: CL125, PLP080, SLP249, SLP250'
     # total mapped number: union of the pooled source-side subsets
-    assert row['query_cov'] == '6 of 12'
+    assert row['query_cov'] == '6 of 12 (50.0%)'
     # target-side coverage sums only the pooled pairs
-    assert row['target_cov'] == '6 of 6'
+    assert row['target_cov'] == '6 of 6 (100.0%)'
 
     reverse = coverage['reverse']
     by_type = {r['type']: r for r in reverse}
     assert by_type['CL125']['relationship'] == '1-to-1'
-    assert by_type['CL125']['source_cov'] == '4 of 12'
-    assert by_type['CL125']['target_cov'] == '4 of 4'
+    assert by_type['CL125']['source_cov'] == '4 of 12 (33.3%)'
+    assert by_type['CL125']['target_cov'] == '4 of 4 (100.0%)'
     assert by_type['SLP249']['source_cov'] == 'not pooled'
 
 
@@ -361,7 +358,41 @@ def test_type_coverage_reverse_makes_n_to_1_explicit():
     assert row['mapped_from'] == 'FAFB: A, B, C'
     # source side: 14 pooled of 14 queried; target side: the union (4)
     # of the receiving type's 4 bodyIds
-    assert row['source_cov'] == '14 of 14'
-    assert row['target_cov'] == '4 of 4'
+    assert row['source_cov'] == '14 of 14 (100.0%)'
+    assert row['target_cov'] == '4 of 4 (100.0%)'
     # N-to-1 rows sort first
     assert reverse[0]['relationship'] == 'N-to-1'
+
+
+def test_format_coverage_states():
+    """The shared one-side coverage formatter: thousands separators, a
+    one-decimal share, and the measured-zero vs unmeasured distinction."""
+    from comparison.mapping_visualization import format_coverage
+
+    assert format_coverage(1655, 1683) == '1,655 of 1,683 (98.3%)'
+    assert format_coverage(2, 8) == '2 of 8 (25.0%)'
+    assert format_coverage(4, 4) == '4 of 4 (100.0%)'
+    assert format_coverage(0, 168) == '0 of 168 (0.0%)'   # measured zero
+    assert format_coverage(0, 0) == '0 of 0'              # degenerate
+    assert format_coverage(3, None) == 'not measured'     # side unknown
+
+
+def test_type_coverage_unmeasured_side_reads_not_measured():
+    """A pool whose side's coverage index was unavailable must render
+    'not measured' — never a fake '0 of n' measured zero."""
+    from comparison.mapping_visualization import build_type_coverage
+
+    pair_flows = {(FAFB, MCNS): [
+        _flow(FAFB, 'T1', MCNS, 'T9', 8, 12, linkers=False)]}
+    pools = {
+        ('T1', 'T9'): {
+            'source_body_ids': [],
+            'target_body_ids': [],
+            'source_basis': 'unmeasured',
+            'target_basis': 'linker rows',
+        },
+    }
+    forward = build_type_coverage(pair_flows, pools)['forward'][0]
+    assert forward['query_cov'] == 'not measured'
+    # the target side measured a real zero: 0 of 12
+    assert forward['target_cov'] == '0 of 12 (0.0%)'

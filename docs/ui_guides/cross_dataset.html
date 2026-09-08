@@ -96,6 +96,14 @@
     report shows <code>v0.9 type → release_alias → v1.0</code> before any
     downstream cross-dataset linker. v0.9-only names use only their native
     <code>*Type</code> fallback and never borrow v1.0 body IDs.</p>
+  <p>Derivation guards keep the bridges honest: a curated BANC label hop
+    (<code>fafb_cell_type</code> et al.) ends the derivation once it lands
+    in the target namespace — nothing may chain after it into annotation
+    name graphs; a primary's annotation cell naming another primary of the
+    same namespace is a cross-reference, not a rename, and is never hopped
+    through; and a derivation whose target-side evidence pools zero rows on
+    the reached type is dropped rather than rendered with a
+    <code>0 of n</code> coverage.</p>
 
   <h2>Pathfinding threshold &amp; bottleneck provenance</h2>
   <p>Every pathfinding row records both the threshold the user requested and
@@ -188,19 +196,44 @@
     <li><b>Pair cards</b> (<code>src → tgt · N mapped pairs</code>): Type,
       Mapped to, Neurons (<code>source → foreign</code>), Map used (the
       derivation linkers, e.g. <code>flywireType 'LMTe01' +
-      additional_type(s) 'LMTe01'</code>), and <b>Pool coverage</b>
-      (<code>source covered &lt;source pool&gt; of &lt;source type total&gt;;
-      target covered &lt;target pool&gt; of &lt;target type total&gt;</code>).
-      Coverage is measured independently per endpoint; the mapper does not
-      infer bodyId-to-bodyId pairings.</li>
+      additional_type(s) 'LMTe01'</code>), and <b>Pool coverage</b> —
+      one basis-aware cell per side so the states can never be confused:
+      a measured subset (<code>FB: 1,655 of 1,683 (98.3%)</code>), an
+      unconstrained full population (<code>FB: all 1,683</code> — the
+      chain names the type identity, nothing was filtered), an
+      unmeasurable side (<code>FB: not measured</code> — the coverage
+      index is unavailable), and a missing pool (<code>not pooled</code>).
+      A measured zero renders explicitly as <code>0 of n (0.0%)</code>.
+      Coverage is measured independently per endpoint; the mapper does
+      not infer bodyId-to-bodyId pairings.</li>
+    <li><b>Type coverage tables</b> (top-level expansion per pair,
+      bidirectional): the FORWARD view lists each queried type with its
+      neurons, mapped targets, <code>1-to-N</code>/<code>1-to-1</code>, and
+      per-side coverage; the BACKWARD view lists each receiving type with
+      the sources converging on it (<code>N-to-1</code> made explicit).
+      Both tables name their coverage columns by DATASET — the full
+      dataset key, e.g. <code>flywire_FAFB_v783 side (bodyIds)</code> /
+      <code>banc_v888 side (bodyIds)</code> — the same two datasets in
+      both views, so nothing reads as flipped.  Cells read <code>x of y
+      (share)</code> with
+      thousands separators; a side whose coverage index is unavailable
+      renders <code>not measured</code> (never a fake zero), and a row
+      without any pool renders <code>not pooled</code>.</li>
     <li><b>Same-name pairs</b>: a pair sharing its name derives through its
       metadata bridge when one exists (e.g.
       <code>flywireType 'DN1a'</code> — the male-cns crosswalk cell
       verifies it); the bare "same name — no metadata verification"
       warning appears only when no evidence connects the pair.</li>
     <li><b>Exports</b>: Sankey (type-level / linker), Network (type-level /
-      linker paths), Bridges CSV (one <code>pool_coverage</code> column;
-      the full mapping is never silently dropped — a
+      linker paths), and <b>Export mapping</b> (per pair and
+      <b>all pairs (CSV)</b>; filenames <code>mapping_*.csv</code>).  One
+      fixed column set: <code>source_dataset, source_entry, matched_column,
+      source_type, target_dataset, target_type, relationship,
+      source_neurons, target_neurons, bridge, bridge_columns,
+      mapping_origin</code>, numeric <code>source_pool/source_total/
+      target_pool/target_total</code>, plus the human-readable
+      <code>pool_coverage</code> and <code>pool_coverage_basis</code>
+      columns.  The full mapping is never silently dropped — a
       <code>+N more flows</code> notice points at the CSV when the drawn
       cap trims).</li>
     <li><b>Legends</b>: the artifact header carries one chip per entry in

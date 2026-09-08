@@ -96,7 +96,7 @@ def test_search_apdn3_in_malecns_offers_group_members():
     assert all(c['kind'] == 'one of N' for c in mcns['candidates'])
     assert counts == {'SLP249': 4, 'CL125': 4, 'SLP250': 2, 'PLP080': 2}
 
-    # both FlyWire datasets know the name natively
+    # both local releases know the name natively
     fafb = _entry(matches, FW)
     native = _candidate(fafb, 'APDN3')
     assert native['kind'] == 'same name'
@@ -237,7 +237,10 @@ def test_native_expansion_taxonomy_labels_map_covered_types():
     assert neuron['column'] == 'Class'
     # covered types carry their mapping relation when one exists ...
     kinds = {(t.get('mapped') or {}).get('kind') for t in neuron['types']}
-    assert {'renamed', 'same name', 'one of N'} <= kinds
+    # 'renamed' is gone since 2026-09-09: the primary->alt annotation hops
+    # that produced cross-primary renames were derivation noise and are no
+    # longer walked; same-name and 1-to-N resolutions remain.
+    assert {'same name', 'one of N'} <= kinds
     # ... and BANC v888 covers an unmapped type, still shown so the user is
     # led to inspect it in the other dataset.
     v888 = {e['dataset']: e for e in native}['banc_v888']
@@ -373,10 +376,11 @@ def test_mapping_origins_real(mapper):
     # same name, primary in both datasets: the type columns match directly
     # (plus the crosswalk carries the identical name).
     origins_same = mapper.get_mapping_origins('MDN', 'MDN', BANC)
-    # the plain {'source': 'type'} descriptor was dropped with the
-    # deterministic same-name arrival — the crosswalk columns carry MDN
-    assert {'source': 'flywireType', 'via': 'MDN'} in origins_same
-
+    # Since 2026-09-09 flywireType never lands on BANC and MCNS is not a
+    # licensed mid for MCNS->BANC, so the crosswalk descriptor is gone;
+    # the pair is carried by BANC's curated malecns_cell_type label hop,
+    # which now reports its own origin descriptor.
+    assert origins_same == [{'source': 'malecns_cell_type', 'via': 'MDN'}]
     # unique rename: FAFB's additional_type(s) column carries the old name
     # 'aMe13' on l-CPDN3 rows, and the male-cns crosswalk carries it too.
     origins_x = mapper.get_mapping_origins('aMe13', 'l-CPDN3', FW)
@@ -443,9 +447,12 @@ def test_mapping_visualizations_from_circadian_flows():
     flows = build_mapping_flows(native, MCNS)
     assert flows
     # name-similarity-only pairs (e.g. SMP532_b -> SMP532b) have no
-    # metadata derivation and honestly carry no bridge chains
+    # metadata derivation and honestly carry no bridge chains.  Since
+    # 2026-09-09 a few more pairs honestly derive chainless: the same-name
+    # isolation for unsupported pairs and the primary->alt annotation hops
+    # that walked BANC's cross-dataset label tokens are no longer derivable.
     chained = [f for f in flows if f['bridges']]
-    assert len(chained) >= len(flows) - 2
+    assert len(chained) >= len(flows) - 9
 
     index = load_cached_neuron_index(MCNS)
     source_types = {f['source_type'] for f in flows}
@@ -495,7 +502,10 @@ def test_mapping_visualizations_from_circadian_flows():
                   if s.startswith('0|')]
     assert pair_edges
     with_text = [d for _s, _t, d in pair_edges if d['bridge_texts']]
-    assert len(with_text) >= len(pair_edges) - 2
+    # 2026-09-09: a few pairs honestly render chainless now — the
+    # primary->alt annotation hops that walked BANC's cross-dataset label
+    # tokens are no longer derivable (derivation noise).
+    assert len(with_text) >= len(pair_edges) - 9
     assert all(not d['bridge_texts']
                for s, t, d in graph.edges(data=True) if t.startswith('2|'))
 
@@ -636,7 +646,7 @@ def test_pool_bridge_body_ids_apdn3_anchors():
     # total coverage: the four bridges cover all 12 APDN3 bodyIds
     assert sum(len(p['target_body_ids']) for p in pools.values()) == 12
     cl125 = pools[('CL125', 'APDN3')]
-    assert cl125['coverage'] == 'covered 4 of 12'
+    assert cl125['coverage'] == 'covered 4 of 12 (33.3%)'
     # the source pool is the real male-cns bodyIds of CL125
     local = count_type_in_index(index, 'CL125')
     assert len(cl125['source_body_ids']) == local == 4

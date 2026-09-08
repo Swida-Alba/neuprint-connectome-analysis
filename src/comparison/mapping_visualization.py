@@ -88,6 +88,51 @@ def get_mapping_pool(pools: Optional[Dict[tuple, Dict[str, Any]]],
     return pools.get(legacy) or {}
 
 
+def format_coverage(count: int, total: Optional[int]) -> str:
+    """Human-readable one-side coverage, e.g. ``1,655 of 1,683 (98.3%)``.
+
+    Thousands separators plus a one-decimal percentage so ``x of y`` never
+    needs mental division.  An unknown total (the side's coverage index was
+    unavailable) yields ``not measured`` — distinct from a measured zero,
+    which renders ``0 of 168 (0.0%)``.  ``not pooled`` (no pool at all)
+    stays a caller decision.
+    """
+    if total is None:
+        return "not measured"
+    if total <= 0:
+        return f"{count:,} of 0"
+    pct = 100.0 * count / total
+    return f"{count:,} of {total:,} ({pct:.1f}%)"
+
+
+_POOL_BASE_FULL = "full population"
+_POOL_BASE_UNMEASURED = "unmeasured"
+
+
+def format_pool_side(code: str, pool: Dict[str, Any], side: str) -> str:
+    """Basis-aware one-side coverage cell for the pair card.
+
+    ``side`` is ``'source'`` or ``'target'``.  Renders the four pool
+    states so they can never be confused:
+
+    * measured subset   — ``FB: 1,655 of 1,683 (98.3%)``
+    * full population   — ``FB: all 1,683`` (unconstrained side; the
+      chain names the type identity, so nothing was filtered)
+    * unmeasured        — ``FB: not measured`` (coverage index absent)
+    * missing pool      — ``not pooled`` (caller passes an empty pool)
+    """
+    if not pool:
+        return "not pooled"
+    ids = pool.get(f"{side}_body_ids") or []
+    basis = pool.get(f"{side}_basis")
+    if basis == _POOL_BASE_UNMEASURED:
+        return f"{code}: not measured"
+    total = pool.get(f"{side}_type_total")
+    if basis == _POOL_BASE_FULL:
+        return f"{code}: all {total:,}" if total else f"{code}: all {len(ids):,}"
+    return f"{code}: {format_coverage(len(ids), total)}"
+
+
 def _dataset_groups(graph) -> List[Dict[str, str]]:
     """Tag every node with its dataset group; return the group list (§13).
 
@@ -488,7 +533,7 @@ def pair_flow_weight(flow, pool: Optional[Dict[str, Any]] = None) -> int:
 
 
 def _pool_title_suffix(count: int) -> str:
-    return f" · pool {count} bodyIds" if count else ""
+    return f" · pool {count:,} bodyIds" if count else ""
 
 
 def build_mapping_network_graph(flows, *,
@@ -1035,9 +1080,9 @@ def build_bridge_linker_graph(flows, *, source_dataset: str,
         pool_note = ""
         if pool:
             pool_note = (
-                f" — pool: {len(pool.get('source_body_ids', []))} "
+                f" — pool: {len(pool.get('source_body_ids', [])):,} "
                 f"bodyIds ({dataset_abbrev(source_dataset)}) / "
-                f"{len(pool.get('target_body_ids', []))} "
+                f"{len(pool.get('target_body_ids', [])):,} "
                 f"bodyIds ({dataset_abbrev(target_dataset)})")
 
         for chain in (flow.get("bridges") or [])[:2]:
@@ -1384,11 +1429,21 @@ def build_type_coverage(pair_flows,
     * ``reverse`` — one row per RECEIVING (target) type: the source
       types that converge on it — several sources make an N-to-1
       explicit (three FAFB types mapping onto male-cns ``SMP227``) —
-      with both sides' coverage.
+      with both sides' coverage.  The UI renders this view under the
+      heading "Backward", and both tables name their coverage columns
+      by DATASET (``<dataset> side (bodyIds)``) so "backward" is never
+      misread as swapping which dataset each column measures.
 
-    Coverage cells are pool-based ``x of y`` bodyIds counts; pairs
-    without pools contribute nothing to the unions and a row without
-    any pooled pair reads ``not pooled``.  Pure: no UI, no I/O.
+    Coverage cells are pool-based ``x of y (pct)`` bodyIds counts.  A
+    side's denominator is the population of the endpoint types involved:
+    neuron indexes carry one row per bodyId, so the per-target totals of
+    a 1-to-N row sum exactly the distinct neurons of the mapped target
+    types (types are disjoint body sets).  Pairs without pools
+    contribute nothing and a row without any pooled pair reads ``not
+    pooled``; a side whose pools could not be measured (``source_basis``
+    / ``target_basis`` ``unmeasured``) contributes nothing to ITS side
+    and reads ``not measured`` — never a fake ``0 of n``.  Pure: no UI,
+    no I/O.
     """
     pools = pools or {}
     forward: Dict[tuple, Dict[str, Any]] = {}
@@ -1409,6 +1464,10 @@ def build_type_coverage(pair_flows,
             s_ids = set(pool.get("source_body_ids") or [])
             t_ids = set(pool.get("target_body_ids") or [])
             pooled = bool(pool)
+            src_measurable = pooled and pool.get(
+                "source_basis") != "unmeasured"
+            tgt_measurable = pooled and pool.get(
+                "target_basis") != "unmeasured"
 
             fwd = forward.setdefault((src_ds, s_type), {
                 "dataset": src_ds, "type": s_type, "count": s_count,
@@ -1419,11 +1478,13 @@ def build_type_coverage(pair_flows,
             entry = fwd["targets"].setdefault(
                 (tgt_ds, f_type),
                 {"s_ids": set(), "t_ids": set(), "t_total": 0,
-                 "pooled": False})
+                 "pooled": False, "s_measured": False, "t_measured": False})
             entry["s_ids"] |= s_ids
             entry["t_ids"] |= t_ids
             entry["t_total"] = max(entry["t_total"], f_count)
             entry["pooled"] = entry["pooled"] or pooled
+            entry["s_measured"] = entry["s_measured"] or src_measurable
+            entry["t_measured"] = entry["t_measured"] or tgt_measurable
 
             rev = reverse.setdefault((tgt_ds, f_type), {
                 "dataset": tgt_ds, "type": f_type, "count": f_count,
@@ -1434,14 +1495,20 @@ def build_type_coverage(pair_flows,
             sentry = rev["sources"].setdefault(
                 (src_ds, s_type),
                 {"s_ids": set(), "t_ids": set(), "s_total": 0,
-                 "pooled": False})
+                 "pooled": False, "s_measured": False, "t_measured": False})
             sentry["s_ids"] |= s_ids
             sentry["t_ids"] |= t_ids
             sentry["s_total"] = max(sentry["s_total"], s_count)
             sentry["pooled"] = sentry["pooled"] or pooled
+            sentry["s_measured"] = sentry["s_measured"] or src_measurable
+            sentry["t_measured"] = sentry["t_measured"] or tgt_measurable
 
-    def _cov(union: set, total: int, pooled: bool) -> str:
-        return f"{len(union)} of {total}" if pooled else "not pooled"
+    def _cov(union: set, total: int, pooled: bool, measured: bool) -> str:
+        if not pooled:
+            return "not pooled"
+        if not measured:
+            return "not measured"
+        return format_coverage(len(union), total)
 
     forward_rows: List[Dict[str, Any]] = []
     for row in forward.values():
@@ -1449,13 +1516,20 @@ def build_type_coverage(pair_flows,
         query_union: set = set()
         target_union: set = set()
         target_total = 0
+        query_measured = False
+        target_measured = False
         for (t_ds, f_type), entry in sorted(row["targets"].items()):
             code = dataset_abbrev(t_ds) or t_ds
             groups.setdefault(code, []).append(f_type)
-            if entry["pooled"]:
+            if not entry["pooled"]:
+                continue
+            if entry["s_measured"]:
                 query_union |= entry["s_ids"]
+                query_measured = True
+            if entry["t_measured"]:
                 target_union |= entry["t_ids"]
                 target_total += entry["t_total"]
+                target_measured = True
         forward_rows.append({
             "dataset": row["dataset"],
             "type": row["type"],
@@ -1466,9 +1540,10 @@ def build_type_coverage(pair_flows,
             "targets": len(row["targets"]),
             "relationship": ("1-to-N" if len(row["targets"]) > 1
                              else "1-to-1"),
-            "query_cov": _cov(query_union, row["count"], row["any_pooled"]),
+            "query_cov": _cov(query_union, row["count"],
+                              row["any_pooled"], query_measured),
             "target_cov": _cov(target_union, target_total,
-                               row["any_pooled"]),
+                               row["any_pooled"], target_measured),
         })
     forward_rows.sort(key=lambda r: (-int(r["count"] or 0),
                                      str(r["type"])))
@@ -1479,14 +1554,20 @@ def build_type_coverage(pair_flows,
         source_union: set = set()
         source_total = 0
         target_union: set = set()
+        source_measured = False
+        target_measured = False
         for (s_ds, s_type), entry in sorted(row["sources"].items()):
             code = dataset_abbrev(s_ds) or s_ds
             groups.setdefault(code, []).append(s_type)
             if not entry["pooled"]:
                 continue
-            source_union |= entry["s_ids"]
-            source_total += entry["s_total"]
-            target_union |= entry["t_ids"]
+            if entry["s_measured"]:
+                source_union |= entry["s_ids"]
+                source_total += entry["s_total"]
+                source_measured = True
+            if entry["t_measured"]:
+                target_union |= entry["t_ids"]
+                target_measured = True
         reverse_rows.append({
             "dataset": row["dataset"],
             "type": row["type"],
@@ -1498,9 +1579,9 @@ def build_type_coverage(pair_flows,
             "relationship": ("N-to-1" if len(row["sources"]) > 1
                              else "1-to-1"),
             "source_cov": _cov(source_union, source_total,
-                               row["any_pooled"]),
+                               row["any_pooled"], source_measured),
             "target_cov": _cov(target_union, row["count"],
-                               row["any_pooled"]),
+                               row["any_pooled"], target_measured),
         })
     reverse_rows.sort(key=lambda r: (0 if r["relationship"] == "N-to-1"
                                      else 1, -int(r["count"] or 0),
@@ -1972,60 +2053,18 @@ def render_composed_mapping_html(pair_flows, *, node_cap: int = 80,
     return html, meta
 
 
-def infer_bridge_columns(flows) -> List[str]:
-    """Standardized linker columns of one pair's flows, first-appearance
-    order — the ``bridge-<column>`` fields that pair's CSV carries."""
-    from comparison.cross_dataset_type_mapper import (
-        BRIDGE_STANDARD,
-        preferred_bridge_chain,
-        standardize_bridge,
-    )
+def build_bridges_csv(flows, *, pools=None) -> Optional[str]:
+    """Mapping CSV for one pair's flows (user 2026-09-09 redesign).
 
-    columns: List[str] = []
-    observed: List[str] = []
-    for flow in flows or []:
-        src_ds = flow.get("source_dataset", "")
-        tgt_ds = flow.get("target_dataset", "")
-        chain = preferred_bridge_chain(
-            flow.get("bridges") or [], src_ds, tgt_ds)
-        linkers = [l for l in standardize_bridge(chain or [], src_ds, tgt_ds)
-                   if l.get("kind") == "linker"] if chain else []
-        for linker in linkers:
-            if linker["column"] not in observed:
-                observed.append(linker["column"])
-    if flows:
-        source_dataset = flows[0].get("source_dataset", "")
-        target_dataset = flows[0].get("target_dataset", "")
-        registry = (
-            BRIDGE_STANDARD.get((source_dataset, target_dataset))
-            or BRIDGE_STANDARD.get((target_dataset, source_dataset))
-            or ()
-        )
-        columns.extend(
-            column for column, _home in registry if column in observed
-        )
-    columns.extend(column for column in observed if column not in columns)
-    return columns
-
-
-def build_bridges_csv(flows, *, pools=None,
-                      bridge_columns: Optional[List[str]] = None,
-                      ) -> Optional[str]:
-    """Bridges CSV for one pair's flows (Round 2, §6).
-
-    One row per (source type, target type, linker path) in the §9.3
-    uniform base schema plus one ``bridge-<column>`` cell per
-    standardized linker column (``; ``-joined values, ``(via hub)`` note
-    on indirect linkers) and independent source/target pool coverage.  The
-    export never represents a bodyId-to-bodyId pairing.
-    Uniform field counts, proper quoting.  Returns None when there is
-    nothing to export.
-
-    ``bridge_columns`` forces an exact ordered set of ``bridge-<column>``
-    fields: the combined all-pairs export passes the UNION of every
-    pair's columns so the concatenated file keeps uniform field counts
-    (per-pair headers differ — the Tablecruncher ragged-rows bug);
-    missing columns pad with empty cells.
+    One row per (source type, target type) pair with EXPLICIT endpoints —
+    ``source_dataset``/``target_dataset`` so the all-pairs export is
+    self-contained — plus the matched source entry and its column, the
+    rendered preferred bridge and its standardized linker columns, and
+    machine-readable per-side pool coverage (independent endpoints; no
+    bodyId-to-bodyId pairing is implied).  The column set is fixed, so
+    per-pair and all-pairs files share one header and the old union-of-
+    bridge-columns concatenation hack is gone.  Uniform field counts,
+    proper quoting.  Returns None when there is nothing to export.
     """
     import csv as _csv
     import io
@@ -2041,44 +2080,51 @@ def build_bridges_csv(flows, *, pools=None,
     if not flows:
         return None
 
-    base = ["dataset", "entry_kind", "matched_column", "name",
-            "foreign_type", "neuron_count", "mapped_kind", "mapped_to",
-            "map_used"]
-    if bridge_columns is not None:
-        linker_columns: List[str] = list(bridge_columns)
-    else:
-        linker_columns = infer_bridge_columns(flows)
-    prepared = []
+    header = [
+        "source_dataset", "source_entry", "matched_column", "source_type",
+        "target_dataset", "target_type", "relationship",
+        "source_neurons", "target_neurons",
+        "bridge", "bridge_columns", "mapping_origin",
+        "source_pool", "source_total", "target_pool", "target_total",
+        "pool_coverage", "pool_coverage_basis",
+    ]
+    targets_by_source: Dict[str, set] = {}
+    for flow in flows:
+        targets_by_source.setdefault(
+            str(flow.get("source_type", "")), set()).add(
+            str(flow.get("foreign_type", "")))
+
+    buffer = io.StringIO()
+    writer = _csv.writer(buffer, quoting=_csv.QUOTE_MINIMAL)
+    writer.writerow(header)
     for flow in flows:
         src_ds = flow.get("source_dataset", "")
         tgt_ds = flow.get("target_dataset", "")
         chains = flow.get("bridges") or []
+        src_type = flow.get("source_type", "")
         foreign = flow.get("foreign_type", "")
         chain = preferred_bridge_chain(chains, src_ds, tgt_ds)
         linkers = [l for l in standardize_bridge(chain or [], src_ds, tgt_ds)
                    if l.get("kind") == "linker"] if chain else []
         info = bridge_linker_text(chains, src_ds, tgt_ds, foreign)
-        prepared.append((flow, linkers, info))
-
-    header = base + [f"bridge-{column}" for column in linker_columns] + [
-        "pool_coverage"]
-    buffer = io.StringIO()
-    writer = _csv.writer(buffer, quoting=_csv.QUOTE_MINIMAL)
-    writer.writerow(header)
-    for flow, linkers, info in prepared:
-        src_ds = flow.get("source_dataset", "")
+        # The matched entry: the source type itself when the match ran
+        # through the type column, otherwise the label/annotation value
+        # that matched (recorded in matched_origin as "<column> · 'v'").
         origin = flow.get("matched_origin", "")
         origin_column, _, origin_value = origin.partition(" · ")
-        entry_kind = "label" if origin_column and origin_column != "type" \
-            else "type"
-        matched_column = origin_value.strip("'") if entry_kind == "label" \
-            else "type"
-        src_type = flow.get("source_type", "")
-        foreign = flow.get("foreign_type", "")
+        if origin_column and origin_column != "type":
+            matched_column = origin_value.strip("'")
+            source_entry = matched_column
+        else:
+            matched_column = "type"
+            source_entry = src_type
+        relationship = ("1-to-N"
+                        if len(targets_by_source.get(src_type, ())) > 1
+                        else "1-to-1")
         pool = get_mapping_pool(pools, flow)
-        # Keep one compact CSV field, but expose BOTH independent sides.
-        # ``coverage`` remains the historical target-side alias for old
-        # callers and synthetic fixtures.
+        # Keep one compact human-readable field, but expose BOTH
+        # independent sides.  ``coverage`` remains the historical
+        # target-side alias for old callers and synthetic fixtures.
         source_coverage = pool.get("source_coverage") or ""
         target_coverage = pool.get("target_coverage") or pool.get(
             "coverage") or ""
@@ -2087,17 +2133,26 @@ def build_bridges_csv(flows, *, pools=None,
                 f"source {source_coverage}; target {target_coverage}")
         else:
             pool_coverage = target_coverage or source_coverage
-        row = [src_ds, entry_kind, matched_column, src_type, foreign,
-               flow.get("source_count") or flow.get("foreign_count") or 0,
-               "same name" if not linkers else "mapped", foreign,
-               info["text"]]
-        by_column: Dict[str, List[str]] = {}
-        for linker in linkers:
-            cell = linker["value"] + (
-                " (via hub)" if linker.get("indirect") else "")
-            by_column.setdefault(linker["column"], []).append(cell)
-        row.extend("; ".join(by_column.get(column, []))
-                   for column in linker_columns)
-        row.extend([pool_coverage])
-        writer.writerow(row)
+        source_total = pool.get("source_type_total")
+        target_total = pool.get("target_type_total")
+        writer.writerow([
+            src_ds,
+            source_entry,
+            matched_column,
+            src_type,
+            tgt_ds,
+            foreign,
+            relationship,
+            flow.get("source_count") or 0,
+            flow.get("foreign_count") or 0,
+            info["text"],
+            "; ".join(linker["column"] for linker in linkers),
+            "same name" if not linkers else "mapped",
+            pool.get("source_pool_size", ""),
+            source_total if source_total is not None else "",
+            pool.get("target_pool_size", ""),
+            target_total if target_total is not None else "",
+            pool_coverage,
+            pool.get("coverage_basis") or "",
+        ])
     return buffer.getvalue()

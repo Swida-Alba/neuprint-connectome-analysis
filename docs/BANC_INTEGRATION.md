@@ -57,7 +57,12 @@ contradictory rows are recorded as conflicts, not removed from the curated
 type-label vote. The mapper records the winning label, vote counts, verified
 votes, verification conflicts, and alternates in bridge provenance. BANC
 labels are direct-only and never turn BANC into a connector between unrelated
-datasets.
+datasets. A label hop is also a derivation endpoint: once it lands in the
+target namespace, nothing may follow it. Because `Alternative Cell Type(s)`
+concatenates the other datasets' curated labels, a primary's annotation cell
+naming another BANC primary is a cross-reference, not a rename — the
+derivation walk refuses to hop through it (this closed the `l-LNv → BM_*`
+fan-out where one oddly-labeled neuron reached 1,212 unrelated primaries).
 
 The two BANC releases have one explicit type bridge from
 `datasets/banc_v888/downloads/banc_888_meta.feather` (or the compiled local
@@ -66,6 +71,8 @@ are retained, `root_888` is the type relation key, and equal numeric IDs are
 not treated as proof. This bridge is labeled `banc_release_crosswalk`; it
 provides independent release coverage participants but never exposes a
 bodyId-to-bodyId pairing or licenses generic BANC↔BANC annotation paths.
+Both releases sit in the mapper's `DATASET_PRIORITY` walk (v888 right after
+v626), so a v888-only type name auto-detects its own namespace.
 
 ### Manual downloads are no longer needed
 

@@ -2,7 +2,7 @@
 
 The hermetic tests in ``test_type_mapper_coverage.py`` validate the mapping
 logic on synthetic tables.  This module loads the *actual* local datasets
-(male-cns v1.0, FlyWire FAFB v783, FlyWire BANC v626) and validates the
+(male-cns v1.0, FAFB v783, standalone BANC v626) and validates the
 additional Type(S) rename resolution end to end:
 
 * male-cns ``SLP249`` (flywireType ``SLP249``) must resolve to FAFB ``APDN3``
@@ -182,9 +182,9 @@ def test_real_banc_label_bridges_use_independent_endpoint_coverage():
     assert forward['granularity'] == '8 to 5'
     assert len(forward['source_body_ids']) == 8
     assert len(forward['target_body_ids']) == 5
-    assert forward['coverage'] == 'covered 5 of 6'
-    assert forward['source_coverage'] == 'covered 8 of 8'
-    assert forward['target_coverage'] == 'covered 5 of 6'
+    assert forward['coverage'] == 'covered 5 of 6 (83.3%)'
+    assert forward['source_coverage'] == 'covered 8 of 8 (100.0%)'
+    assert forward['target_coverage'] == 'covered 5 of 6 (83.3%)'
     assert 'matched_body_ids' not in forward['per_linker'][0]
 
     mcns_linker = [{
@@ -194,9 +194,9 @@ def test_real_banc_label_bridges_use_independent_endpoint_coverage():
     mcns_forward = pool_bridge_body_ids(
         mcns, banc, mcns_linker, 'l-LNv', 'l-LNv', indexes=indexes)
     assert mcns_forward['granularity'] == '8 to 1'
-    assert mcns_forward['coverage'] == 'covered 1 of 6'
-    assert mcns_forward['source_coverage'] == 'covered 8 of 8'
-    assert mcns_forward['target_coverage'] == 'covered 1 of 6'
+    assert mcns_forward['coverage'] == 'covered 1 of 6 (16.7%)'
+    assert mcns_forward['source_coverage'] == 'covered 8 of 8 (100.0%)'
+    assert mcns_forward['target_coverage'] == 'covered 1 of 6 (16.7%)'
     assert 'matched_body_ids' not in mcns_forward['per_linker'][0]
 
 
@@ -221,9 +221,9 @@ def test_real_banc_release_bridge_uses_root_body_relation():
     # The relation is not a complete type-total identity: it reaches 1,655
     # v888 L5 bodyIds out of 1,683, while retaining 1,651 v626 roots.
     assert pool['granularity'] == '1651 to 1655'
-    assert pool['coverage'] == 'covered 1655 of 1683'
-    assert pool['source_coverage'] == 'covered 1651 of 1651'
-    assert pool['target_coverage'] == 'covered 1655 of 1683'
+    assert pool['coverage'] == 'covered 1,655 of 1,683 (98.3%)'
+    assert pool['source_coverage'] == 'covered 1,651 of 1,651 (100.0%)'
+    assert pool['target_coverage'] == 'covered 1,655 of 1,683 (98.3%)'
     assert 'matched_body_ids' not in pool['per_linker'][0]
 
 
@@ -477,7 +477,7 @@ def test_get_alias_candidates_slp249_real(mapper):
 def test_get_alias_candidates_apdn3_real(mapper):
     res = mapper.get_alias_candidates(
         'APDN3', [MCNS, FW, BANC])
-    # native in both FlyWire datasets, with the aggregation annotation on
+    # native in both local releases, with the aggregation annotation on
     # the FAFB candidate (BANC keeps its own 1:1 annotation-free identity).
     fafb = _candidate(res, FW, 'APDN3')
     assert fafb['kind'] == 'same name'

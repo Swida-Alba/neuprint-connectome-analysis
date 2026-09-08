@@ -9,9 +9,9 @@ cross-dataset type columns establish bridges.  BodyIds remain useful for
 release-local population counts and optional provenance diagnostics, but a
 bodyId-to-bodyId relation is never required to establish a type bridge.
 
-FlyWire datasets also publish an extra additional-type column (FAFB:
-``additional_type(s)``, BANC: ``Alternative Cell Type(s)``) that records type
-renames: neurons whose type changed name keep the old name there while the
+FAFB and BANC releases also publish release-specific additional-type columns
+(FAFB: ``additional_type(s)``, BANC: ``Alternative Cell Type(s)``) that record
+type renames: neurons whose type changed name keep the old name there while the
 primary ``type`` column holds the current one. When a male-cns ``flywireType``
 value is no longer a primary type in the target dataset but appears in that
 column, the mapping resolves to the current primary name (e.g. male-cns
@@ -20,10 +20,10 @@ several names separated by ','; each name is split out before mapping.
 
 Key Features:
 - Auto-loads type mappings from male-cns_v1_0_allneurons_neuron_df.csv
-- Resolves renamed flywire types via the FlyWire additional Type(S) columns
+- Resolves renamed FAFB/BANC types via their additional Type(S) columns
 - Handles 1-to-1, N-to-1, and 1-to-N type relationships
 - Warns about N-to-1 aggregations that should be avoided
-- Priority-based resolution: male-cns > flywire > manc > hemibrain > optic-lobe
+- Priority-based resolution: male-cns > FAFB/BANC > manc > hemibrain > optic-lobe
 - Graceful handling of missing mappings
 - Integration with LabelMapper (LabelMapper has higher priority)
 """
@@ -61,6 +61,7 @@ DATASET_PRIORITY = [
     'male-cns_v0_9',
     'flywire_FAFB_v783',
     'banc_v626',
+    'banc_v888',
     'flywire_FAFB',
     'banc',
     'manc:v1.0',
@@ -95,7 +96,7 @@ DATASET_TO_TYPE_COL = {
     # optic-lobe not in male-cns mapping
 }
 
-# FlyWire schema namespaces kept in the type mappings.  FAFB uses the
+# FAFB/BANC release namespaces kept in the type mappings.  FAFB uses the
 # male-cns ``flywireType`` crosswalk; BANC releases use their own curated
 # per-dataset label columns and each release renames types independently
 # through its own alternative-type column, so their resolved names live under
@@ -105,7 +106,7 @@ DATASET_TO_TYPE_COL = {
 FLYWIRE_MAPPING_KEYS = ('flywire_FAFB_v783', 'banc_v626', 'banc_v888')
 BANC_RELEASE_KEYS = frozenset({'banc_v626', 'banc_v888'})
 
-# Per FlyWire namespace: which neuron table carries the primary ``type``
+# Per FAFB/BANC namespace: which neuron table carries the primary ``type``
 # column and which additional-type column records renamed types.
 FLYWIRE_TYPE_SOURCES = {
     'flywire_FAFB_v783': {
@@ -230,6 +231,22 @@ BANC_RELEASE_LINKER = "banc_release_crosswalk"
 RELEASE_ALIAS_LINKER = "release_alias"
 ANNOTATION_COLUMNS = ("additional_type(s)", "Alternative Cell Type(s)")
 
+# Linkers that land directly in their licensed target namespace carrying
+# the reached type's own row-level evidence (curated BANC label columns,
+# the BANC root relation, the MCNS release alias).  When such a hop
+# ARRIVES in the target namespace the derivation ends there: continuing
+# only wanders the target's annotation name graph — e.g. a BANC label hop
+# into a type whose ACT lists one of its OTHER datasets' curated labels,
+# fanning out to every primary sharing that token with zero row-level
+# support on the reached types.  When the hop lands in a licensed
+# intermediate namespace instead (BANC --malecns_cell_type-> MCNS
+# --flywireType-> FAFB), the walk continues through the licensed hub leg.
+# Annotation columns are deliberately absent from this set: the designed
+# two-linker standard (FAFB additional_type(s) token -> BANC ACT ->
+# BANC primary) still needs an annotation hop to ARRIVE.
+TERMINAL_LINKER_COLUMNS = BANC_LABEL_COLUMNS + (
+    BANC_RELEASE_LINKER, RELEASE_ALIAS_LINKER)
+
 # ---------------------------------------------------------------------------
 # The declarative source map of the valid derivation bridges (§9I).
 #
@@ -240,19 +257,19 @@ ANNOTATION_COLUMNS = ("additional_type(s)", "Alternative Cell Type(s)")
 #
 #   - ``type`` is the universal same-name identity between namespaces;
 #   - the male-cns crosswalk columns route from the male-cns metadata into
-#     their target families: flywireType reaches FAFB, hemibrainType
+#     their target namespaces: flywireType reaches FAFB, hemibrainType
 #     only hemibrain (100%), mancType only manc (the crosswalk was built
 #     against MANC v1.0);
 #   - the annotation columns are intra-namespace: ``additional_type(s)``
-#     maps to flywire datasets only (it lives on the FAFB rows) and
-#     ``Alternative Cell Type(s)`` only works for the BANC.
+#     maps to FAFB only (it lives on the FAFB rows) and
+#     ``Alternative Cell Type(s)`` only works for BANC.
 #
 # ``bridge_is_valid`` (below) plus the walk enforce one more rule on top of
 # the map: a crosswalk hop is only evidence when the bridge's ENDPOINT
 # namespaces include a namespace the column routes to — a hemibrainType hop
 # on a male-cns↔BANC bridge describes a third dataset's naming and is
-# invalid, while the hemibrain↔flywire route through male-cns (hemibrain
-# type → hemibrainType → male-cns type → flywireType → flywire type) is
+# invalid, while the hemibrain↔FAFB route through male-cns (hemibrain
+# type → hemibrainType → male-cns type → flywireType → FAFB type) is
 # licensed on both legs.
 # ---------------------------------------------------------------------------
 
@@ -729,6 +746,7 @@ class CrossDatasetTypeMapper:
 
         # Conflict tracking
         self._conflicts: List[TypeMappingConflict] = []
+        self._conflict_keys: Set[tuple] = set()
         self._n_to_1_types: Dict[str, Set[str]] = defaultdict(set)  # {target_type: {source_types}}
 
         # Annotation-bridge overlay provenance (built with the mappings):
@@ -852,7 +870,21 @@ class CrossDatasetTypeMapper:
         """Normalize integer-like IDs without losing CSV scientific notation."""
         if value is None or (isinstance(value, float) and pd.isna(value)):
             return ''
-        text = str(value).strip()
+        # All current metadata/index readers expose body IDs as strings.  The
+        # Decimal fallback below is needed for scientific notation and values
+        # such as ``123.0``, but constructing a Decimal for every ordinary
+        # 64-bit ID was a measurable part of cold mapper initialization.
+        if isinstance(value, str):
+            text = value.strip()
+            if not text or text.lower() in {'nan', 'none'}:
+                return ''
+            if text.isdigit() and (len(text) == 1 or text[0] != '0'):
+                return text
+            if (text.startswith('-') and text[1:].isdigit()
+                    and (len(text) == 2 or text[1] != '0')):
+                return text
+        else:
+            text = str(value).strip()
         if not text or text.lower() in {'nan', 'none'}:
             return ''
         try:
@@ -862,6 +894,94 @@ class CrossDatasetTypeMapper:
         except (InvalidOperation, ValueError):
             pass
         return text
+
+    def _cached_mapper_index_path(
+        self,
+        source_path: Optional[str],
+        dataset_folder: str,
+        required_columns: Set[str],
+    ) -> Optional[Path]:
+        """Return a fresh local Parquet index suitable for mapper loading.
+
+        The UI index is already a typed, columnar projection of the source
+        neuron table.  Reusing it avoids reparsing 100--190k-row CSVs during
+        the first cross-dataset search.  Explicit test/consumer overrides are
+        intentionally kept hermetic: an index is eligible only when the
+        source path is the conventional file below this workspace's
+        ``datasets/<dataset_folder>`` directory (or the source is absent).
+        """
+        if not self._workspace_path or not dataset_folder:
+            return None
+        datasets_root = Path(self._workspace_path) / 'datasets'
+        index_path = (
+            Path(self._workspace_path) / 'neuron_indexes'
+            / dataset_folder / 'neuron_index.parquet'
+        )
+        if not index_path.is_file():
+            return None
+
+        expected_dir = datasets_root / dataset_folder
+        if source_path:
+            source = Path(source_path)
+            try:
+                if source.parent.resolve() != expected_dir.resolve():
+                    return None
+            except OSError:
+                return None
+            if source.is_file():
+                try:
+                    if index_path.stat().st_mtime_ns < source.stat().st_mtime_ns:
+                        return None
+                except OSError:
+                    return None
+
+        try:
+            import polars as pl
+
+            if not required_columns.issubset(
+                    set(pl.read_parquet_schema(index_path))):
+                return None
+        except Exception:
+            return None
+        return index_path
+
+    def _read_mapper_table(
+        self,
+        source_path: str,
+        dataset_folder: str,
+        columns: Set[str],
+        *,
+        required_columns: Set[str],
+        as_pandas: bool = False,
+    ):
+        """Read mapper evidence from a local index, with CSV fallback."""
+        import polars as pl
+
+        cached_path = self._cached_mapper_index_path(
+            source_path, dataset_folder, required_columns)
+        if cached_path is not None:
+            available = set(pl.read_parquet_schema(cached_path))
+            selected = [column for column in columns if column in available]
+            table = pl.read_parquet(cached_path, columns=selected)
+        else:
+            if not source_path or not os.path.exists(source_path):
+                raise FileNotFoundError(source_path)
+            header = pl.read_csv(source_path, n_rows=0)
+            selected = [column for column in columns
+                        if column in header.columns]
+            if not selected:
+                table = pl.DataFrame()
+            else:
+                table = pl.read_csv(
+                    source_path,
+                    columns=selected,
+                    schema_overrides={column: pl.Utf8
+                                      for column in selected},
+                    infer_schema_length=0,
+                )
+        if as_pandas:
+            return table.to_pandas()
+        return table
 
     def _load_flywire_type_tables(self):
         """Index primary and additional types from the FAFB/BANC neuron tables.
@@ -873,6 +993,8 @@ class CrossDatasetTypeMapper:
         male-cns ``flywireType`` crosswalk values can resolve to.  Missing
         tables only disable the rename resolution for that namespace.
         """
+        import polars as pl
+
         self._flywire_alt_to_primary = {}
         self._flywire_primary_to_alts = {}
         # UNFILTERED annotation view (annotation value -> primaries): unlike
@@ -888,7 +1010,17 @@ class CrossDatasetTypeMapper:
             path = self._flywire_neuron_df_paths.get(key)
             if not path:
                 continue
-            if not os.path.exists(path):
+            source = FLYWIRE_TYPE_SOURCES[key]
+            columns = {'type', source['alt_column'], 'bodyId'}
+            if key.startswith('banc_'):
+                columns.update(BANC_LABEL_COLUMNS)
+                columns.update({
+                    'fafb_match', 'manc_match', 'malecns_match',
+                    'hemibrain_match',
+                })
+            cached_path = self._cached_mapper_index_path(
+                path, source['dataset_dir'], {'type', source['alt_column']})
+            if not os.path.exists(path) and cached_path is None:
                 self._log(
                     f"FlyWire neuron table not found for {key} "
                     f"({os.path.basename(path)}); renamed types (additional "
@@ -897,21 +1029,14 @@ class CrossDatasetTypeMapper:
                 )
                 continue
 
-            alt_column = FLYWIRE_TYPE_SOURCES[key]['alt_column']
-            columns = {'type', alt_column, 'bodyId'}
-            if key.startswith('banc_'):
-                columns.update(BANC_LABEL_COLUMNS)
-                columns.update({
-                    'fafb_match', 'manc_match', 'malecns_match',
-                    'hemibrain_match',
-                })
+            alt_column = source['alt_column']
             try:
-                table = pd.read_csv(
-                    path,
-                    usecols=lambda c, wanted=columns: c in wanted,
-                    dtype=str,
-                    low_memory=False,
-                )
+                # The prepared Parquet index is used whenever it is fresh;
+                # otherwise read the same narrow evidence projection from
+                # the authoritative CSV.  Both paths stay Polars-native.
+                table = self._read_mapper_table(
+                    path, source['dataset_dir'], columns,
+                    required_columns={'type', alt_column})
             except Exception as e:
                 self._log(f"Could not read {path}: {e}", level='warn')
                 continue
@@ -924,13 +1049,23 @@ class CrossDatasetTypeMapper:
                 )
                 continue
 
-            primaries = set(table['type'].dropna().astype(str).str.strip()) - {''}
+            if isinstance(table, pl.DataFrame):
+                primaries = {
+                    str(value).strip()
+                    for value in table.get_column('type').drop_nulls().to_list()
+                } - {''}
+            else:
+                primaries = set(table['type'].dropna().astype(str).str.strip()) - {''}
             # Primary types double as the authoritative "does this name exist
             # in the dataset" check for alias candidates.
             self._flywire_primaries[key] = primaries
             if 'bodyId' in table.columns:
                 body_to_type = {}
-                for body_id, primary in zip(table['bodyId'], table['type']):
+                if isinstance(table, pl.DataFrame):
+                    body_rows = table.select(['bodyId', 'type']).iter_rows()
+                else:
+                    body_rows = zip(table['bodyId'], table['type'])
+                for body_id, primary in body_rows:
                     body_id = self._normalize_body_id(body_id)
                     primary = str(primary or '').strip()
                     if body_id and primary:
@@ -958,7 +1093,11 @@ class CrossDatasetTypeMapper:
                     used_values.update(self._split_type_cell(cw_cell))
             alt_to_primary: Dict[str, Set[str]] = {}
             annotation_primaries: Dict[str, Set[str]] = defaultdict(set)
-            for cell, primary in zip(table[alt_column], table['type']):
+            if isinstance(table, pl.DataFrame):
+                annotation_rows = table.select([alt_column, 'type']).iter_rows()
+            else:
+                annotation_rows = zip(table[alt_column], table['type'])
+            for cell, primary in annotation_rows:
                 names = self._split_type_cell(cell)
                 if not names or not isinstance(primary, str):
                     continue
@@ -991,8 +1130,8 @@ class CrossDatasetTypeMapper:
             # values listed on its rows. The linker bridge walks these
             # edges in BOTH directions — alt -> primary resolves a rename,
             # primary -> alt pools the bodyIds whose annotation column
-            # carries the linked crosswalk value (e.g. BANC/FlyWire types
-            # routed through FAFB annotations into male-cns).
+            # carries the linked crosswalk value (e.g. BANC/FAFB types
+            # routed through release annotations into male-cns).
             # The walker-facing reverse table uses the UNFILTERED
             # annotation view: primary↔primary annotation links (e.g.
             # FAFB pC2la rows annotated 'AVLP567') are real pair evidence
@@ -1030,13 +1169,16 @@ class CrossDatasetTypeMapper:
     def _read_body_type_index(self, path: Optional[str]) -> Dict[str, str]:
         """Read only ``bodyId`` and ``type`` for match-column validation."""
         if not path or not os.path.exists(path):
-            return {}
+            if not path:
+                return {}
+            folder = Path(path).parent.name
+            if self._cached_mapper_index_path(
+                    path, folder, {'bodyId', 'type'}) is None:
+                return {}
         try:
-            table = pd.read_csv(
-                path,
-                usecols=lambda c: c in {'bodyId', 'type'},
-                dtype=str,
-                low_memory=False,
+            table = self._read_mapper_table(
+                path, Path(path).parent.name, {'bodyId', 'type'},
+                required_columns={'bodyId', 'type'},
             )
         except Exception as exc:
             self._log(f"Could not read body/type index {path}: {exc}", level='warn')
@@ -1044,11 +1186,23 @@ class CrossDatasetTypeMapper:
         if 'bodyId' not in table.columns or 'type' not in table.columns:
             return {}
         result = {}
-        for body_id, primary in zip(table['bodyId'], table['type']):
+        for body_id, primary in table.select(['bodyId', 'type']).iter_rows():
             body_id = self._normalize_body_id(body_id)
             primary = str(primary or '').strip()
             if body_id and primary:
                 result[body_id] = primary
+        return result
+
+    def _body_type_index_from_table(self, table) -> Dict[str, str]:
+        """Build a body-to-type diagnostic index with one ID normalization."""
+        if ('bodyId' not in table.columns or 'type' not in table.columns):
+            return {}
+        result: Dict[str, str] = {}
+        for body_id, primary in zip(table['bodyId'], table['type']):
+            normalized_id = self._normalize_body_id(body_id)
+            primary = str(primary or '').strip()
+            if normalized_id and primary:
+                result[normalized_id] = primary
         return result
 
     def _load_release_metadata(self) -> None:
@@ -1056,27 +1210,26 @@ class CrossDatasetTypeMapper:
         self._mcns_v09_neuron_df = None
         self._release_alias_diagnostics = {}
         v09_path = getattr(self, '_mcns_v09_neuron_df_path', None)
-        if v09_path and os.path.exists(v09_path):
+        v09_index = (
+            self._cached_mapper_index_path(
+                v09_path, Path(v09_path).parent.name, {'bodyId', 'type'})
+            if v09_path else None
+        )
+        if v09_path and (os.path.exists(v09_path) or v09_index is not None):
             try:
-                self._mcns_v09_neuron_df = pd.read_csv(
-                    v09_path,
-                    usecols=lambda c: c in {
+                self._mcns_v09_neuron_df = self._read_mapper_table(
+                    v09_path, Path(v09_path).parent.name,
+                    {
                         'bodyId', 'type', 'flywireType',
                         'hemibrainType', 'mancType',
                     },
-                    dtype=str,
-                    low_memory=False,
+                    required_columns={'bodyId', 'type'},
+                    as_pandas=True,
                 )
                 self._release_alias_diagnostics = self._compare_mcns_releases()
-                self._body_id_to_primary['male-cns:v0.9'] = {
-                    self._normalize_body_id(body_id): str(primary).strip()
-                    for body_id, primary in zip(
-                        self._mcns_v09_neuron_df.get('bodyId', ()),
-                        self._mcns_v09_neuron_df.get('type', ()),
-                    )
-                    if self._normalize_body_id(body_id)
-                    and str(primary or '').strip()
-                }
+                self._body_id_to_primary['male-cns:v0.9'] = (
+                    self._body_type_index_from_table(
+                        self._mcns_v09_neuron_df))
                 self._log(
                     "Loaded MCNS v0.9 release metadata for exact-name "
                     f"aliasing ({len(self._body_id_to_primary['male-cns:v0.9']):,} rows)"
@@ -1093,15 +1246,8 @@ class CrossDatasetTypeMapper:
         # The BANC match columns can be checked against local tables for FAFB,
         # MCNS, HEMI, and MANC.  Missing target tables do not invalidate the
         # label column; they only remove that row-level verification signal.
-        self._body_id_to_primary['male-cns:v1.0'] = {
-            self._normalize_body_id(body_id): str(primary).strip()
-            for body_id, primary in zip(
-                self._neuron_df.get('bodyId', ()),
-                self._neuron_df.get('type', ()),
-            )
-            if self._normalize_body_id(body_id)
-            and str(primary or '').strip()
-        }
+        self._body_id_to_primary['male-cns:v1.0'] = (
+            self._body_type_index_from_table(self._neuron_df))
         if self._workspace_path:
             target_paths = {
                 'hemibrain:v1.2.1': (
@@ -1251,21 +1397,27 @@ class CrossDatasetTypeMapper:
         if self._loaded and not force_reload:
             return True
         
-        if not os.path.exists(self._neuron_df_path):
+        main_folder = Path(self._neuron_df_path).parent.name
+        main_index = self._cached_mapper_index_path(
+            self._neuron_df_path, main_folder, {'bodyId', 'type'})
+        if not os.path.exists(self._neuron_df_path) and main_index is None:
             self._log(f"Neuron DF file not found: {self._neuron_df_path}", level='warn')
             self._log("Auto type mapping will be disabled. Initialize male-cns dataset first.", level='warn')
             return False
         
         try:
-            self._log(f"Loading type mappings from {os.path.basename(self._neuron_df_path)}...")
+            self._log(
+                f"Loading type mappings from {os.path.basename(self._neuron_df_path)}"
+                f"{' (cached index)' if main_index is not None else ''}...")
             
             # Read only the columns we need for efficiency
             cols_needed = ['bodyId', 'type', 'flywireType', 'hemibrainType', 'mancType']
-            self._neuron_df = pd.read_csv(
+            self._neuron_df = self._read_mapper_table(
                 self._neuron_df_path,
-                usecols=lambda c: c in cols_needed,
-                dtype={'bodyId': str},
-                low_memory=False,
+                main_folder,
+                set(cols_needed),
+                required_columns={'bodyId', 'type'},
+                as_pandas=True,
             )
 
             # Load the FlyWire primary/additional type tables used to
@@ -1385,7 +1537,11 @@ class CrossDatasetTypeMapper:
                         f"({100 * hit / max(1, len(values)):.0f}%)")
             elif home in FLYWIRE_TYPE_SOURCES:
                 path = self._flywire_neuron_df_paths.get(home)
-                if not path or not os.path.exists(path):
+                source = FLYWIRE_TYPE_SOURCES[home]
+                cached_path = self._cached_mapper_index_path(
+                    path, source['dataset_dir'], {column}) if path else None
+                if not path or (not os.path.exists(path)
+                                and cached_path is None):
                     # optional namespace: an absent table only disables
                     # its rename resolution (existing behavior)
                     self._log(
@@ -1394,7 +1550,13 @@ class CrossDatasetTypeMapper:
                         level='warn')
                     continue
                 try:
-                    present = column in pd.read_csv(path, nrows=0).columns
+                    import polars as pl
+                    if cached_path is not None:
+                        present = column in pl.read_parquet_schema(
+                            cached_path)
+                    else:
+                        present = column in pl.read_csv(
+                            path, n_rows=0).columns
                 except Exception:
                     present = False
                 if not present and column in BANC_LABEL_COLUMNS:
@@ -1432,6 +1594,7 @@ class CrossDatasetTypeMapper:
         self._crosswalk_reverse_cache = None
         self._dataset_types = defaultdict(set)
         self._conflicts = []
+        self._conflict_keys = set()
         self._n_to_1_types = defaultdict(set)
         self._bridge_provenance = {}
         self._banc_label_edges = defaultdict(list)
@@ -1439,7 +1602,11 @@ class CrossDatasetTypeMapper:
         self._banc_label_votes = {}
         self._banc_release_votes = {}
 
-        df = self._neuron_df.copy()
+        # Keep the authoritative projection available for reverse-crosswalk
+        # diagnostics, but avoid making a second pandas frame just to clean
+        # four columns.  ``itertuples`` below is several times cheaper than
+        # ``iterrows`` and does not allocate one Series per neuron.
+        df = self._neuron_df
         
         # Clean up: fill NaN with empty string, strip whitespace
         for col in ['type', 'flywireType', 'hemibrainType', 'mancType']:
@@ -1473,9 +1640,17 @@ class CrossDatasetTypeMapper:
         hemibrain_to_mcns: Dict[str, Set[str]] = defaultdict(set)
         manc_to_mcns: Dict[str, Set[str]] = defaultdict(set)
 
-        for _, row in df.iterrows():
-            mcns_type = row.get('type', '')
-            body_id = row.get('bodyId', '')
+        column_positions = {
+            column: df.columns.get_loc(column)
+            for column in ('type', 'flywireType', 'hemibrainType', 'mancType')
+            if column in df.columns
+        }
+        type_position = column_positions.get('type')
+        fw_position = column_positions.get('flywireType')
+        hemibrain_position = column_positions.get('hemibrainType')
+        manc_position = column_positions.get('mancType')
+        for row in df.itertuples(index=False, name=None):
+            mcns_type = row[type_position] if type_position is not None else ''
 
             # Skip empty types
             if not mcns_type:
@@ -1487,20 +1662,24 @@ class CrossDatasetTypeMapper:
             # Crosswalk cells may carry several names separated by ',';
             # resolve them only against the FAFB namespace.  In particular,
             # never copy MCNS flywireType into either BANC release.
-            fw_names = self._split_type_cell(row.get('flywireType', ''))
+            fw_names = self._split_type_cell(
+                row[fw_position] if fw_position is not None else '')
             for fw_key in ('flywire_FAFB_v783',):
                 for fw_type in self._resolve_flywire_names(fw_names, fw_key):
                     mcns_to_flywire[fw_key][mcns_type].add(fw_type)
                     flywire_to_mcns[fw_key][fw_type].add(mcns_type)
                     self._dataset_types[fw_key].add(fw_type)
 
-            for hemibrain_type in self._split_type_cell(row.get('hemibrainType', '')):
+            for hemibrain_type in self._split_type_cell(
+                    row[hemibrain_position]
+                    if hemibrain_position is not None else ''):
                 hemibrain_types.add(hemibrain_type)
                 mcns_to_hemibrain[mcns_type].add(hemibrain_type)
                 hemibrain_to_mcns[hemibrain_type].add(mcns_type)
                 self._dataset_types['hemibrain:v1.2.1'].add(hemibrain_type)
 
-            for manc_name in self._split_type_cell(row.get('mancType', '')):
+            for manc_name in self._split_type_cell(
+                    row[manc_position] if manc_position is not None else ''):
                 manc_types.add(manc_name)
                 mcns_to_manc[mcns_type].add(manc_name)
                 manc_to_mcns[manc_name].add(mcns_type)
@@ -1538,14 +1717,10 @@ class CrossDatasetTypeMapper:
 
         # MCNS v0.9 stays a native namespace.  The release alias and its
         # exact-name delegation to v1.0 are applied after the v1.0 maps exist.
-        if self._mcns_v09_neuron_df is not None:
-            for body_id, mcns_type in zip(
-                    self._mcns_v09_neuron_df.get('bodyId', ()),
-                    self._mcns_v09_neuron_df.get('type', ())):
-                body_id = self._normalize_body_id(body_id)
-                mcns_type = str(mcns_type or '').strip()
-                if body_id and mcns_type and not self._is_untyped_value(mcns_type):
-                    self._dataset_types['male-cns:v0.9'].add(mcns_type)
+        for mcns_type in self._body_id_to_primary.get(
+                'male-cns:v0.9', {}).values():
+            if mcns_type and not self._is_untyped_value(mcns_type):
+                self._dataset_types['male-cns:v0.9'].add(mcns_type)
         
         # Process male-cns to other datasets
         for mcns_type in male_cns_types:
@@ -1561,7 +1736,7 @@ class CrossDatasetTypeMapper:
                     # multiple types in this FlyWire namespace): the mcns
                     # type is a superset - record a conflict instead of
                     # guessing one target name.
-                    self._conflicts.append(TypeMappingConflict(
+                    self._append_conflict(TypeMappingConflict(
                         source_dataset='male-cns:v1.0',
                         target_dataset=fw_key,
                         source_type=mcns_type,
@@ -1575,7 +1750,7 @@ class CrossDatasetTypeMapper:
                 hb_type = next(iter(hb_types))
                 self._type_mappings['male-cns:v1.0'][mcns_type]['hemibrain:v1.2.1'] = hb_type
             elif len(hb_types) > 1:
-                self._conflicts.append(TypeMappingConflict(
+                self._append_conflict(TypeMappingConflict(
                     source_dataset='male-cns:v1.0',
                     target_dataset='hemibrain:v1.2.1',
                     source_type=mcns_type,
@@ -1590,7 +1765,7 @@ class CrossDatasetTypeMapper:
                 self._type_mappings['male-cns:v1.0'][mcns_type]['manc:v1.0'] = manc_type
                 self._type_mappings['male-cns:v1.0'][mcns_type]['manc:v1.2.1'] = manc_type
             elif len(manc_types_mapped) > 1:
-                self._conflicts.append(TypeMappingConflict(
+                self._append_conflict(TypeMappingConflict(
                     source_dataset='male-cns:v1.0',
                     target_dataset='manc:v1.0',
                     source_type=mcns_type,
@@ -1608,7 +1783,7 @@ class CrossDatasetTypeMapper:
                 elif len(mcns_types_for_fw) > 1:
                     # N-to-1: multiple mcns types map to the same type in
                     # this FlyWire namespace. This should NOT be aggregated.
-                    self._conflicts.append(TypeMappingConflict(
+                    self._append_conflict(TypeMappingConflict(
                         source_dataset=fw_key,
                         target_dataset='male-cns:v1.0',
                         source_type=fw_type,
@@ -1619,9 +1794,9 @@ class CrossDatasetTypeMapper:
                     for mt in mcns_types_for_fw:
                         self._n_to_1_types['male-cns:v1.0'].add(mt)
 
-        # Transitive mappings from each FlyWire namespace: its reverse
+        # Transitive mappings from each FAFB/BANC release namespace: its reverse
         # entries gain the male-cns type's other targets, including the
-        # sibling FlyWire namespace (FAFB <-> BANC names can legitimately
+        # sibling local-release namespace (FAFB <-> BANC names can legitimately
         # differ after rename resolution).
         for fw_key in FLYWIRE_MAPPING_KEYS:
             for fw_type, target_maps in self._type_mappings[fw_key].items():
@@ -1648,7 +1823,7 @@ class CrossDatasetTypeMapper:
                                 self._type_mappings['hemibrain:v1.2.1'][hb_type] = {}
                             self._type_mappings['hemibrain:v1.2.1'][hb_type][target_ds] = target_type
             elif len(mcns_types) > 1:
-                self._conflicts.append(TypeMappingConflict(
+                self._append_conflict(TypeMappingConflict(
                     source_dataset='hemibrain:v1.2.1',
                     target_dataset='male-cns:v1.0',
                     source_type=hb_type,
@@ -1674,7 +1849,7 @@ class CrossDatasetTypeMapper:
                             self._type_mappings['manc:v1.0'][manc_type][target_ds] = target_type
                             self._type_mappings['manc:v1.2.1'][manc_type][target_ds] = target_type
             elif len(mcns_types) > 1:
-                self._conflicts.append(TypeMappingConflict(
+                self._append_conflict(TypeMappingConflict(
                     source_dataset='manc:v1.0',
                     target_dataset='male-cns:v1.0',
                     source_type=manc_type,
@@ -1766,11 +1941,229 @@ class CrossDatasetTypeMapper:
                     candidates.add(token)
         return candidates
 
+    def _banc_label_vote_batches_polars(
+        self, banc_key: str, table, column: str, target_keys: List[str]
+    ):
+        """Aggregate one BANC label column without pandas row iteration.
+
+        A BANC label cell can contain several comma-separated values.  The
+        old implementation split and resolved those cells once per row inside
+        ``groupby(...).iterrows()``.  This path first deduplicates
+        ``(source-row, token)`` pairs in Polars, resolves each distinct token
+        once, and then aggregates the votes columnarly.  The optional match
+        body IDs are joined back only for diagnostics; they do not determine a
+        type-level mapping.
+        """
+        import polars as pl
+
+        match_column = self._banc_label_match_column(column)
+        selected_columns = ["type", column]
+        if match_column and match_column in table.columns:
+            selected_columns.append(match_column)
+        selected = table.select(selected_columns).with_row_index("__banc_row")
+        selected = selected.with_columns(
+            pl.col("type").cast(pl.Utf8, strict=False).fill_null("")
+            .str.strip_chars().alias("__banc_type"),
+            pl.col(column).cast(pl.Utf8, strict=False).fill_null("")
+            .alias("__banc_label"),
+        )
+
+        token_lower = pl.col("__token").str.to_lowercase()
+        type_lower = pl.col("__banc_type").str.to_lowercase()
+        tokens = (
+            selected.select(["__banc_row", "__banc_type", "__banc_label"])
+            .with_columns(
+                pl.col("__banc_label").str.split(",").alias("__token"))
+            .explode("__token")
+            .with_columns(
+                pl.col("__token").cast(pl.Utf8, strict=False).fill_null("")
+                .str.strip_chars().alias("__token"))
+            .filter(
+                (pl.col("__banc_type") != "")
+                & ~type_lower.is_in(["unknown", "nan", "none"])
+                & ~type_lower.str.contains(r"^[0-9]+$", literal=False)
+                & (pl.col("__token") != "")
+                & ~token_lower.is_in(["unknown", "nan", "none"])
+                & ~token_lower.str.starts_with("auto:")
+                & ~token_lower.str.contains(r"^[0-9]+$", literal=False)
+            )
+            # ``_banc_label_candidates`` returns a set per row.  Deduplicating
+            # here preserves that one-vote-per-row behavior for cells such as
+            # ``A, A`` while keeping the operation in the column engine.
+            .unique(
+                subset=["__banc_row", "__banc_type", "__token"],
+                maintain_order=True,
+            )
+        )
+        if tokens.is_empty():
+            return []
+
+        candidate_rows = []
+        for token in tokens.get_column("__token").unique(
+                maintain_order=True).to_list():
+            token = str(token)
+            candidate_rows.extend(
+                (token, candidate)
+                for candidate in sorted(
+                    self._banc_label_candidates(token, column))
+            )
+        if not candidate_rows:
+            return []
+        candidate_frame = pl.DataFrame(
+            candidate_rows,
+            schema=[("__token", pl.Utf8), ("__candidate", pl.Utf8)],
+            orient="row",
+        )
+        evidence = tokens.join(candidate_frame, on="__token", how="inner")
+        if evidence.is_empty():
+            return []
+
+        votes_by_type: Dict[str, Counter] = defaultdict(Counter)
+        first_row_by_type: Dict[str, int] = {}
+        vote_counts = evidence.group_by(
+            ["__banc_type", "__candidate"]
+        ).agg(
+            pl.len().alias("__count"),
+            pl.col("__banc_row").min().alias("__first_row"),
+        )
+        for banc_type, candidate, count, first_row in vote_counts.iter_rows():
+            banc_type = str(banc_type)
+            votes_by_type[banc_type][str(candidate)] += int(count)
+            first_row_by_type[banc_type] = min(
+                first_row_by_type.get(banc_type, int(first_row)),
+                int(first_row),
+            )
+
+        verified_by_type: Dict[str, Counter] = defaultdict(Counter)
+        conflicts_by_type: Dict[str, Counter] = defaultdict(Counter)
+        if match_column and match_column in selected.columns:
+            target_body_indexes = {
+                target: self._body_id_to_primary.get(target, {})
+                for target in target_keys
+            }
+            row_candidates = evidence.group_by(
+                ["__banc_row", "__banc_type"]
+            ).agg(pl.col("__candidate").unique().alias("__candidates"))
+            row_matches = (
+                row_candidates
+                .join(
+                    selected.select(["__banc_row", "__banc_type",
+                                     match_column]),
+                    on=["__banc_row", "__banc_type"],
+                    how="left",
+                )
+                .select(["__banc_type", match_column, "__candidates"])
+            )
+            for banc_type, match_value, candidates in row_matches.iter_rows():
+                match_id = self._normalize_body_id(match_value)
+                if not match_id:
+                    continue
+                for target_key in target_keys:
+                    actual = target_body_indexes[target_key].get(match_id)
+                    if not actual:
+                        continue
+                    if actual in candidates:
+                        verified_by_type[str(banc_type)][actual] += 1
+                    else:
+                        conflicts_by_type[str(banc_type)][actual] += 1
+                    # Match-column evidence is intentionally optional and
+                    # follows the old first-known-target diagnostic rule.
+                    break
+
+        return [
+            (
+                banc_type,
+                votes,
+                verified_by_type.get(banc_type, Counter()),
+                conflicts_by_type.get(banc_type, Counter()),
+            )
+            for banc_type, votes in sorted(
+                votes_by_type.items(),
+                key=lambda item: first_row_by_type[item[0]],
+            )
+            if votes
+        ]
+
     def _apply_banc_label_overlay(self) -> None:
         """Use BANC's curated per-dataset label columns as direct bridges."""
+        import polars as pl
+
         label_columns = BANC_LABEL_COLUMNS
         added_maps = 0
         added_conflicts = 0
+
+        def record_votes(banc_key, column, target_keys, banc_type,
+                         votes, verified_votes, verification_conflicts):
+            """Apply one already-aggregated source-type vote set."""
+            nonlocal added_maps, added_conflicts
+            self._banc_label_votes[(
+                banc_key, column, banc_type
+            )] = {
+                'votes': dict(votes),
+                'verified_votes': dict(verified_votes),
+                'verification_conflicts': dict(verification_conflicts),
+            }
+            winner = self._dominant_vote(votes)
+            if winner is None:
+                if len(votes) > 1:
+                    for target_key in target_keys:
+                        if not self._has_conflict(
+                                banc_key, target_key, banc_type):
+                            self._append_conflict(TypeMappingConflict(
+                                source_dataset=banc_key,
+                                target_dataset=target_key,
+                                source_type=banc_type,
+                                target_types=set(votes),
+                                relationship='1-to-N',
+                                origin='cross-dataset cell type',
+                            ))
+                            added_conflicts += 1
+                return
+            alternates = sorted(set(votes) - {winner})
+            for target_key in target_keys:
+                existing = self._type_mappings.setdefault(
+                    banc_key, {}).setdefault(banc_type, {})
+                if target_key in existing and existing[target_key] != winner:
+                    continue
+                if target_key not in existing:
+                    existing[target_key] = winner
+                    added_maps += 1
+                reverse = self._type_mappings.setdefault(
+                    target_key, {}).setdefault(winner, {})
+                if banc_key not in reverse:
+                    reverse[banc_key] = banc_type
+                edge = (target_key, winner, column, winner, banc_key)
+                if edge not in self._banc_label_edges[(banc_key, banc_type)]:
+                    self._banc_label_edges[(banc_key, banc_type)].append(edge)
+                reverse_edge = (banc_key, banc_type, column, banc_type,
+                                banc_key)
+                if reverse_edge not in self._banc_label_edges[(target_key,
+                                                               winner)]:
+                    self._banc_label_edges[(target_key, winner)].append(
+                        reverse_edge)
+                self._bridge_provenance[(
+                    banc_key, banc_type, target_key
+                )] = {
+                    'kind': 'cross-dataset cell type',
+                    'column': column,
+                    'target': winner,
+                    'votes': dict(votes),
+                    'verified_votes': dict(verified_votes),
+                    'verification_conflicts': dict(verification_conflicts),
+                    'alternates': alternates,
+                }
+                self._bridge_provenance[(
+                    target_key, winner, banc_key
+                )] = {
+                    'kind': 'cross-dataset cell type',
+                    'column': column,
+                    'target': banc_type,
+                    'votes': dict(votes),
+                    'verified_votes': dict(verified_votes),
+                    'verification_conflicts': dict(verification_conflicts),
+                    'alternates': alternates,
+                }
+
         for banc_key, table in getattr(self, '_banc_label_tables', {}).items():
             if 'type' not in table.columns:
                 continue
@@ -1780,6 +2173,19 @@ class CrossDatasetTypeMapper:
                 target_keys = sorted(self._banc_label_targets(column))
                 if not target_keys:
                     continue
+                if isinstance(table, pl.DataFrame):
+                    for banc_type, votes, verified_votes, conflicts in (
+                            self._banc_label_vote_batches_polars(
+                                banc_key, table, column, target_keys)):
+                        banc_type = str(banc_type or '').strip()
+                        if banc_type and not self._is_untyped_value(banc_type):
+                            record_votes(
+                                banc_key, column, target_keys, banc_type,
+                                votes, verified_votes, conflicts)
+                    continue
+
+                # Compatibility fallback for callers/tests that inject a
+                # pandas table directly.  Normal loads use the Polars path.
                 match_column = self._banc_label_match_column(column)
                 target_body_indexes = {
                     target: self._body_id_to_primary.get(target, {})
@@ -1798,10 +2204,6 @@ class CrossDatasetTypeMapper:
                             row.get(column, ''), column)
                         if not row_candidates:
                             continue
-                        # A locally known match body's type is optional
-                        # verification evidence.  A mismatch is recorded but
-                        # never drops the curated type-label candidate: the
-                        # type mapper must not require a bodyId-to-bodyId map.
                         match_id = self._normalize_body_id(
                             row.get(match_column, '') if match_column else '')
                         if match_column and match_id:
@@ -1816,74 +2218,10 @@ class CrossDatasetTypeMapper:
                                 break
                         for candidate in row_candidates:
                             votes[candidate] += 1
-                    if not votes:
-                        continue
-                    self._banc_label_votes[(
-                        banc_key, column, banc_type
-                    )] = {
-                        'votes': dict(votes),
-                        'verified_votes': dict(verified_votes),
-                        'verification_conflicts': dict(verification_conflicts),
-                    }
-                    winner = self._dominant_vote(votes)
-                    if winner is None:
-                        if len(votes) > 1:
-                            for target_key in target_keys:
-                                if not self._has_conflict(
-                                        banc_key, target_key, banc_type):
-                                    self._conflicts.append(TypeMappingConflict(
-                                        source_dataset=banc_key,
-                                        target_dataset=target_key,
-                                        source_type=banc_type,
-                                        target_types=set(votes),
-                                        relationship='1-to-N',
-                                        origin='cross-dataset cell type',
-                                    ))
-                                    added_conflicts += 1
-                        continue
-                    alternates = sorted(set(votes) - {winner})
-                    for target_key in target_keys:
-                        existing = self._type_mappings.setdefault(
-                            banc_key, {}).setdefault(banc_type, {})
-                        if target_key in existing and existing[target_key] != winner:
-                            continue
-                        if target_key not in existing:
-                            existing[target_key] = winner
-                            added_maps += 1
-                        reverse = self._type_mappings.setdefault(
-                            target_key, {}).setdefault(winner, {})
-                        if banc_key not in reverse:
-                            reverse[banc_key] = banc_type
-                        edge = (target_key, winner, column, winner, banc_key)
-                        if edge not in self._banc_label_edges[(banc_key, banc_type)]:
-                            self._banc_label_edges[(banc_key, banc_type)].append(edge)
-                        reverse_edge = (banc_key, banc_type, column, banc_type, banc_key)
-                        if reverse_edge not in self._banc_label_edges[(target_key, winner)]:
-                            self._banc_label_edges[(target_key, winner)].append(reverse_edge)
-                        self._bridge_provenance[(
-                            banc_key, banc_type, target_key
-                        )] = {
-                            'kind': 'cross-dataset cell type',
-                            'column': column,
-                            'target': winner,
-                            'votes': dict(votes),
-                            'verified_votes': dict(verified_votes),
-                            'verification_conflicts': dict(
-                                verification_conflicts),
-                            'alternates': alternates,
-                        }
-                        self._bridge_provenance[(
-                            target_key, winner, banc_key
-                        )] = {
-                            'kind': 'cross-dataset cell type',
-                            'column': column,
-                            'target': banc_type,
-                            'votes': dict(votes),
-                            'verified_votes': dict(verified_votes),
-                            'verification_conflicts': dict(
-                                verification_conflicts),
-                            'alternates': alternates,
-                        }
+                    if votes:
+                        record_votes(
+                            banc_key, column, target_keys, banc_type, votes,
+                            verified_votes, verification_conflicts)
         if added_maps or added_conflicts:
             self._log(
                 f"BANC label overlay: {added_maps} mappings and "
@@ -1957,7 +2295,7 @@ class CrossDatasetTypeMapper:
                 if winner is None:
                     if len(counter) > 1 and not self._has_conflict(
                             source_key, target_key, source_type):
-                        self._conflicts.append(TypeMappingConflict(
+                        self._append_conflict(TypeMappingConflict(
                             source_dataset=source_key,
                             target_dataset=target_key,
                             source_type=source_type,
@@ -2012,7 +2350,9 @@ class CrossDatasetTypeMapper:
             return
         self._release_alias_diagnostics.setdefault(
             'alias_strategy', alias.get('strategy'))
-        old = old.copy()
+        # Normalize the narrow release projection in place.  Build the
+        # fallback crosswalk cells in one pass; repeatedly filtering the full
+        # v0.9 frame once per type adds avoidable work to every cold load.
         for column in ('type', 'flywireType', 'hemibrainType', 'mancType'):
             if column in old.columns:
                 old[column] = old[column].fillna('').astype(str).str.strip()
@@ -2023,6 +2363,24 @@ class CrossDatasetTypeMapper:
         }
         self._mcns_v09_shared_names = old_types & v10_types
         self._mcns_v09_direct_edges = defaultdict(list)
+        fallback_names_by_type: Dict[str, Dict[str, Set[str]]] = defaultdict(
+            lambda: defaultdict(set))
+        column_positions = {
+            column: old.columns.get_loc(column)
+            for column in ('type', 'flywireType', 'hemibrainType', 'mancType')
+            if column in old.columns
+        }
+        type_position = column_positions.get('type')
+        for row in old.itertuples(index=False, name=None):
+            source_type = row[type_position] if type_position is not None else ''
+            if not source_type or self._is_untyped_value(source_type):
+                continue
+            for column in ('flywireType', 'hemibrainType', 'mancType'):
+                position = column_positions.get(column)
+                if position is None:
+                    continue
+                fallback_names_by_type[source_type][column].update(
+                    self._split_type_cell(row[position]))
         for source_type in sorted(old_types):
             target_maps = self._type_mappings.setdefault(
                 'male-cns:v0.9', {}).setdefault(source_type, {})
@@ -2034,18 +2392,16 @@ class CrossDatasetTypeMapper:
                         'male-cns:v1.0', {}).get(source_type, {}).items():
                     target_maps[target_key] = target_type
                 continue
-            rows = old[old['type'].eq(source_type)]
             fallback_columns = {
                 'flywireType': {'flywire_FAFB_v783'},
                 'hemibrainType': {'hemibrain:v1.2.1'},
                 'mancType': {'manc:v1.0', 'manc:v1.2.1'},
-            }
+                }
             for column, targets in fallback_columns.items():
-                if column not in rows.columns:
+                if column not in column_positions:
                     continue
-                raw_names = set()
-                for cell in rows[column].dropna():
-                    raw_names.update(self._split_type_cell(cell))
+                raw_names = fallback_names_by_type[source_type].get(
+                    column, set())
                 if column == 'flywireType':
                     names = self._resolve_flywire_names(
                         sorted(raw_names), 'flywire_FAFB_v783')
@@ -2078,7 +2434,7 @@ class CrossDatasetTypeMapper:
                     for target_key in targets:
                         if not self._has_conflict(
                                 'male-cns:v0.9', target_key, source_type):
-                            self._conflicts.append(TypeMappingConflict(
+                            self._append_conflict(TypeMappingConflict(
                                 source_dataset='male-cns:v0.9',
                                 target_dataset=target_key,
                                 source_type=source_type,
@@ -2104,15 +2460,32 @@ class CrossDatasetTypeMapper:
             return True
         return s.isdigit()
 
+    def _append_conflict(self, conflict: TypeMappingConflict) -> None:
+        """Append a conflict and update the O(1) duplicate-check index."""
+        self._conflicts.append(conflict)
+        self._conflict_keys.add((
+            conflict.source_dataset,
+            conflict.target_dataset,
+            conflict.source_type,
+        ))
+
     def _has_conflict(self, source_dataset: str, target_dataset: str,
                       source_type: str) -> bool:
-        """True when a conflict for this ordered pair already exists (the
-        annotation-bridge overlay must not duplicate crosswalk conflicts)."""
-        return any(
-            c.source_dataset == source_dataset
-            and c.target_dataset == target_dataset
-            and c.source_type == source_type
-            for c in self._conflicts)
+        """True when a conflict for this ordered pair already exists.
+
+        The old implementation scanned every conflict for each overlay row.
+        BANC creates tens of thousands of votes, so use a keyed set instead.
+        The fallback initialization keeps synthetic ``__new__``-constructed
+        mappers used by unit tests compatible.
+        """
+        keys = getattr(self, '_conflict_keys', None)
+        if keys is None:
+            keys = {
+                (c.source_dataset, c.target_dataset, c.source_type)
+                for c in self._conflicts
+            }
+            self._conflict_keys = keys
+        return (source_dataset, target_dataset, source_type) in keys
 
     def _annotation_bridge_candidates(self, src_key: str, src_type: str,
                                       dst_key: str) -> Dict[str, Set[str]]:
@@ -2233,7 +2606,7 @@ class CrossDatasetTypeMapper:
                     else:
                         prov['target'] = None
                         if not self._has_conflict(src_key, dst_key, src_type):
-                            self._conflicts.append(TypeMappingConflict(
+                            self._append_conflict(TypeMappingConflict(
                                 source_dataset=src_key,
                                 target_dataset=dst_key,
                                 source_type=src_type,
@@ -3613,7 +3986,7 @@ class CrossDatasetTypeMapper:
         return names
 
     def _flywire_alt_column(self, fw_key: str) -> str:
-        """The additional Type(S) column name of one FlyWire namespace."""
+        """The additional Type(S) column name of one FAFB/BANC namespace."""
         return FLYWIRE_TYPE_SOURCES.get(fw_key, {}).get(
             'alt_column', 'additional_type(s)')
 
@@ -3647,7 +4020,7 @@ class CrossDatasetTypeMapper:
                 for part in self._crosswalk_parts(name, column):
                     neighbors.append((target_key, part, column, part))
 
-        # FlyWire additional-type columns: an alternative (old) name on
+        # FAFB/BANC additional-type columns: an alternative (old) name on
         # rows typed with the primary name.  The edges exist only when
         # the source map licenses this namespace's annotation column.
         alt_column = self._flywire_alt_column(key)
@@ -3656,24 +4029,35 @@ class CrossDatasetTypeMapper:
                     self._flywire_alt_to_primary.get(key, {}).get(name, ())
             ):
                 neighbors.append((key, primary, alt_column, name))
-        # FlyWire reverse annotation edges: a primary type whose rows list
+        # FAFB/BANC reverse annotation edges: a primary type whose rows list
         # additional Type(S) values — the linker bridge walks these BOTH
         # ways (alt -> primary resolves a rename; primary -> alt pools the
         # bodyIds annotated with the linked crosswalk value, which is how
-        # BANC/FlyWire type names route into the male-cns crosswalk).
+        # BANC/FAFB type names route into the male-cns crosswalk).
         if source_map_targets(key, alt_column):
+            ns_primaries = self._flywire_primaries.get(key, ())
             for alt in sorted(
                     self._flywire_primary_to_alts.get(key, {}).get(name, ())
             ):
+                if alt in ns_primaries:
+                    # A primary's annotation cells listing ANOTHER primary's
+                    # name is a cross-reference (BANC's ACT carries other
+                    # datasets' curated labels), not a rename.  Hopping to
+                    # that primary as an alt-name node only feeds name-graph
+                    # wandering (l-LNv -> 'BM_InOm' -> every primary whose
+                    # cells list it) with zero row-level support on the
+                    # reached types; same-name identity is handled by the
+                    # membership block below.
+                    continue
                 neighbors.append((key, alt, alt_column, name))
         # Annotation-reverse edges from the MALE-CNS namespace: when a
-        # FlyWire dataset's annotation cells name THIS type (e.g. FAFB
+        # FAFB/BANC release's annotation cells name THIS type (e.g. FAFB
         # rows typed APDN3 carry additional Type(S) 'CL125'), that is
         # registry evidence for the pair and must be walkable from this
         # side too — otherwise the MCNS→FAFB direction loses every
         # mapping that only the FAFB→MCNS direction could see.  This is
         # a male-cns-side bridge form (MCNS --aT-- FAFB, MCNS --ACT--
-        # BANC); other namespaces reach the flywire family only through
+        # BANC); other namespaces reach the FAFB/BANC releases only through
         # the licensed connector routes, so the edges are gated to the
         # crosswalk home (§bridge rules).  Only namespaces whose
         # annotation column the source map licenses are consulted (§9I).
@@ -3901,6 +4285,10 @@ class CrossDatasetTypeMapper:
                     # arrival — no annotation continuation (see
                     # has_registry above).
                     return
+                if chain[-1]["column"] in TERMINAL_LINKER_COLUMNS:
+                    # Curated label / release / alias hops land with their
+                    # own row-level evidence; the derivation ends there.
+                    return
                 # Arrival does NOT end the walk: the reached primary's own
                 # annotation edges continue the two-linker registry
                 # standard (crosswalk primary -> its annotated siblings,
@@ -3965,7 +4353,7 @@ class CrossDatasetTypeMapper:
                     # evidence only when the bridge actually connects a
                     # namespace the column routes to — hemibrainType
                     # needs a hemibrain endpoint, mancType a manc
-                    # endpoint, flywireType a flywire-family endpoint.
+                    # endpoint, flywireType an FAFB endpoint.
                     continue
                 hop = {"dataset": nns, "column": column, "value": nname}
                 if via != nname:
@@ -3975,9 +4363,10 @@ class CrossDatasetTypeMapper:
                 chain.append(hop)
                 visited.add((nns, nname))
                 chained = ann_chained or (
-                    column in ANNOTATION_COLUMNS
-                    and prev_column in ANNOTATION_COLUMNS
-                    and nns == ns)
+                    prev_column in TERMINAL_LINKER_COLUMNS
+                    or (column in ANNOTATION_COLUMNS
+                        and prev_column in ANNOTATION_COLUMNS
+                        and nns == ns))
                 _walk((nns, nname), chain, depth + 1, visited, chained)
                 visited.discard((nns, nname))
                 chain.pop()
@@ -4096,6 +4485,9 @@ class CrossDatasetTypeMapper:
         except the chain's endpoints becomes one
         ``{'source': <column>, 'via': <value>}`` descriptor, matching the
         historical format (e.g. ``additional_type(s) via 'LMTe01'``).
+        One-linker bridges (a curated BANC label hop) report their single
+        linker as the descriptor; a bare 2-hop same-name chain reports
+        ``{'source': 'type'}`` once.
         """
         source_dataset = (
             self._detect_type_source(local_type) or "male-cns:v1.0"
@@ -4111,6 +4503,18 @@ class CrossDatasetTypeMapper:
                 if ("type",) not in seen:
                     seen.add(("type",))
                     origins.append({"source": "type"})
+                continue
+            if len(bridge) == 2:
+                # A one-linker bridge (e.g. a curated BANC label hop)
+                # carries exactly one origin descriptor — its own linker.
+                if bridge[1]["column"] != "type":
+                    key = (bridge[1]["column"], bridge[1]["value"])
+                    if key not in seen:
+                        seen.add(key)
+                        origins.append({
+                            "source": bridge[1]["column"],
+                            "via": bridge[1]["value"],
+                        })
                 continue
             if len(bridge) < 3:
                 continue

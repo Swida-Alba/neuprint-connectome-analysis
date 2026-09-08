@@ -517,6 +517,45 @@ class TestNeuronIndexData:
         assert set(index.frame.columns) == {"type", "Class", "cell_class"}
         assert index.search_frame is None
 
+    def test_cross_match_loader_uses_index_sidecar(self, isolated_index_root):
+        """Native mapping reads the compact value index, not wide metadata."""
+        import ui.neuron_index as neuron_index
+        from src.neuron_index_builder import build_search_cache_frame
+
+        dataset = "indexed:v1.0"
+        folder = dataset.replace(":", "_").replace(".", "_")
+        cache_dir = isolated_index_root / "neuron_indexes" / folder
+        cache_dir.mkdir(parents=True)
+        frame = pl.DataFrame(
+            {
+                "bodyId": ["1", "2", "3"],
+                "type": ["R7", "R8", "APL_R"],
+                "instance": ["R7_L", "R8_R", "APL_R"],
+                "Class": ["visual", "visual", "olfactory"],
+                "post": [1, 2, 3],
+            }
+        )
+        index_path = cache_dir / "neuron_index.parquet"
+        frame.write_parquet(index_path)
+        build_search_cache_frame(frame).write_parquet(
+            cache_dir / "neuron_index_search.parquet")
+
+        index = neuron_index._load_cross_match_index(dataset)
+
+        assert index is not None
+        assert index.frame.columns == ["type"]
+        assert index.search_frame is not None
+        types, _ = neuron_index._native_type_matches(
+            index, "R", 100, prefix_only=True)
+        labels, _ = neuron_index._native_label_matches(
+            index, "vis", 100, 100)
+        assert {item["name"] for item in types} == {"R7", "R8"}
+        assert labels[0]["label"] == "visual"
+        assert labels[0]["covered_all"] == [
+            {"name": "R7", "count": 1},
+            {"name": "R8", "count": 1},
+        ]
+
     def test_zero_hit_mapping_forwards_prefix_only_mode(self, monkeypatch):
         """Cross-dataset collection keeps the forced-search safety flag."""
         import ui.neuron_index as neuron_index
@@ -2491,7 +2530,7 @@ class TestBridgeBodyIdPooling:
         assert [l["body_ids"] for l in pool["per_linker"]] == [
             ["1", "2"], ["11", "12", "13", "14"]]
         # coverage states the partial target coverage
-        assert pool["coverage"] == "covered 4 of 4"
+        assert pool["coverage"] == "covered 4 of 4 (100.0%)"
 
     def test_no_linker_yields_full_endpoint_pools(self, isolated_index_root,
                                                   tmp_path):
@@ -2532,7 +2571,7 @@ class TestBridgeBodyIdPooling:
             indexes={"zero_source:v1.0": source,
                      "zero_target:v1.0": target})
         assert pool["granularity"] == "2 to 0"
-        assert pool["coverage"] == "covered 0 of 3"
+        assert pool["coverage"] == "covered 0 of 3 (0.0%)"
 
     def test_banc_label_match_ids_do_not_refine_the_opposite_side(
             self, isolated_index_root, tmp_path):
@@ -2569,8 +2608,8 @@ class TestBridgeBodyIdPooling:
         assert forward["granularity"] == "4 to 3"
         assert forward["source_body_ids"] == ["f1", "f2", "f3", "f4"]
         assert forward["target_body_ids"] == ["b1", "b2", "b3"]
-        assert forward["source_coverage"] == "covered 4 of 4"
-        assert forward["target_coverage"] == "covered 3 of 3"
+        assert forward["source_coverage"] == "covered 4 of 4 (100.0%)"
+        assert forward["target_coverage"] == "covered 3 of 3 (100.0%)"
         assert "matched_body_ids" not in forward["per_linker"][0]
 
         reverse = pool_bridge_body_ids(
@@ -2580,6 +2619,65 @@ class TestBridgeBodyIdPooling:
         assert reverse["granularity"] == "3 to 4"
         assert reverse["source_body_ids"] == ["b1", "b2", "b3"]
         assert reverse["target_body_ids"] == ["f1", "f2", "f3", "f4"]
+
+
+    def test_pool_basis_flags_and_unmeasured_side(
+            self, isolated_index_root, tmp_path):
+        """Each side reports WHICH pool state produced its numbers:
+        linker-measured subset, unconstrained full population, or an
+        unmeasurable side (coverage index unavailable) — never conflated."""
+        from ui.neuron_index import chain_is_supported, pool_bridge_body_ids
+
+        source = self._index(tmp_path, "bs:v1.0", {
+            "bodyId": ["1", "2"], "type": ["A", "A"],
+            "bridge": ["W", "W"],
+        })
+        target = self._index(tmp_path, "bt:v1.0", {
+            "bodyId": ["11", "12"], "type": ["B", "B"],
+            "bridge": ["X", "X"],
+        })
+        # target side has NO linker: the full type population is the pool
+        pool = pool_bridge_body_ids(
+            "bs:v1.0", "bt:v1.0", [{
+                "column": "bridge", "value": "W",
+                "home": "bs:v1.0", "kind": "linker",
+            }], "A", "B",
+            indexes={"bs:v1.0": source, "bt:v1.0": target})
+        assert pool["source_basis"] == "linker rows"
+        assert pool["target_basis"] == "full population"
+        assert pool["source_pool_size"] == 2
+        assert pool["source_type_total"] == 2
+        assert pool["target_type_total"] == 2
+        assert chain_is_supported(pool, "bt:v1.0")
+
+        # the target coverage index is unavailable: the side is UNMEASURED,
+        # never a fake measured zero
+        pool_unmeasured = pool_bridge_body_ids(
+            "bs:v1.0", "missing:v1.0", [{
+                "column": "bridge", "value": "W",
+                "home": "bs:v1.0", "kind": "linker",
+            }], "A", "B",
+            indexes={"bs:v1.0": source})
+        assert pool_unmeasured["source_basis"] == "linker rows"
+        assert pool_unmeasured["target_basis"] == "unmeasured"
+        assert pool_unmeasured["target_type_total"] is None
+        assert chain_is_supported(pool_unmeasured, "missing:v1.0")
+
+        # a chain whose every target-home linker pooled zero rows is
+        # unsupported (the mapper-side name-graph noise safety net)
+        empty_target = pool_bridge_body_ids(
+            "bs:v1.0", "bt:v1.0", [{
+                "column": "bridge", "value": "W",
+                "home": "bt:v1.0", "kind": "linker",
+            }], "A", "B",
+            indexes={"bs:v1.0": source, "bt:v1.0": target})
+        assert empty_target["target_basis"] == "linker rows"
+        assert not chain_is_supported(empty_target, "bt:v1.0")
+        # same-name chains (no target-home linker) are supported by default
+        bare = pool_bridge_body_ids(
+            "bs:v1.0", "bt:v1.0", [], "A", "B",
+            indexes={"bs:v1.0": source, "bt:v1.0": target})
+        assert chain_is_supported(bare, "bt:v1.0")
 
 
 def test_mapped_csv_extras_dedupe_and_via_note():
