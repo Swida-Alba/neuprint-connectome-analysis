@@ -79,16 +79,21 @@ bridge for the corresponding namespace:
 |---|---|---|
 | `fafb_cell_type` | FAFB v783 | `fafb_match` when the FAFB table is available |
 | `malecns_cell_type` | male-cns v1.0 | `malecns_match` when the MCNS table is available |
-| `hemibrain_cell_type` | hemibrain v1.2.1 | curated non-`auto:` label |
-| `manc_cell_type` | MANC v1.0/v1.2.1 | curated non-`auto:` label |
+| `hemibrain_cell_type` | hemibrain v1.2.1 | curated label or known normalized `auto:` label |
+| `manc_cell_type` | MANC v1.0/v1.2.1 | curated label or known normalized `auto:` label |
 
 The labels are voted per BANC primary type. A single candidate, or a
 candidate with more than half of the votes and at least twice the runner-up,
 wins; unresolved splits become a `TypeMappingConflict`. A known match-bodyId
 whose target `type` contradicts a FAFB/MCNS label removes that row's vote.
-`auto:` values, `Unknown`, empty labels, and bare numeric sentinels are never
-mapping evidence. These bridges are direct-only: BANC is not introduced as a
-connector between unrelated endpoint pairs. A label hop is also a
+The `auto:` prefix is provenance, not a separate type namespace: a normalized
+`auto:<name>` token is eligible only when `<name>` resolves to a known target
+type. The raw token and its auto evidence tier are retained in bridge
+provenance and exports. Unknown `auto:` tokens, `Unknown`, empty labels, and
+bare numeric sentinels remain ineligible. Conflicting votes remain rejected
+even when one conflicting row uses a known `auto:` token. These bridges are
+direct-only: BANC is not introduced as a connector between unrelated endpoint
+pairs. A label hop is also a
 **derivation endpoint**: once it lands in the target namespace, the chain
 ends there — the label cell names the reached type exactly, and continuing
 into that namespace's annotation graph would only drift onto unrelated
@@ -558,10 +563,23 @@ When running `ComparisonAnalyzer.export_results()` with `auto_type_mapping=True`
 
 ### Conflict Handling
 
-- **1-to-N mappings**: One male-cns type maps to multiple types in another dataset. These are logged as warnings but the mapping proceeds using all variations.
-- **N-to-1 mappings**: Multiple types from different datasets map to the same canonical name. These types should NOT be aggregated incorrectly.
+- **Unresolved 1-to-N mappings**: One source type has several target
+  candidates. The candidates and licensed bridge chains remain available as
+  explicitly labeled evidence, but `get_mapped_type()` returns no single
+  canonical target and automatic mapped-neuron totals do not choose a branch.
+  For example, MCNS `SMP227` → FAFB `s-CPDN3B`, `s-CPDN3C`, and
+  `s-CPDN3D` is valid split evidence, not a single accepted mapping.
+- **N-to-1 mappings**: Multiple source types share one target name. These
+  types should NOT be aggregated incorrectly; coverage and artifacts retain
+  their independent endpoint populations.
+- **BANC label votes**: a unique winning vote may be accepted, including a
+  known normalized `auto:` label, but a conflicting vote set stays rejected.
+  For example, BANC `CB1011` remains unmapped toward MCNS despite its
+  same-name row.
 
-Use `mapper.is_n_to_1_type(type_name, dataset)` to check if a type is involved in a conflict.
+Use `mapper.get_mapping_conflicts(source_dataset, target_dataset,
+source_type)` for a direction-scoped conflict, and
+`mapper.is_n_to_1_type(type_name, dataset)` for the legacy broad check.
 
 ## Performance Considerations
 

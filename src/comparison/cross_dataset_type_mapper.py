@@ -107,6 +107,21 @@ FLYWIRE_MAPPING_KEYS = ('flywire_FAFB_v783', 'banc_v626', 'banc_v888')
 BANC_RELEASE_KEYS = frozenset({'banc_v626', 'banc_v888'})
 _UNTYPED_SENTINELS = frozenset({'unknown', 'nan', 'none'})
 
+
+def canonical_linker_token(value: Any) -> str:
+    """Return the type token used when matching a linker cell.
+
+    BANC label cells use ``auto:`` as provenance, not as part of the type
+    namespace.  Keep raw cells on the mapper's provenance records, but use
+    the normalized token for exact row matching and bridge calls.  The
+    helper is intentionally module-level so the coverage layer and the type
+    mapper share precisely the same normalization rule.
+    """
+    token = str(value or '').strip()
+    if token.casefold().startswith('auto:'):
+        return token.split(':', 1)[1].strip()
+    return token
+
 # Per FAFB/BANC namespace: which neuron table carries the primary ``type``
 # column and which additional-type column records renamed types.
 FLYWIRE_TYPE_SOURCES = {
@@ -398,32 +413,87 @@ def hop_home(hop: Dict[str, str], source_dataset: str) -> str:
     return hop.get("dataset", source_dataset)
 
 
+def linker_evidence_tier(column: str, raw_value: Any = "",
+                         indirect: bool = False) -> str:
+    """Classify one linker without using coverage or population size."""
+    if indirect:
+        return "indirect route"
+    if column in BANC_LABEL_COLUMNS:
+        return ("direct auto label" if str(raw_value or "").casefold()
+                .startswith("auto:") else "direct curated label")
+    if column in CROSSWALK_COLUMNS:
+        return "direct crosswalk"
+    if column in ANNOTATION_COLUMNS:
+        return "direct annotation"
+    if column in (BANC_RELEASE_LINKER, RELEASE_ALIAS_LINKER):
+        return "direct release relation"
+    return "direct metadata"
+
+
+def prioritized_bridge_chains(chains, source_dataset: str,
+                              target_dataset: str):
+    """Return bridge candidates in deterministic evidence priority order.
+
+    Direct registry linkers outrank indirect/hub routes, and any metadata
+    linker outranks a bare same-name echo.  Ties use the shortest
+    standardized/derivation chain and then the hop tuple, so the order is
+    reproducible without looking at body counts.  Callers may walk this
+    complete ordered list and retain later supported candidates as
+    alternatives; :func:`preferred_bridge_chain` remains the compatibility
+    single-chain view.
+    """
+    candidates = [chain for chain in (chains or []) if chain]
+
+    def key(chain):
+        linkers = standardize_bridge(chain, source_dataset, target_dataset)
+        direct = sum(1 for linker in linkers
+                     if linker["kind"] == "linker" and not linker["indirect"])
+        indirect = sum(1 for linker in linkers
+                       if linker["kind"] == "linker" and linker["indirect"])
+        total = len(linkers)
+        tier_order = {
+            "direct curated label": 0,
+            "direct crosswalk": 1,
+            "direct auto label": 2,
+            "direct annotation": 3,
+            "direct release relation": 4,
+            "direct metadata": 4,
+            "indirect route": 5,
+            "same name": 6,
+        }
+        best_tier = min(
+            (tier_order.get(linker.get("evidence_tier", "direct metadata"), 4)
+             for linker in linkers
+             if linker.get("kind") == "linker"),
+            default=6,
+        )
+        # bare name-equality chains sink below ANY linker chain — a metadata
+        # verification always outranks an unverified name echo.
+        return (
+            0 if total else 1,
+            indirect,
+            best_tier,
+            -direct,
+            total,
+            len(chain),
+            tuple((hop.get('dataset', ''), hop.get('column', ''),
+                   hop.get('value', '')) for hop in chain),
+        )
+
+    return sorted(candidates, key=key)
+
+
 def preferred_bridge_chain(chains, source_dataset: str,
                            target_dataset: str):
     """The most representative chain of one mapped pair.
 
     Among the chains that end at the pair's foreign type, prefer the one
-    standardized with the most DIRECT (registry) linkers — the transitive
-    same-name routes (via other namespaces) and hub detours are kept as
-    alternative bridges but must not drive bodyId pooling or the
-    primary hover.  Ties: fewer linkers, then the shorter chain.
+    standardized with the most DIRECT (registry) linkers.  Other chains are
+    valid alternatives when independently supported, but must not replace
+    this primary hover/pool choice.
     """
-    best = None
-    best_key = None
-    for chain in chains or []:
-        if not chain:
-            continue
-        linkers = standardize_bridge(chain, source_dataset, target_dataset)
-        direct = sum(1 for l in linkers
-                     if l["kind"] == "linker" and not l["indirect"])
-        total = len(linkers)
-        # bare name-equality chains sink below ANY linker chain — a
-        # metadata verification (even a non-registry crosswalk hop)
-        # always outranks the unverified name echo
-        key = (0 if total else 1, -direct, total, len(chain))
-        if best_key is None or key < best_key:
-            best, best_key = chain, key
-    return best
+    ordered = prioritized_bridge_chains(chains, source_dataset, target_dataset)
+    return ordered[0] if ordered else None
 
 
 def bridge_linker_text(chains: List[List[Dict[str, str]]],
@@ -466,11 +536,12 @@ def bridge_linker_text(chains: List[List[Dict[str, str]]],
                 continue
             seen.add(key)
             entries.append(dict(linker))
+    registry = (
+        BRIDGE_STANDARD.get((source_dataset, target_dataset))
+        or BRIDGE_STANDARD.get((target_dataset, source_dataset), ())
+    )
     registry_order = {
-        column: index
-        for index, (column, _home) in enumerate(
-            BRIDGE_STANDARD.get((source_dataset, target_dataset), ())
-        )
+        column: index for index, (column, _home) in enumerate(registry)
     }
     entries.sort(key=lambda e: (
         e["indirect"],
@@ -515,7 +586,15 @@ def standardize_bridge(chain, source_dataset: str,
     crosswalk + one annotation). Hops outside the pair registry are
     flagged ``indirect``.
     """
-    registry = BRIDGE_STANDARD.get((source_dataset, target_dataset), ())
+    # A bridge can be traversed in either direction.  The registry describes
+    # the physical linker columns for the pair, so use its mirror when the
+    # caller is walking the reverse direction too.  This keeps evidence-tier
+    # classification tied to the actual route rather than the display
+    # orientation.
+    registry = (
+        BRIDGE_STANDARD.get((source_dataset, target_dataset))
+        or BRIDGE_STANDARD.get((target_dataset, source_dataset), ())
+    )
     registry_columns = {column for column, _home in registry}
     special_columns = {
         BANC_RELEASE_LINKER,
@@ -523,23 +602,42 @@ def standardize_bridge(chain, source_dataset: str,
         *BANC_LABEL_COLUMNS,
     }
     linkers: List[Dict[str, Any]] = []
+
+    def _linker(hop: Dict[str, Any], raw_value: Any, *,
+                kind: str = "linker", indirect: bool = False) -> Dict[str, Any]:
+        raw_value = str(raw_value or "").strip()
+        canonical = str(
+            hop.get("canonical_value") or canonical_linker_token(raw_value)
+        ).strip()
+        return {
+            'column': hop.get('column', ''),
+            'value': raw_value,
+            'raw_value': raw_value,
+            'canonical_value': canonical,
+            'home': hop_home(hop, source_dataset),
+            'kind': kind,
+            'indirect': indirect,
+            'evidence_tier': hop.get('evidence_tier') or
+            linker_evidence_tier(hop.get('column', ''), raw_value, indirect),
+        }
+
     middle = chain[1:-1]
     for hop in middle:
         if hop['column'] == 'type':
-            linkers.append({
-                'column': 'type', 'value': hop['value'],
-                'home': hop['dataset'], 'kind': 'same_name_pass',
-                'indirect': True,
-            })
+            linkers.append(_linker(
+                hop, hop['value'], kind='same_name_pass', indirect=True))
             continue
-        linkers.append({
-            'column': hop['column'], 'value': hop['value'],
-            'home': hop_home(hop, source_dataset), 'kind': 'linker',
-            'indirect': (
-                hop['column'] not in registry_columns
-                and hop['column'] not in special_columns
-            ),
-        })
+        indirect = (
+            hop['column'] not in registry_columns
+            and hop['column'] not in special_columns
+        )
+        # For a middle hop, ``value`` is the cell token on the physical
+        # linker column.  ``via`` is the type at the other side of that hop
+        # and is only the correct linker token for the terminal arrival hop.
+        # Using ``via`` here breaks reverse crosswalk routes such as
+        # FAFB APDN3 -> MCNS CL125: FAFB rows carry CL125 in
+        # additional_type(s), not APDN3.
+        linkers.append(_linker(hop, hop.get('value'), indirect=indirect))
     last = chain[-1] if chain else {}
     if len(chain) >= 2 and last.get("column") in (
             *CROSSWALK_COLUMNS, *BANC_LABEL_COLUMNS,
@@ -553,24 +651,18 @@ def standardize_bridge(chain, source_dataset: str,
         # while the cell carries the foreign token (e.g. MCNS rows typed
         # 5thsLNv_LNd6 whose flywireType cell is 's-LNv_a,LNd_a'): using
         # the arrival name emptied the target-side bodyId pool.
-        linkers.append({
-            'column': last['column'],
-            'value': last.get("via") or last["value"],
-            'home': hop_home(last, source_dataset), 'kind': 'linker',
-            'indirect': (
-                last['column'] not in registry_columns
-                and last['column'] not in special_columns
-            ),
-        })
+        indirect = (
+            last['column'] not in registry_columns
+            and last['column'] not in special_columns
+        )
+        linkers.append(_linker(
+            last, last.get("via") or last["value"], indirect=indirect))
     elif len(chain) >= 2 and last.get('via') and last.get('column') != 'type':
-        final = {
-            'column': last['column'], 'value': last['via'],
-            'home': hop_home(last, source_dataset), 'kind': 'linker',
-            'indirect': (
-                last['column'] not in registry_columns
-                and last['column'] not in special_columns
-            ),
-        }
+        indirect = (
+            last['column'] not in registry_columns
+            and last['column'] not in special_columns
+        )
+        final = _linker(last, last['via'], indirect=indirect)
         # A cross-namespace annotation landing standardizes to the same
         # (column, value) as the arrival hop's via (the shared token): one
         # linker represents both legs of the composed bridge.  Only a
@@ -783,7 +875,9 @@ class CrossDatasetTypeMapper:
         self._flywire_primaries: Dict[str, Set[str]] = {}
 
         # Derived lookup for get_alias_candidates; rebuilt with the mappings.
-        self._alias_n_to_1_cache: Optional[Dict[str, TypeMappingConflict]] = None
+        self._alias_n_to_1_cache: Optional[
+            Dict[Tuple[str, str], List[TypeMappingConflict]]
+        ] = None
 
         # Reverse crosswalk index ({cell value: {male-cns primaries}});
         # lazily built by _crosswalk_reverse, reset with the mappings.
@@ -1950,9 +2044,8 @@ class CrossDatasetTypeMapper:
         the prefix while retaining the tier for provenance and diagnostics.
         """
         token = str(value or '').strip()
-        if cls._is_auto_label(token):
-            return token.split(':', 1)[1].strip(), True
-        return token, False
+        normalized = canonical_linker_token(token)
+        return normalized, normalized != token
 
     def _banc_label_targets(self, column: str) -> Set[str]:
         return {
@@ -1999,9 +2092,14 @@ class CrossDatasetTypeMapper:
                     if token in self._dataset_types.get(target_key, {}):
                         token_candidates.add(token)
                 else:
-                    # MANC/HEMI primaries are not required to be locally
-                    # grounded for this overlay; their curated non-auto
-                    # labels are accepted as-is.
+                    # Curated HEMI/MANC labels historically remain usable when
+                    # their optional local table is unavailable.  A machine
+                    # label is different: once ``auto:`` is stripped it must
+                    # resolve to a known target type, otherwise an arbitrary
+                    # generated token would become a type bridge.
+                    if (auto_stripped and token not in
+                            self._dataset_types.get(target_key, set())):
+                        continue
                     token_candidates.add(token)
             for candidate in token_candidates:
                 # Keep one vote per candidate per source row, matching the
@@ -2049,6 +2147,7 @@ class CrossDatasetTypeMapper:
                 pl.col("__token").cast(pl.Utf8, strict=False).fill_null("")
                 .str.strip_chars().alias("__token"))
             .with_columns(
+                pl.col("__token").alias("__raw_token"),
                 pl.col("__token").str.to_lowercase().str.starts_with(
                     "auto:").alias("__auto_stripped"),
                 pl.when(pl.col("__token").str.to_lowercase().str.starts_with(
@@ -2074,20 +2173,36 @@ class CrossDatasetTypeMapper:
             # ``A, A`` while keeping the operation in the column engine.
             .group_by(["__banc_row", "__banc_type", "__token"],
                       maintain_order=True)
-            .agg(pl.col("__auto_stripped").any().alias("__auto_stripped"))
+            .agg(
+                pl.col("__auto_stripped").any().alias("__auto_stripped"),
+                pl.col("__raw_token").unique().alias("__raw_tokens"),
+            )
         )
         if tokens.is_empty():
             return []
 
         candidate_rows = []
-        for token in tokens.get_column("__token").unique(
-                maintain_order=True).to_list():
+        candidate_pairs = set()
+        token_rows = tokens.select(["__token", "__raw_tokens"]).unique(
+            maintain_order=True).iter_rows()
+        for token, raw_tokens in token_rows:
             token = str(token)
-            candidate_rows.extend(
-                (token, candidate)
-                for candidate in sorted(
-                    self._banc_label_candidates(token, column))
-            )
+            candidates = set()
+            # Resolve each raw spelling so the known-type gate can distinguish
+            # a curated token from the same normalized token supplied only as
+            # ``auto:<name>``.  The normalized value remains the join key.
+            for raw_token in raw_tokens or ():
+                candidates.update(
+                    self._banc_label_candidates(raw_token, column))
+            for candidate in sorted(candidates):
+                pair = (token, candidate)
+                # One normalized token may be present once as a curated value
+                # and once as ``auto:<name>``.  Candidate resolution is a
+                # mapping from normalized token to candidate, so duplicate
+                # raw spellings must not duplicate the later row vote.
+                if pair not in candidate_pairs:
+                    candidate_pairs.add(pair)
+                    candidate_rows.append(pair)
         if not candidate_rows:
             return []
         candidate_frame = pl.DataFrame(
@@ -2101,6 +2216,8 @@ class CrossDatasetTypeMapper:
 
         votes_by_type: Dict[str, Counter] = defaultdict(Counter)
         auto_stripped_by_type: Dict[str, Counter] = defaultdict(Counter)
+        raw_values_by_type: Dict[str, Dict[str, Set[str]]] = defaultdict(
+            lambda: defaultdict(set))
         first_row_by_type: Dict[str, int] = {}
         vote_counts = evidence.group_by(
             ["__banc_type", "__candidate"]
@@ -2115,6 +2232,14 @@ class CrossDatasetTypeMapper:
                 first_row_by_type.get(banc_type, int(first_row)),
                 int(first_row),
             )
+        for banc_type, candidate, raw_tokens in evidence.select(
+                ["__banc_type", "__candidate", "__raw_tokens"]
+        ).iter_rows():
+            for raw_token in raw_tokens or ():
+                raw_token = str(raw_token or '').strip()
+                if raw_token:
+                    raw_values_by_type[str(banc_type)][str(candidate)].add(
+                        raw_token)
         auto_counts = evidence.filter(pl.col("__auto_stripped")).group_by(
             ["__banc_type", "__candidate"]
         ).agg(pl.len().alias("__count"))
@@ -2164,6 +2289,7 @@ class CrossDatasetTypeMapper:
                 verified_by_type.get(banc_type, Counter()),
                 conflicts_by_type.get(banc_type, Counter()),
                 auto_stripped_by_type.get(banc_type, Counter()),
+                raw_values_by_type.get(banc_type, {}),
             )
             for banc_type, votes in sorted(
                 votes_by_type.items(),
@@ -2179,13 +2305,29 @@ class CrossDatasetTypeMapper:
         label_columns = BANC_LABEL_COLUMNS
         added_maps = 0
         added_conflicts = 0
+        # A BANC label column is naturally read in the direction
+        # ``BANC primary -> labelled source type``.  The reverse lookup is
+        # only valid when exactly one BANC primary claims a given labelled
+        # source type.  Accumulate those reverse candidates first so that a
+        # source type such as MCNS ``VS`` cannot be silently assigned to the
+        # first/last BANC subtype encountered in the table.
+        reverse_label_candidates: Dict[Tuple[str, str, str], Set[str]] = \
+            defaultdict(set)
+        reverse_label_records: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
 
         def record_votes(banc_key, column, target_keys, banc_type,
                          votes, verified_votes, verification_conflicts,
-                         auto_stripped_votes=None):
+                         auto_stripped_votes=None, raw_values=None):
             """Apply one already-aggregated source-type vote set."""
             nonlocal added_maps, added_conflicts
             auto_stripped_votes = auto_stripped_votes or Counter()
+            raw_values = raw_values or {}
+            raw_values = {
+                str(candidate): sorted({str(raw).strip() for raw in values
+                                        if str(raw).strip()})
+                for candidate, values in raw_values.items()
+                if values
+            }
             self._banc_label_votes[(
                 banc_key, column, banc_type
             )] = {
@@ -2193,6 +2335,7 @@ class CrossDatasetTypeMapper:
                 'verified_votes': dict(verified_votes),
                 'verification_conflicts': dict(verification_conflicts),
                 'auto_stripped_votes': dict(auto_stripped_votes),
+                'raw_values': raw_values,
             }
             winner = self._dominant_vote(votes)
             if winner is None:
@@ -2211,6 +2354,24 @@ class CrossDatasetTypeMapper:
                             added_conflicts += 1
                 return
             alternates = sorted(set(votes) - {winner})
+
+            def preferred_raw_value(candidate: str) -> str:
+                """Choose one display/matching token deterministically.
+
+                The canonical candidate remains the type identity.  If the
+                source cell supplied a raw value, keep that value on the
+                linker edge so the bridge display exposes ``auto:`` instead
+                of silently erasing its provenance.  Curated spelling wins a
+                tie over an auto spelling, then lexical order makes repeated
+                runs stable.
+                """
+                values = raw_values.get(candidate) or []
+                if not values:
+                    return candidate
+                return min(values, key=lambda raw: (
+                    self._is_auto_label(raw), raw.casefold(), raw))
+
+            linker_value = preferred_raw_value(winner)
             for target_key in target_keys:
                 existing = self._type_mappings.setdefault(
                     banc_key, {}).setdefault(banc_type, {})
@@ -2219,25 +2380,34 @@ class CrossDatasetTypeMapper:
                 if target_key not in existing:
                     existing[target_key] = winner
                     added_maps += 1
-                reverse = self._type_mappings.setdefault(
-                    target_key, {}).setdefault(winner, {})
-                if banc_key not in reverse:
-                    reverse[banc_key] = banc_type
-                edge = (target_key, winner, column, winner, banc_key)
+                reverse_key = (target_key, winner, banc_key)
+                reverse_label_candidates[reverse_key].add(banc_type)
+                reverse_label_records.setdefault((
+                    target_key, winner, banc_key, banc_type), {
+                    'column': column,
+                    'linker_value': linker_value,
+                    'votes': dict(votes),
+                    'verified_votes': dict(verified_votes),
+                    'verification_conflicts': dict(verification_conflicts),
+                    'auto_stripped_votes': dict(auto_stripped_votes),
+                    'winner_auto_stripped_votes': int(
+                        auto_stripped_votes.get(winner, 0)),
+                    'winner_derived_from_auto': bool(
+                        auto_stripped_votes.get(winner, 0)),
+                    'raw_values': raw_values,
+                    'winner_raw_values': list(raw_values.get(winner, [])),
+                    'alternates': alternates,
+                })
+                edge = (target_key, winner, column, linker_value, banc_key)
                 if edge not in self._banc_label_edges[(banc_key, banc_type)]:
                     self._banc_label_edges[(banc_key, banc_type)].append(edge)
-                reverse_edge = (banc_key, banc_type, column, banc_type,
-                                banc_key)
-                if reverse_edge not in self._banc_label_edges[(target_key,
-                                                               winner)]:
-                    self._banc_label_edges[(target_key, winner)].append(
-                        reverse_edge)
                 self._bridge_provenance[(
                     banc_key, banc_type, target_key
                 )] = {
                     'kind': 'cross-dataset cell type',
                     'column': column,
                     'target': winner,
+                    'linker_value': linker_value,
                     'votes': dict(votes),
                     'verified_votes': dict(verified_votes),
                     'verification_conflicts': dict(verification_conflicts),
@@ -2246,22 +2416,8 @@ class CrossDatasetTypeMapper:
                         auto_stripped_votes.get(winner, 0)),
                     'winner_derived_from_auto': bool(
                         auto_stripped_votes.get(winner, 0)),
-                    'alternates': alternates,
-                }
-                self._bridge_provenance[(
-                    target_key, winner, banc_key
-                )] = {
-                    'kind': 'cross-dataset cell type',
-                    'column': column,
-                    'target': banc_type,
-                    'votes': dict(votes),
-                    'verified_votes': dict(verified_votes),
-                    'verification_conflicts': dict(verification_conflicts),
-                    'auto_stripped_votes': dict(auto_stripped_votes),
-                    'winner_auto_stripped_votes': int(
-                        auto_stripped_votes.get(winner, 0)),
-                    'winner_derived_from_auto': bool(
-                        auto_stripped_votes.get(winner, 0)),
+                    'raw_values': raw_values,
+                    'winner_raw_values': list(raw_values.get(winner, [])),
                     'alternates': alternates,
                 }
 
@@ -2275,14 +2431,16 @@ class CrossDatasetTypeMapper:
                 target_keys = sorted(self._banc_label_targets(column))
                 if not target_keys:
                     continue
-                for banc_type, votes, verified_votes, conflicts, auto_stripped in (
+                for (banc_type, votes, verified_votes, conflicts, auto_stripped,
+                     raw_values) in (
                         self._banc_label_vote_batches_polars(
                             banc_key, table, column, target_keys)):
                     banc_type = str(banc_type or '').strip()
                     if banc_type and not self._is_untyped_value(banc_type):
                         record_votes(
                             banc_key, column, target_keys, banc_type,
-                            votes, verified_votes, conflicts, auto_stripped)
+                            votes, verified_votes, conflicts, auto_stripped,
+                            raw_values)
 
         for banc_key, table in getattr(self, '_banc_label_tables', {}).items():
             if isinstance(table, pl.DataFrame):
@@ -2311,6 +2469,7 @@ class CrossDatasetTypeMapper:
                     verified_votes = Counter()
                     verification_conflicts = Counter()
                     auto_stripped_votes = Counter()
+                    raw_values = defaultdict(set)
                     for _, row in rows.iterrows():
                         candidate_details = self._banc_label_candidate_details(
                             row.get(column, ''), column)
@@ -2336,11 +2495,17 @@ class CrossDatasetTypeMapper:
                                 candidate for candidate, was_auto in
                                 candidate_details if was_auto}:
                             auto_stripped_votes[candidate] += 1
+                        for raw_token in self._split_type_cell(
+                                row.get(column, '')):
+                            raw_token = str(raw_token or '').strip()
+                            for candidate in self._banc_label_candidates(
+                                    raw_token, column):
+                                raw_values[candidate].add(raw_token)
                     if votes:
                         record_votes(
                             banc_key, column, target_keys, banc_type, votes,
                             verified_votes, verification_conflicts,
-                            auto_stripped_votes)
+                            auto_stripped_votes, raw_values)
 
         # Normal cold loads retain only the path to the BANC table.  Read one
         # narrow label projection per release (rather than the full metadata
@@ -2365,6 +2530,90 @@ class CrossDatasetTypeMapper:
                     f"{exc}", level='warn')
                 continue
             apply_polars_table(banc_key, table)
+
+        # Materialize only unambiguous reverse label mappings.  Conflicting
+        # BANC primaries remain useful in their native direction, but the
+        # reverse source-type query is deliberately rejected and recorded as
+        # a scoped 1-to-N conflict.
+        for (target_key, winner, banc_key), source_types in sorted(
+                reverse_label_candidates.items()):
+            source_types = set(source_types)
+            if len(source_types) > 1:
+                existing = self._type_mappings.get(target_key, {}).get(
+                    winner, {}).get(banc_key)
+                if existing in source_types:
+                    self._type_mappings[target_key][winner].pop(
+                        banc_key, None)
+                # Keep the individual reverse evidence edges available for
+                # diagnostics and valid-split presentation, but do not put a
+                # canonical reverse entry in ``_type_mappings``.  Consumers
+                # must consult ``get_mapping_decision`` before treating these
+                # chains as accepted mappings.
+                for banc_type in sorted(source_types):
+                    record = reverse_label_records[(
+                        target_key, winner, banc_key, banc_type)]
+                    reverse_edge = (
+                        banc_key, banc_type, record['column'],
+                        record['linker_value'], banc_key)
+                    if reverse_edge not in self._banc_label_edges[(
+                            target_key, winner)]:
+                        self._banc_label_edges[(target_key, winner)].append(
+                            reverse_edge)
+                self._bridge_provenance[(
+                    target_key, winner, banc_key
+                )] = {
+                    'kind': 'cross-dataset cell type',
+                    'column': 'multiple',
+                    'target': None,
+                    'conflict': True,
+                    'alternates': sorted(source_types),
+                }
+                if not self._has_conflict(
+                        target_key, banc_key, winner):
+                    self._append_conflict(TypeMappingConflict(
+                        source_dataset=target_key,
+                        target_dataset=banc_key,
+                        source_type=winner,
+                        target_types=source_types,
+                        relationship='1-to-N',
+                        origin='cross-dataset cell type',
+                    ))
+                    added_conflicts += 1
+                continue
+
+            banc_type = next(iter(source_types))
+            record = reverse_label_records[(
+                target_key, winner, banc_key, banc_type)]
+            reverse = self._type_mappings.setdefault(
+                target_key, {}).setdefault(winner, {})
+            reverse[banc_key] = banc_type
+            reverse_edge = (
+                banc_key, banc_type, record['column'],
+                record['linker_value'], banc_key)
+            if reverse_edge not in self._banc_label_edges[(target_key,
+                                                           winner)]:
+                self._banc_label_edges[(target_key, winner)].append(
+                    reverse_edge)
+            self._bridge_provenance[(
+                target_key, winner, banc_key
+            )] = {
+                'kind': 'cross-dataset cell type',
+                'column': record['column'],
+                'target': banc_type,
+                'linker_value': record['linker_value'],
+                'votes': record['votes'],
+                'verified_votes': record['verified_votes'],
+                'verification_conflicts': record[
+                    'verification_conflicts'],
+                'auto_stripped_votes': record['auto_stripped_votes'],
+                'winner_auto_stripped_votes': record[
+                    'winner_auto_stripped_votes'],
+                'winner_derived_from_auto': record[
+                    'winner_derived_from_auto'],
+                'raw_values': record['raw_values'],
+                'winner_raw_values': record['winner_raw_values'],
+                'alternates': record['alternates'],
+            }
         if added_maps or added_conflicts:
             self._log(
                 f"BANC label overlay: {added_maps} mappings and "
@@ -3317,32 +3566,265 @@ class CrossDatasetTypeMapper:
     def get_1_to_n_conflicts(self) -> List[TypeMappingConflict]:
         """Get all 1-to-N type mapping conflicts."""
         return [c for c in self._conflicts if c.relationship == '1-to-N']
+
+    def get_mapping_conflicts(
+        self,
+        source_dataset: str,
+        target_dataset: str,
+        source_type: Optional[str] = None,
+    ) -> List[TypeMappingConflict]:
+        """Return conflicts for one *ordered*, dataset-scoped mapping.
+
+        Conflict records are deliberately not looked up by type name alone:
+        names such as ``SMP227`` and ``CB1449`` occur in multiple namespaces,
+        and a conflict in BANC must not suppress an unrelated MCNS or FAFB
+        mapping.  ``source_type`` is optional for callers that want all
+        conflicts affecting a pair.
+        """
+        if not self._loaded:
+            if not self.load():
+                return []
+        source_key = self._get_type_mapping_key(source_dataset)
+        target_key = self._get_type_mapping_key(target_dataset)
+        base_type = None
+        if source_type is not None:
+            base_type, _ = self._split_hemi_suffix(str(source_type))
+        source_keys = {source_key}
+        # Shared MCNS v0.9 names deliberately delegate their cross-dataset
+        # type evidence to the v1.0 namespace.  Surface the v1.0 conflict in
+        # the v0.9-scoped decision too, without copying v1.0 body IDs or
+        # changing the release-local mapping tables.
+        if (source_key == 'male-cns:v0.9'
+                and target_key != 'male-cns:v0.9'
+                and base_type in getattr(self, '_mcns_v09_shared_names', set())):
+            source_keys.add('male-cns:v1.0')
+        return [
+            conflict for conflict in self._conflicts
+            if self._get_type_mapping_key(conflict.source_dataset) in source_keys
+            and self._get_type_mapping_key(conflict.target_dataset) == target_key
+            and (base_type is None or conflict.source_type == base_type)
+        ]
+
+    def get_mapping_decision(
+        self,
+        source_type: Union[str, int, None],
+        source_dataset: str,
+        target_dataset: str,
+        *,
+        include_bridges: bool = True,
+    ) -> Dict[str, Any]:
+        """Return the scoped policy decision for one type-level edge.
+
+        ``get_mapped_type`` remains the backward-compatible single-target
+        API.  This structured result makes its refusal explainable:
+
+        * ``mapped`` — one unconflicted canonical target;
+        * ``valid_split_evidence`` — a crosswalk-backed 1-to-N split, where
+          all target names are valid evidence but no one target is selected;
+        * ``evidence_only`` — a crosswalk-derived reverse N-to-1 relation;
+          the target members remain reviewable, but no canonical target is
+          accepted;
+        * ``conflict`` — an unresolved vote/annotation conflict (for example
+          BANC ``CB1011``), so no automatic target is accepted;
+        * ``unmapped`` — no scoped relation is available.
+
+        The distinction between a crosswalk split and a conflicting BANC
+        vote is intentional: the former should remain visible as evidence,
+        while the latter must stay rejected.  Body counts never participate
+        in this decision.
+        """
+        raw_type = str(source_type or '').strip()
+        result: Dict[str, Any] = {
+            'source_dataset': source_dataset,
+            'target_dataset': target_dataset,
+            'source_type': raw_type,
+            'target_type': None,
+            'target_types': [],
+            'status': 'unmapped',
+            'relationship': None,
+            'conflicts': [],
+        }
+        if not raw_type:
+            return result
+        if not self._loaded and not self.load():
+            return result
+
+        conflicts = self.get_mapping_conflicts(
+            source_dataset, target_dataset, raw_type)
+        result['conflicts'] = [
+            {
+                'source_dataset': conflict.source_dataset,
+                'target_dataset': conflict.target_dataset,
+                'source_type': conflict.source_type,
+                'target_types': sorted(conflict.target_types),
+                'relationship': conflict.relationship,
+                'origin': conflict.origin,
+            }
+            for conflict in conflicts
+        ]
+        if conflicts:
+            conflict = conflicts[0]
+            result['relationship'] = conflict.relationship
+            result['target_types'] = sorted(conflict.target_types)
+            source_key = self._get_type_mapping_key(source_dataset)
+            target_key = self._get_type_mapping_key(target_dataset)
+            # Crosswalk conflicts are structural evidence in the direction
+            # represented by the source table.  Reverse BANC-label fan-out
+            # is the same kind of target-side structural evidence: several
+            # BANC primary types can legitimately carry one foreign label,
+            # but no arbitrary BANC subtype may be selected.  In contrast,
+            # a BANC source type with competing labels is a vote conflict
+            # and remains terminally rejected.
+            structural_split = (
+                not conflict.origin
+                or (
+                    conflict.origin == 'cross-dataset cell type'
+                    and target_key in BANC_RELEASE_KEYS
+                    and source_key not in BANC_RELEASE_KEYS
+                )
+            )
+            if structural_split and conflict.relationship == '1-to-N':
+                result['status'] = 'valid_split_evidence'
+            elif structural_split and conflict.relationship == 'N-to-1':
+                result['status'] = 'evidence_only'
+            else:
+                result['status'] = 'conflict'
+            return result
+
+        mapped = self.get_mapped_type(
+            raw_type, source_dataset, target_dataset)
+        if mapped:
+            result['target_type'] = mapped
+            result['target_types'] = [mapped]
+            result['status'] = 'mapped'
+            result['relationship'] = '1-to-1'
+            return result
+
+        # Some sanctioned overlays (notably a direct BANC label bridge in
+        # the MCNS→BANC direction) are intentionally kept as derivation
+        # evidence rather than copied into the canonical mapping dictionary.
+        # Surface those as a bridge-only decision when requested, without
+        # ever using the resulting pool size to create or choose a mapping.
+        if include_bridges:
+            try:
+                bridges = self.get_type_bridges(
+                    raw_type, source_dataset, target_dataset, max_bridges=0)
+            except Exception:
+                bridges = []
+            bridge_targets = sorted({
+                str(chain[-1].get('value')) for chain in bridges
+                if chain and chain[-1].get('value')
+            })
+            if bridge_targets:
+                result['target_types'] = bridge_targets
+                result['target_type'] = (
+                    bridge_targets[0] if len(bridge_targets) == 1 else None)
+                result['relationship'] = (
+                    '1-to-N' if len(bridge_targets) > 1 else '1-to-1')
+                result['status'] = (
+                    'valid_split_evidence' if len(bridge_targets) > 1
+                    else 'bridged')
+        return result
     
-    def warn_if_conflicting(self, type_name: str, datasets: List[str]) -> bool:
+    def _scoped_conflicts_for_type(
+        self,
+        type_name: Union[str, int, None],
+        datasets: Optional[List[str]] = None,
+        source_dataset: Optional[str] = None,
+    ) -> List[TypeMappingConflict]:
+        """Return type conflicts limited to the selected namespaces.
+
+        Conflict records are ordered and dataset-scoped.  This helper is
+        shared by warnings and summaries so a repeated bare name cannot pull
+        in the first conflict from another release or direction.
         """
-        Warn if type has conflicting mappings and return True if warned.
-        
-        Args:
-            type_name: Type name to check.
-            datasets: Datasets being compared.
-            
-        Returns:
-            True if a warning was issued.
+        if not self._loaded and not self.load():
+            return []
+        if type_name is None:
+            return []
+        base, _ = self._split_hemi_suffix(str(type_name))
+        selected_keys = {
+            self._get_type_mapping_key(dataset)
+            for dataset in (datasets or [])
+        }
+        source_key = (self._get_type_mapping_key(source_dataset)
+                      if source_dataset else None)
+        conflicts = []
+        for conflict in self._conflicts:
+            conflict_source = self._get_type_mapping_key(
+                conflict.source_dataset)
+            conflict_target = self._get_type_mapping_key(
+                conflict.target_dataset)
+            if selected_keys:
+                if len(selected_keys) == 1:
+                    if conflict_source not in selected_keys and \
+                            conflict_target not in selected_keys:
+                        continue
+                elif (conflict_source not in selected_keys
+                      or conflict_target not in selected_keys):
+                    continue
+            if source_key is not None and source_key not in {
+                    conflict_source, conflict_target}:
+                continue
+            if (conflict.source_type != base
+                    and base not in conflict.target_types):
+                continue
+            conflicts.append(conflict)
+        return sorted(
+            conflicts,
+            key=lambda conflict: (
+                self._get_type_mapping_key(conflict.source_dataset),
+                conflict.source_type,
+                self._get_type_mapping_key(conflict.target_dataset),
+                conflict.relationship,
+                tuple(sorted(conflict.target_types)),
+                conflict.origin,
+            ),
+        )
+
+    def warn_if_conflicting(
+        self,
+        type_name: str,
+        datasets: List[str],
+        *,
+        source_dataset: Optional[str] = None,
+        target_dataset: Optional[str] = None,
+    ) -> bool:
+        """Warn once when a type has a selected, scoped conflict.
+
+        The original positional API remains valid.  Keyword endpoint hints
+        let callers avoid all bare-name ambiguity and make both N-to-1 and
+        1-to-N relationships visible.
         """
-        for dataset in datasets:
-            if self.is_n_to_1_type(type_name, dataset):
-                # Find the specific conflict
-                for conflict in self._conflicts:
-                    if conflict.source_type == type_name or type_name in conflict.target_types:
-                        msg = (
-                            f"Type '{type_name}' is involved in an N-to-1 mapping: "
-                            f"{conflict.target_types} in {conflict.target_dataset} all map to "
-                            f"'{conflict.source_type}' in {conflict.source_dataset}. "
-                            f"Consider using LabelMapper to specify explicit mappings for these types."
-                        )
-                        warnings.warn(msg, TypeMappingWarning, stacklevel=3)
-                        return True
-        return False
+        if not self._loaded and not self.load():
+            return False
+        selected = list(datasets or [])
+        if source_dataset and target_dataset:
+            selected = [source_dataset, target_dataset]
+        conflicts = self._scoped_conflicts_for_type(
+            type_name, selected, source_dataset=source_dataset)
+        if not conflicts:
+            return False
+        conflict = conflicts[0]
+        targets = ', '.join(sorted(conflict.target_types))
+        origin = (f" ({conflict.origin})" if conflict.origin else "")
+        if conflict.relationship == 'N-to-1':
+            msg = (
+                f"Type '{type_name}' is involved in an N-to-1 mapping: "
+                f"{targets} in {conflict.target_dataset} all map to "
+                f"'{conflict.source_type}' in {conflict.source_dataset}"
+                f"{origin}. Explicit mappings are required to aggregate "
+                "these types safely."
+            )
+        else:
+            msg = (
+                f"Type '{type_name}' is involved in a 1-to-N mapping: "
+                f"'{conflict.source_type}' in {conflict.source_dataset} "
+                f"has targets {targets} in {conflict.target_dataset}"
+                f"{origin}. No single automatic target was selected."
+            )
+        warnings.warn(msg, TypeMappingWarning, stacklevel=3)
+        return True
     
     def check_type_name_conflict(
         self,
@@ -3754,26 +4236,30 @@ class CrossDatasetTypeMapper:
             if has_different:
                 different_mappings.append((neuron, mappings_for_type))
             
-            # Check for N-to-1 conflicts
-            for conflict in self._conflicts:
+            # Conflict records are scoped to the detected source namespace
+            # and the selected dataset pair.  Never scan by bare type name:
+            # the same string can be a source in one release and a target in
+            # another.
+            scoped_conflicts = self._scoped_conflicts_for_type(
+                neuron, datasets, source_dataset=source_ds)
+            for conflict in scoped_conflicts:
                 if conflict.relationship == 'N-to-1':
-                    if neuron == conflict.source_type or neuron in conflict.target_types:
-                        n_to_1_warnings.append((
-                            neuron,
-                            conflict.source_dataset,
-                            conflict.target_dataset,
-                            conflict.target_types,
-                        ))
-                        break
-                elif conflict.relationship == '1-to-N':
-                    if neuron == conflict.source_type:
-                        one_to_n_warnings.append((
-                            neuron,
-                            conflict.source_dataset,
-                            conflict.target_dataset,
-                            conflict.target_types,
-                        ))
-                        break
+                    n_to_1_warnings.append((
+                        neuron,
+                        conflict.source_dataset,
+                        conflict.target_dataset,
+                        conflict.target_types,
+                    ))
+                    break
+            for conflict in scoped_conflicts:
+                if conflict.relationship == '1-to-N':
+                    one_to_n_warnings.append((
+                        neuron,
+                        conflict.source_dataset,
+                        conflict.target_dataset,
+                        conflict.target_types,
+                    ))
+                    break
         
         return {
             'per_dataset': per_dataset,
@@ -3817,16 +4303,12 @@ class CrossDatasetTypeMapper:
                         mapped_count += 1
                         break
             
-            # Check conflicts
-            for conflict in self._conflicts:
-                if conflict.relationship == 'N-to-1':
-                    if type_name == conflict.source_type or type_name in conflict.target_types:
-                        n_to_1_count += 1
-                        break
-                elif conflict.relationship == '1-to-N':
-                    if type_name == conflict.source_type:
-                        one_to_n_count += 1
-                        break
+            scoped_conflicts = self._scoped_conflicts_for_type(
+                type_name, datasets, source_dataset=source_ds)
+            if any(c.relationship == 'N-to-1' for c in scoped_conflicts):
+                n_to_1_count += 1
+            if any(c.relationship == '1-to-N' for c in scoped_conflicts):
+                one_to_n_count += 1
         
         return {
             'total_types': len(types_used),
@@ -3870,22 +4352,11 @@ class CrossDatasetTypeMapper:
         if not str_types or not datasets:
             return []
 
-        # O(1) conflict involvement lookups (a per-type scan over all
-        # conflicts would be too slow for result-type sized inputs).
-        n_to_1_conflicts = self.get_n_to_1_conflicts()
-        one_to_n_conflicts = self.get_1_to_n_conflicts()
-        n_to_1_by_source = {c.source_type: c for c in n_to_1_conflicts}
-        n_to_1_by_member: Dict[str, TypeMappingConflict] = {}
-        for conflict in n_to_1_conflicts:
-            for member_type in conflict.target_types:
-                n_to_1_by_member.setdefault(member_type, conflict)
-        one_to_n_by_source = {c.source_type: c for c in one_to_n_conflicts}
-
         expanded: List[Tuple[str, Dict[str, str]]] = []
         n_to_1: List[Tuple[str, TypeMappingConflict, bool]] = []
-        one_to_n: List[str] = []
-        seen_n_to_1: Set[int] = set()
-        seen_one_to_n: Set[str] = set()
+        one_to_n: List[Tuple[str, TypeMappingConflict]] = []
+        seen_n_to_1: Set[Tuple[Any, ...]] = set()
+        seen_one_to_n: Set[Tuple[Any, ...]] = set()
 
         for type_name in str_types:
             base_name, _ = self._split_hemi_suffix(type_name)
@@ -3898,18 +4369,29 @@ class CrossDatasetTypeMapper:
             if different:
                 expanded.append((type_name, different))
 
-            conflict = (
-                n_to_1_by_source.get(base_name)
-                or n_to_1_by_member.get(base_name)
-            )
-            if conflict is not None and id(conflict) not in seen_n_to_1:
-                seen_n_to_1.add(id(conflict))
-                n_to_1.append((base_name, conflict, base_name in conflict.target_types))
-
-            conflict = one_to_n_by_source.get(base_name)
-            if conflict is not None and base_name not in seen_one_to_n:
-                seen_one_to_n.add(base_name)
-                one_to_n.append(base_name)
+            for conflict in self._scoped_conflicts_for_type(
+                    base_name, datasets):
+                conflict_key = (
+                    self._get_type_mapping_key(conflict.source_dataset),
+                    conflict.source_type,
+                    self._get_type_mapping_key(conflict.target_dataset),
+                    conflict.relationship,
+                    tuple(sorted(conflict.target_types)),
+                    conflict.origin,
+                )
+                if conflict.relationship == 'N-to-1':
+                    if conflict_key in seen_n_to_1:
+                        continue
+                    seen_n_to_1.add(conflict_key)
+                    n_to_1.append((
+                        base_name, conflict,
+                        base_name in conflict.target_types,
+                    ))
+                elif conflict.relationship == '1-to-N':
+                    if conflict_key in seen_one_to_n:
+                        continue
+                    seen_one_to_n.add(conflict_key)
+                    one_to_n.append((base_name, conflict))
 
         notes: List[str] = []
 
@@ -3966,8 +4448,7 @@ class CrossDatasetTypeMapper:
 
         if one_to_n:
             if len(one_to_n) <= max_examples:
-                for type_name in one_to_n:
-                    conflict = one_to_n_by_source[type_name]
+                for type_name, conflict in one_to_n:
                     split = ', '.join(sorted(conflict.target_types))
                     notes.append(
                         f"1-to-N type mapping: '{type_name}' splits into "
@@ -3978,7 +4459,7 @@ class CrossDatasetTypeMapper:
             else:
                 notes.append(
                     f"1-to-N type mapping affected {len(one_to_n)} types "
-                    f"(examples: {', '.join(one_to_n[:max_examples])}; ...); "
+                    f"(examples: {', '.join(type_name for type_name, _ in one_to_n[:max_examples])}; ...); "
                     "no automatic mapping was made for them."
                 )
 
@@ -4009,15 +4490,31 @@ class CrossDatasetTypeMapper:
         (N-to-1): matching by this one name in ``mapping_key`` also matches
         the other listed male-cns types.
         """
-        conflict = self._n_to_1_by_source_cache().get(name)
-        if conflict is not None and self._get_type_mapping_key(conflict.source_dataset) == mapping_key:
-            return sorted(conflict.target_types)
+        conflicts = self._n_to_1_by_source_cache().get(
+            (mapping_key, name), [])
+        if conflicts:
+            return sorted({
+                target for conflict in conflicts
+                for target in conflict.target_types
+            })
         return None
 
-    def _n_to_1_by_source_cache(self) -> Dict[str, TypeMappingConflict]:
+    def _n_to_1_by_source_cache(
+        self,
+    ) -> Dict[Tuple[str, str], List[TypeMappingConflict]]:
+        """Index N-to-1 conflicts by source namespace and source name.
+
+        The same bare name can be a source in multiple dataset namespaces or
+        releases.  Keep both dimensions in this private cache so alias
+        expansion cannot borrow a conflict from a different direction.
+        """
         cache = getattr(self, '_alias_n_to_1_cache', None)
         if cache is None:
-            cache = {c.source_type: c for c in self.get_n_to_1_conflicts()}
+            cache = defaultdict(list)
+            for conflict in self.get_n_to_1_conflicts():
+                cache[(self._get_type_mapping_key(
+                    conflict.source_dataset), conflict.source_type)].append(
+                        conflict)
             self._alias_n_to_1_cache = cache
         return cache
 
@@ -4025,6 +4522,7 @@ class CrossDatasetTypeMapper:
         self,
         type_name: Union[str, int, None],
         datasets: List[str],
+        source_dataset: Optional[str] = None,
     ) -> Dict[str, Dict[str, any]]:
         """Resolve one queried type name into per-dataset alias candidates.
 
@@ -4077,11 +4575,22 @@ class CrossDatasetTypeMapper:
             return not_applicable
 
         base_name, _ = self._split_hemi_suffix(query)
-        query_ns = self._detect_type_source(base_name)
+        query_ns = (
+            self._get_type_mapping_key(source_dataset)
+            if source_dataset else self._detect_type_source(base_name)
+        )
 
-        one_to_n_by_source: Dict[str, List[TypeMappingConflict]] = {}
+        # Keep conflict lookup scoped to the query namespace and destination
+        # namespace.  A bare ``source_type`` index is unsafe for repeated
+        # names and was the reason a valid split could be confused with a
+        # BANC vote conflict in a different pair.
+        one_to_n_by_pair: Dict[Tuple[str, str, str], List[TypeMappingConflict]] = {}
         for conflict in self.get_1_to_n_conflicts():
-            one_to_n_by_source.setdefault(conflict.source_type, []).append(conflict)
+            source_key = self._get_type_mapping_key(conflict.source_dataset)
+            target_key = self._get_type_mapping_key(conflict.target_dataset)
+            one_to_n_by_pair.setdefault(
+                (source_key, conflict.source_type, target_key), []).append(
+                    conflict)
 
         outcomes: Dict[str, Dict[str, any]] = {}
         for dataset in datasets:
@@ -4111,26 +4620,26 @@ class CrossDatasetTypeMapper:
             # B. mapping-driven candidates (namespaces must differ; within
             # one namespace the mapping value is the name itself).
             if query_ns is not None and query_ns != d_key:
-                mapped = self.get_mapped_type(query, query_ns, dataset)
+                mapped = self.get_mapped_type(query, source_dataset or query_ns,
+                                               dataset)
                 if mapped and mapped != base_name:
                     _add(mapped, 'renamed',
                          self._alias_aggregates(mapped, d_key))
                 elif mapped is None:
                     if query_ns == 'male-cns:v1.0':
                         # The query splits into several names here.
-                        for conflict in one_to_n_by_source.get(base_name, []):
-                            if self._get_type_mapping_key(conflict.target_dataset) == d_key:
-                                for target in sorted(conflict.target_types):
-                                    _add(target, 'splits into')
+                        for conflict in one_to_n_by_pair.get(
+                                (query_ns, base_name, d_key), []):
+                            for target in sorted(conflict.target_types):
+                                _add(target, 'splits into')
                     else:
                         # The reverse aggregation is refused: the candidates
                         # are the group members (male-cns namespace only).
-                        conflict = self._n_to_1_by_source_cache().get(base_name)
-                        if (
-                            conflict is not None
-                            and self._get_type_mapping_key(conflict.source_dataset) == query_ns
-                            and d_key == 'male-cns:v1.0'
-                        ):
+                        conflicts = self._n_to_1_by_source_cache().get(
+                            (query_ns, base_name), [])
+                        for conflict in conflicts:
+                            if d_key != 'male-cns:v1.0':
+                                continue
                             for target in sorted(conflict.target_types):
                                 _add(target, 'one of N')
 
@@ -4366,13 +4875,14 @@ class CrossDatasetTypeMapper:
                 ] + [dict(hop) for hop in chain[1:]]
                 for chain in downstream
             ]
-            return [
+            valid = [
                 chain for chain in chains
                 if bridge_is_valid(
                     chain, source_dataset, target_dataset,
                     key_of=self._get_type_mapping_key,
                 )
-            ][:max_bridges]
+            ]
+            return valid[:max_bridges] if max_bridges > 0 else valid
 
         # Reverse direction: resolve the foreign name to v1.0 first, then
         # append the exact same-name alias into the requested v0.9 release.
@@ -4399,13 +4909,14 @@ class CrossDatasetTypeMapper:
                         'home': 'male-cns:v1.0',
                     },
                 ])
-            return [
+            valid = [
                 chain for chain in chains
                 if bridge_is_valid(
                     chain, source_dataset, target_dataset,
                     key_of=self._get_type_mapping_key,
                 )
-            ][:max_bridges]
+            ]
+            return valid[:max_bridges] if max_bridges > 0 else valid
 
         if source_key == target_key:
             return [
@@ -4522,6 +5033,12 @@ class CrossDatasetTypeMapper:
                 hop = {"dataset": nns, "column": column, "value": nname}
                 if via != nname:
                     hop["via"] = via
+                if column in BANC_LABEL_COLUMNS:
+                    raw_value = via or nname
+                    hop["raw_value"] = raw_value
+                    hop["canonical_value"] = canonical_linker_token(raw_value)
+                    hop["evidence_tier"] = linker_evidence_tier(
+                        column, raw_value, False)
                 if physical_home:
                     hop["home"] = physical_home
                 chain.append(hop)

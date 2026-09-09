@@ -237,16 +237,26 @@ def test_native_expansion_taxonomy_labels_map_covered_types():
     assert neuron['column'] == 'Class'
     # covered types carry their mapping relation when one exists ...
     kinds = {(t.get('mapped') or {}).get('kind') for t in neuron['types']}
-    # 'renamed' is gone since 2026-09-09: the primary->alt annotation hops
-    # that produced cross-primary renames were derivation noise and are no
-    # longer walked; same-name and 1-to-N resolutions remain.
-    assert {'same name', 'one of N'} <= kinds
-    # ... and BANC v888 covers an unmapped type, still shown so the user is
-    # led to inspect it in the other dataset.
+    # BANC fan-outs are evidence-only: the source type is still displayed,
+    # but no single BANC target is selected as an accepted mapping.  This is
+    # distinct from the valid one-of-N presentation used for ordinary
+    # cross-dataset split evidence.
+    assert {'same name', 'renamed', 'conflict'} <= kinds
+    conflict_types = [
+        t for t in neuron['types']
+        if (t.get('mapped') or {}).get('kind') == 'conflict'
+    ]
+    assert conflict_types
+    assert all(not (t.get('mapped') or {}).get('targets')
+               for t in conflict_types)
+    # ... and BANC v888 keeps conflict entries visible with an explicit
+    # blocked mapping, so the user is led to inspect them in the other
+    # dataset rather than seeing a fabricated target.
     v888 = {e['dataset']: e for e in native}['banc_v888']
     v888_labels = {l['label']: l for l in v888['labels']}
     assert any(
-        t.get('mapped') is None for t in v888_labels['circadian_neuron']['types']
+        (t.get('mapped') or {}).get('kind') == 'conflict'
+        for t in v888_labels['circadian_neuron']['types']
     )
 
 

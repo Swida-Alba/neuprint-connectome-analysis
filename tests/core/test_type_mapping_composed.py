@@ -217,6 +217,75 @@ def test_combined_bridges_csv_uniform_width():
     assert headers.pop()[:2] == ('source_dataset', 'source_entry')
 
 
+def test_extended_bridges_csv_exposes_selected_and_all_valid_scopes():
+    """The UI export keeps selected evidence and supported alternatives distinct."""
+    import csv
+    import io
+
+    flow = _flow(MCNS, 'T1', FAFB, 'T1', 4, 4)
+    selected = [
+        {'dataset': MCNS, 'column': 'type', 'value': 'T1'},
+        {'dataset': MCNS, 'column': 'flywireType',
+         'value': 'auto:LMTe01'},
+        {'dataset': FAFB, 'column': 'type', 'value': 'T1'},
+    ]
+    alternate = [
+        {'dataset': MCNS, 'column': 'type', 'value': 'T1'},
+        {'dataset': MCNS, 'column': 'flywireType', 'value': 'LMTe02'},
+        {'dataset': FAFB, 'column': 'type', 'value': 'T1'},
+    ]
+    flow['bridges'] = [selected, alternate]
+    flow['mapping_status'] = 'valid_split_evidence'
+    pool = {
+        'selected_chain': selected,
+        'valid_chains': [selected, alternate],
+        'selected_chain_rank': 1,
+        'valid_chain_count': 2,
+        'source_body_ids': ['s1'],
+        'target_body_ids': ['t1'],
+        'source_type_body_ids': ['s1', 's2', 's3'],
+        'target_type_body_ids': ['t1', 't2'],
+        'all_valid_source_body_ids': ['s1', 's2'],
+        'all_valid_target_body_ids': ['t1', 't2'],
+        'source_pool_size': 1,
+        'source_type_total': 3,
+        'target_pool_size': 1,
+        'target_type_total': 2,
+        'all_valid_source_pool_size': 2,
+        'all_valid_source_type_total': 3,
+        'all_valid_target_pool_size': 2,
+        'all_valid_target_type_total': 2,
+        'source_basis': 'linker rows',
+        'target_basis': 'full population',
+        'all_valid_source_basis': 'union of supported bridge pools',
+        'all_valid_target_basis': 'full population',
+        'coverage_basis': 'independent endpoint pools; no bodyId pairing',
+        'coverage_scope': 'selected bridge; all valid alternatives retained',
+        'all_valid_source_overlap_count': 0,
+        'all_valid_target_overlap_count': 0,
+        'attempts': [
+            {'rank': 0, 'supported': False, 'status': 'unsupported',
+             'reason': 'target-side linker rows had no bodyIds'},
+        ],
+    }
+    rows = list(csv.reader(io.StringIO(build_bridges_csv(
+        [flow], pools={('T1', 'T1'): pool}, extended=True))))
+    header = rows[0]
+    row = dict(zip(header, rows[1]))
+    assert len(header) == 35
+    assert row['mapping_status'] == 'valid_split_evidence'
+    assert row['selected_bridge_rank'] == '1'
+    assert row['valid_bridge_count'] == '2'
+    assert row['selected_linker_values'] == 'auto:LMTe01'
+    assert row['selected_linker_canonical_values'] == 'LMTe01'
+    assert row['all_valid_source_pool'] == '2'
+    assert row['all_valid_target_pool'] == '2'
+    assert row['coverage_scope'] == (
+        'selected bridge; all valid alternatives retained')
+    assert 'target-side linker rows had no bodyIds' in row[
+        'unsupported_attempts']
+
+
 def test_pair_flow_weight_shared_formula():
     """ONE per-pair weight formula for every artifact (user 2026-09-07).
 

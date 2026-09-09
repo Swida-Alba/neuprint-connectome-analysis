@@ -30,11 +30,14 @@ from comparison.cross_dataset_type_mapper import (
     preferred_bridge_chain,
     standardize_bridge,
 )
+from comparison.mapping_visualization import build_type_coverage
 from ui.neuron_index import (
     collect_native_type_matches,
     enrich_native_type_matches,
     load_cached_neuron_index,
+    mapped_type_targets,
     pool_bridge_body_ids,
+    resolve_prioritized_bridge_pool,
 )
 
 MCNS = 'male-cns:v1.0'
@@ -193,11 +196,124 @@ def test_real_banc_label_bridges_use_independent_endpoint_coverage():
     }]
     mcns_forward = pool_bridge_body_ids(
         mcns, banc, mcns_linker, 'l-LNv', 'l-LNv', indexes=indexes)
-    assert mcns_forward['granularity'] == '8 to 1'
-    assert mcns_forward['coverage'] == 'covered 1 of 6 (16.7%)'
+    # One curated row plus one normalized ``auto:l-LNv`` row is valid
+    # evidence, so canonical-token matching covers two BANC bodyIds.  The
+    # source side is still the full MCNS population; this is not a bodyId
+    # pairing.
+    assert mcns_forward['granularity'] == '8 to 2'
+    assert mcns_forward['coverage'] == 'covered 2 of 6 (33.3%)'
     assert mcns_forward['source_coverage'] == 'covered 8 of 8 (100.0%)'
-    assert mcns_forward['target_coverage'] == 'covered 1 of 6 (16.7%)'
+    assert mcns_forward['target_coverage'] == 'covered 2 of 6 (33.3%)'
     assert 'matched_body_ids' not in mcns_forward['per_linker'][0]
+
+
+@requires_banc_release_indexes
+def test_real_prioritized_pools_preserve_smp227_branch_evidence(mapper):
+    """SMP227 keeps one selected branch and the supported alternatives.
+
+    The MCNS type has six neurons.  Its FAFB bridge evidence is split across
+    CB3763 (2 source bodies), CB3766 (1), and CB1449/CB2843 (3 shared source
+    bodies).  The selected pool is intentionally narrower than the all-valid
+    union; neither view is a bodyId-to-bodyId pairing.
+    """
+    from comparison.mapping_visualization import build_type_coverage
+
+    indexes = {
+        ds: load_cached_neuron_index(ds, enrich=False)
+        for ds in (MCNS, FW)
+    }
+    chains = mapper.get_type_bridges('SMP227', MCNS, FW, max_bridges=0)
+    expected = {
+        's-CPDN3B': (2, 2, 3, 4, 2),
+        's-CPDN3C': (3, 2, 3, 2, 1),
+        's-CPDN3D': (3, 2, 3, 2, 1),
+    }
+    pools = {}
+    flows = []
+    for target_type, (selected_source, selected_target, all_source,
+                      all_target, valid_count) in expected.items():
+        pool = resolve_prioritized_bridge_pool(
+            MCNS, FW, chains, 'SMP227', target_type, indexes=indexes)
+        assert pool['resolution_status'] == 'supported'
+        assert pool['selected_chain_rank'] == 1
+        assert pool['valid_chain_count'] == valid_count
+        assert len(pool['source_body_ids']) == selected_source
+        assert len(pool['target_body_ids']) == selected_target
+        assert len(pool['all_valid_source_body_ids']) == all_source
+        assert len(pool['all_valid_target_body_ids']) == all_target
+        assert not set(pool['source_body_ids']) & set(
+            pool['target_body_ids'])
+        selected_linkers = list(pool['per_linker'])
+        assert selected_linkers
+        assert all(linker['raw_value'] == linker['canonical_value']
+                   for linker in selected_linkers)
+        pools[(MCNS, FW, 'SMP227', target_type)] = pool
+        flows.append({
+            'source_dataset': MCNS,
+            'target_dataset': FW,
+            'source_type': 'SMP227',
+            'foreign_type': target_type,
+            'source_count': 6,
+            'foreign_count': {
+                's-CPDN3B': 25,
+                's-CPDN3C': 32,
+                's-CPDN3D': 37,
+            }[target_type],
+            'matched_origin': "type · 'SMP227'",
+            'bridges': chains,
+        })
+
+    row = build_type_coverage({(MCNS, FW): flows}, pools)['forward'][0]
+    assert row['relationship'] == '1-to-N'
+    assert row['query_cov_selected'] == '5 of 6 (83.3%)'
+    assert row['query_cov_all_valid'] == '6 of 6 (100.0%)'
+    assert row['target_cov_selected'] == '6 of 94 (6.4%)'
+    assert row['target_cov_all_valid'] == '8 of 94 (8.5%)'
+    assert row['query_overlap_selected'] == 3
+    assert row['query_overlap_all_valid'] == 3
+    assert row['target_overlap_selected'] == 0
+    assert row['target_overlap_all_valid'] == 0
+    assert 'branch evidence is non-exclusive' in row['coverage_note']
+    assert 'all-valid union includes supported alternative bridges' in row[
+        'coverage_note']
+
+
+@requires_banc_release_indexes
+def test_real_mevplo2_banc_auto_label_is_counted_with_provenance(mapper):
+    """Known ``auto:MeVPLo2`` labels are usable without erasing provenance."""
+    indexes = {
+        ds: load_cached_neuron_index(ds, enrich=False)
+        for ds in (MCNS, BANC, 'banc_v888')
+    }
+    for banc, expected_target_count in ((BANC, 8), ('banc_v888', 9)):
+        chains = mapper.get_type_bridges(
+            'MeVPLo2', MCNS, banc, max_bridges=0)
+        assert chains and chains[0][-1]['value'] == 'MTe07'
+        pool = resolve_prioritized_bridge_pool(
+            MCNS, banc, chains, 'MeVPLo2', 'MTe07',
+            indexes={MCNS: indexes[MCNS], banc: indexes[banc]})
+        assert pool['resolution_status'] == 'supported'
+        assert pool['source_pool_size'] == 14
+        assert pool['target_pool_size'] == expected_target_count
+        linkers = list(pool['per_linker'])
+        assert [(l['raw_value'], l['canonical_value']) for l in linkers] == [
+            ('auto:MeVPLo2', 'MeVPLo2')]
+        assert pool['all_valid_source_pool_size'] == 14
+        assert pool['all_valid_target_pool_size'] == expected_target_count
+
+
+def test_real_banc_conflicting_cell_type_vote_stays_unmapped(mapper):
+    """Conflicting BANC labels stay blocked in both mapper/UI paths."""
+    expected_targets = {'CB1011', 'CB3252', 'SMP227'}
+    for banc in (BANC, 'banc_v888'):
+        decision = mapper.get_mapping_decision(
+            'CB1011', banc, MCNS)
+        assert decision['status'] == 'conflict'
+        assert set(decision['target_types']) == expected_targets
+        assert mapper.get_mapped_type('CB1011', banc, MCNS) is None
+        ui_result = mapped_type_targets(mapper, 'CB1011', banc, MCNS)
+        assert ui_result['kind'] == 'conflict'
+        assert ui_result['targets'] == []
 
 
 @requires_banc_release_indexes
@@ -257,9 +373,14 @@ def test_comma_separated_crosswalk_cell_expands_to_conflict(mapper):
         and c.target_types == vs_targets
         for c in mapper.get_1_to_n_conflicts()
     )
-    # MCNS flywireType is FAFB-only; BANC requires a BANC malecns_cell_type
-    # label and therefore has no fabricated VS mapping/conflict here.
+    # The BANC overlay has its own MCNS-side labels.  They independently
+    # expose a split (the BANC namespace omits VS6), but still must not make
+    # one canonical BANC target up from the branch evidence.
     assert mapper.get_mapped_type('VS', MCNS, BANC) is None
+    banc_decision = mapper.get_mapping_decision('VS', MCNS, BANC)
+    assert banc_decision['status'] == 'valid_split_evidence'
+    assert set(banc_decision['target_types']) == {
+        'VS1', 'VS2', 'VS3', 'VS4', 'VS5', 'VS7', 'VS8'}
 
 
 def test_comma_separated_hemibrain_cell_expands_to_conflict(mapper):

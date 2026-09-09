@@ -109,10 +109,13 @@ _POOL_BASE_FULL = "full population"
 _POOL_BASE_UNMEASURED = "unmeasured"
 
 
-def format_pool_side(code: str, pool: Dict[str, Any], side: str) -> str:
+def format_pool_side(code: str, pool: Dict[str, Any], side: str,
+                     scope: str = "selected") -> str:
     """Basis-aware one-side coverage cell for the pair card.
 
-    ``side`` is ``'source'`` or ``'target'``.  Renders the four pool
+    ``side`` is ``'source'`` or ``'target'``.  ``scope`` is ``'selected'``
+    (the first supported bridge) or ``'all_valid'`` (the union of every
+    independently supported alternative).  Renders the four pool
     states so they can never be confused:
 
     * measured subset   — ``FB: 1,655 of 1,683 (98.3%)``
@@ -123,11 +126,19 @@ def format_pool_side(code: str, pool: Dict[str, Any], side: str) -> str:
     """
     if not pool:
         return "not pooled"
-    ids = pool.get(f"{side}_body_ids") or []
-    basis = pool.get(f"{side}_basis")
+    prefix = "all_valid_" if scope == "all_valid" else ""
+    ids_key = f"{prefix}{side}_body_ids"
+    ids = pool.get(ids_key)
+    if ids is None:
+        ids = pool.get(f"{side}_body_ids") or []
+    basis = pool.get(f"{prefix}{side}_basis")
+    if basis is None:
+        basis = pool.get(f"{side}_basis")
     if basis == _POOL_BASE_UNMEASURED:
         return f"{code}: not measured"
-    total = pool.get(f"{side}_type_total")
+    total = pool.get(f"{prefix}{side}_type_total")
+    if total is None:
+        total = pool.get(f"{side}_type_total")
     if basis == _POOL_BASE_FULL:
         return f"{code}: all {total:,}" if total else f"{code}: all {len(ids):,}"
     return f"{code}: {format_coverage(len(ids), total)}"
@@ -253,6 +264,12 @@ def build_mapping_flows(entries, source_dataset: str,
     source side falls back to the foreign count.
     """
     counts = source_counts or {}
+    try:
+        from comparison.cross_dataset_type_mapper import get_type_mapper
+
+        mapper = get_type_mapper()
+    except Exception:
+        mapper = None
     flows: List[Dict[str, Any]] = []
     seen_pairs = set()
     for entry in entries:
@@ -310,6 +327,24 @@ def build_mapping_flows(entries, source_dataset: str,
                     return (0 if total else 1, -direct, total, len(chain))
 
                 chains.sort(key=_order)
+                try:
+                    decision = mapper.get_mapping_decision(
+                        target, source_dataset, foreign,
+                        include_bridges=False)
+                except Exception:
+                    decision = {}
+                mapping_status = decision.get("status", "mapped")
+                if mapping_status == "conflict":
+                    # Bridge discovery may retain a same-name or other
+                    # diagnostic chain, but a scoped vote conflict is not an
+                    # accepted mapping and must not contribute flow counts or
+                    # coverage.  The caller can surface it as an orphan or a
+                    # conflict note instead.
+                    continue
+                if mapping_status == "unmapped":
+                    mapping_status = ("valid_split_evidence"
+                                      if len((bridges_by_target or {})) > 1
+                                      else "bridged")
                 flows.append({
                     "source_dataset": source_dataset,
                     "target_dataset": foreign,
@@ -319,6 +354,10 @@ def build_mapping_flows(entries, source_dataset: str,
                     "foreign_count": covered_count,
                     "matched_origin": matched_origin,
                     "bridges": chains,
+                    "mapping_status": mapping_status,
+                    "mapping_relationship": decision.get("relationship"),
+                    "mapping_target_types": decision.get("target_types", []),
+                    "mapping_conflicts": decision.get("conflicts", []),
                 })
 
         for cand in (entry.get("types_all") or entry.get("types", [])):
@@ -342,7 +381,7 @@ def origin_seeded_flows(origin_dataset: str, matched_types, target_dataset: str,
                         *, source_counts: Optional[Dict[str, int]] = None,
                         foreign_counts: Optional[Dict[str, int]] = None,
                         matched_origins: Optional[Dict[str, Any]] = None,
-                        max_chains_per_flow: int = 6,
+                        max_chains_per_flow: int = 8,
                         max_types: int = 500) -> List[Dict[str, Any]]:
     """Map one ORIGIN dataset's matched types into a target dataset (§12).
 
@@ -397,7 +436,7 @@ def origin_seeded_flows(origin_dataset: str, matched_types, target_dataset: str,
     for type_name in types:
         try:
             chains = mapper.get_type_bridges(
-                type_name, origin_dataset, target_dataset)
+                type_name, origin_dataset, target_dataset, max_bridges=0)
         except Exception:
             # one unmappable type must not sink the sweep, but the
             # failure is logged, not silent
@@ -417,6 +456,21 @@ def origin_seeded_flows(origin_dataset: str, matched_types, target_dataset: str,
             if pair in seen:
                 continue
             seen.add(pair)
+            try:
+                decision = mapper.get_mapping_decision(
+                    type_name, origin_dataset, target_dataset,
+                    include_bridges=False)
+            except Exception:
+                decision = {}
+            mapping_status = decision.get("status", "mapped")
+            if mapping_status == "conflict":
+                # Keep unresolved BANC/annotation conflicts out of accepted
+                # flow and coverage totals even when a bare same-name chain
+                # is also discoverable.
+                continue
+            if mapping_status == "unmapped":
+                mapping_status = ("valid_split_evidence"
+                                  if len(by_end) > 1 else "bridged")
             flows.append({
                 "source_dataset": origin_dataset,
                 "target_dataset": target_dataset,
@@ -426,6 +480,13 @@ def origin_seeded_flows(origin_dataset: str, matched_types, target_dataset: str,
                 "foreign_count": int(counts_t.get(foreign_type) or 0),
                 "matched_origin": _matched_origin(type_name),
                 "bridges": by_end[foreign_type][:max_chains_per_flow],
+                # Type-level policy is kept beside the evidence chains so
+                # renderers can distinguish a valid split from a rejected
+                # vote conflict without inspecting an unscoped type name.
+                "mapping_status": mapping_status,
+                "mapping_relationship": decision.get("relationship"),
+                "mapping_target_types": decision.get("target_types", []),
+                "mapping_conflicts": decision.get("conflicts", []),
             })
     return flows
 
@@ -494,7 +555,8 @@ def dedupe_mirrored_pairs(pair_flows: Dict[tuple, list],
     return result
 
 
-def _endpoint_pool_counts(pools, *, include_datasets: bool = False) -> tuple:
+def _endpoint_pool_counts(pools, *, include_datasets: bool = False,
+                          scope: str = "all_valid") -> tuple:
     """Pooled bodyId counts per type on each side (user report).
 
     Returns ``(source_counts, target_counts)`` — type name → the UNIQUE
@@ -521,12 +583,27 @@ def _endpoint_pool_counts(pools, *, include_datasets: bool = False) -> tuple:
                       else s_type)
         target_key = ((t_ds, f_type) if include_datasets
                       else f_type)
-        if pool.get("source_body_ids"):
+        # Node hovers describe the complete independently supported evidence
+        # for the type.  Pair-edge/ribbon weights remain selected-chain
+        # values via ``pair_flow_weight``; keeping these scopes separate is
+        # what makes an MCNS split visible as 6/6 without inflating each
+        # branch edge.
+        if scope == "selected":
+            source_values = pool.get("source_body_ids")
+            target_values = pool.get("target_body_ids")
+        else:
+            source_values = pool.get("all_valid_source_body_ids")
+            if source_values is None:
+                source_values = pool.get("source_body_ids")
+            target_values = pool.get("all_valid_target_body_ids")
+            if target_values is None:
+                target_values = pool.get("target_body_ids")
+        if source_values:
             src_ids.setdefault(source_key, set()).update(
-                str(b) for b in pool["source_body_ids"])
-        if pool.get("target_body_ids"):
+                str(b) for b in source_values)
+        if target_values:
             tgt_ids.setdefault(target_key, set()).update(
-                str(b) for b in pool["target_body_ids"])
+                str(b) for b in target_values)
     return ({t: len(v) for t, v in src_ids.items()},
             {t: len(v) for t, v in tgt_ids.items()})
 
@@ -552,8 +629,15 @@ def pair_flow_weight(flow, pool: Optional[Dict[str, Any]] = None) -> int:
     return max(1, min(src_side, tgt_side))
 
 
-def _pool_title_suffix(count: int) -> str:
-    return f" · pool {count:,} bodyIds" if count else ""
+def _pool_title_suffix(count: int, selected_count: Optional[int] = None) -> str:
+    if not count:
+        return ""
+    text = f" · pool {count:,} bodyIds (all-valid union"
+    if selected_count is not None and selected_count != count:
+        text += f"; selected bridge {selected_count:,}"
+    else:
+        text += "; selected bridge"
+    return text + ")"
 
 
 def build_mapping_network_graph(flows, *,
@@ -589,6 +673,8 @@ def build_mapping_network_graph(flows, *,
     dataset_scoped = any(len(key) == 4 for key in pools)
     src_pool_ids, tgt_pool_ids = _endpoint_pool_counts(
         pools, include_datasets=dataset_scoped)
+    src_selected_pool_ids, tgt_selected_pool_ids = _endpoint_pool_counts(
+        pools, include_datasets=dataset_scoped, scope="selected")
     graph = nx.DiGraph()
     ordered = sorted(
         flows,
@@ -620,6 +706,12 @@ def build_mapping_network_graph(flows, *,
                                       flow.get("source_type", "")), 0)
                                   if dataset_scoped else
                                   src_pool_ids.get(
+                                      flow.get("source_type", ""), 0),
+                                  src_selected_pool_ids.get((
+                                      flow.get("source_dataset", ""),
+                                      flow.get("source_type", "")), 0)
+                                  if dataset_scoped else
+                                  src_selected_pool_ids.get(
                                       flow.get("source_type", ""), 0))))
         graph.add_node(tgt_id, node_type="target",
                        label=flow.get("foreign_type", ""),
@@ -632,6 +724,12 @@ def build_mapping_network_graph(flows, *,
                                       flow.get("foreign_type", "")), 0)
                                   if dataset_scoped else
                                   tgt_pool_ids.get(
+                                      flow.get("foreign_type", ""), 0),
+                                  tgt_selected_pool_ids.get((
+                                      flow.get("target_dataset", ""),
+                                      flow.get("foreign_type", "")), 0)
+                                  if dataset_scoped else
+                                  tgt_selected_pool_ids.get(
                                       flow.get("foreign_type", ""), 0))))
         # the pair edge IS the mapping; its hover label carries the bridge
         # derivation and both sides' neuron counts
@@ -1031,6 +1129,8 @@ def build_bridge_linker_graph(flows, *, source_dataset: str,
     dataset_scoped = any(len(key) == 4 for key in pools)
     src_pool_ids, tgt_pool_ids = _endpoint_pool_counts(
         pools, include_datasets=dataset_scoped)
+    src_selected_pool_ids, tgt_selected_pool_ids = _endpoint_pool_counts(
+        pools, include_datasets=dataset_scoped, scope="selected")
 
     ordered = sorted(
         flows,
@@ -1048,7 +1148,11 @@ def build_bridge_linker_graph(flows, *, source_dataset: str,
     # node's position was overwritten by whichever chain processed last.
     observed_columns: List[str] = []
     for flow in ordered:
-        for chain in (flow.get("bridges") or [])[:2]:
+        pool = get_mapping_pool(pools, flow)
+        chains = (pool.get("valid_chains")
+                  if pool.get("valid_chains") is not None
+                  else (flow.get("bridges") or [])[:2])
+        for chain in chains:
             for linker in (l for l in standardize_bridge(
                     chain, source_dataset, target_dataset)
                     if l.get("kind") == "linker"):
@@ -1071,14 +1175,14 @@ def build_bridge_linker_graph(flows, *, source_dataset: str,
 
     def _endpoint(side: int, dataset: str, type_name: str, count) -> str:
         node_id = f"{side}|{dataset}|{type_name}"
+        all_counts = src_pool_ids if side == 0 else tgt_pool_ids
+        selected_counts = (src_selected_pool_ids
+                           if side == 0 else tgt_selected_pool_ids)
+        key = (dataset, type_name) if dataset_scoped else type_name
         title = (f"{type_name} · {dataset} "
                  f"({count or 0} neurons)"
                  + _pool_title_suffix(
-                     (src_pool_ids if side == 0 else tgt_pool_ids)
-                     .get((dataset, type_name), 0)
-                     if dataset_scoped else
-                     (src_pool_ids if side == 0 else tgt_pool_ids)
-                     .get(type_name, 0)))
+                     all_counts.get(key, 0), selected_counts.get(key, 0)))
         graph.add_node(
             node_id,
             node_type="source" if side == 0 else "target",
@@ -1097,15 +1201,22 @@ def build_bridge_linker_graph(flows, *, source_dataset: str,
                            flow.get("source_count"))
         tgt_id = _endpoint(1, flow.get("target_dataset", ""), foreign_type,
                            flow.get("foreign_count"))
-        pool_note = ""
-        if pool:
-            pool_note = (
-                f" — pool: {len(pool.get('source_body_ids', [])):,} "
-                f"bodyIds ({dataset_abbrev(source_dataset)}) / "
-                f"{len(pool.get('target_body_ids', [])):,} "
-                f"bodyIds ({dataset_abbrev(target_dataset)})")
-
-        for chain in (flow.get("bridges") or [])[:2]:
+        selected_linkers = {
+            (str(linker.get("column", "")),
+             str(linker.get("value", "")),
+             str(linker.get("home", ""))): linker
+            for linker in (pool.get("per_linker") or [])
+        }
+        all_valid_linkers = {
+            (str(linker.get("column", "")),
+             str(linker.get("value", "")),
+             str(linker.get("home", ""))): linker
+            for linker in (pool.get("all_valid_per_linker") or [])
+        }
+        chains = (pool.get("valid_chains")
+                  if pool.get("valid_chains") is not None
+                  else (flow.get("bridges") or [])[:2])
+        for chain in chains:
             linkers = [l for l in standardize_bridge(
                 chain, source_dataset, target_dataset)
                 if l.get("kind") == "linker"]
@@ -1113,8 +1224,31 @@ def build_bridge_linker_graph(flows, *, source_dataset: str,
             previous = src_id
             for linker in linkers:
                 node_id = f"L|{linker['column']}|{linker['value']}"
+                marker = (str(linker.get("column", "")),
+                          str(linker.get("value", "")),
+                          str(linker.get("home", "")))
+                selected_entry = selected_linkers.get(marker)
+                all_valid_entry = all_valid_linkers.get(marker)
+                own_pool_note = ""
+                if selected_entry is not None:
+                    own_pool_note = (
+                        f" — selected linker pool: "
+                        f"{len(selected_entry.get('body_ids') or []):,} "
+                        f"bodyIds ({dataset_abbrev(linker.get('home', ''))})")
+                elif all_valid_entry is not None:
+                    own_pool_note = (
+                        f" — valid alternative linker pool: "
+                        f"{len(all_valid_entry.get('body_ids') or []):,} "
+                        f"bodyIds ({dataset_abbrev(linker.get('home', ''))})")
+                if (all_valid_entry is not None and selected_entry is not None
+                        and len(all_valid_entry.get('body_ids') or []) !=
+                        len(selected_entry.get('body_ids') or [])):
+                    own_pool_note += (
+                        f"; all-valid union "
+                        f"{len(all_valid_entry.get('body_ids') or []):,}")
                 title = (f"{linker['column']} · {linker['value']} "
-                         f"[{dataset_abbrev(linker['home'])}]{pool_note}")
+                         f"[{dataset_abbrev(linker['home'])}]"
+                         f"{own_pool_note}")
                 graph.add_node(
                     node_id, node_type="linker",
                     home_dataset=linker.get("home", ""),
@@ -1176,7 +1310,9 @@ _LINKER_LEGEND_DESC = {
 }
 
 
-def _collect_linker_columns(flows) -> List[tuple]:
+def _collect_linker_columns(
+        flows, pools: Optional[Dict[tuple, Dict[str, Any]]] = None
+        ) -> List[tuple]:
     """(column, home-dataset, distinct-value count) in chain order."""
     from comparison.cross_dataset_type_mapper import standardize_bridge
 
@@ -1186,7 +1322,11 @@ def _collect_linker_columns(flows) -> List[tuple]:
     for flow in flows or []:
         s = flow.get("source_dataset", "")
         t = flow.get("target_dataset", "")
-        for chain in (flow.get("bridges") or [])[:2]:
+        pool = get_mapping_pool(pools, flow)
+        chains = (pool.get("valid_chains")
+                  if pool.get("valid_chains") is not None
+                  else (flow.get("bridges") or [])[:2])
+        for chain in chains:
             for linker in (l for l in standardize_bridge(chain, s, t)
                            if l.get("kind") == "linker"):
                 if linker["column"] not in columns:
@@ -1402,7 +1542,10 @@ def build_mapping_sankey_paths(flows, *, pools: Optional[Dict[tuple,
                 rows.append(([src_name, tgt_name], [flow_weight]))
             continue
 
-        for chain in (flow.get("bridges") or [])[:2]:
+        chains = (pool.get("valid_chains")
+                  if pool.get("valid_chains") is not None
+                  else (flow.get("bridges") or [])[:2])
+        for chain in chains:
             linkers = [l for l in standardize_bridge(
                 chain, source_ds, target_ds) if l.get("kind") == "linker"]
             names = [src_name]
@@ -1483,11 +1626,25 @@ def build_type_coverage(pair_flows,
                  "target_dataset": flow.get("target_dataset") or tgt_ds})
             s_ids = set(pool.get("source_body_ids") or [])
             t_ids = set(pool.get("target_body_ids") or [])
+            s_all_ids = set(
+                pool.get("all_valid_source_body_ids")
+                if pool.get("all_valid_source_body_ids") is not None
+                else s_ids)
+            t_all_ids = set(
+                pool.get("all_valid_target_body_ids")
+                if pool.get("all_valid_target_body_ids") is not None
+                else t_ids)
             pooled = bool(pool)
             src_measurable = pooled and pool.get(
                 "source_basis") != "unmeasured"
             tgt_measurable = pooled and pool.get(
                 "target_basis") != "unmeasured"
+            src_all_measurable = pooled and pool.get(
+                "all_valid_source_basis", pool.get("source_basis")) != \
+                "unmeasured"
+            tgt_all_measurable = pooled and pool.get(
+                "all_valid_target_basis", pool.get("target_basis")) != \
+                "unmeasured"
 
             fwd = forward.setdefault((src_ds, s_type), {
                 "dataset": src_ds, "type": s_type, "count": s_count,
@@ -1498,14 +1655,27 @@ def build_type_coverage(pair_flows,
             entry = fwd["targets"].setdefault(
                 (tgt_ds, f_type),
                 {"s_ids": set(), "t_ids": set(), "t_total": 0,
-                 "pooled": False, "s_measured": False, "t_measured": False})
+                 "all_s_ids": set(), "all_t_ids": set(),
+                 "all_s_overlap_ids": set(),
+                 "all_t_overlap_ids": set(),
+                 "pooled": False, "s_measured": False, "t_measured": False,
+                 "all_s_measured": False, "all_t_measured": False})
             entry["s_ids"] |= s_ids
             entry["t_ids"] |= t_ids
+            entry["all_s_ids"] |= s_all_ids
+            entry["all_t_ids"] |= t_all_ids
+            entry["all_s_overlap_ids"] |= set(
+                pool.get("all_valid_source_overlap_body_ids") or [])
+            entry["all_t_overlap_ids"] |= set(
+                pool.get("all_valid_target_overlap_body_ids") or [])
             entry["t_total"] = max(entry["t_total"], f_count)
             entry["pooled"] = entry["pooled"] or pooled
             entry["s_measured"] = entry["s_measured"] or src_measurable
             entry["t_measured"] = entry["t_measured"] or tgt_measurable
-
+            entry["all_s_measured"] = (entry["all_s_measured"]
+                                        or src_all_measurable)
+            entry["all_t_measured"] = (entry["all_t_measured"]
+                                        or tgt_all_measurable)
             rev = reverse.setdefault((tgt_ds, f_type), {
                 "dataset": tgt_ds, "type": f_type, "count": f_count,
                 "sources": {}, "any_pooled": False,
@@ -1515,14 +1685,27 @@ def build_type_coverage(pair_flows,
             sentry = rev["sources"].setdefault(
                 (src_ds, s_type),
                 {"s_ids": set(), "t_ids": set(), "s_total": 0,
-                 "pooled": False, "s_measured": False, "t_measured": False})
+                 "all_s_ids": set(), "all_t_ids": set(),
+                 "all_s_overlap_ids": set(),
+                 "all_t_overlap_ids": set(),
+                 "pooled": False, "s_measured": False, "t_measured": False,
+                 "all_s_measured": False, "all_t_measured": False})
             sentry["s_ids"] |= s_ids
             sentry["t_ids"] |= t_ids
+            sentry["all_s_ids"] |= s_all_ids
+            sentry["all_t_ids"] |= t_all_ids
+            sentry["all_s_overlap_ids"] |= set(
+                pool.get("all_valid_source_overlap_body_ids") or [])
+            sentry["all_t_overlap_ids"] |= set(
+                pool.get("all_valid_target_overlap_body_ids") or [])
             sentry["s_total"] = max(sentry["s_total"], s_count)
             sentry["pooled"] = sentry["pooled"] or pooled
             sentry["s_measured"] = sentry["s_measured"] or src_measurable
             sentry["t_measured"] = sentry["t_measured"] or tgt_measurable
-
+            sentry["all_s_measured"] = (sentry["all_s_measured"]
+                                         or src_all_measurable)
+            sentry["all_t_measured"] = (sentry["all_t_measured"]
+                                         or tgt_all_measurable)
     def _cov(union: set, total: int, pooled: bool, measured: bool) -> str:
         if not pooled:
             return "not pooled"
@@ -1535,21 +1718,93 @@ def build_type_coverage(pair_flows,
         groups: Dict[str, List[str]] = {}
         query_union: set = set()
         target_union: set = set()
+        selected_query_union: set = set()
+        selected_target_union: set = set()
+        all_query_branches: List[set] = []
+        all_target_branches: List[set] = []
+        selected_query_branches: List[set] = []
+        selected_target_branches: List[set] = []
+        all_query_overlap: set = set()
+        all_target_overlap: set = set()
+        has_valid_alternatives = False
         target_total = 0
         query_measured = False
         target_measured = False
+        selected_query_measured = False
+        selected_target_measured = False
         for (t_ds, f_type), entry in sorted(row["targets"].items()):
             code = dataset_abbrev(t_ds) or t_ds
             groups.setdefault(code, []).append(f_type)
+            if (entry["all_s_ids"] != entry["s_ids"]
+                    or entry["all_t_ids"] != entry["t_ids"]):
+                has_valid_alternatives = True
             if not entry["pooled"]:
                 continue
             if entry["s_measured"]:
-                query_union |= entry["s_ids"]
-                query_measured = True
+                selected_query_union |= entry["s_ids"]
+                selected_query_branches.append(set(entry["s_ids"]))
+                selected_query_measured = True
             if entry["t_measured"]:
-                target_union |= entry["t_ids"]
+                selected_target_union |= entry["t_ids"]
+                selected_target_branches.append(set(entry["t_ids"]))
+                selected_target_measured = True
+            if entry["all_s_measured"]:
+                query_union |= entry["all_s_ids"]
+                all_query_branches.append(set(entry["all_s_ids"]))
+                all_query_overlap.update(entry.get("all_s_overlap_ids", set()))
+                query_measured = True
+            if entry["all_t_measured"]:
+                target_union |= entry["all_t_ids"]
+                all_target_branches.append(set(entry["all_t_ids"]))
+                all_target_overlap.update(entry.get("all_t_overlap_ids", set()))
                 target_total += entry["t_total"]
                 target_measured = True
+        # A legacy pool has no all-valid fields; in that case the all-valid
+        # view intentionally falls back to the selected view.
+        if not query_measured and selected_query_measured:
+            query_union = selected_query_union
+            query_measured = True
+        if not target_measured and selected_target_measured:
+            target_union = selected_target_union
+            target_total = sum(
+                entry["t_total"] for entry in row["targets"].values()
+                if entry["pooled"] and entry["t_measured"])
+            target_measured = True
+
+        def _overlap_ids(branches: List[set]) -> set:
+            from collections import Counter
+
+            counts = Counter()
+            for branch in branches:
+                counts.update(branch)
+            return {body_id for body_id, count in counts.items()
+                    if count > 1}
+
+        query_overlap_all_valid_ids = (
+            _overlap_ids(all_query_branches) | all_query_overlap)
+        target_overlap_all_valid_ids = (
+            _overlap_ids(all_target_branches) | all_target_overlap)
+        query_overlap_all_valid = len(query_overlap_all_valid_ids)
+        target_overlap_all_valid = len(target_overlap_all_valid_ids)
+        query_overlap_selected = len(_overlap_ids(selected_query_branches))
+        target_overlap_selected = len(_overlap_ids(selected_target_branches))
+        coverage_notes = []
+        if len(row["targets"]) > 1:
+            coverage_notes.append("branch evidence is non-exclusive")
+        if has_valid_alternatives:
+            coverage_notes.append(
+                "all-valid union includes supported alternative bridges")
+        if query_overlap_selected or target_overlap_selected:
+            coverage_notes.append(
+                "selected overlap: "
+                f"{query_overlap_selected} source bodyIds, "
+                f"{target_overlap_selected} target bodyIds")
+        if query_overlap_all_valid or target_overlap_all_valid:
+            coverage_notes.append(
+                "all-valid overlap: "
+                f"{query_overlap_all_valid} source bodyIds, "
+                f"{target_overlap_all_valid} target bodyIds")
+        coverage_note = "; ".join(coverage_notes)
         forward_rows.append({
             "dataset": row["dataset"],
             "type": row["type"],
@@ -1564,6 +1819,24 @@ def build_type_coverage(pair_flows,
                               row["any_pooled"], query_measured),
             "target_cov": _cov(target_union, target_total,
                                row["any_pooled"], target_measured),
+            "query_cov_selected": _cov(
+                selected_query_union, row["count"], row["any_pooled"],
+                selected_query_measured),
+            "target_cov_selected": _cov(
+                selected_target_union,
+                sum(entry["t_total"] for entry in row["targets"].values()
+                    if entry["pooled"] and entry["t_measured"]),
+                row["any_pooled"], selected_target_measured),
+            "query_cov_all_valid": _cov(
+                query_union, row["count"], row["any_pooled"], query_measured),
+            "target_cov_all_valid": _cov(
+                target_union, target_total, row["any_pooled"],
+                target_measured),
+            "query_overlap_selected": query_overlap_selected,
+            "target_overlap_selected": target_overlap_selected,
+            "query_overlap_all_valid": query_overlap_all_valid,
+            "target_overlap_all_valid": target_overlap_all_valid,
+            "coverage_note": coverage_note,
         })
     forward_rows.sort(key=lambda r: (-int(r["count"] or 0),
                                      str(r["type"])))
@@ -1574,20 +1847,90 @@ def build_type_coverage(pair_flows,
         source_union: set = set()
         source_total = 0
         target_union: set = set()
+        selected_source_union: set = set()
+        selected_target_union: set = set()
+        selected_source_total = 0
+        all_source_branches: List[set] = []
+        all_target_branches: List[set] = []
+        selected_source_branches: List[set] = []
+        selected_target_branches: List[set] = []
+        all_source_overlap: set = set()
+        all_target_overlap: set = set()
+        has_valid_alternatives = False
         source_measured = False
         target_measured = False
+        selected_source_measured = False
+        selected_target_measured = False
         for (s_ds, s_type), entry in sorted(row["sources"].items()):
             code = dataset_abbrev(s_ds) or s_ds
             groups.setdefault(code, []).append(s_type)
+            if (entry["all_s_ids"] != entry["s_ids"]
+                    or entry["all_t_ids"] != entry["t_ids"]):
+                has_valid_alternatives = True
             if not entry["pooled"]:
                 continue
             if entry["s_measured"]:
-                source_union |= entry["s_ids"]
+                selected_source_union |= entry["s_ids"]
+                selected_source_branches.append(set(entry["s_ids"]))
+                selected_source_total += entry["s_total"]
+                selected_source_measured = True
+            if entry["t_measured"]:
+                selected_target_union |= entry["t_ids"]
+                selected_target_branches.append(set(entry["t_ids"]))
+                selected_target_measured = True
+            if entry["all_s_measured"]:
+                source_union |= entry["all_s_ids"]
+                all_source_branches.append(set(entry["all_s_ids"]))
+                all_source_overlap.update(entry.get("all_s_overlap_ids", set()))
                 source_total += entry["s_total"]
                 source_measured = True
-            if entry["t_measured"]:
-                target_union |= entry["t_ids"]
+            if entry["all_t_measured"]:
+                target_union |= entry["all_t_ids"]
+                all_target_branches.append(set(entry["all_t_ids"]))
+                all_target_overlap.update(entry.get("all_t_overlap_ids", set()))
                 target_measured = True
+        if not source_measured and selected_source_measured:
+            source_union = selected_source_union
+            source_total = selected_source_total
+            source_measured = True
+        if not target_measured and selected_target_measured:
+            target_union = selected_target_union
+            target_measured = True
+
+        def _overlap_ids(branches: List[set]) -> set:
+            from collections import Counter
+
+            counts = Counter()
+            for branch in branches:
+                counts.update(branch)
+            return {body_id for body_id, count in counts.items()
+                    if count > 1}
+
+        source_overlap_all_valid_ids = (
+            _overlap_ids(all_source_branches) | all_source_overlap)
+        target_overlap_all_valid_ids = (
+            _overlap_ids(all_target_branches) | all_target_overlap)
+        source_overlap_all_valid = len(source_overlap_all_valid_ids)
+        target_overlap_all_valid = len(target_overlap_all_valid_ids)
+        source_overlap_selected = len(_overlap_ids(selected_source_branches))
+        target_overlap_selected = len(_overlap_ids(selected_target_branches))
+        coverage_notes = []
+        if len(row["sources"]) > 1:
+            coverage_notes.append("branch evidence is non-exclusive")
+        if has_valid_alternatives:
+            coverage_notes.append(
+                "all-valid union includes supported alternative bridges")
+        if source_overlap_selected or target_overlap_selected:
+            coverage_notes.append(
+                "selected overlap: "
+                f"{source_overlap_selected} source bodyIds, "
+                f"{target_overlap_selected} target bodyIds")
+        if source_overlap_all_valid or target_overlap_all_valid:
+            coverage_notes.append(
+                "all-valid overlap: "
+                f"{source_overlap_all_valid} source bodyIds, "
+                f"{target_overlap_all_valid} target bodyIds")
+        coverage_note = "; ".join(coverage_notes)
         reverse_rows.append({
             "dataset": row["dataset"],
             "type": row["type"],
@@ -1602,6 +1945,23 @@ def build_type_coverage(pair_flows,
                                row["any_pooled"], source_measured),
             "target_cov": _cov(target_union, row["count"],
                                row["any_pooled"], target_measured),
+            "source_cov_selected": _cov(
+                selected_source_union, selected_source_total,
+                row["any_pooled"], selected_source_measured),
+            "target_cov_selected": _cov(
+                selected_target_union, row["count"], row["any_pooled"],
+                selected_target_measured),
+            "source_cov_all_valid": _cov(
+                source_union, source_total, row["any_pooled"],
+                source_measured),
+            "target_cov_all_valid": _cov(
+                target_union, row["count"], row["any_pooled"],
+                target_measured),
+            "source_overlap_selected": source_overlap_selected,
+            "target_overlap_selected": target_overlap_selected,
+            "source_overlap_all_valid": source_overlap_all_valid,
+            "target_overlap_all_valid": target_overlap_all_valid,
+            "coverage_note": coverage_note,
         })
     reverse_rows.sort(key=lambda r: (0 if r["relationship"] == "N-to-1"
                                      else 1, -int(r["count"] or 0),
@@ -1677,9 +2037,20 @@ def render_mapping_sankey_html(flows, *, pools: Optional[Dict[tuple,
             f'<b>+{overflow} more flows not drawn</b> (cap {max_flows}) — '
             'the full mapping is in the CSV export.</div>')
     if variant == "linker":
-        legend = _linker_legend_html(_collect_linker_columns(flows))
+        legend = _linker_legend_html(_collect_linker_columns(flows, pools))
         if legend:
             notes.append(legend)
+    if any(
+            (get_mapping_pool(pools, flow).get("valid_chain_count", 0) > 1)
+            for flow in (flows or []) if flow):
+        notes.append(
+            '<div style="position:fixed;bottom:8px;left:8px;z-index:9999;'
+            'background:rgba(255,255,255,0.94);border:1px solid #cbd5e1;'
+            'border-radius:8px;padding:8px 12px;'
+            'font:12px/1.45 -apple-system,Segoe UI,sans-serif;color:#0f172a">'
+            '<b>Alternative bridge evidence retained.</b> Ribbon weights use '
+            'the selected bridge and are not summed; see Type coverage for '
+            'the all-valid union and overlap.</div>')
     if notes:
         html = _inject_body_note(html, "".join(notes))
     return html
@@ -1842,7 +2213,8 @@ def _order_component(component, ds_types, pair_flows):
     return ordered
 
 
-def build_composed_mapping_graph(pair_flows, *, node_cap: int = 80):
+def build_composed_mapping_graph(pair_flows, *, pools=None,
+                                 node_cap: int = 80):
     """Composed N-dataset type-level graph (Round 2, spec §4).
 
     ``pair_flows`` maps ``(source_dataset, target_dataset)`` to the
@@ -1857,6 +2229,13 @@ def build_composed_mapping_graph(pair_flows, *, node_cap: int = 80):
     ``meta['notes']``.  Returns ``(graph, meta)``.
     """
     from comparison.cross_dataset_type_mapper import standardize_bridge
+
+    pools = pools or {}
+    dataset_scoped = any(len(key) == 4 for key in pools)
+    src_pool_ids, tgt_pool_ids = _endpoint_pool_counts(
+        pools, include_datasets=dataset_scoped)
+    src_selected_pool_ids, tgt_selected_pool_ids = _endpoint_pool_counts(
+        pools, include_datasets=dataset_scoped, scope="selected")
 
     graph = nx.DiGraph()
     ds_types: Dict[str, set] = {}
@@ -1876,8 +2255,17 @@ def build_composed_mapping_graph(pair_flows, *, node_cap: int = 80):
                 any(l.get("kind") == "linker"
                     for l in standardize_bridge(c, src_ds, tgt_ds))
                 for c in (flow.get("bridges") or [])[:2])
+            pool = get_mapping_pool(pools, {
+                **flow,
+                "source_dataset": flow.get("source_dataset") or src_ds,
+                "target_dataset": flow.get("target_dataset") or tgt_ds,
+            })
             edges.append(((src_ds, src_type), (tgt_ds, tgt_type), {
-                "weight": pair_flow_weight(flow),
+                # Use the same selected-chain coverage weight as the
+                # pair-level network and Sankey.  When no pool is supplied,
+                # pair_flow_weight retains the historical type-count
+                # fallback for programmatic callers.
+                "weight": pair_flow_weight(flow, pool),
                 "bridge_texts": build_bridge_texts(flow.get("bridges")),
                 "linker_bearing": linker_bearing,
                 "source_count": src_count,
@@ -1949,6 +2337,20 @@ def build_composed_mapping_graph(pair_flows, *, node_cap: int = 80):
             return
         title = (f"{type_name} · {dataset_abbrev(ds)} "
                  f"({count or 0} neurons)")
+        pool_count = max(
+            src_pool_ids.get((ds, type_name), 0)
+            if dataset_scoped else src_pool_ids.get(type_name, 0),
+            tgt_pool_ids.get((ds, type_name), 0)
+            if dataset_scoped else tgt_pool_ids.get(type_name, 0),
+        )
+        selected_pool_count = max(
+            src_selected_pool_ids.get((ds, type_name), 0)
+            if dataset_scoped else src_selected_pool_ids.get(type_name, 0),
+            tgt_selected_pool_ids.get((ds, type_name), 0)
+            if dataset_scoped else tgt_selected_pool_ids.get(type_name, 0),
+        )
+        if pool_count:
+            title += _pool_title_suffix(pool_count, selected_pool_count)
         matched = sorted({(m_ds, m_t) for m_ds, m_t in matches.get(
             (ds, type_name), []) if m_ds != ds})
         if matched:
@@ -2032,7 +2434,8 @@ def build_composed_mapping_graph(pair_flows, *, node_cap: int = 80):
     return graph, meta
 
 
-def render_composed_mapping_html(pair_flows, *, node_cap: int = 80,
+def render_composed_mapping_html(pair_flows, *, pools=None,
+                                 node_cap: int = 80,
                                  title: str = "Composed type mapping"):
     """Render the composed N-dataset mapping to an HTML string (Round 2).
 
@@ -2040,7 +2443,8 @@ def render_composed_mapping_html(pair_flows, *, node_cap: int = 80,
     or nothing is mapped; meta carries component orders and scoping
     notes for the popup.
     """
-    graph, meta = build_composed_mapping_graph(pair_flows, node_cap=node_cap)
+    graph, meta = build_composed_mapping_graph(
+        pair_flows, pools=pools, node_cap=node_cap)
     if not graph.nodes:
         return None, meta
 
@@ -2073,7 +2477,7 @@ def render_composed_mapping_html(pair_flows, *, node_cap: int = 80,
     return html, meta
 
 
-def build_bridges_csv(flows, *, pools=None) -> Optional[str]:
+def build_bridges_csv(flows, *, pools=None, extended: bool = False) -> Optional[str]:
     """Mapping CSV for one pair's flows (user 2026-09-09 redesign).
 
     One row per (source type, target type) pair with EXPLICIT endpoints —
@@ -2089,7 +2493,10 @@ def build_bridges_csv(flows, *, pools=None) -> Optional[str]:
     so per-pair and all-pairs files share one header and the old
     union-of-bridge-columns concatenation hack is gone.  Uniform field
     counts, proper quoting.  Returns None when there is nothing to
-    export.
+    export.  ``extended=True`` adds selected/all-valid coverage scopes,
+    resolver status, ranks, and the selected/all-valid pool IDs.  The
+    default keeps the historical 20-column contract for downstream callers;
+    the Type Mapping UI requests the extended form explicitly.
     """
     import csv as _csv
     import io
@@ -2112,7 +2519,7 @@ def build_bridges_csv(flows, *, pools=None) -> Optional[str]:
         return "" if ids is None else "{" + ", ".join(
             str(body_id) for body_id in ids) + "}"
 
-    header = [
+    legacy_header = [
         "source_dataset", "source_entry", "matched_column", "source_type",
         "target_dataset", "target_type", "relationship",
         "source_neurons", "target_neurons",
@@ -2121,6 +2528,23 @@ def build_bridges_csv(flows, *, pools=None) -> Optional[str]:
         "source_body_ids", "target_body_ids",
         "pool_coverage", "pool_coverage_basis",
     ]
+    extended_header = [
+        "source_dataset", "source_entry", "matched_column", "source_type",
+        "target_dataset", "target_type", "relationship",
+        "source_neurons", "target_neurons",
+        "selected_bridge", "bridge", "bridge_columns", "mapping_origin",
+        "mapping_status", "selected_bridge_rank", "valid_bridge_count",
+        "selected_linker_values", "selected_linker_canonical_values",
+        "unsupported_attempts",
+        "source_pool", "source_total", "target_pool", "target_total",
+        "all_valid_source_pool", "all_valid_source_total",
+        "all_valid_target_pool", "all_valid_target_total",
+        "source_body_ids", "target_body_ids",
+        "all_valid_source_body_ids", "all_valid_target_body_ids",
+        "pool_coverage", "pool_coverage_basis", "coverage_overlap",
+        "coverage_scope",
+    ]
+    header = extended_header if extended else legacy_header
     targets_by_source: Dict[str, set] = {}
     for flow in flows:
         targets_by_source.setdefault(
@@ -2137,9 +2561,17 @@ def build_bridges_csv(flows, *, pools=None) -> Optional[str]:
         src_type = flow.get("source_type", "")
         foreign = flow.get("foreign_type", "")
         chain = preferred_bridge_chain(chains, src_ds, tgt_ds)
-        linkers = [l for l in standardize_bridge(chain or [], src_ds, tgt_ds)
-                   if l.get("kind") == "linker"] if chain else []
         info = bridge_linker_text(chains, src_ds, tgt_ds, foreign)
+        pool = get_mapping_pool(pools, flow)
+        selected_chain = pool.get("selected_chain") if pool else chain
+        linkers = [
+            linker for linker in standardize_bridge(
+                selected_chain or [], src_ds, tgt_ds)
+            if linker.get("kind") == "linker"
+        ] if selected_chain else []
+        selected_info = bridge_linker_text(
+            [selected_chain] if selected_chain else [],
+            src_ds, tgt_ds, foreign)
         # The matched entry: the source type itself when the match ran
         # through the type column, otherwise the label/annotation value
         # that matched (recorded in matched_origin as "<column> · 'v'").
@@ -2157,7 +2589,6 @@ def build_bridges_csv(flows, *, pools=None) -> Optional[str]:
         relationship = ("1-to-N"
                         if len(targets_by_source.get(src_type, ())) > 1
                         else "1-to-1")
-        pool = get_mapping_pool(pools, flow)
         # Keep one compact human-readable field, but expose BOTH
         # independent sides.  ``coverage`` remains the historical
         # target-side alias for old callers and synthetic fixtures.
@@ -2171,7 +2602,57 @@ def build_bridges_csv(flows, *, pools=None) -> Optional[str]:
             pool_coverage = target_coverage or source_coverage
         source_total = pool.get("source_type_total")
         target_total = pool.get("target_type_total")
-        writer.writerow([
+        all_source_ids = pool.get("all_valid_source_body_ids")
+        if all_source_ids is None:
+            all_source_ids = pool.get("source_body_ids")
+        all_target_ids = pool.get("all_valid_target_body_ids")
+        if all_target_ids is None:
+            all_target_ids = pool.get("target_body_ids")
+        all_source_total = pool.get("all_valid_source_type_total")
+        if all_source_total is None:
+            all_source_total = source_total
+        all_target_total = pool.get("all_valid_target_type_total")
+        if all_target_total is None:
+            all_target_total = target_total
+        all_source_coverage = (
+            format_coverage(len(all_source_ids or []), all_source_total)
+            if all_source_total is not None else "")
+        all_target_coverage = (
+            format_coverage(len(all_target_ids or []), all_target_total)
+            if all_target_total is not None else "")
+        if all_source_coverage and all_target_coverage and (
+                all_source_coverage != source_coverage
+                or all_target_coverage != target_coverage):
+            pool_coverage += (
+                f"; all-valid union source {all_source_coverage}; "
+                f"target {all_target_coverage}")
+        coverage_basis = pool.get("coverage_basis") or ""
+        if pool:
+            all_source_basis = pool.get(
+                "all_valid_source_basis", pool.get("source_basis", ""))
+            all_target_basis = pool.get(
+                "all_valid_target_basis", pool.get("target_basis", ""))
+            coverage_basis = (
+                f"selected: {pool.get('source_basis', '')} / "
+                f"{pool.get('target_basis', '')}; all-valid: "
+                f"{all_source_basis} / {all_target_basis}; "
+                f"{coverage_basis}")
+        selected_linker_values = "; ".join(
+            str(linker.get("raw_value", linker.get("value", "")))
+            for linker in linkers)
+        selected_linker_canonical_values = "; ".join(
+            str(linker.get("canonical_value", linker.get("value", "")))
+            for linker in linkers)
+        unsupported_attempts = "; ".join(
+            f"#{attempt.get('rank')}: {attempt.get('reason') or attempt.get('status')}"
+            for attempt in ((pool.get("attempts") or []) if pool else [])
+            if not attempt.get("supported"))
+        coverage_overlap = ""
+        if pool:
+            coverage_overlap = (
+                f"source {pool.get('all_valid_source_overlap_count', 0)}; "
+                f"target {pool.get('all_valid_target_overlap_count', 0)}")
+        legacy_row = [
             src_ds,
             source_entry,
             matched_column,
@@ -2195,5 +2676,43 @@ def build_bridges_csv(flows, *, pools=None) -> Optional[str]:
             _body_ids_cell(pool.get("target_type_body_ids")),
             pool_coverage,
             pool.get("coverage_basis") or "",
-        ])
+        ]
+        extended_row = [
+            src_ds,
+            source_entry,
+            matched_column,
+            src_type,
+            tgt_ds,
+            foreign,
+            relationship,
+            flow.get("source_count") or 0,
+            flow.get("foreign_count") or 0,
+            selected_info["text"],
+            info["text"],
+            "; ".join(linker["column"] for linker in linkers),
+            "same name" if not linkers else "mapped",
+            flow.get("mapping_status") or "mapped",
+            pool.get("selected_chain_rank", ""),
+            pool.get("valid_chain_count", ""),
+            selected_linker_values,
+            selected_linker_canonical_values,
+            unsupported_attempts,
+            pool.get("source_pool_size", ""),
+            source_total if source_total is not None else "",
+            pool.get("target_pool_size", ""),
+            target_total if target_total is not None else "",
+            pool.get("all_valid_source_pool_size", "") if pool else "",
+            all_source_total if all_source_total is not None else "",
+            pool.get("all_valid_target_pool_size", "") if pool else "",
+            all_target_total if all_target_total is not None else "",
+            _body_ids_cell(pool.get("source_type_body_ids")),
+            _body_ids_cell(pool.get("target_type_body_ids")),
+            _body_ids_cell(all_source_ids),
+            _body_ids_cell(all_target_ids),
+            pool_coverage,
+            coverage_basis,
+            coverage_overlap,
+            pool.get("coverage_scope") or "selected bridge",
+        ]
+        writer.writerow(extended_row if extended else legacy_row)
     return buffer.getvalue()

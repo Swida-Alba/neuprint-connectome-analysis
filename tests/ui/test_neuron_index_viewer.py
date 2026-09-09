@@ -2718,6 +2718,48 @@ class TestBridgeBodyIdPooling:
         assert pool_unmeasured["source_type_body_ids"] == ["1", "2", "3"]
         assert pool_unmeasured["target_type_body_ids"] == []
 
+    def test_prioritized_resolver_falls_back_after_unsupported_chain(
+            self, isolated_index_root, tmp_path):
+        """A zero-evidence high-priority chain cannot hide a valid fallback."""
+        from ui.neuron_index import resolve_prioritized_bridge_pool
+
+        source = self._index(tmp_path, "resolver_source:v1.0", {
+            "bodyId": ["1", "2"], "type": ["A", "A"]})
+        target = self._index(tmp_path, "resolver_target:v1.0", {
+            "bodyId": ["11", "12"], "type": ["B", "B"],
+            "bridge": ["GOOD", "GOOD"]})
+        # The metadata-bearing chain is ordered ahead of the bare identity
+        # chain, but its target-side linker has no rows.  The resolver must
+        # record the failed attempt and select the supported fallback.
+        unsupported = [
+            {"dataset": "resolver_source:v1.0", "column": "type",
+             "value": "A"},
+            {"dataset": "resolver_target:v1.0", "column": "bridge",
+             "value": "MISSING", "home": "resolver_target:v1.0"},
+            {"dataset": "resolver_target:v1.0", "column": "type",
+             "value": "B"},
+        ]
+        fallback = [
+            {"dataset": "resolver_source:v1.0", "column": "type",
+             "value": "A"},
+            {"dataset": "resolver_target:v1.0", "column": "type",
+             "value": "B"},
+        ]
+        pool = resolve_prioritized_bridge_pool(
+            "resolver_source:v1.0", "resolver_target:v1.0",
+            [fallback, unsupported], "A", "B",
+            indexes={"resolver_source:v1.0": source,
+                     "resolver_target:v1.0": target})
+        assert pool["selected_chain_rank"] == 2
+        assert pool["fallback_used"] is True
+        assert pool["valid_chain_ranks"] == [2]
+        assert pool["attempts"][0]["supported"] is False
+        assert pool["attempts"][0]["unsupported_sides"] == ["target"]
+        assert pool["source_body_ids"] == ["1", "2"]
+        assert pool["target_body_ids"] == ["11", "12"]
+        assert pool["all_valid_source_body_ids"] == ["1", "2"]
+        assert pool["all_valid_target_body_ids"] == ["11", "12"]
+
 
 def test_mapped_csv_extras_dedupe_and_via_note():
     """mapped_csv_extras: bridge-<column> cells per standardized linker,

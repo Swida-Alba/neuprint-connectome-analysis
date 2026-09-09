@@ -21,6 +21,7 @@ CrossDatasetTypeMapper                      src/comparison/cross_dataset_type_ma
   ├─ _apply_annotation_bridge_overlay()   same-name identity + annotation-bridge pairs
   ├─ get_type_bridges()            derivation chains (the evidence algebra, §3)
   ├─ get_alias_candidates()        per-dataset alias candidates (rename / same name / one-of-N)
+  ├─ get_mapping_decision()        source/target-scoped accepted, split, evidence, or conflict state
   └─ get_mapped_type()             stored-mapping lookup (production resolution)
         ▼
 mapped_type_targets()                       ui/neuron_index.py — THE shared backend (§5)
@@ -205,6 +206,12 @@ stored mappings consumed by `get_mapped_type`:
 5. Exports state the derivation: `mapping_origin` in
    `auto_type_mapping.csv`, `origin` in the conflicts CSV.
 
+`get_mapping_decision(source_type, source_dataset, target_dataset)` is the
+policy gate used by UI consumers. It scopes conflicts to the ordered dataset
+pair, keeps BANC label-vote conflicts blocked, and distinguishes an accepted
+mapping from `valid_split_evidence` and `evidence_only`. A split can therefore
+remain inspectable without being mistaken for one canonical target.
+
 ## 5. Shared backend and surface parity
 
 `mapped_type_targets()` resolves one foreign type as the **union** of
@@ -285,6 +292,37 @@ its own dataset (sorted, independent of the linker-filtered subsets),
 exported as the mapping CSV's `source_body_ids` / `target_body_ids`
 columns; listed per type per side, never paired across datasets.
 
+### 6.1 Prioritized bridge resolution and coverage scopes
+
+`prioritized_bridge_chains(chains, source_dataset, target_dataset)` provides a
+deterministic evidence order without consulting body counts. Direct curated
+labels and direct crosswalk evidence outrank direct auto labels, annotations,
+release metadata, indirect routes, and finally a bare same-name chain. Ties
+use the number of direct/indirect linkers, chain length, and hop values. The
+older `preferred_bridge_chain()` API is now a compatibility view of the first
+ordered candidate.
+
+`resolve_prioritized_bridge_pool()` is the shared bodyId-boundary resolver used
+by the Type Mapping panel and mapped viewer. It:
+
+- filters candidates to the requested endpoint type and attempts them in the
+  priority order, within an explicit alternative budget;
+- selects the first supported chain for legacy edge weights and records every
+  unsupported attempt, fallback reason, linker evidence tier, raw token, and
+  canonical token;
+- retains later supported chains as alternatives and unions their independent
+  source/target bodyId pools into `all_valid_*` fields, including overlap IDs
+  and per-linker unions; and
+- checks source-home and target-home linkers separately while never pairing
+  bodyIds across datasets or using coverage to resolve a type conflict.
+
+The selected pool is the stable primary display/weight scope. The all-valid
+union is the complete supported-evidence scope. For a fan-out, branch rows are
+non-exclusive: an aggregate may report `5/6` selected MCNS bodies and `6/6`
+all-valid bodies while the per-branch evidence is `2 + 3 + 3 = 8`. The
+coverage layer reports both scopes and overlap rather than presenting eight as
+eight distinct source neurons.
+
 ## 7. Visualization contract
 
 - **Panel result presentation** (user 2026-09-07, refreshed 2026-09-09):
@@ -306,8 +344,10 @@ columns; listed per type per side, never paired across datasets.
   side's
   denominator is the population of the endpoint types involved (types
   are disjoint body sets, so a 1-to-N row's target total is the summed
-  population of all mapped target types); a side whose pools were
-  unmeasurable renders `not measured`, never a fake `0 of n`.  The
+  population of all mapped target types); each table exposes selected-bridge
+  and all-valid-union coverage. Fan-out branch values are marked
+  non-exclusive and overlap counts are shown. A side whose pools were
+  unmeasurable renders `not measured`, never a fake `0 of n`. The
   per-pair cards label both sides ("12 FAFB → 4 MCNS"), annotate every
   linker in Map used with its own pooled bodyId count (pooling now
   covers both rendered chains), and show per-side BASIS-AWARE pool
@@ -374,7 +414,11 @@ columns; listed per type per side, never paired across datasets.
   delimiter sniffing split them into pseudo-columns): listed per type per
   side, never a bodyId-to-bodyId
   pairing.  The export never represents bodyId
-  pairings.
+  pairings. The UI requests the `extended=True` export, which adds the
+  selected bridge, mapping status, selected rank, valid-chain count,
+  raw/canonical selected linker values, unsupported attempts,
+  selected/all-valid pool totals and IDs, coverage overlap, and scope. The
+  default 20-column form remains available for existing programmatic callers.
 
 ## 8. Testing matrix
 
@@ -383,12 +427,13 @@ columns; listed per type per side, never paired across datasets.
 | `tests/core/test_type_mapper_source_map.py` | declarative licensing vs the tables, per-pair sweeps |
 | `tests/core/test_type_mapper_bridge_rules.py` | the algebra: reverse crosswalk legs, connector licenses, BANC ban, no-flip order, untyped exclusion, label-hop terminality + primary-valued-alt refusal (the `l-LNv → BM_*` regression), the designed `aT`→`ACT` standard, real-data acceptance |
 | `tests/core/test_type_mapper_annotation_bridge.py` | overlay precedence, exports, release-name resolution |
-| `tests/core/test_type_mapper_real_datasets.py` | circadian parity (panel == viewer, 219 unique), linker layout + header legend chips, direct BANC label routes, two-linker cap, APDN3 pair weights == Sankey ribbons, APDN3 pool-union hover, Sankey no parallel links, edge-label size control |
+| `tests/core/test_type_mapper_real_datasets.py` | circadian parity (panel == viewer, 219 unique), linker layout + header legend chips, direct BANC label routes, normalized-auto MeVPLo2 pools, SMP227 selected/all-valid coverage and overlap, CB1011 conflict blocking, two-linker cap, APDN3 pair weights == Sankey ribbons, APDN3 pool-union hover, Sankey no parallel links, edge-label size control |
 | `tests/core/test_banc_release_and_mcns_version.py` | BANC label votes/verification, `auto:`-stripped label provenance, duplicated root relation, MCNS v0.9 alias/native fallback |
 | `tests/core/test_dataset_release_registry.py` | shared recommendation policy and unavailable-release behavior |
 | `tests/ui/test_dataset_release_notice.py` | explicit single/multi selector recommendation action and suppression |
-| `tests/core/test_type_mapping_composed.py` | mapping-CSV fixed-width contract (`source_dataset`…`pool_coverage_basis`), `format_coverage` states, `not measured` coverage rows, shared `pair_flow_weight` formula, pool-count union, forward 1-to-N + reverse N-to-1 coverage rows |
-| `tests/ui/test_alias_matches.py` | viewer enrichment, mapped-type view, pool granularity |
+| `tests/core/test_type_mapping_composed.py` | mapping-CSV fixed-width contract (`source_dataset`…`pool_coverage_basis`), extended selected/all-valid scope and raw/canonical linker export, `format_coverage` states, `not measured` coverage rows, shared `pair_flow_weight` formula, pool-count union, forward 1-to-N + reverse N-to-1 coverage rows |
+| `tests/ui/test_alias_matches.py` | viewer enrichment, source-scoped conflict rendering, mapped-type view, pool granularity |
+| `tests/ui/test_neuron_index_viewer.py` | independent endpoint pools, two-sided support semantics, prioritized fallback after an unsupported chain |
 
 Probes under `local_data/`: `repro_two_flows.py` (surface parity),
 `probe_t2_t3.py` (version control + used-name filter),

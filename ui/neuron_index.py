@@ -2716,12 +2716,24 @@ def _cell_contains(column_expr, value: str):
     """
     import polars as pl
 
-    return (
+    # ``auto:`` is a provenance tier used by BANC label columns, not a
+    # different type namespace.  The mapper keeps the raw cell for
+    # provenance; coverage matching uses the same canonical token so an
+    # auto-derived bridge can still reach the independently indexed rows.
+    from comparison.cross_dataset_type_mapper import canonical_linker_token
+
+    canonical = canonical_linker_token(value).casefold()
+    tokens = (
         column_expr.cast(pl.Utf8)
         .str.split(",")
-        .list.eval(pl.element().str.strip_chars().str.to_lowercase())
-        .list.contains(value.casefold())
+        .list.eval(pl.element().str.strip_chars())
     )
+    return tokens.list.eval(
+        pl.when(pl.element().str.to_lowercase().str.starts_with("auto:"))
+        .then(pl.element().str.slice(5).str.strip_chars())
+        .otherwise(pl.element())
+        .str.to_lowercase()
+    ).list.contains(canonical)
 
 
 @lru_cache(maxsize=1)
@@ -2873,8 +2885,11 @@ def pool_bridge_body_ids(source_dataset: str, target_dataset: str,
         """
         from comparison.cross_dataset_type_mapper import BRIDGE_STANDARD
 
-        for reg_column, reg_home in BRIDGE_STANDARD.get(
-                (source_dataset, target_dataset), ()):
+        registry = (
+            BRIDGE_STANDARD.get((source_dataset, target_dataset))
+            or BRIDGE_STANDARD.get((target_dataset, source_dataset), ())
+        )
+        for reg_column, reg_home in registry:
             if reg_column == column:
                 return reg_home
         if (claimed_home in datasets and loaded.get(claimed_home) is not None
@@ -2913,6 +2928,10 @@ def pool_bridge_body_ids(source_dataset: str, target_dataset: str,
             per_linker.append({
                 "column": column, "value": value, "home": home,
                 "body_ids": [], "coverage_basis": "release relation",
+                "raw_value": linker.get("raw_value", value),
+                "canonical_value": linker.get(
+                    "canonical_value", value),
+                "evidence_tier": linker.get("evidence_tier", ""),
             })
             continue
         if index is None or column not in index.frame.columns:
@@ -2929,6 +2948,11 @@ def pool_bridge_body_ids(source_dataset: str, target_dataset: str,
             "column": column, "value": value, "home": home,
             "body_ids": body_ids,
             "coverage_basis": "home-side linker rows",
+            "raw_value": linker.get("raw_value", value),
+            "canonical_value": linker.get(
+                "canonical_value", value),
+            "evidence_tier": linker.get("evidence_tier", ""),
+            "indirect": bool(linker.get("indirect", False)),
         })
         if home == source_dataset:
             # An existing linker with no matching endpoint rows is an
@@ -3063,27 +3087,308 @@ def pool_bridge_body_ids(source_dataset: str, target_dataset: str,
     }
 
 
-def chain_is_supported(pool: Dict[str, Any], target_dataset: str) -> bool:
-    """False when a pooled bridge chain carries no target-side evidence.
+def chain_is_supported(pool: Dict[str, Any], target_dataset: str,
+                       source_dataset: Optional[str] = None) -> bool:
+    """False when a pooled bridge chain carries no measured evidence.
 
-    A chain whose standardized linkers all home on the TARGET dataset yet
-    every one pooled zero rows on the reached type derives nothing
-    observable: the walk followed an annotation name graph whose token
-    never appears on the reached type's rows.  Such a chain would render a
-    mapping whose own coverage reads ``0 of N`` — dropped by the pooling
-    callers as a safety net on top of the mapper's derivation licensing.
-    Chains without any target-home linker (same-name / crosswalk arrival
-    with full-population pools) and chains whose target side could not be
-    measured (``target_basis == "unmeasured"``) are supported by default.
+    A chain whose standardized linkers home on one endpoint yet every one
+    pooled zero rows on that endpoint derives nothing observable.  Such a
+    chain would render a mapping whose own coverage reads ``0 of N`` —
+    dropped by the pooling callers as a safety net on top of the mapper's
+    derivation licensing.  The historical two-argument call remains
+    target-side-only for compatibility; the shared resolver supplies
+    ``source_dataset`` and checks both endpoint sides.
     """
-    if not pool or pool.get("target_basis") == "unmeasured":
+    if not pool:
         return True
     target_linkers = [
         linker for linker in (pool.get("per_linker") or [])
         if linker.get("home") == target_dataset]
-    if not target_linkers:
+    if target_linkers and pool.get("target_basis") != "unmeasured":
+        if not any(linker.get("body_ids") for linker in target_linkers):
+            return False
+    if source_dataset is None:
         return True
-    return any(linker.get("body_ids") for linker in target_linkers)
+    source_linkers = [
+        linker for linker in (pool.get("per_linker") or [])
+        if linker.get("home") == source_dataset]
+    if source_linkers and pool.get("source_basis") != "unmeasured":
+        if not any(linker.get("body_ids") for linker in source_linkers):
+            return False
+    return True
+
+
+def resolve_prioritized_bridge_pool(
+        source_dataset: str,
+        target_dataset: str,
+        chains,
+        source_type: str,
+        foreign_type: str,
+        *,
+        indexes: Optional[Dict[str, "CachedNeuronIndex"]] = None,
+        max_alternatives: int = 8,
+) -> Dict[str, Any]:
+    """Resolve and pool bridge candidates in evidence-priority order.
+
+    Every candidate is attempted independently, in the deterministic order
+    from :func:`prioritized_bridge_chains`.  The first supported candidate is
+    the selected bridge used for the legacy top-level pool fields and visual
+    weights.  Later supported candidates are retained as valid alternatives;
+    their independent endpoint pools are unioned into the explicit
+    ``all_valid_*`` fields.  A failed candidate never contributes coverage.
+
+    This is intentionally a type-evidence/coverage boundary: it never joins
+    bodyIds across datasets and never uses population size to choose a type
+    target.  The selected-versus-all-valid distinction lets the UI explain a
+    split such as MCNS SMP227 → FAFB s-CPDN3B/C/D without pretending that the
+    three branches are mutually exclusive neurons.
+    """
+    from comparison.cross_dataset_type_mapper import (
+        prioritized_bridge_chains,
+        standardize_bridge,
+    )
+
+    candidates = [
+        chain for chain in (chains or [])
+        if chain and (not foreign_type
+                      or chain[-1].get("value") == foreign_type)
+    ]
+    if not candidates:
+        candidates = [chain for chain in (chains or []) if chain]
+    ordered = prioritized_bridge_chains(
+        candidates, source_dataset, target_dataset)
+    if max_alternatives and max_alternatives > 0:
+        ordered = ordered[:max_alternatives]
+
+    attempts: List[Dict[str, Any]] = []
+    valid: List[Tuple[int, Any, Dict[str, Any]]] = []
+    selected: Optional[Tuple[int, Any, Dict[str, Any]]] = None
+    for rank, chain in enumerate(ordered, start=1):
+        linkers = standardize_bridge(chain, source_dataset, target_dataset)
+        try:
+            pool = pool_bridge_body_ids(
+                source_dataset, target_dataset, linkers,
+                source_type, foreign_type, indexes=indexes)
+        except Exception as exc:
+            attempts.append({
+                "rank": rank,
+                "chain": chain,
+                "linkers": linkers,
+                "supported": False,
+                "status": "error",
+                "reason": str(exc),
+            })
+            continue
+        supported = chain_is_supported(
+            pool, target_dataset, source_dataset=source_dataset)
+        target_linkers = [
+            linker for linker in (pool.get("per_linker") or [])
+            if linker.get("home") == target_dataset]
+        source_linkers = [
+            linker for linker in (pool.get("per_linker") or [])
+            if linker.get("home") == source_dataset]
+        unsupported_sides = []
+        if (target_linkers and pool.get("target_basis") != "unmeasured"
+                and not any(l.get("body_ids") for l in target_linkers)):
+            unsupported_sides.append("target")
+        if (source_linkers and pool.get("source_basis") != "unmeasured"
+                and not any(l.get("body_ids") for l in source_linkers)):
+            unsupported_sides.append("source")
+        attempt = {
+            "rank": rank,
+            "chain": chain,
+            "linkers": linkers,
+            "supported": supported,
+            "status": "supported" if supported else "unsupported",
+            "reason": (
+                ", ".join(
+                    f"{side}-side linker rows had no bodyIds"
+                    for side in unsupported_sides)
+                if not supported else ""),
+            "unsupported_sides": unsupported_sides,
+            "source_basis": pool.get("source_basis"),
+            "target_basis": pool.get("target_basis"),
+            "linker_values": [
+                {
+                    "column": linker.get("column", ""),
+                    "raw_value": linker.get(
+                        "raw_value", linker.get("value", "")),
+                    "canonical_value": linker.get(
+                        "canonical_value", linker.get("value", "")),
+                    "home": linker.get("home", ""),
+                }
+                for linker in linkers
+                if linker.get("kind") == "linker"
+            ],
+            "source_pool_size": pool.get("source_pool_size"),
+            "target_pool_size": pool.get("target_pool_size"),
+        }
+        attempts.append(attempt)
+        if not supported:
+            continue
+        record = (rank, chain, pool)
+        valid.append(record)
+        if selected is None:
+            selected = record
+
+    if selected is None:
+        return {
+            "resolution_status": (
+                "no_supported_bridge" if ordered else "no_bridge_candidates"),
+            "selected_chain": None,
+            "selected_chain_rank": None,
+            "valid_chains": [],
+            "alternative_chains": [],
+            "valid_chain_ranks": [],
+            "valid_chain_count": 0,
+            "fallback_used": False,
+            "attempts": attempts,
+            "source_body_ids": [],
+            "target_body_ids": [],
+            "source_pool_size": 0,
+            "target_pool_size": 0,
+            "coverage_scope": "no supported bridge",
+            "failure_reason": (
+                attempts[-1].get("reason", "") if attempts else ""),
+        }
+
+    selected_rank, selected_chain, selected_pool = selected
+    result = dict(selected_pool)
+    result["per_linker"] = list(selected_pool.get("per_linker") or [])
+    result.update({
+        "selected_chain": selected_chain,
+        "selected_chain_rank": selected_rank,
+        "selected_bridge": selected_chain,
+        "fallback_used": selected_rank > 1,
+        "fallback_reason": (
+            "; ".join(
+                attempt.get("reason", "") for attempt in attempts
+                if attempt.get("rank", 0) < selected_rank
+                and attempt.get("reason"))
+            if selected_rank > 1 else ""),
+        "selected_source_body_ids": list(
+            selected_pool.get("source_body_ids") or []),
+        "selected_target_body_ids": list(
+            selected_pool.get("target_body_ids") or []),
+        "selected_source_pool_size": selected_pool.get(
+            "source_pool_size", len(selected_pool.get("source_body_ids") or [])),
+        "selected_target_pool_size": selected_pool.get(
+            "target_pool_size", len(selected_pool.get("target_body_ids") or [])),
+        "valid_chains": [chain for _rank, chain, _pool in valid],
+        "alternative_chains": [
+            chain for rank, chain, _pool in valid if rank != selected_rank],
+        "valid_chain_ranks": [rank for rank, _chain, _pool in valid],
+        "valid_chain_count": len(valid),
+        "attempts": attempts,
+        "resolution_status": "supported",
+        "coverage_scope": "selected bridge; all valid alternatives retained",
+    })
+
+    def union_ids(side: str) -> List[str]:
+        values = set()
+        field = f"{side}_body_ids"
+        for _rank, _chain, pool in valid:
+            values.update(str(body_id) for body_id in pool.get(field) or [])
+        return sorted(values)
+
+    all_source = union_ids("source")
+    all_target = union_ids("target")
+    result.update({
+        "all_valid_source_body_ids": all_source,
+        "all_valid_target_body_ids": all_target,
+        "all_valid_source_pool_size": len(all_source),
+        "all_valid_target_pool_size": len(all_target),
+        "all_valid_source_type_total": next(
+            (pool.get("source_type_total") for _rank, _chain, pool in valid
+             if pool.get("source_type_total") is not None), None),
+        "all_valid_target_type_total": next(
+            (pool.get("target_type_total") for _rank, _chain, pool in valid
+             if pool.get("target_type_total") is not None), None),
+    })
+
+    def union_basis(side: str) -> str:
+        bases = [pool.get(f"{side}_basis") for _rank, _chain, pool in valid]
+        measurable = [basis for basis in bases if basis != "unmeasured"]
+        if not measurable:
+            return "unmeasured"
+        if all(basis == "full population" for basis in measurable):
+            return "full population"
+        return "union of supported bridge pools"
+
+    result["all_valid_source_basis"] = union_basis("source")
+    result["all_valid_target_basis"] = union_basis("target")
+
+    # Retain per-linker unions for inspection/export without replacing the
+    # selected chain's per-linker counts used by existing visual edges.
+    linker_union: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    for rank, _chain, pool in valid:
+        for linker in pool.get("per_linker") or []:
+            marker = (str(linker.get("column", "")),
+                      str(linker.get("value", "")),
+                      str(linker.get("home", "")))
+            entry = linker_union.setdefault(marker, {
+                "column": linker.get("column", ""),
+                "value": linker.get("value", ""),
+                "raw_value": linker.get(
+                    "raw_value", linker.get("value", "")),
+                "canonical_value": linker.get(
+                    "canonical_value", linker.get("value", "")),
+                "home": linker.get("home", ""),
+                "body_ids": [],
+                "coverage_basis": linker.get("coverage_basis", ""),
+                "evidence_tier": linker.get("evidence_tier", ""),
+                "indirect": bool(linker.get("indirect", False)),
+                "valid_chain_ranks": [],
+            })
+            entry["body_ids"] = sorted(set(entry["body_ids"]) | {
+                str(body_id) for body_id in linker.get("body_ids") or []})
+            entry["valid_chain_ranks"].append(rank)
+            if linker.get("relation_rows") is not None:
+                entry["relation_rows"] = max(
+                    int(entry.get("relation_rows") or 0),
+                    int(linker.get("relation_rows") or 0))
+    result["all_valid_per_linker"] = list(linker_union.values())
+    from collections import Counter
+
+    def overlap_ids(side: str) -> List[str]:
+        counts = Counter()
+        field = f"{side}_body_ids"
+        for _rank, _chain, pool in valid:
+            counts.update({str(body_id) for body_id in pool.get(field) or []})
+        return sorted(body_id for body_id, count in counts.items()
+                      if count > 1)
+
+    result["all_valid_source_overlap_body_ids"] = overlap_ids("source")
+    result["all_valid_target_overlap_body_ids"] = overlap_ids("target")
+    result["all_valid_source_overlap_count"] = len(
+        result["all_valid_source_overlap_body_ids"])
+    result["all_valid_target_overlap_count"] = len(
+        result["all_valid_target_overlap_body_ids"])
+    result["valid_chain_metadata"] = [
+        {
+            "rank": rank,
+            "selected": rank == selected_rank,
+            "source_pool_size": pool.get("source_pool_size"),
+            "target_pool_size": pool.get("target_pool_size"),
+            "source_basis": pool.get("source_basis"),
+            "target_basis": pool.get("target_basis"),
+            "linkers": [
+                {
+                    "column": linker.get("column", ""),
+                    "raw_value": linker.get(
+                        "raw_value", linker.get("value", "")),
+                    "canonical_value": linker.get(
+                        "canonical_value", linker.get("value", "")),
+                    "home": linker.get("home", ""),
+                }
+                for linker in standardize_bridge(
+                    chain, source_dataset, target_dataset)
+                if linker.get("kind") == "linker"
+            ],
+        }
+        for rank, chain, pool in valid
+    ]
+    return result
 
 
 def _load_alias_index(dataset: str) -> Optional["CachedNeuronIndex"]:
@@ -3932,7 +4237,7 @@ def collect_native_type_matches(
 
 def mapped_type_targets(mapper, foreign_type: str, foreign_ds: str,
                         selected_ds: str,
-                        alias_cache: Optional[Dict[str,
+                        alias_cache: Optional[Dict[Any,
                                                    Optional[Dict[str, Any]]]] = None,
                         bridge_cache: Optional[Dict[Tuple[str, str, str],
                                                       List[List[Dict[str, str]]]]] = None,
@@ -3953,15 +4258,32 @@ def mapped_type_targets(mapper, foreign_type: str, foreign_ds: str,
     Returns ``{'kind', 'targets'}`` or None; ``alias_cache`` optionally
     memoizes the alias half across calls.
     """
-    if alias_cache is not None and foreign_type in alias_cache:
+    alias_key = (str(foreign_type), str(foreign_ds), str(selected_ds))
+    if alias_cache is not None and alias_key in alias_cache:
+        ann = alias_cache[alias_key]
+    elif alias_cache is not None and foreign_type in alias_cache:
+        # Compatibility with older callers that supplied a name-only cache;
+        # new entries are always direction-scoped.
         ann = alias_cache[foreign_type]
     else:
         try:
-            res = mapper.get_alias_candidates(foreign_type, [selected_ds])
+            res = mapper.get_alias_candidates(
+                foreign_type, [selected_ds], source_dataset=foreign_ds)
             info = res.get(selected_ds) or {}
             candidates = info.get("candidates", [])
             if info.get("outcome") != "matched" or not candidates:
                 ann = None
+            elif any(c["kind"] == "splits into" for c in candidates):
+                # A crosswalk-backed split is valid multi-target evidence;
+                # never choose the first branch merely because it sorts first.
+                ann = {
+                    "kind": "splits into",
+                    "targets": sorted({
+                        c["name"] for c in candidates
+                        if c["kind"] == "splits into"
+                    }),
+                    "status": "valid_split_evidence",
+                }
             elif any(c["kind"] == "one of N" for c in candidates):
                 # The reverse aggregation is refused: show every local
                 # type that corresponds to the foreign name.
@@ -3981,14 +4303,14 @@ def mapped_type_targets(mapper, foreign_type: str, foreign_ds: str,
         except Exception:
             ann = None
         if alias_cache is not None:
-            alias_cache[foreign_type] = ann
+            alias_cache[alias_key] = ann
     bridge_key = (str(foreign_type), str(foreign_ds), str(selected_ds))
     if bridge_cache is not None and bridge_key in bridge_cache:
         chains = bridge_cache[bridge_key]
     else:
         try:
             chains = mapper.get_type_bridges(
-                foreign_type, foreign_ds, selected_ds)
+                foreign_type, foreign_ds, selected_ds, max_bridges=8)
         except Exception:
             chains = []
         if bridge_cache is not None:
@@ -3997,16 +4319,50 @@ def mapped_type_targets(mapper, foreign_type: str, foreign_ds: str,
         str(c[-1]['value']) for c in (chains or [])
         if c and c[-1].get('value')
     }
+    decision = None
+    try:
+        decision = mapper.get_mapping_decision(
+            foreign_type, foreign_ds, selected_ds, include_bridges=False)
+    except Exception:
+        decision = None
+    # A same-name chain can still exist for a type whose label evidence is
+    # explicitly conflicted (for example BANC CB1011).  The chain is useful
+    # for diagnostics, but it must not turn an unresolved vote into an
+    # alias-derived mapped-neuron count.
+    if decision and decision.get("status") == "conflict":
+        return {
+            "kind": "conflict",
+            "targets": [],
+            "status": "conflict",
+            "source_dataset": foreign_ds,
+            "target_dataset": selected_ds,
+            "conflicts": decision.get("conflicts", []),
+        }
     if not ends:
+        if ann:
+            ann = dict(ann)
+            if decision and decision.get("status") in {
+                    "evidence_only", "valid_split_evidence"}:
+                ann.setdefault("status", decision["status"])
         return ann
     targets = set(ends)
     if ann:
         targets.update(ann.get('targets') or [])
     if len(targets) == 1 and ann:
-        return {'kind': ann['kind'], 'targets': sorted(targets)}
+        result = dict(ann)
+        result.update({'targets': sorted(targets)})
+        return result
+    split_evidence = bool(
+        ann and ann.get("kind") == "splits into") or bool(
+            decision and decision.get("status") == "valid_split_evidence")
+    evidence_only = bool(
+        decision and decision.get("status") == "evidence_only")
     return {
-        'kind': 'one of N' if len(targets) > 1 else 'bridged',
+        'kind': 'splits into' if split_evidence and len(targets) > 1
+        else ('one of N' if len(targets) > 1 else 'bridged'),
         'targets': sorted(targets),
+        'status': ('valid_split_evidence' if split_evidence
+                   else ('evidence_only' if evidence_only else 'mapped')),
     }
 
 
@@ -4073,7 +4429,8 @@ def enrich_native_type_matches(
                 if bridge_key not in bridge_cache:
                     try:
                         bridge_cache[bridge_key] = mapper.get_type_bridges(
-                            local_target, selected_dataset, foreign_ds)
+                            local_target, selected_dataset, foreign_ds,
+                            max_bridges=8)
                     except Exception:
                         bridge_cache[bridge_key] = []
                 chains = bridge_cache[bridge_key]

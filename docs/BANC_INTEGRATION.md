@@ -51,14 +51,18 @@ dataset:
 | `hemibrain_cell_type` | hemibrain v1.2.1 |
 | `manc_cell_type` | MANC v1.0/v1.2.1 |
 
-`auto:` labels are excluded. FAFB/MCNS match bodyIds are checked against the
-target table when available only as optional provenance diagnostics;
-contradictory rows are recorded as conflicts, not removed from the curated
-type-label vote. The mapper records the winning label, vote counts, verified
-votes, verification conflicts, and alternates in bridge provenance. BANC
-labels are direct-only and never turn BANC into a connector between unrelated
-datasets. A label hop is also a derivation endpoint: once it lands in the
-target namespace, nothing may follow it. Because `Alternative Cell Type(s)`
+`auto:` is a provenance prefix, not a separate namespace. A normalized
+`auto:<name>` label is eligible when `<name>` resolves to a known target type;
+the raw value and auto provenance are retained. Unknown `auto:` labels remain
+ineligible, and conflicting label votes remain rejected. FAFB/MCNS match
+bodyIds are checked against the target table when available only as optional
+provenance diagnostics; contradictory rows are recorded as conflicts, not
+removed from the curated type-label vote. The mapper records the winning
+label, vote counts, verified votes, verification conflicts, raw/canonical
+values, and alternates in bridge provenance. BANC labels are direct-only and
+never turn BANC into a connector between unrelated datasets. A label hop is
+also a derivation endpoint: once it lands in the target namespace, nothing may
+follow it. Because `Alternative Cell Type(s)`
 concatenates the other datasets' curated labels, a primary's annotation cell
 naming another BANC primary is a cross-reference, not a rename — the
 derivation walk refuses to hop through it (this closed the `l-LNv → BM_*`

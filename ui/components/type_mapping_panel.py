@@ -51,68 +51,43 @@ def _pool_mapping_pair(flows, src, tgt, indexes, pools) -> None:
     been resolved by the mapper; this helper merely computes the independent
     endpoint pools used to report ``m of n`` coverage in the rendered card.
     """
-    from ..neuron_index import chain_is_supported, pool_bridge_body_ids
-    from comparison.cross_dataset_type_mapper import (
-        preferred_bridge_chain,
-        standardize_bridge,
-    )
+    from ..neuron_index import resolve_prioritized_bridge_pool
     from comparison.mapping_visualization import mapping_pool_key
 
     for flow in flows:
         chains = [c for c in (flow.get("bridges") or [])
                   if c and c[-1].get("value") == flow.get("foreign_type")]
         chains = chains or flow.get("bridges") or []
-        preferred = preferred_bridge_chain(chains, src, tgt)
-        if preferred is None:
-            continue
-        ordered = ([preferred]
-                   + [c for c in chains if c is not preferred])[:2]
         key = mapping_pool_key(
             src, tgt, flow.get("source_type"), flow.get("foreign_type"))
         if key in pools:
             continue
-        foreign_index = indexes.get(tgt)
-        index_kw = ({src: indexes.get(src), tgt: foreign_index}
-                    if foreign_index is not None else None)
-        base = None
-        per_linker: List[dict] = []
-        seen: set = set()
-        for chain in ordered:
-            try:
-                result = pool_bridge_body_ids(
-                    src, tgt, standardize_bridge(chain, src, tgt),
-                    flow.get("source_type"),
-                    flow.get("foreign_type"),
-                    indexes=index_kw)
-            except Exception:
-                # one un-poolable pair only loses the pooled-count hover, but
-                # the failure is logged, not silent
+        index_kw = {
+            dataset: index for dataset, index in (
+                (src, indexes.get(src)), (tgt, indexes.get(tgt)))
+            if index is not None
+        }
+        result = resolve_prioritized_bridge_pool(
+            src, tgt, chains,
+            flow.get("source_type"), flow.get("foreign_type"),
+            indexes=index_kw)
+        for attempt in result.get("attempts") or []:
+            if attempt.get("status") in {"unsupported", "error"}:
+                linker_text = "; ".join(
+                    f"{item.get('column', '')}="
+                    f"{item.get('raw_value', '')}"
+                    f"[{item.get('canonical_value', '')}]"
+                    for item in attempt.get("linker_values") or [])
                 logger.warning(
-                    "pool_bridge_body_ids failed for %r (%s → %s)",
-                    key, src, tgt, exc_info=True)
-                continue
-            if not chain_is_supported(result, tgt):
-                # A chain whose target-side linkers all pooled zero rows on
-                # the reached type has no observable evidence — never let it
-                # provide the pair's coverage or hovers (safety net on top of
-                # the mapper's derivation licensing).
-                logger.warning(
-                    "unsupported bridge chain dropped for %r (%s → %s)",
-                    key, src, tgt)
-                continue
-            if base is None:
-                base = result
-            for linker in result.get("per_linker") or []:
-                marker = (linker.get("column"), linker.get("value"))
-                if marker in seen:
-                    continue
-                seen.add(marker)
-                per_linker.append(linker)
-        if base is None:
+                    "unsupported bridge chain dropped for %r (%s → %s; "
+                    "rank %s; linkers %s; source pool %s; target pool %s; "
+                    "%s)", key, src, tgt, attempt.get("rank"),
+                    linker_text or "none", attempt.get("source_pool_size"),
+                    attempt.get("target_pool_size"),
+                    attempt.get("reason") or attempt.get("status"))
+        if result.get("resolution_status") != "supported":
             continue
-        pools[key] = {**base,
-                      "per_linker": per_linker or base.get(
-                          "per_linker", [])}
+        pools[key] = result
 
 
 def _compute_type_mapping(queries, datasets, mode) -> Dict[str, Any]:
@@ -310,7 +285,7 @@ def _compute_type_mapping(queries, datasets, mode) -> Dict[str, Any]:
         })
 
     html, meta = render_composed_mapping_html(
-        pair_flows, node_cap=COMPOSED_NODE_CAP)
+        pair_flows, pools=pools, node_cap=COMPOSED_NODE_CAP)
     meta = dict(meta or {})
     meta["notes"] = notes + list(meta.get("notes", []))
     return {"pair_flows": pair_flows, "pools": pools, "meta": meta,
@@ -457,7 +432,7 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                           stamp: str) -> None:
         from comparison.mapping_visualization import build_bridges_csv
 
-        text = build_bridges_csv(flows, pools=pools)
+        text = build_bridges_csv(flows, pools=pools, extended=True)
         if not text:
             ui.notify("Nothing to export.", type="info")
             return
@@ -501,16 +476,49 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                              f"{dataset_abbrev(linker.get('home', '')) or '?'}"
                              " bodyIds")
                 parts.append(text)
-            map_used = " + ".join(parts) if parts else (info["text"] or "—")
+            selected_chain = pool.get("selected_chain") if pool else None
+            selected_text = ""
+            if selected_chain:
+                selected_text = bridge_linker_text(
+                    [selected_chain], src, tgt, f_type).get("text") or ""
+            all_valid_chains = (pool.get("valid_chains") if pool else None)
+            all_valid_text = ""
+            if all_valid_chains:
+                all_valid_text = bridge_linker_text(
+                    all_valid_chains, src, tgt, f_type).get("text") or ""
+            if selected_text and all_valid_text and (
+                    all_valid_text != selected_text):
+                map_used = (f"selected: {selected_text}; "
+                            f"all valid evidence: {all_valid_text}")
+            else:
+                map_used = selected_text or (" + ".join(parts)
+                                             if parts else (info["text"] or "—"))
+            if flow.get("mapping_status") == "valid_split_evidence":
+                map_used = (
+                    "valid 1-to-N evidence (branch counts are non-exclusive) "
+                    "— no single canonical target; "
+                    f"{map_used}"
+                )
+            elif flow.get("mapping_status") == "conflict":
+                map_used = "unresolved conflict — no automatic target; " \
+                           f"{map_used}"
             # basis-aware per-side cells (user 2026-09-09): a measured
             # subset, the unconstrained full population, an unmeasurable
             # side and a missing pool must never look alike
             if pool:
-                cov = " · ".join((
+                selected_cov = " · ".join((
                     format_pool_side(src_code, pool, "source"),
                     format_pool_side(tgt_code, pool, "target")))
+                all_valid_cov = " · ".join((
+                    format_pool_side(src_code, pool, "source", "all_valid"),
+                    format_pool_side(tgt_code, pool, "target", "all_valid")))
+                cov = selected_cov
+                if all_valid_cov != selected_cov:
+                    cov += f" · all-valid union: {all_valid_cov}"
             else:
                 cov = "not pooled"
+            if flow.get("mapping_status") == "valid_split_evidence":
+                cov = "branch evidence (non-exclusive); " + cov
             rows.append([
                 s_type, f_type,
                 f"{s_total} {src_code} → {t_total} {tgt_code}",
@@ -586,7 +594,9 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
             ui.label(
                 "Forward — each queried type: its neurons, the "
                 "targets it maps to, and how many of its bodyIds "
-                "carry the type-level evidence (pool of total, with the "
+                "carry the type-level evidence. Coverage shows both the "
+                "selected bridge and the union of all independently valid "
+                "bridge alternatives (pool of total, with the "
                 "share in parentheses; a 1-to-N row's target total is the "
                 "summed population of all mapped target types).  States: "
                 "'not pooled' = no coverage pool at all, 'not measured' = "
@@ -602,12 +612,20 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                     _col("maps_to", "Maps to", "maps_to", max_w=440),
                     _col("relationship", "Relationship",
                          "relationship", min_w=110),
+                    _col("coverage_note", "Coverage interpretation",
+                         "coverage_note", max_w=330),
+                    _col("query_cov_selected",
+                         f"{src} side (bodyIds) — selected bridge",
+                         "query_cov_selected", min_w=190),
                     _col("query_cov",
-                         f"{src} side (bodyIds)",
-                         "query_cov", min_w=190),
+                         f"{src} side (bodyIds) — all-valid union",
+                         "query_cov", min_w=205),
+                    _col("target_cov_selected",
+                         f"{tgt} side (bodyIds) — selected bridge",
+                         "target_cov_selected", min_w=190),
                     _col("target_cov",
-                         f"{tgt} side (bodyIds)",
-                         "target_cov", min_w=190),
+                         f"{tgt} side (bodyIds) — all-valid union",
+                         "target_cov", min_w=205),
                 ],
                 rows=forward,
             ).classes("w-full")
@@ -615,9 +633,11 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                 "Backward — each receiving type and the sources that "
                 "map onto it: several sources make the N-to-1 "
                 "explicit.  Same datasets as above — the coverage "
-                "columns stay named by dataset (pool of total, percent "
+                "columns show selected-bridge and all-valid-union scopes "
+                "by dataset (pool of total, percent "
                 "in parentheses), with no bodyId pairing inferred; the "
-                "same three states apply."
+                "same three states apply.  Split branches and overlapping "
+                "bodyId evidence are non-exclusive."
             ).classes("text-caption drocat-muted")
             ui.table(
                 columns=[
@@ -628,12 +648,20 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                          max_w=440),
                     _col("relationship", "Relationship",
                          "relationship", min_w=110),
+                    _col("coverage_note", "Coverage interpretation",
+                         "coverage_note", max_w=330),
+                    _col("source_cov_selected",
+                         f"{src} side (bodyIds) — selected bridge",
+                         "source_cov_selected", min_w=190),
                     _col("source_cov",
-                         f"{src} side (bodyIds)",
-                         "source_cov", min_w=190),
+                         f"{src} side (bodyIds) — all-valid union",
+                         "source_cov", min_w=205),
+                    _col("target_cov_selected",
+                         f"{tgt} side (bodyIds) — selected bridge",
+                         "target_cov_selected", min_w=190),
                     _col("target_cov",
-                         f"{tgt} side (bodyIds)",
-                         "target_cov", min_w=190),
+                         f"{tgt} side (bodyIds) — all-valid union",
+                         "target_cov", min_w=205),
                 ],
                 rows=backward,
             ).classes("w-full")
@@ -725,7 +753,7 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
         # uniform field counts).
         parts: List[str] = []
         for (src, tgt), flows in sorted(pair_flows.items()):
-            text = build_bridges_csv(flows, pools=pools)
+            text = build_bridges_csv(flows, pools=pools, extended=True)
             if not text:
                 continue
             lines = text.splitlines()

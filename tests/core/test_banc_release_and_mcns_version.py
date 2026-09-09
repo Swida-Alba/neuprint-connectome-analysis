@@ -97,8 +97,15 @@ def _build_mapper(
 def test_banc_label_overlay_uses_curated_columns_and_verification(tmp_path):
     mapper = _build_mapper(tmp_path)
 
-    # MCNS↔BANC is the curated mct label, not the MCNS flywireType cell.
-    assert mapper.get_mapped_type("Shared", MCNS, BANC626) == "T626"
+    # MCNS↔BANC is the curated MCNS-side label, not the MCNS flywireType
+    # cell.  In this fixture the evidence fans out to three BANC primaries,
+    # so it remains visible as a split but no single target is accepted.
+    assert mapper.get_mapped_type("Shared", MCNS, BANC626) is None
+    decision = mapper.get_mapping_decision("Shared", MCNS, BANC626)
+    assert decision["status"] == "valid_split_evidence"
+    assert set(decision["target_types"]) == {"T626", "TBad", "AutoShared"}
+    assert decision["relationship"] == "1-to-N"
+    assert mapper.get_mapping_conflicts(MCNS, BANC626, "Shared")
     assert mapper.get_mapped_type("T626", BANC626, MCNS) == "Shared"
     provenance = mapper._bridge_provenance[(BANC626, "T626", MCNS)]
     assert provenance["kind"] == "cross-dataset cell type"
@@ -126,6 +133,36 @@ def test_banc_label_overlay_uses_curated_columns_and_verification(tmp_path):
     assert mapper._banc_label_votes[(
         BANC626, "malecns_cell_type", "AutoShared"
     )]["auto_stripped_votes"] == {"Shared": 1}
+
+    # The same policy applies to the optional HEMI/MANC label columns: a
+    # normalized auto label must resolve to a known target type, while a
+    # curated non-auto label may remain usable without a local target table.
+    assert mapper._banc_label_candidate_details(
+        "auto:HbShared", "hemibrain_cell_type") == [("HbShared", True)]
+    assert mapper._banc_label_candidate_details(
+        "auto:MnShared", "manc_cell_type") == [("MnShared", True)]
+    assert mapper._banc_label_candidate_details(
+        "auto:not-a-known-type", "hemibrain_cell_type") == []
+    assert mapper._banc_label_candidate_details(
+        "auto:not-a-known-type", "manc_cell_type") == []
+
+    # Exercise the normal Polars aggregation path as well as the compatibility
+    # candidate helper: raw auto provenance must survive normalization before
+    # unknown HEMI/MANC tokens are filtered.
+    import polars as pl
+
+    labels = pl.DataFrame({
+        "type": ["AutoHemiUnknown", "AutoHemiKnown",
+                 "AutoMancUnknown", "AutoMancKnown"],
+        "hemibrain_cell_type": ["auto:not-known", "auto:HbShared", "", ""],
+        "manc_cell_type": ["", "", "auto:not-known", "auto:MnShared"],
+    })
+    hemi_batches = mapper._banc_label_vote_batches_polars(
+        BANC626, labels, "hemibrain_cell_type", ["hemibrain:v1.2.1"])
+    manc_batches = mapper._banc_label_vote_batches_polars(
+        BANC626, labels, "manc_cell_type", ["manc:v1.0", "manc:v1.2.1"])
+    assert [batch[0] for batch in hemi_batches] == ["AutoHemiKnown"]
+    assert [batch[0] for batch in manc_batches] == ["AutoMancKnown"]
 
     # A direct FAFB label is separately exposed as FAFB↔BANC evidence.
     assert mapper.get_mapped_type("FType", FAFB, BANC626) == "T626"
@@ -180,7 +217,10 @@ def test_mcns_v09_shared_and_native_only_resolution(tmp_path):
     mapper = _build_mapper(tmp_path)
 
     assert mapper.get_mapped_type("Shared", MCNS_09, MCNS) == "Shared"
-    assert mapper.get_mapped_type("Shared", MCNS_09, BANC888) == "T888"
+    assert mapper.get_mapped_type("Shared", MCNS_09, BANC888) is None
+    decision = mapper.get_mapping_decision("Shared", MCNS_09, BANC888)
+    assert decision["status"] == "valid_split_evidence"
+    assert set(decision["target_types"]) == {"T888", "T888b"}
     alias_chain = mapper.get_type_bridges("Shared", MCNS_09, FAFB)[0]
     assert alias_chain[0]["dataset"] == MCNS_09
     assert alias_chain[1]["column"] == "release_alias"

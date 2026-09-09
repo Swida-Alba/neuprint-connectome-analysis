@@ -205,7 +205,12 @@
       index is unavailable), and a missing pool (<code>not pooled</code>).
       A measured zero renders explicitly as <code>0 of n (0.0%)</code>.
       Coverage is measured independently per endpoint; the mapper does
-      not infer bodyId-to-bodyId pairings.</li>
+      not infer bodyId-to-bodyId pairings. When more than one supported
+      bridge chain reaches the same endpoint pair, the card identifies the
+      selected bridge and the all-valid union; the latter includes the
+      unique bodyIds from supported alternatives. Raw linker values such as
+      <code>auto:MeVPLo2</code> and their canonical matching tokens are
+      retained in the extended export.</li>
     <li><b>Type coverage tables</b> (top-level expansion per pair,
       bidirectional): the FORWARD view lists each queried type with its
       neurons, mapped targets, <code>1-to-N</code>/<code>1-to-1</code>, and
@@ -214,7 +219,11 @@
       Both tables name their coverage columns by DATASET — the full
       dataset key, e.g. <code>flywire_FAFB_v783 side (bodyIds)</code> /
       <code>banc_v888 side (bodyIds)</code> — the same two datasets in
-      both views, so nothing reads as flipped.  Cells read <code>x of y
+      both views, so nothing reads as flipped. Each dataset has a
+      <code>selected bridge</code> and <code>all-valid union</code> column.
+      Split branch rows are labeled as <code>branch evidence
+      (non-exclusive)</code>; overlap counts explain when the same source
+      bodyId supports multiple branches. Cells read <code>x of y
       (share)</code> with
       thousands separators; a side whose coverage index is unavailable
       renders <code>not measured</code> (never a fake zero), and a row
@@ -238,7 +247,11 @@
       CSV field per cell so spreadsheet delimiters never split it; listed
       per type, never paired across datasets), plus the human-readable
       <code>pool_coverage</code> and <code>pool_coverage_basis</code>
-      columns.  The full mapping is never silently dropped — a
+      columns. The UI's extended export additionally carries the selected
+      bridge, mapping status, selected rank, valid-chain count,
+      raw/canonical selected linker values, unsupported attempts,
+      selected/all-valid pool IDs and totals, overlap, and scope. The full
+      mapping is never silently dropped — a
       <code>+N more flows</code> notice points at the CSV when the drawn
       cap trims).</li>
     <li><b>Legends</b>: the artifact header carries one chip per entry in

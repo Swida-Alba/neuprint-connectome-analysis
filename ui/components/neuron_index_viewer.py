@@ -23,10 +23,9 @@ from ..neuron_index import (
     load_cached_neuron_index,
     mapped_csv_extras,
     neuron_index_path,
-    chain_is_supported,
-    pool_bridge_body_ids,
     query_match_group_subtypes,
     query_neuron_index,
+    resolve_prioritized_bridge_pool,
     run_cross_dataset_scan_in_process,
     run_serialized_cross_dataset_scan,
     CROSS_SCAN_SUPERSEDED,
@@ -2226,10 +2225,6 @@ def _render_index(
             feed the sankey ribbons and the linker-path graph.
             """
             from comparison.mapping_visualization import build_mapping_flows
-            from comparison.cross_dataset_type_mapper import (
-                preferred_bridge_chain,
-                standardize_bridge,
-            )
 
             source_counts = count_types_in_index(
                 index, entry.get("mapped_type_names", []))
@@ -2256,24 +2251,15 @@ def _render_index(
                               "foreign_type")]
                 if not chains:
                     continue
-                # pool through the most representative (most direct)
-                # chain — transitive/hub detours stay alternative bridges
-                chain = preferred_bridge_chain(chains, dataset, foreign_ds)
-                if chain is None:
-                    continue
-                linkers = standardize_bridge(chain, dataset, foreign_ds)
-                try:
-                    pool = pool_bridge_body_ids(
-                        dataset, foreign_ds, linkers,
-                        flow["source_type"], flow["foreign_type"],
-                        indexes={dataset: index,
-                                 foreign_ds: foreign_index}
-                        if foreign_index is not None else None)
-                except Exception:
-                    continue
-                if not chain_is_supported(pool, foreign_ds):
-                    # zero target-side evidence on the reached type — the
-                    # artifacts must not weight an unsupported derivation
+                pool = resolve_prioritized_bridge_pool(
+                    dataset, foreign_ds, chains,
+                    flow["source_type"], flow["foreign_type"],
+                    indexes={
+                        ds_name: ds_index for ds_name, ds_index in (
+                            (dataset, index), (foreign_ds, foreign_index))
+                        if ds_index is not None
+                    })
+                if pool.get("resolution_status") != "supported":
                     continue
                 pools[(flow["source_type"], flow["foreign_type"])] = pool
             return flows, pools

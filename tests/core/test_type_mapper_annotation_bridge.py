@@ -470,16 +470,24 @@ class TestRealDataAcceptance:
             's-CPDN3A', FAFB_RELEASE, BANC_RELEASE)
         ends = {c[-1]['value'] for c in chains}
         assert {'CB1770', 'CB1791', 'SMP229'} <= ends
-        # The curated BANC FAFB label is now a higher-priority direct bridge;
-        # annotation candidates remain visible in the derivation view but do
-        # not override the label winner.
+        # The curated BANC FAFB labels independently expose three BANC
+        # primaries.  They remain valid split evidence, but no single BANC
+        # target is accepted merely because one direct chain is ranked first.
         mapped = real_mapper.get_mapped_type(
             's-CPDN3A', FAFB_RELEASE, BANC_RELEASE)
-        assert mapped in {'CB1770', 'CB1791', 'SMP229'}
+        assert mapped is None
+        decision = real_mapper.get_mapping_decision(
+            's-CPDN3A', FAFB_RELEASE, BANC_RELEASE)
+        assert decision['status'] == 'valid_split_evidence'
+        assert set(decision['target_types']) == {
+            'CB1770', 'CB1791', 'SMP229'}
         provenance = real_mapper._bridge_provenance[
             (FAFB_RELEASE, 's-CPDN3A', BANC_RELEASE)]
-        assert provenance['kind'] == 'cross-dataset cell type'
-        assert provenance['column'] == 'fafb_cell_type'
+        # The aggregate provenance key remains the annotation overlay; the
+        # source-scoped conflict record above carries the BANC fan-out.
+        assert provenance['kind'] == 'annotation bridge'
+        assert set(provenance['via']) == {
+            'CB1770', 'CB1791', 'SMP229'}
 
     def test_no_untyped_conflict_targets(self, real_mapper):
         # Scope to overlay-origin conflicts: legacy crosswalk conflicts

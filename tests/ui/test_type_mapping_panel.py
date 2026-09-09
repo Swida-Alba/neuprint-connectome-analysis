@@ -189,8 +189,10 @@ def test_global_search_composes_the_selection(panel_client):
     assert coverage_tables, 'dataset-named coverage columns missing'
     for table in coverage_tables:
         column_labels = {c['label'] for c in table._props['columns']}
-        assert 'flywire_FAFB_v783 side (bodyIds)' in column_labels
-        assert 'male-cns:v1.0 side (bodyIds)' in column_labels
+        assert 'flywire_FAFB_v783 side (bodyIds) — selected bridge' in column_labels
+        assert 'flywire_FAFB_v783 side (bodyIds) — all-valid union' in column_labels
+        assert 'male-cns:v1.0 side (bodyIds) — selected bridge' in column_labels
+        assert 'male-cns:v1.0 side (bodyIds) — all-valid union' in column_labels
     # artifact + CSV actions of the per-pair card are present
     for action in ('Sankey (type-level)', 'Sankey (linker)',
                    'Network (type-level)', 'Network (linker)',
