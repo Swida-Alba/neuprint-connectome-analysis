@@ -6967,6 +6967,14 @@ class VisualizePath:
             }}
         }});
 
+        // Showing the restore button changes the ribbon's layout.  Cytoscape
+        // caches the canvas' client rect for pointer projection, so a DOM
+        // reflow without resize() makes subsequent clicks/pans use the old
+        // canvas origin (the visible pointer and the hit-test point diverge).
+        function resizeCanvasAfterVisibilityControlChange() {{
+            if (typeof cy !== 'undefined') cy.resize();
+        }}
+
         // Right-click to hide nodes/edges (or delete in edit mode)
         cy.on('cxttap', 'node', function(evt) {{
             if (editMode) {{
@@ -6980,6 +6988,7 @@ class VisualizePath:
                 // Hide connected edges
                 node.connectedEdges().addClass('hidden');
                 document.getElementById('showAllBtn').style.display = 'inline-block';
+                resizeCanvasAfterVisibilityControlChange();
                 reapplyDeadEndHiding();
             }}
         }});
@@ -6995,6 +7004,7 @@ class VisualizePath:
                 const edge = evt.target;
                 edge.addClass('hidden');
                 document.getElementById('showAllBtn').style.display = 'inline-block';
+                resizeCanvasAfterVisibilityControlChange();
                 reapplyDeadEndHiding();
             }}
         }});
@@ -7015,6 +7025,7 @@ class VisualizePath:
                     selected.addClass('hidden');
                     selected.connectedEdges().addClass('hidden');
                     document.getElementById('showAllBtn').style.display = 'inline-block';
+                    resizeCanvasAfterVisibilityControlChange();
                     reapplyDeadEndHiding();
                 }}
             }}
@@ -7033,6 +7044,7 @@ class VisualizePath:
                     pushHistory('Hide edges');
                     selected.addClass('hidden');
                     document.getElementById('showAllBtn').style.display = 'inline-block';
+                    resizeCanvasAfterVisibilityControlChange();
                     reapplyDeadEndHiding();
                 }}
             }}
@@ -8278,6 +8290,7 @@ class VisualizePath:
             pushHistory('Show all');
             cy.elements().removeClass('hidden');
             document.getElementById('showAllBtn').style.display = 'none';
+            resizeCanvasAfterVisibilityControlChange();
             reapplyDeadEndHiding();
         }}
 

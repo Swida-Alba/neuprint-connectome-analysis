@@ -202,6 +202,30 @@ class TestGeneratedHtmlStructure:
         for label in ("Toggle self-loops", "Toggle orphans", "Toggle dead-ends"):
             assert f"pushHistory('{label}')" in js
 
+    def test_visibility_control_remeasures_canvas(self, network_html):
+        """Showing/restoring the visibility button must invalidate Cytoscape's
+        cached container geometry before the next pointer event.
+
+        The button is initially ``display:none`` and its first appearance can
+        reflow the ribbon, moving the canvas.  Without ``cy.resize()`` the
+        renderer keeps the old client-rect origin and hit-testing drifts away
+        from the mouse position.
+        """
+        js = _script_text(network_html)
+        assert "function resizeCanvasAfterVisibilityControlChange" in js
+        assert "if (typeof cy !== 'undefined') cy.resize();" in js
+        inline_show = re.findall(
+            r"showAllBtn'\)\.style\.display = 'inline-block';\s+"
+            r"resizeCanvasAfterVisibilityControlChange\(\);",
+            js,
+        )
+        assert len(inline_show) == 4  # node/edge hide, H, and E
+        assert re.search(
+            r"showAllBtn'\)\.style\.display = 'none';\s+"
+            r"resizeCanvasAfterVisibilityControlChange\(\);",
+            js,
+        )
+
     def test_geometry_editor_present(self, network_html):
         """Precise size/position editing and alignment helpers: numeric
         inputs in the Selected Element(s) panel, node-vs-edge row groups,
