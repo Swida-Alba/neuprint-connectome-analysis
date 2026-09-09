@@ -399,6 +399,17 @@ def test_mapped_view_pinned_columns_and_bridge_hover(viewer_client):
         origin_parts = str(row['__map_origin']).split('; ')
         assert len(origin_parts) == len(set(origin_parts))
 
+    # hover-to-display + click-to-expand wiring ships in the body slot:
+    # a styled multiline tooltip carries the full text and derivation, a
+    # click on the cell toggles the in-place expanded (wrapping) state,
+    # and the native title attribute is gone so the hover paths don't
+    # double up
+    body_slot = table.slots['body'].template
+    assert 'drocat-map-cell-expanded' in body_slot
+    assert 'q-tooltip' in body_slot
+    assert '__map_bridge' in body_slot
+    assert ':title=' not in body_slot
+
 
 def test_mapping_visualization_icons(viewer_client):
     """Sankey and Network buttons are visually distinguishable icons."""

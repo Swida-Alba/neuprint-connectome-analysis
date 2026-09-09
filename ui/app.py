@@ -1042,12 +1042,29 @@ html, body {
        white-space: nowrap unless wrap-cells is enabled, so long map text
        would paint past the pinned cell and get covered by the neighbour
        or clipped by the scroll edge; confine it to the cell with a
-       truncation ellipsis — the full text stays reachable through the
-       cell's hover title (__map_bridge). */
+       truncation ellipsis. Hover shows the full text as a tooltip and a
+       click expands the cell in place (wrapping, row grows). */
     width: 100%;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    cursor: zoom-in;
+}
+.drocat-data-viewer-table .drocat-neuron-map-value.drocat-map-cell-expanded {
+    /* Click-to-expand: wrap the full text within the fixed column width;
+       the row grows to fit. A second click collapses back to one line. */
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    cursor: zoom-out;
+}
+.drocat-map-cell-tooltip {
+    /* Multiline hover display for the mapped-view provenance cells: the
+       full cell texts followed by the bridge derivation lines. */
+    white-space: pre-line;
+    max-width: 540px;
+    font-size: 12.5px;
+    line-height: 1.45;
 }
 .drocat-data-viewer-table mark.drocat-neuron-match-text {
     padding: 0 .08em;

@@ -1457,7 +1457,6 @@ def _render_index(
                               'drocat-neuron-map-cell': (col.name || '').startsWith('__map_'),
                             }"
                             :style="col.style || ''"
-                            :title="(col.name || '').startsWith('__map_') ? (props.row.__map_bridge || '') : ''"
                             :data-match-column="(
                               props.row.match_column_keys || [props.row.match_column_key]
                             ).includes(col.name) ? col.name : null"
@@ -1468,6 +1467,7 @@ def _render_index(
                             <div
                               v-if="(col.name || '').startsWith('__map_')"
                               class="drocat-neuron-map-value"
+                              @click.stop="$event.currentTarget.classList.toggle('drocat-map-cell-expanded')"
                             >
                               <span
                                 v-if="props.row.__highlighted_cells && props.row.__highlighted_cells[col.name]"
@@ -1480,6 +1480,12 @@ def _render_index(
                               v-html="props.row.__highlighted_cells[col.name]"
                             ></span>
                             <span v-else>{{ props.row[col.field] }}</span>
+                            <q-tooltip
+                              v-if="(col.name || '').startsWith('__map_') && props.row.__map_bridge"
+                              class="drocat-map-cell-tooltip"
+                              anchor="top middle"
+                              self="bottom middle"
+                            >{{ props.row.__map_bridge }}</q-tooltip>
                           </q-td>
                         </q-tr>
                         """,
