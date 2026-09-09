@@ -4,8 +4,8 @@ Consumes the derivation chains produced by
 ``CrossDatasetTypeMapper.get_type_bridges`` and renders through the
 vispath machinery: the type-level network (dagre layout — no custom
 layer map; current dataset types on the left, foreign dataset types in
-the middle joined by direct per-pair edges, matched query entries on
-the right converging the foreign types they cover) and the layered
+the middle joined by direct per-pair edges, mapping-graph query entries
+anchored to the dataset where they resolved) and the layered
 Sankey (``create_sankey`` backend with the shared interactive control
 panel — user-adjustable node/edge colors).
 
@@ -149,7 +149,7 @@ def _dataset_groups(graph) -> List[Dict[str, str]]:
 
     Nodes carry their dataset in the ``home_dataset`` attribute (linker
     nodes) or in a ``|``-joined id — the second segment for the pair /
-    composed views (``0|<dataset>|<type>``), the first for the source-map
+    mapping-graph views (``0|<dataset>|<type>``), the first for the source-map
     ids (``<dataset>|type``).  Sets ``graph.nodes[n]['group']`` to the
     4-char dataset code and returns the vispath ``node_groups`` list
     (``[{name, label, color}]``) sorted by code for stable rendering.
@@ -246,6 +246,30 @@ def build_bridge_texts(bridges, limit: int = 2) -> List[str]:
     return [format_bridge(b) for b in (bridges or [])[:limit] if b]
 
 
+def _origin_metadata(origin_dataset: str, matched_origin: str,
+                     source_type: str = "") -> Dict[str, str]:
+    """Return structured provenance for the query that seeded a flow.
+
+    ``matched_origin`` remains the backwards-compatible display string, but
+    graph builders must not infer dataset ownership from that string.  The
+    explicit fields let a taxonomy value such as ``cell_type ·
+    'circadian_clock'`` remain attached to the dataset where it resolved.
+    """
+    label = str(matched_origin or "").strip()
+    column, separator, raw_value = label.partition(" · ")
+    column = column.strip() or "type"
+    value = raw_value.strip().strip("'") if separator else ""
+    if column == "type" and not value:
+        value = str(source_type or "").strip()
+    return {
+        "origin_dataset": str(origin_dataset or ""),
+        "origin_column": column,
+        "origin_value": value,
+        "origin_label": label,
+        "origin_type": str(source_type or "").strip(),
+    }
+
+
 def build_mapping_flows(entries, source_dataset: str,
                         source_counts: Optional[Dict[str, int]] = None):
     """Flatten expansion entries into mapped flows with bridge chains.
@@ -327,13 +351,15 @@ def build_mapping_flows(entries, source_dataset: str,
                     return (0 if total else 1, -direct, total, len(chain))
 
                 chains.sort(key=_order)
-                try:
-                    decision = mapper.get_mapping_decision(
-                        target, source_dataset, foreign,
-                        include_bridges=False)
-                except Exception:
-                    decision = {}
-                mapping_status = decision.get("status", "mapped")
+                # Flow status policy comes from the shared resolver
+                # (comparison.type_resolver.resolve_flow_status): the same
+                # scoped decision this builder used to make inline, with
+                # conflicts marked for skipping and bridge-only edges
+                # relabeled by their end count.
+                from comparison.type_resolver import resolve_flow_status
+                mapping_status, decision_fields = resolve_flow_status(
+                    mapper, target, source_dataset, foreign,
+                    bridge_end_count=len(bridges_by_target or {}))
                 if mapping_status == "conflict":
                     # Bridge discovery may retain a same-name or other
                     # diagnostic chain, but a scoped vote conflict is not an
@@ -341,10 +367,15 @@ def build_mapping_flows(entries, source_dataset: str,
                     # coverage.  The caller can surface it as an orphan or a
                     # conflict note instead.
                     continue
-                if mapping_status == "unmapped":
-                    mapping_status = ("valid_split_evidence"
-                                      if len((bridges_by_target or {})) > 1
-                                      else "bridged")
+                # The matched column/value live in the ENTRY's dataset
+                # (the flow's target side): a native-match flow maps the
+                # local type ↔ the foreign name the query reached, so the
+                # query-origin provenance must be foreign-anchored.  The
+                # graph entry nodes attach to THIS side (user 2026-09-10:
+                # the viewer's circadian_clock entry was mis-owned by the
+                # searched dataset and counted the received neurons).
+                origin = _origin_metadata(
+                    foreign, matched_origin, covered_name)
                 flows.append({
                     "source_dataset": source_dataset,
                     "target_dataset": foreign,
@@ -353,11 +384,13 @@ def build_mapping_flows(entries, source_dataset: str,
                     "foreign_type": covered_name,
                     "foreign_count": covered_count,
                     "matched_origin": matched_origin,
+                    **origin,
+                    "origin_count": covered_count,
                     "bridges": chains,
                     "mapping_status": mapping_status,
-                    "mapping_relationship": decision.get("relationship"),
-                    "mapping_target_types": decision.get("target_types", []),
-                    "mapping_conflicts": decision.get("conflicts", []),
+                    "mapping_relationship": decision_fields["relationship"],
+                    "mapping_target_types": decision_fields["target_types"],
+                    "mapping_conflicts": decision_fields["conflicts"],
                 })
 
         for cand in (entry.get("types_all") or entry.get("types", [])):
@@ -390,7 +423,7 @@ def origin_seeded_flows(origin_dataset: str, matched_types, target_dataset: str,
     mapper (``get_type_bridges`` — every chain already passes
     ``BRIDGE_SOURCE_MAP`` licensing and ``bridge_is_valid``), emitting
     the SAME flow dicts as ``build_mapping_flows`` so the per-pair
-    cards, CSV and composed graph are unchanged downstream.
+    cards, CSV and mapping graph are unchanged downstream.
     """
     from comparison.cross_dataset_type_mapper import get_type_mapper
 
@@ -400,9 +433,12 @@ def origin_seeded_flows(origin_dataset: str, matched_types, target_dataset: str,
     if (not origin_dataset or not target_dataset
             or origin_dataset == target_dataset):
         return []
-    key_o = mapper._get_type_mapping_key(origin_dataset)
-    key_t = mapper._get_type_mapping_key(target_dataset)
-    if key_o == key_t:  # family versions share one registry namespace
+    # Family versions share one registry namespace; the namespace guard is
+    # the shared resolver's (no private mapper attribute access).
+    from comparison.type_resolver import (
+        resolve_flow_status, same_namespace,
+    )
+    if same_namespace(mapper, origin_dataset, target_dataset):
         return []
 
     counts_o = source_counts or {}
@@ -456,21 +492,17 @@ def origin_seeded_flows(origin_dataset: str, matched_types, target_dataset: str,
             if pair in seen:
                 continue
             seen.add(pair)
-            try:
-                decision = mapper.get_mapping_decision(
-                    type_name, origin_dataset, target_dataset,
-                    include_bridges=False)
-            except Exception:
-                decision = {}
-            mapping_status = decision.get("status", "mapped")
+            # Shared resolver flow policy (see build_mapping_flows).
+            mapping_status, decision_fields = resolve_flow_status(
+                mapper, type_name, origin_dataset, target_dataset,
+                bridge_end_count=len(by_end))
             if mapping_status == "conflict":
                 # Keep unresolved BANC/annotation conflicts out of accepted
                 # flow and coverage totals even when a bare same-name chain
                 # is also discoverable.
                 continue
-            if mapping_status == "unmapped":
-                mapping_status = ("valid_split_evidence"
-                                  if len(by_end) > 1 else "bridged")
+            origin = _origin_metadata(
+                origin_dataset, _matched_origin(type_name), type_name)
             flows.append({
                 "source_dataset": origin_dataset,
                 "target_dataset": target_dataset,
@@ -478,15 +510,17 @@ def origin_seeded_flows(origin_dataset: str, matched_types, target_dataset: str,
                 "foreign_type": foreign_type,
                 "source_count": int(counts_o.get(type_name) or 0),
                 "foreign_count": int(counts_t.get(foreign_type) or 0),
-                "matched_origin": _matched_origin(type_name),
+                "matched_origin": origin["origin_label"],
+                **origin,
+                "origin_count": int(counts_o.get(type_name) or 0),
                 "bridges": by_end[foreign_type][:max_chains_per_flow],
                 # Type-level policy is kept beside the evidence chains so
                 # renderers can distinguish a valid split from a rejected
                 # vote conflict without inspecting an unscoped type name.
                 "mapping_status": mapping_status,
-                "mapping_relationship": decision.get("relationship"),
-                "mapping_target_types": decision.get("target_types", []),
-                "mapping_conflicts": decision.get("conflicts", []),
+                "mapping_relationship": decision_fields["relationship"],
+                "mapping_target_types": decision_fields["target_types"],
+                "mapping_conflicts": decision_fields["conflicts"],
             })
     return flows
 
@@ -612,7 +646,7 @@ def pair_flow_weight(flow, pool: Optional[Dict[str, Any]] = None) -> int:
     """The per-pair coverage weight — ONE formula for every artifact.
 
     The Sankey ribbon, the network pair edge, the linker-path edges and
-    the composed-graph edges all render the same type-level bridge, so they
+    the mapping-graph edges all render the same type-level bridge, so they
     must all carry the same number.  Per side: the independent pooled bodyId
     count when a coverage pool exists, else that side's neuron count (a side
     with no data falls back to the other side's), collapsed by min.  This is
@@ -649,19 +683,25 @@ def build_mapping_network_graph(flows, *,
 
     Edges are the per-pair type mappings themselves, so 1-to-1, 1-to-N,
     and N-to-1 are visible in the node geometry.  The matched query entry
-    (taxonomy label hits) sits at the rightmost layer and converges the
-    foreign types it covers.  The bridge derivation (columns · via) is
-    carried exclusively on the pair edges (``bridge_texts`` attribute)
-    together with the per-side neuron counts — never as a node.
+    (taxonomy label hits) belongs to the dataset where the query resolved:
+    one ``E|<origin>|<label>`` node per matched label, connected to the
+    covered types on that origin side (§14) — the flow's source side for
+    origin-seeded flows, its target side for native-match flows (the
+    matched column lives in the foreign dataset there).  Never a
+    target-side coverage sink keyed under an unrelated dataset.  The
+    bridge derivation (columns · via) is carried exclusively on the pair
+    edges (``bridge_texts`` attribute) together with the per-side neuron
+    counts — never as a node.
 
-    Layer 0 = current dataset types, layer 1 = foreign dataset types,
-    layer 2 = matched query entries.  Pair-edge weight is the shared
+    Layer 0 = current dataset types, layer 1 = foreign dataset types;
+    entry nodes carry ``E|`` ids on their origin side (dagre positions
+    them from their edges).  Pair-edge weight is the shared
     ``pair_flow_weight`` (independent endpoint coverage / min of the two
-    sides) — the same number the Sankey ribbon draws for the type bridge;
-    coverage-edge
-    weight is the foreign count, summing to the entry label's total.
-    With ``pools``, node hovers also carry the pooled bodyId count of
-    the type on its side.
+    sides) — the same number the Sankey ribbon draws for the type bridge.
+    Entry-edge weight is the covered origin-side type's neuron count, and
+    the entry hover counts unique origin-side types and their neurons —
+    never the opposite side's received counts.  With ``pools``, node
+    hovers also carry the pooled bodyId count of the type on its side.
 
     ``orphans`` (W3) are queried types with NO mapped counterpart in a
     target dataset: ``{'dataset', 'type', 'count', 'target'}``.  Each is
@@ -687,85 +727,158 @@ def build_mapping_network_graph(flows, *,
         origin_column, _, origin_value = flow.get("matched_origin", "").partition(" · ")
         origin_value = origin_value.strip("'")
 
-        src_id = f"0|{flow.get('source_dataset', '')}|{flow.get('source_type', '')}"
-        tgt_id = f"1|{flow.get('target_dataset', '')}|{flow.get('foreign_type', '')}"
+        source_ds = str(flow.get("source_dataset", "") or "")
+        target_ds = str(flow.get("target_dataset", "") or "")
+        flow_origin_ds = str(flow.get("origin_dataset") or source_ds or "")
+        # Native-match flows (the viewer's expanded search) run
+        # searched → foreign with the query origin on the TARGET side.
+        # Present them the way the panel's origin-seeded exports read:
+        # origin side left (layer 0), counterpart right (layer 1), so
+        # dagre ranks query entry → origin types → counterpart types
+        # instead of burying the entry in the counterpart's rank (user
+        # 2026-09-10 layout report).  Only label-origin flows flip; each
+        # rendered artifact holds a single orientation (one entry block
+        # or one seeded direction), so the two id spaces never mix.
+        flipped = bool(origin_column
+                       and origin_column != "type"
+                       and flow_origin_ds
+                       and flow_origin_ds == target_ds != source_ds)
+        if flipped:
+            left_id = f"0|{target_ds}|{flow.get('foreign_type', '')}"
+            right_id = f"1|{source_ds}|{flow.get('source_type', '')}"
+            left_type = str(flow.get("foreign_type", "") or "")
+            left_ds = target_ds
+            left_count = foreign_count
+            left_pool_ids = tgt_pool_ids
+            left_selected_pool_ids = tgt_selected_pool_ids
+            right_type = str(flow.get("source_type", "") or "")
+            right_ds = source_ds
+            right_count = source_count
+            right_pool_ids = src_pool_ids
+            right_selected_pool_ids = src_selected_pool_ids
+        else:
+            left_id = f"0|{source_ds}|{flow.get('source_type', '')}"
+            right_id = f"1|{target_ds}|{flow.get('foreign_type', '')}"
+            left_type = str(flow.get("source_type", "") or "")
+            left_ds = source_ds
+            left_count = source_count
+            left_pool_ids = src_pool_ids
+            left_selected_pool_ids = src_selected_pool_ids
+            right_type = str(flow.get("foreign_type", "") or "")
+            right_ds = target_ds
+            right_count = foreign_count
+            right_pool_ids = tgt_pool_ids
+            right_selected_pool_ids = tgt_selected_pool_ids
+
+        def _side_title(side_type: str, side_ds: str, side_count: int,
+                        pool_ids, selected_pool_ids) -> str:
+            dataset_scoped_key = (side_ds, side_type)
+            return (f"{side_type} · {side_ds} "
+                    f"({side_count or pair_weight} neurons)"
+                    + _pool_title_suffix(
+                        pool_ids.get(dataset_scoped_key, 0)
+                        if dataset_scoped else pool_ids.get(side_type, 0),
+                        selected_pool_ids.get(dataset_scoped_key, 0)
+                        if dataset_scoped else selected_pool_ids.get(
+                            side_type, 0)))
 
         # the pair edge carries the SHARED per-pair flow weight (the same
         # number the Sankey ribbon draws) — never the source type's whole
         # count duplicated onto every edge it participates in
         pool = get_mapping_pool(pools, flow)
         pair_weight = pair_flow_weight(flow, pool)
-        graph.add_node(src_id, node_type="source",
-                       label=flow.get("source_type", ""),
-                       title=(f"{flow.get('source_type', '')} · "
-                              f"{flow.get('source_dataset', '')} "
-                              f"({source_count or pair_weight} neurons)"
-                              + _pool_title_suffix(
-                                  src_pool_ids.get((
-                                      flow.get("source_dataset", ""),
-                                      flow.get("source_type", "")), 0)
-                                  if dataset_scoped else
-                                  src_pool_ids.get(
-                                      flow.get("source_type", ""), 0),
-                                  src_selected_pool_ids.get((
-                                      flow.get("source_dataset", ""),
-                                      flow.get("source_type", "")), 0)
-                                  if dataset_scoped else
-                                  src_selected_pool_ids.get(
-                                      flow.get("source_type", ""), 0))))
-        graph.add_node(tgt_id, node_type="target",
-                       label=flow.get("foreign_type", ""),
-                       title=(f"{flow.get('foreign_type', '')} · "
-                              f"{flow.get('target_dataset', '')} "
-                              f"({foreign_count or pair_weight} neurons)"
-                              + _pool_title_suffix(
-                                  tgt_pool_ids.get((
-                                      flow.get("target_dataset", ""),
-                                      flow.get("foreign_type", "")), 0)
-                                  if dataset_scoped else
-                                  tgt_pool_ids.get(
-                                      flow.get("foreign_type", ""), 0),
-                                  tgt_selected_pool_ids.get((
-                                      flow.get("target_dataset", ""),
-                                      flow.get("foreign_type", "")), 0)
-                                  if dataset_scoped else
-                                  tgt_selected_pool_ids.get(
-                                      flow.get("foreign_type", ""), 0))))
+
+        def _side_title(side_type: str, side_ds: str, side_count: int,
+                        pool_ids, selected_pool_ids) -> str:
+            dataset_scoped_key = (side_ds, side_type)
+            return (f"{side_type} · {side_ds} "
+                    f"({side_count or pair_weight} neurons)"
+                    + _pool_title_suffix(
+                        pool_ids.get(dataset_scoped_key, 0)
+                        if dataset_scoped else pool_ids.get(side_type, 0),
+                        selected_pool_ids.get(dataset_scoped_key, 0)
+                        if dataset_scoped else selected_pool_ids.get(
+                            side_type, 0)))
+
+        graph.add_node(left_id, node_type="source",
+                       label=left_type,
+                       title=_side_title(left_type, left_ds, left_count,
+                                         left_pool_ids,
+                                         left_selected_pool_ids))
+        graph.add_node(right_id, node_type="target",
+                       label=right_type,
+                       title=_side_title(right_type, right_ds, right_count,
+                                         right_pool_ids,
+                                         right_selected_pool_ids))
         # the pair edge IS the mapping; its hover label carries the bridge
-        # derivation and both sides' neuron counts
+        # derivation and both sides' neuron counts.  For flipped flows the
+        # edge is drawn origin → counterpart so the rendered flow reads
+        # query → origin → counterpart (arrow semantics follow the
+        # presentation, the hover keeps the per-side truth).
         bridge_texts = build_bridge_texts(flow.get("bridges"))
-        if graph.has_edge(src_id, tgt_id):
-            existing = graph[src_id][tgt_id]
+        if graph.has_edge(left_id, right_id):
+            existing = graph[left_id][right_id]
             existing["weight"] += pair_weight
             existing["bridge_texts"] = list(dict.fromkeys(
                 existing.get("bridge_texts", []) + bridge_texts))
         else:
-            graph.add_edge(src_id, tgt_id, weight=pair_weight,
+            graph.add_edge(left_id, right_id, weight=pair_weight,
                            title=f"{pair_weight} neurons",
                            bridge_texts=bridge_texts,
                            source_count=source_count,
                            foreign_count=foreign_count,
-                           source_dataset=flow.get("source_dataset", ""),
-                           target_dataset=flow.get("target_dataset", ""))
+                           source_dataset=source_ds,
+                           target_dataset=target_ds)
 
-        # the query hit converges the foreign types it covers (rightmost)
+        # the query hit belongs to the dataset where it resolved and
+        # attaches to the covered types on THAT side — which the
+        # orientation flip above always renders as the LEFT side (layer
+        # 0): the flow's source side for origin-seeded flows (the panel)
+        # and the target side for native-match flows (the viewer's
+        # expanded search, where the matched column lives in the foreign
+        # dataset).  The structured origin metadata decides the owner;
+        # the source side is only the legacy fallback.
         if origin_column and origin_column != "type":
-            entry_id = (f"2|{flow.get('target_dataset', '')}|"
-                        f"{flow.get('matched_origin', '') or 'matched'}")
-            graph.add_node(entry_id, node_type="entry",
-                           label=flow.get("matched_origin", "") or "matched")
+            origin_ds = flow_origin_ds or source_ds
+            attach_id = left_id
+            attach_type = left_type
+            side_count = left_count
+            origin_label = str(flow.get("matched_origin", "") or "matched")
+            entry_id = f"E|{origin_ds}|{origin_label}"
+            graph.add_node(
+                entry_id, node_type="entry", label=origin_label,
+                home_dataset=origin_ds, origin_dataset=origin_ds,
+                origin_column=origin_column, origin_value=origin_value)
             cover = entry_cover.setdefault(
-                entry_id, {"types": set(), "neurons": 0})
-            cover["types"].add(flow.get("foreign_type", ""))
-            cover["neurons"] += foreign_count or pair_weight
-            if graph.has_edge(tgt_id, entry_id):
-                graph[tgt_id][entry_id]["weight"] += foreign_count or pair_weight
+                entry_id, {"types": {}, "dataset": origin_ds})
+            origin_type = str(flow.get("origin_type")
+                              or attach_type or "")
+            raw_origin_count = flow.get("origin_count")
+            origin_count = int(
+                raw_origin_count if raw_origin_count is not None
+                else side_count)
+            # one origin type can fan out to many counterpart types (and
+            # so appear in several flows): count it once in the
+            # query-entry hover, retaining the largest consistent
+            # origin-side count
+            if origin_type:
+                previous = cover["types"].get(origin_type)
+                if previous is None or origin_count > previous:
+                    cover["types"][origin_type] = origin_count
+            # the entry is the query input, so the edge follows the same
+            # left-to-right direction as the pair edges: entry → covered
+            # origin-side type.  This is not a type-to-type mapping edge.
+            edge_weight = max(1, origin_count)
+            if graph.has_edge(entry_id, attach_id):
+                existing = graph[entry_id][attach_id]
+                if edge_weight > existing.get("weight", 0):
+                    existing["weight"] = edge_weight
+                    existing["title"] = f"{edge_weight} neurons"
             else:
-                graph.add_edge(tgt_id, entry_id,
-                               weight=foreign_count or pair_weight,
-                               title=f"{foreign_count or pair_weight} neurons",
-                               bridge_texts=[],
-                               target_dataset=flow.get("target_dataset", ""))
+                graph.add_edge(
+                    entry_id, attach_id, weight=edge_weight,
+                    title=f"{edge_weight} neurons", bridge_texts=[],
+                    entry_edge=True, origin_dataset=origin_ds)
 
     # W3 orphans: queried types with no mapped counterpart in a target
     # dataset stay VISIBLE as isolated nodes (degree 0) with the
@@ -789,11 +902,15 @@ def build_mapping_network_graph(flows, *,
                            title=(f"{otype} — no mapped counterpart in "
                                   f"{target_code} ({count:,} neurons)"))
 
-    # Entry hover titles name what they cover (coverage, not derivation).
+    # Entry hover titles name what they cover on the ORIGIN side (§14):
+    # unique source types and their source-side counts — never the
+    # target-side received neurons.
     for entry_id, cover in entry_cover.items():
+        types = cover["types"]
+        total = sum(types.values())
         graph.nodes[entry_id]["title"] = (
             f"{graph.nodes[entry_id].get('label', '')} — covers "
-            f"{len(cover['types'])} types, {cover['neurons']:,} neurons"
+            f"{len(types)} types, {total:,} neurons"
         )
 
     return graph
@@ -807,8 +924,9 @@ def render_mapping_network_html(flows, *,
                                 ) -> Optional[str]:
     """Render the type-level mapping network to an HTML string.
 
-    Uses the vispath machinery with the dagre layout (types left,
-    foreign types middle, query entries right, nodes draggable).
+    Uses the vispath machinery with the dagre layout (source types left,
+    foreign types right; a taxonomy query entry sits on its ORIGIN side,
+    attached to the source types it covers — §14).  Nodes are draggable.
     ``pools`` adds the pooled bodyId counts to the node hovers.
     ``orphans`` adds isolated unmapped-type nodes (W3).
     Nothing is written to the repository — the temp render file lives
@@ -866,7 +984,7 @@ def render_mapping_network_html(flows, *,
         node_dataset_info=node_dataset_info,
         dataset_legend=dataset_legend,
         dataset_legend_meta=legend_meta,
-        node_groups=_dataset_groups(graph), layout="dagre")
+        node_groups=_dataset_groups(graph), layout="dagre", title=title)
 
 
 def write_mapping_network_html(flows, output_path: str, *,
@@ -1018,7 +1136,9 @@ def _render_mapping_graph(graph, output_path: str, *, open_browser: bool = False
 def _vispath_html(graph, *, edge_labels=None, node_dataset_info=None,
                   dataset_legend=None, dataset_legend_meta=None,
                   node_groups=None,
-                  layout: str = "dagre") -> Optional[str]:
+                  layout: str = "dagre",
+                  title: str = "Neural Pathway Network - Selected Paths"
+                  ) -> Optional[str]:
     """Render a mapping graph to an HTML string.
 
     The vispath renderer is path-based, so the render goes to a temp
@@ -1026,8 +1146,9 @@ def _vispath_html(graph, *, edge_labels=None, node_dataset_info=None,
     repository (the viewer delivers artifacts as browser downloads).
     ``layout`` selects the cytoscape layout (dagre positions the
     type-mapping network natively — no custom layer map needed).
-    ``node_groups`` declares the per-dataset groups (§13).  Returns None
-    when vispath is unavailable.
+    ``node_groups`` declares the per-dataset groups (§13).  ``title`` is
+    applied to the downloaded document title after the vendored renderer
+    writes its HTML.  Returns None when vispath is unavailable.
     """
     import os
     import tempfile
@@ -1046,7 +1167,18 @@ def _vispath_html(graph, *, edge_labels=None, node_dataset_info=None,
         except _VispathUnavailable:
             return None
         with open(path, "r", encoding="utf-8") as handle:
-            return handle.read()
+            rendered = handle.read()
+
+    # The vendored vispath template uses a generic document title.  Keep the
+    # dependency untouched and apply the caller's artifact title safely here.
+    import re
+    from html import escape as html_escape
+
+    safe_title = html_escape(str(title or ""), quote=False)
+    return re.sub(
+        r"(<title\b[^>]*>).*?(</title>)",
+        lambda match: f"{match.group(1)}{safe_title}{match.group(2)}",
+        rendered, count=1, flags=re.IGNORECASE | re.DOTALL)
 
 
 class _VispathUnavailable(ImportError):
@@ -1577,8 +1709,20 @@ def build_mapping_sankey_paths(flows, *, pools: Optional[Dict[tuple,
     return rows
 
 
+def _coverage_cell(union: set, total: int, pooled: bool,
+                   measured: bool) -> str:
+    """One coverage cell: the three states, then ``x of y (pct)``."""
+    if not pooled:
+        return "not pooled"
+    if not measured:
+        return "not measured"
+    return format_coverage(len(union), total)
+
+
 def build_type_coverage(pair_flows,
-                        pools: Optional[Dict[tuple, Dict[str, Any]]] = None
+                        pools: Optional[Dict[tuple, Dict[str, Any]]] = None,
+                        reverse_contexts: Optional[Dict[tuple,
+                                                        Dict[str, Any]]] = None
                         ) -> Dict[str, List[Dict[str, Any]]]:
     """Bidirectional type-level coverage rows for the mapping results.
 
@@ -1591,12 +1735,25 @@ def build_type_coverage(pair_flows,
       reaches in total (union over its pairs) and how many target-side
       bodyIds the targets cover.
     * ``reverse`` — one row per RECEIVING (target) type: the source
-      types that converge on it — several sources make an N-to-1
-      explicit (three FAFB types mapping onto male-cns ``SMP227``) —
-      with both sides' coverage.  The UI renders this view under the
-      heading "Backward", and both tables name their coverage columns
-      by DATASET (``<dataset> side (bodyIds)``) so "backward" is never
+      types that map onto it, read from the receiving type back to its
+      sources — several sources make the fan-out ``1-to-N`` (§12.1 user
+      decision: relationship cells follow the ROW SUBJECT's fan-out, so
+      no backward row with more than one source reads ``1-to-1``).  The
+      UI renders this view under the heading "Backward", and both tables
+      name their coverage columns by DATASET so "backward" is never
       misread as swapping which dataset each column measures.
+
+    ``reverse_contexts`` (optional, keyed ``(target_dataset,
+    receiving_type)``) upgrades a backward row to the DATASET-WIDE
+    incoming scope (§12.3): the context carries every source type in the
+    source dataset that maps onto the receiving type with its
+    prioritized-bridge pools, so the row lists the full incoming family
+    (the active query members marked), labels the relationship from the
+    full family, and its coverage cells measure the dataset-wide unions
+    — the source-side denominator becomes the incoming types' population
+    union, the target-side stays the receiving type's own population.
+    The query-scoped values are preserved on ``query_scope_*`` fields.
+    Without a context the row stays exactly the query-scoped slice.
 
     Coverage cells are pool-based ``x of y (pct)`` bodyIds counts.  A
     side's denominator is the population of the endpoint types involved:
@@ -1708,11 +1865,7 @@ def build_type_coverage(pair_flows,
             sentry["all_t_measured"] = (sentry["all_t_measured"]
                                          or tgt_all_measurable)
     def _cov(union: set, total: int, pooled: bool, measured: bool) -> str:
-        if not pooled:
-            return "not pooled"
-        if not measured:
-            return "not measured"
-        return format_coverage(len(union), total)
+        return _coverage_cell(union, total, pooled, measured)
 
     # Fan-in across the queried pool: how many distinct source types
     # reach each target, so a 2-into-1 convergence reads N-to-1 instead
@@ -1943,7 +2096,7 @@ def build_type_coverage(pair_flows,
                 f"{source_overlap_all_valid} source bodyIds, "
                 f"{target_overlap_all_valid} target bodyIds")
         coverage_note = "; ".join(coverage_notes)
-        reverse_rows.append({
+        reverse_row = {
             "dataset": row["dataset"],
             "type": row["type"],
             "count": row["count"],
@@ -1951,7 +2104,11 @@ def build_type_coverage(pair_flows,
                 f"{code}: {', '.join(names)}"
                 for code, names in sorted(groups.items())),
             "sources": len(row["sources"]),
-            "relationship": ("N-to-1" if len(row["sources"]) > 1
+            # §12.1 user decision: relationship cells follow the ROW
+            # SUBJECT's fan-out — read from the receiving type back to its
+            # source types, so several sources read `1-to-N`, never
+            # `1-to-1`
+            "relationship": ("1-to-N" if len(row["sources"]) > 1
                              else "1-to-1"),
             "source_cov": _cov(source_union, source_total,
                                row["any_pooled"], source_measured),
@@ -1974,11 +2131,123 @@ def build_type_coverage(pair_flows,
             "source_overlap_all_valid": source_overlap_all_valid,
             "target_overlap_all_valid": target_overlap_all_valid,
             "coverage_note": coverage_note,
-        })
-    reverse_rows.sort(key=lambda r: (0 if r["relationship"] == "N-to-1"
+            "coverage_scope": "query",
+        }
+        # §12.3: upgrade the row to the dataset-wide incoming scope when a
+        # reverse context was supplied for this receiving type
+        ctx = (reverse_contexts or {}).get((row["dataset"], row["type"]))
+        if ctx:
+            reverse_row.update(_apply_reverse_context(reverse_row, ctx, row))
+        reverse_rows.append(reverse_row)
+    reverse_rows.sort(key=lambda r: (0 if r["relationship"] == "1-to-N"
                                      else 1, -int(r["count"] or 0),
                                      str(r["type"])))
     return {"forward": forward_rows, "reverse": reverse_rows}
+
+
+def _apply_reverse_context(row: Dict[str, Any], ctx: Dict[str, Any],
+                           aggregate: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge one dataset-wide incoming context into a backward row (§12.3).
+
+    The row keeps its identity (receiving type, dataset, population) but
+    its ``mapped_from``/relationship/coverage cells are re-measured over
+    the FULL incoming family: the source side unions every incoming
+    type's prioritized-bridge pools with the incoming population union as
+    the denominator, the target side keeps the receiving population as
+    the denominator.  The query-scoped cells are preserved on
+    ``query_scope_*`` fields, and the active query members stay visible
+    in the row so it still connects to the forward result.
+    """
+    query_sources = sorted({name for (_ds, name) in aggregate["sources"]})
+    members = list(ctx.get("sources") or [])
+    total_sources = int(ctx.get("incoming_source_count") or len(members))
+    listed = [m.get("type", "") for m in members]
+
+    source_code = (dataset_abbrev(ctx.get("source_dataset", ""))
+                   or ctx.get("source_dataset", ""))
+    merged_groups: Dict[str, List[str]] = {}
+    for name in listed:
+        merged_groups.setdefault(source_code, []).append(name)
+    for q_ds, q_name in sorted(aggregate["sources"]):
+        q_code = dataset_abbrev(q_ds) or q_ds
+        bucket = merged_groups.setdefault(q_code, [])
+        if q_name not in bucket:
+            bucket.append(q_name)
+    mapped_from = " · ".join(
+        f"{code}: {', '.join(names)}"
+        for code, names in sorted(merged_groups.items()))
+    notes: List[str] = []
+    hidden = total_sources - len(listed)
+    if hidden > 0:
+        notes.append(f"+{hidden} more")
+    if query_sources:
+        notes.append("active query: " + ", ".join(query_sources))
+    if notes:
+        mapped_from += " — " + "; ".join(notes)
+
+    pooled = bool(ctx.get("pooled"))
+    receiving_total = int(ctx.get("receiving_count") or 0) or row["count"]
+
+    def _ctx_cov(union_key: str, measured_key: str,
+                 denominator: int) -> str:
+        return _coverage_cell(set(ctx.get(union_key) or []), denominator,
+                              pooled, bool(ctx.get(measured_key)))
+
+    context_notes = [
+        f"dataset-wide incoming: {total_sources} source types"]
+    source_overlap_all = len(ctx.get("source_overlap_all_valid_ids") or [])
+    target_overlap_all = len(ctx.get("target_overlap_all_valid_ids") or [])
+    if source_overlap_all or target_overlap_all:
+        context_notes.append(
+            "all-valid overlap: "
+            f"{source_overlap_all} source bodyIds, "
+            f"{target_overlap_all} target bodyIds")
+    source_overlap_selected = len(
+        ctx.get("source_overlap_selected_ids") or [])
+    target_overlap_selected = len(
+        ctx.get("target_overlap_selected_ids") or [])
+    if source_overlap_selected or target_overlap_selected:
+        context_notes.append(
+            "selected overlap: "
+            f"{source_overlap_selected} source bodyIds, "
+            f"{target_overlap_selected} target bodyIds")
+    note_parts = ([row["coverage_note"]] if row["coverage_note"] else [])
+    note_parts.extend(context_notes)
+
+    return {
+        # query-scoped slice preserved for auditability/export
+        "query_scope_mapped_from": row["mapped_from"],
+        "query_scope_relationship": row["relationship"],
+        "query_scope_source_cov_selected": row["source_cov_selected"],
+        "query_scope_source_cov": row["source_cov"],
+        "query_scope_target_cov_selected": row["target_cov_selected"],
+        "query_scope_target_cov": row["target_cov"],
+        # dataset-wide incoming cells
+        "mapped_from": mapped_from,
+        "sources": total_sources,
+        "relationship": ("1-to-N" if total_sources > 1 else "1-to-1"),
+        "source_cov_selected": _ctx_cov(
+            "selected_source_union_ids", "selected_source_measured",
+            int(ctx.get("source_population_total") or 0)),
+        "source_cov": _ctx_cov(
+            "all_valid_source_union_ids", "all_valid_source_measured",
+            int(ctx.get("source_population_total") or 0)),
+        "target_cov_selected": _ctx_cov(
+            "selected_target_union_ids", "selected_target_measured",
+            receiving_total),
+        "target_cov": _ctx_cov(
+            "all_valid_target_union_ids", "all_valid_target_measured",
+            receiving_total),
+        "source_overlap_selected": source_overlap_selected,
+        "target_overlap_selected": target_overlap_selected,
+        "source_overlap_all_valid": source_overlap_all,
+        "target_overlap_all_valid": target_overlap_all,
+        "coverage_note": "; ".join(note_parts),
+        "coverage_scope": "dataset-wide incoming",
+        "incoming_source_count": total_sources,
+        "active_query_sources": query_sources,
+        "truncated": bool(ctx.get("truncated")),
+    }
 
 
 def render_mapping_sankey_html(flows, *, pools: Optional[Dict[tuple,
@@ -2234,8 +2503,9 @@ def build_composed_mapping_graph(pair_flows, *, pools=None,
     per-pair results.  Nodes are ``<layer>|<dataset>|<type>`` with the
     layer taken from the component's affinity-ordered datasets (§10.1);
     per-pair edges carry the maps-via texts and per-side neuron counts;
-    label-query pooled nodes (``entry`` group) sit on their owning
-    dataset fed by the types they cover; every type node's hover lists
+    label-query pooled nodes (``entry`` group) sit on the dataset where the
+    query resolved and connect only to the source types they cover; every
+    type node's hover lists
     its cross-dataset matches (§10.2).  Beyond ``node_cap`` nodes,
     all-same-name types are hidden first (§6) and reported via
     ``meta['notes']``.  Returns ``(graph, meta)``.
@@ -2285,16 +2555,39 @@ def build_composed_mapping_graph(pair_flows, *, pools=None,
                 "source_dataset": src_ds,
                 "target_dataset": tgt_ds,
             }))
-            origin = flow.get("matched_origin", "")
-            origin_column, _, origin_value = origin.partition(" · ")
-            origin_value = origin_value.strip("'")
-            if origin_column and origin_column != "type":
+            origin = str(flow.get("origin_label") or
+                         flow.get("matched_origin", "") or "").strip()
+            origin_column = str(flow.get("origin_column") or "").strip()
+            origin_value = str(flow.get("origin_value") or "").strip()
+            if not origin_column:
+                origin_column, separator, parsed_value = origin.partition(
+                    " · ")
+                origin_column = origin_column.strip()
+                if not origin_value and separator:
+                    origin_value = parsed_value.strip().strip("'")
+            if origin_column and origin_column != "type" and origin:
+                # A taxonomy/metadata query belongs to the dataset in which
+                # it resolved.  The source side of an origin-seeded flow is
+                # that dataset; never re-key this entry to the target dataset.
+                origin_ds = str(flow.get("origin_dataset") or src_ds)
+                origin_type = str(flow.get("origin_type") or src_type)
+                raw_origin_count = flow.get("origin_count")
+                origin_count = int(
+                    raw_origin_count if raw_origin_count is not None
+                    else src_count)
+                ds_types.setdefault(origin_ds, set()).add(origin_type)
                 spec = entry_specs.setdefault(
-                    (tgt_ds, origin),
-                    {"label": origin, "types": {}, "neurons": 0})
-                spec["types"][tgt_type] = spec["types"].get(tgt_type, 0) + \
-                    tgt_count
-                spec["neurons"] += tgt_count
+                    (origin_ds, origin),
+                    {"label": origin, "types": {}, "neurons": 0,
+                     "column": origin_column, "value": origin_value})
+                # One origin type can fan out to many target types.  Count it
+                # once in the query-entry hover, retaining the largest
+                # consistent source-side count seen across its flows.
+                if origin_type:
+                    previous = spec["types"].get(origin_type)
+                    if previous is None or origin_count > previous:
+                        spec["types"][origin_type] = origin_count
+                    spec["neurons"] = sum(spec["types"].values())
 
     # connected components over the datasets that have mapped pairs
     ds_graph = nx.Graph()
@@ -2395,21 +2688,29 @@ def build_composed_mapping_graph(pair_flows, *, pools=None,
             graph.add_edge(sid, tid, title=f"{attrs['weight']} neurons",
                            **attrs)
 
-    # label-query pooled nodes: one per owning dataset per matched label,
-    # fed by the covered types (§1.B′)
+    # label-query entry nodes: one per origin dataset per matched label,
+    # connected only to the covered origin/source types (§1.B′)
     for (ds, origin), spec in sorted(entry_specs.items()):
         node_id = f"E|{ds}|{origin}"
         graph.add_node(node_id, node_type="entry", label=origin,
                        title=(f"{origin} — covers {len(spec['types'])} types, "
-                              f"{spec['neurons']:,} neurons"))
+                              f"{spec['neurons']:,} neurons"),
+                       home_dataset=ds,
+                       origin_dataset=ds,
+                       origin_column=spec.get("column", ""),
+                       origin_value=spec.get("value", ""))
         for type_name, count in sorted(spec["types"].items()):
             nid = _node_id(ds, type_name)
-            if graph.has_node(nid):
-                graph.add_edge(nid, node_id, weight=count or 1,
-                               title=f"{count or 1} neurons",
-                               bridge_texts=[])
+            _ensure_node(ds, type_name, count)
+            # The entry is the query input, so the edge follows the same
+            # left-to-right direction as the mapping edges: entry → covered
+            # origin type.  This is not a type-to-type mapping edge.
+            graph.add_edge(node_id, nid, weight=count or 1,
+                           title=f"{count or 1} neurons",
+                           bridge_texts=[], entry_edge=True,
+                           origin_dataset=ds)
 
-    # composed-graph scoping (§6): beyond the node cap hide all-same-name
+    # mapping-graph scoping (§6): beyond the node cap hide all-same-name
     # types first — bare name echoes carry no mapping information, while
     # linker-bearing types and pooled-fed types are never hidden
     notes: List[str] = []
@@ -2448,8 +2749,8 @@ def build_composed_mapping_graph(pair_flows, *, pools=None,
 
 def render_composed_mapping_html(pair_flows, *, pools=None,
                                  node_cap: int = 80,
-                                 title: str = "Composed type mapping"):
-    """Render the composed N-dataset mapping to an HTML string (Round 2).
+                                 title: str = "Mapping graph"):
+    """Render the N-dataset mapping graph to an HTML string (Round 2).
 
     Returns ``(html, meta)`` — html is None when vispath is unavailable
     or nothing is mapped; meta carries component orders and scoping
@@ -2485,7 +2786,7 @@ def render_composed_mapping_html(pair_flows, *, pools=None,
                          node_dataset_info=node_dataset_info,
                          dataset_legend=dataset_legend,
                          node_groups=_dataset_groups(graph),
-                         layout="dagre")
+                         layout="dagre", title=title)
     return html, meta
 
 

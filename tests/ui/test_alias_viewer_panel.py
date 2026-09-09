@@ -534,7 +534,9 @@ def test_mapping_visualization_variants_download_not_saved(
     # label in a child section, so match via descendant label text.
     def _invoke_menu_items(text_exact):
         count = 0
-        for element in client.elements.values():
+        # Snapshot: an invoked handler may create elements (the banner
+        # stack's lazy self-heal) and mutate client.elements mid-loop.
+        for element in list(client.elements.values()):
             if type(element).__name__ != 'MenuItem':
                 continue
             if not any(str(getattr(d, 'text', '')) == text_exact

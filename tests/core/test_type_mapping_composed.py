@@ -1,6 +1,6 @@
-"""Unit tests for the Round 2 composed type-mapping view (spec §4/§6/§7).
+"""Unit tests for the Round 2 mapping graph (spec §4/§6/§7).
 
-Synthetic pair flows only — the composed graph builder's layer naming,
+Synthetic pair flows only — the mapping graph builder's layer naming,
 per-component dataset ordering (§10.1), matched-type hovers (§10.2),
 pooled label nodes, the scoping cap (§6) and the bridges CSV contract
 (§7) are validated without touching the real datasets.
@@ -17,7 +17,7 @@ FAFB = 'flywire_FAFB_v783'
 BANC = 'banc_v626'
 
 
-def _flow(s, st, t, tt, sc, fc, origin='type', linkers=True):
+def _flow(s, st, t, tt, sc, fc, origin='type', linkers=True, **extra):
     hops = [
         {'dataset': s, 'column': 'type', 'value': st},
         {'dataset': 'male-cns:v1.0', 'column': 'flywireType', 'value': 'LMTe01'},
@@ -26,9 +26,11 @@ def _flow(s, st, t, tt, sc, fc, origin='type', linkers=True):
         {'dataset': s, 'column': 'type', 'value': st},
         {'dataset': t, 'column': 'type', 'value': tt},
     ]
-    return {'source_dataset': s, 'target_dataset': t, 'source_type': st,
+    flow = {'source_dataset': s, 'target_dataset': t, 'source_type': st,
             'foreign_type': tt, 'source_count': sc, 'foreign_count': fc,
             'matched_origin': origin, 'bridges': [hops]}
+    flow.update(extra)
+    return flow
 
 
 def test_composed_graph_layers_roles_and_hovers():
@@ -78,11 +80,39 @@ def test_composed_component_order_prefers_same_name():
 
 def test_composed_pooled_label_node():
     pair_flows = {
-        (MCNS, FAFB): [
-            _flow(MCNS, 'T1', FAFB, 'C1', 2, 2,
-                  origin="cell_type · 'circadian_clock'"),
-            _flow(MCNS, 'T2', FAFB, 'C2', 1, 3,
-                  origin="cell_type · 'circadian_clock'"),
+        (FAFB, MCNS): [
+            _flow(FAFB, 'T1', MCNS, 'M1', 2, 2,
+                  origin="cell_type · 'circadian_clock'",
+                  origin_dataset=FAFB, origin_column='cell_type',
+                  origin_value='circadian_clock', origin_label=
+                  "cell_type · 'circadian_clock'", origin_type='T1',
+                  origin_count=2),
+            _flow(FAFB, 'T1', MCNS, 'M2', 2, 3,
+                  origin="cell_type · 'circadian_clock'",
+                  origin_dataset=FAFB, origin_column='cell_type',
+                  origin_value='circadian_clock', origin_label=
+                  "cell_type · 'circadian_clock'", origin_type='T1',
+                  origin_count=2),
+            _flow(FAFB, 'T2', MCNS, 'M1', 1, 3,
+                  origin="cell_type · 'circadian_clock'",
+                  origin_dataset=FAFB, origin_column='cell_type',
+                  origin_value='circadian_clock', origin_label=
+                  "cell_type · 'circadian_clock'", origin_type='T2',
+                  origin_count=1),
+        ],
+        (FAFB, BANC): [
+            _flow(FAFB, 'T1', BANC, 'B1', 2, 4,
+                  origin="cell_type · 'circadian_clock'",
+                  origin_dataset=FAFB, origin_column='cell_type',
+                  origin_value='circadian_clock', origin_label=
+                  "cell_type · 'circadian_clock'", origin_type='T1',
+                  origin_count=2),
+            _flow(FAFB, 'T2', BANC, 'B2', 1, 5,
+                  origin="cell_type · 'circadian_clock'",
+                  origin_dataset=FAFB, origin_column='cell_type',
+                  origin_value='circadian_clock', origin_label=
+                  "cell_type · 'circadian_clock'", origin_type='T2',
+                  origin_count=1),
         ],
     }
     graph, _meta = build_composed_mapping_graph(pair_flows)
@@ -90,12 +120,154 @@ def test_composed_pooled_label_node():
                if d['node_type'] == 'entry']
     assert len(entries) == 1
     entry = entries[0]
-    assert entry.startswith('E|')
+    assert entry == f"E|{FAFB}|cell_type · 'circadian_clock'"
     assert 'circadian_clock' in graph.nodes[entry]['label']
-    # fed by BOTH covered types, cover stat in the hover
-    preds = list(graph.predecessors(entry))
-    assert len(preds) == 2
-    assert 'covers 2 types' in graph.nodes[entry]['title']
+    assert graph.nodes[entry]['home_dataset'] == FAFB
+    assert graph.nodes[entry]['origin_column'] == 'cell_type'
+    # The query entry is attached to the two unique origin types, even though
+    # T1 fans out to multiple target types and two target datasets.
+    successors = list(graph.successors(entry))
+    assert {graph.nodes[n]['label'] for n in successors} == {'T1', 'T2'}
+    assert not list(graph.predecessors(entry))
+    assert all(n.startswith(f'0|{FAFB}|') for n in successors)
+    assert 'covers 2 types, 3 neurons' in graph.nodes[entry]['title']
+    assert not any(
+        d['node_type'] == 'entry' and n.split('|')[1] in {MCNS, BANC}
+        for n, d in graph.nodes(data=True))
+
+
+def _entry_flows(**overrides):
+    """Three circadian_clock flows: T1→M1/M2, T2→M1 with origin metadata."""
+    def _meta(origin_type, origin_count):
+        base = dict(
+            origin="cell_type · 'circadian_clock'",
+            origin_dataset=FAFB, origin_column='cell_type',
+            origin_value='circadian_clock',
+            origin_label="cell_type · 'circadian_clock'",
+            origin_type=origin_type, origin_count=origin_count)
+        base.update(overrides)
+        return base
+    return [
+        _flow(FAFB, 'T1', MCNS, 'M1', 2, 2, **_meta('T1', 2)),
+        _flow(FAFB, 'T1', MCNS, 'M2', 2, 3, **_meta('T1', 2)),
+        _flow(FAFB, 'T2', MCNS, 'M1', 1, 3, **_meta('T2', 1)),
+    ]
+
+
+def test_pair_network_query_entry_owns_origin_side():
+    """§14: the per-pair type-level network attaches a taxonomy query
+    entry to its ORIGIN dataset and the origin-side source types — the
+    same contract the composed graph already follows (§13)."""
+    from comparison.mapping_visualization import build_mapping_network_graph
+
+    graph = build_mapping_network_graph(_entry_flows())
+    entries = [n for n, d in graph.nodes(data=True)
+               if d['node_type'] == 'entry']
+    assert entries == [f"E|{FAFB}|cell_type · 'circadian_clock'"]
+    entry = entries[0]
+    assert graph.nodes[entry]['home_dataset'] == FAFB
+    assert graph.nodes[entry]['origin_column'] == 'cell_type'
+    assert graph.nodes[entry]['origin_value'] == 'circadian_clock'
+    # the entry touches only origin-side source types, in the entry →
+    # source direction (the entry is the query input)
+    successors = list(graph.successors(entry))
+    assert {graph.nodes[n]['label'] for n in successors} == {'T1', 'T2'}
+    assert all(n.startswith(f'0|{FAFB}|') for n in successors)
+    assert not list(graph.predecessors(entry))
+    # hover coverage counts UNIQUE origin types and source-side neurons,
+    # never the target-side received counts
+    assert 'covers 2 types, 3 neurons' in graph.nodes[entry]['title']
+    # no entry keyed under the target dataset
+    assert not any(
+        d['node_type'] == 'entry' and n.split('|')[1] == MCNS
+        for n, d in graph.nodes(data=True))
+    # the real pair-mapping edges survive unchanged (T1→M1, T1→M2, T2→M1)
+    pair_edges = {(u, v) for u, v in graph.edges()
+                  if not graph[u][v].get('entry_edge')}
+    assert pair_edges == {(f'0|{FAFB}|T1', f'1|{MCNS}|M1'),
+                          (f'0|{FAFB}|T1', f'1|{MCNS}|M2'),
+                          (f'0|{FAFB}|T2', f'1|{MCNS}|M1')}
+    assert any(graph[u][v]['bridge_texts'] for u, v in pair_edges)
+
+
+def test_pair_network_entry_falls_back_to_source_dataset():
+    """§14: a legacy flow with only the matched_origin display string keys
+    its entry under the flow's source (origin) dataset."""
+    from comparison.mapping_visualization import build_mapping_network_graph
+
+    graph = build_mapping_network_graph(
+        [_flow(FAFB, 'T1', MCNS, 'M1', 2, 2,
+               origin="cell_type · 'legacy_label'")])
+    entries = [n for n, d in graph.nodes(data=True)
+               if d['node_type'] == 'entry']
+    assert entries == [f"E|{FAFB}|cell_type · 'legacy_label'"]
+    assert all(n.startswith(f'0|{FAFB}|')
+               for n in graph.successors(entries[0]))
+
+
+def test_pair_network_entry_attaches_to_target_side_origin():
+    """Native-match flows (the viewer's expanded search, and the panel's
+    fallback chips) run searched → foreign with the matched column on the
+    FOREIGN side: the entry must attach there and count the foreign
+    population (user 2026-09-10: the viewer's circadian_clock artifact
+    was mis-owned by MCNS, hovering 'covers 40 types, 219 neurons' — the
+    received side)."""
+    from comparison.mapping_visualization import build_mapping_network_graph
+
+    def _native_flow(local, foreign_type, count, foreign_count):
+        return _flow(
+            MCNS, local, FAFB, foreign_type, count, foreign_count,
+            origin="cell_type · 'circadian_clock'",
+            origin_dataset=FAFB, origin_column='cell_type',
+            origin_value='circadian_clock',
+            origin_label="cell_type · 'circadian_clock'",
+            origin_type=foreign_type, origin_count=foreign_count)
+
+    graph = build_mapping_network_graph([
+        _native_flow('M1', 's-CPDN3A', 3, 38),
+        _native_flow('M2', 's-CPDN3C', 2, 32),
+        _native_flow('M1', 's-CPDN3D', 3, 37),
+    ])
+    entries = [n for n, d in graph.nodes(data=True)
+               if d['node_type'] == 'entry']
+    assert entries == [f"E|{FAFB}|cell_type · 'circadian_clock'"]
+    entry = entries[0]
+    assert graph.nodes[entry]['home_dataset'] == FAFB
+    successors = list(graph.successors(entry))
+    assert {graph.nodes[n]['label']
+            for n in successors} == {'s-CPDN3A', 's-CPDN3C', 's-CPDN3D'}
+    # the origin side is presented LEFT (layer 0), so dagre ranks
+    # query entry → FAFB types → searched MCNS types — the same natural
+    # flow as the panel's origin-seeded exports
+    assert all(n.startswith(f'0|{FAFB}|') for n in successors)
+    assert not list(graph.predecessors(entry))
+    # the hover counts the ORIGIN side's covered population (38+32+37),
+    # never the searched side's received neurons
+    assert 'covers 3 types, 107 neurons' in graph.nodes[entry]['title']
+    assert not any(
+        d['node_type'] == 'entry' and n.split('|')[1] == MCNS
+        for n, d in graph.nodes(data=True))
+    # the pair edges are drawn origin → counterpart (presentation
+    # direction); per-side counts stay on the edge attrs
+    pair_edges = {(u, v) for u, v in graph.edges()
+                  if not graph[u][v].get('entry_edge')}
+    assert pair_edges == {(f'0|{FAFB}|s-CPDN3A', f'1|{MCNS}|M1'),
+                          (f'0|{FAFB}|s-CPDN3C', f'1|{MCNS}|M2'),
+                          (f'0|{FAFB}|s-CPDN3D', f'1|{MCNS}|M1')}
+    for u, v in pair_edges:
+        data = graph[u][v]
+        assert data['source_dataset'] == MCNS
+        assert data['target_dataset'] == FAFB
+
+
+def test_pair_network_type_query_has_no_entry():
+    """A `type`-column query creates no entry node (§14 guard)."""
+    from comparison.mapping_visualization import build_mapping_network_graph
+
+    graph = build_mapping_network_graph(
+        [_flow(MCNS, 'SMP227', FAFB, 's-CPDN3B', 6, 25)])
+    assert not any(d['node_type'] == 'entry'
+                   for _, d in graph.nodes(data=True))
 
 
 def test_composed_cap_hides_same_name_first():
@@ -121,6 +293,7 @@ def test_composed_render_html():
     }
     html, meta = render_composed_mapping_html(pair_flows)
     assert html and 'cytoscape' in html.lower()
+    assert '<title>Mapping graph</title>' in html
     empty, meta2 = render_composed_mapping_html({})
     assert empty is None
 
@@ -479,10 +652,13 @@ def test_type_coverage_forward_1_to_n_and_totals():
     assert by_type['SLP249']['source_cov'] == 'not pooled'
 
 
-def test_type_coverage_reverse_makes_n_to_1_explicit():
+def test_type_coverage_reverse_fanout_label_and_unions():
     """User report (circadian_clock): three FAFB types map onto ONE
-    male-cns type — the reverse row must label it N-to-1 and carry both
-    sides' coverage (source-side union vs summed source counts)."""
+    male-cns type.  §12.1 user decision (2026-09-09): relationship cells
+    follow the ROW SUBJECT's fan-out, so the backward row reads 1-to-N
+    (read from the receiving type back to its sources) — never 1-to-1 —
+    and carries both sides' coverage (source-side union vs the receiving
+    type's own population)."""
     from comparison.mapping_visualization import build_type_coverage
 
     sources = [('A', 5, ['s1', 's2', 's3', 's4', 's5']),
@@ -502,15 +678,98 @@ def test_type_coverage_reverse_makes_n_to_1_explicit():
     row = reverse[0]
     assert (row['type'], row['dataset'], row['count']) == (
         'SMP227', MCNS, 4)
-    assert row['relationship'] == 'N-to-1'
+    assert row['relationship'] == '1-to-N'
     assert row['sources'] == 3
     assert row['mapped_from'] == 'FAFB: A, B, C'
     # source side: 14 pooled of 14 queried; target side: the union (4)
     # of the receiving type's 4 bodyIds
     assert row['source_cov'] == '14 of 14 (100.0%)'
     assert row['target_cov'] == '4 of 4 (100.0%)'
-    # N-to-1 rows sort first
-    assert reverse[0]['relationship'] == 'N-to-1'
+    # fan-out rows sort first
+    assert reverse[0]['relationship'] == '1-to-N'
+    # query-scoped rows carry no dataset-wide fields
+    assert row['coverage_scope'] == 'query'
+    assert 'incoming_source_count' not in row
+
+
+def test_type_coverage_reverse_dataset_wide_incoming_context():
+    """§12.3: a reverse context upgrades the backward row to the
+    dataset-wide incoming scope — the full incoming family in
+    mapped_from (active query marked), the relationship from the FULL
+    family, coverage cells re-measured with the incoming population
+    union as the source denominator, and the query-scoped slice
+    preserved on query_scope_* fields."""
+    from comparison.mapping_visualization import build_type_coverage
+
+    sources = [('A', 5, ['s1', 's2', 's3', 's4', 's5']),
+               ('B', 7, ['s6', 's7', 's8', 's9', 's10', 's11', 's12'])]
+    pair_flows = {(FAFB, MCNS): [
+        _flow(FAFB, name, MCNS, 'SMP227', count, 4)
+        for name, count, _ids in sources]}
+    pools = {
+        ('A', 'SMP227'): {
+            'source_body_ids': ['s1', 's2', 's3'],
+            'target_body_ids': ['t1', 't2'],
+        },
+    }
+    # the dataset-wide family adds source 'C' (not part of the query)
+    contexts = {(MCNS, 'SMP227'): {
+        'source_dataset': FAFB,
+        'target_dataset': MCNS,
+        'receiving_type': 'SMP227',
+        'receiving_count': 4,
+        'sources': [
+            {'type': 'A', 'count': 5, 'pooled': True,
+             'selected_source_pool_size': 3, 'selected_target_pool_size': 2,
+             'all_valid_source_pool_size': 3, 'all_valid_target_pool_size': 2},
+            {'type': 'B', 'count': 7, 'pooled': False,
+             'selected_source_pool_size': 0, 'selected_target_pool_size': 0,
+             'all_valid_source_pool_size': 0, 'all_valid_target_pool_size': 0},
+            {'type': 'C', 'count': 8, 'pooled': True,
+             'selected_source_pool_size': 2, 'selected_target_pool_size': 1,
+             'all_valid_source_pool_size': 4, 'all_valid_target_pool_size': 3},
+        ],
+        'incoming_source_count': 3,
+        'truncated': False,
+        'source_population_total': 20,
+        'pooled': True,
+        'selected_source_union_ids': ['s1', 's2', 's3', 'c1', 'c2'],
+        'all_valid_source_union_ids': ['s1', 's2', 's3', 'c1', 'c2',
+                                       'c3', 'c4'],
+        'selected_target_union_ids': ['t1', 't2', 't3'],
+        'all_valid_target_union_ids': ['t1', 't2', 't3', 't4'],
+        'source_overlap_selected_ids': [],
+        'source_overlap_all_valid_ids': [],
+        'target_overlap_selected_ids': [],
+        'target_overlap_all_valid_ids': [],
+        'selected_source_measured': True,
+        'selected_target_measured': True,
+        'all_valid_source_measured': True,
+        'all_valid_target_measured': True,
+    }}
+    row = build_type_coverage(
+        pair_flows, pools, reverse_contexts=contexts)['reverse'][0]
+    assert row['relationship'] == '1-to-N'
+    assert row['coverage_scope'] == 'dataset-wide incoming'
+    assert row['incoming_source_count'] == 3
+    assert row['active_query_sources'] == ['A', 'B']
+    assert row['truncated'] is False
+    # full incoming family listed (it lives on the SOURCE dataset side);
+    # the active query members marked
+    assert row['mapped_from'] == (
+        'FAFB: A, B, C — active query: A, B')
+    # source denominator is the incoming population union (5 + 7 + 8)
+    assert row['source_cov_selected'] == '5 of 20 (25.0%)'
+    assert row['source_cov'] == '7 of 20 (35.0%)'
+    # target side keeps the receiving population as the denominator
+    assert row['target_cov_selected'] == '3 of 4 (75.0%)'
+    assert row['target_cov'] == '4 of 4 (100.0%)'
+    # the query-scoped slice survives on the row
+    assert row['query_scope_relationship'] == '1-to-N'
+    assert row['query_scope_mapped_from'] == 'FAFB: A, B'
+    # query-scope denominator counts only the measured sources (A)
+    assert row['query_scope_source_cov_selected'] == '3 of 5 (60.0%)'
+    assert 'dataset-wide incoming: 3 source types' in row['coverage_note']
 
 
 def test_format_coverage_states():

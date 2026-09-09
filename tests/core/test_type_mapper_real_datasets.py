@@ -1083,6 +1083,10 @@ def test_panel_chip_modes_and_origin_seeded_flows():
     flows_b = origin_seeded_flows(FW, ['APDN3'], BANC)
     assert flows_m and flows_b
     assert all(f['source_dataset'] == FW for f in flows_m + flows_b)
+    assert all(f['origin_dataset'] == FW for f in flows_m + flows_b)
+    assert all(f['origin_column'] == 'type' for f in flows_m + flows_b)
+    assert all(f['origin_type'] == f['source_type']
+               for f in flows_m + flows_b)
     assert {'CL125', 'PLP080', 'SLP249', 'SLP250'} <= {
         f['foreign_type'] for f in flows_m}
     assert any(f['foreign_type'] == 'APDN3' and f['source_type'] == 'APDN3'
@@ -1093,6 +1097,14 @@ def test_panel_chip_modes_and_origin_seeded_flows():
                                  source_counts=counts)
     assert seeded and all(
         f['source_count'] == counts.get('APDN3', 0) for f in seeded)
+    label_seeded = origin_seeded_flows(
+        FW, ['APDN3'], MCNS,
+        matched_origins={
+            'APDN3': [{'column': 'cell_type',
+                       'value': 'circadian_clock'}]})
+    assert label_seeded and all(
+        (f['origin_dataset'], f['origin_column'], f['origin_value']) ==
+        (FW, 'cell_type', 'circadian_clock') for f in label_seeded)
 
     # mirror dedupe (type-pair granularity): the two directions of one
     # equivalence collapse to ONE flow — the origin-source direction
@@ -1122,6 +1134,159 @@ def test_panel_chip_modes_and_origin_seeded_flows():
     # single-direction pairs pass through unchanged
     kept = dedupe_mirrored_pairs({(MCNS, FW): flows_m}, [])
     assert set(kept) == {(MCNS, FW)}
+
+
+def test_pair_network_circadian_entry_owns_fafb():
+    """§14 real-index probe: the per-pair `Network (type-level)` export for
+    the FAFB taxonomy query `cell_type = circadian_clock` carries exactly
+    ONE FAFB-owned query entry attached to the FAFB source types, with the
+    origin-side population in its hover — never a target-owned entry."""
+    from comparison.mapping_visualization import (
+        build_mapping_network_graph,
+        origin_seeded_flows,
+    )
+    from ui.neuron_index import (
+        count_types_in_index,
+        resolve_type_matches,
+    )
+
+    res = resolve_type_matches(['circadian_clock'], 'exact', [MCNS, FW])
+    origins = res['origins']
+    assert set(origins) == {FW}
+    counts = count_types_in_index(load_cached_neuron_index(FW), origins[FW])
+    flows = origin_seeded_flows(
+        FW, origins[FW], MCNS, source_counts=counts,
+        matched_origins=res['origin_matches'].get(FW))
+    assert flows
+    graph = build_mapping_network_graph(flows)
+    entries = [n for n, d in graph.nodes(data=True)
+               if d['node_type'] == 'entry']
+    assert entries == [f"E|{FW}|cell_type · 'circadian_clock'"]
+    entry = entries[0]
+    successors = list(graph.successors(entry))
+    assert successors
+    assert all(n.startswith(f'0|{FW}|') for n in successors)
+    assert not list(graph.predecessors(entry))
+    assert 'covers 21 types, 242 neurons' in graph.nodes[entry]['title']
+    assert not any(
+        d['node_type'] == 'entry' and n.split('|')[1] == MCNS
+        for n, d in graph.nodes(data=True))
+    # the FAFB -> MCNS pair-mapping edges are untouched by the entry fix
+    pair_edges = [(u, v) for u, v in graph.edges()
+                  if not graph[u][v].get('entry_edge')]
+    assert pair_edges
+    assert all(u.startswith(f'0|{FW}|') and v.startswith(f'1|{MCNS}|')
+               for u, v in pair_edges)
+
+
+def test_reverse_context_smp227_incoming_families(mapper):
+    """§12.2/§12.3 real-index probe: the dataset-wide incoming context for
+    the s-CPDN3* receiving types lists the full incoming family (4/4/6
+    MCNS types including SMP227) and materializes the per-target
+    selected/all-valid unions that explain the 6 → 94 forward fan-out."""
+    from comparison.mapping_visualization import build_type_coverage
+    from ui.neuron_index import (
+        _load_coverage_index,
+        _load_cross_match_index,
+        build_reverse_type_contexts,
+    )
+
+    targets = ['s-CPDN3B', 's-CPDN3C', 's-CPDN3D']
+    indexes = {ds: _load_cross_match_index(ds) for ds in (MCNS, FW)}
+    contexts = build_reverse_type_contexts(
+        mapper, MCNS, FW, targets,
+        source_index=indexes[MCNS], target_index=indexes[FW],
+        coverage_indexes={ds: _load_coverage_index(ds)
+                          for ds in (MCNS, FW)})
+    expected_sources = {
+        's-CPDN3B': ['CB1011', 'CB3252', 'SMP226', 'SMP227'],
+        's-CPDN3C': ['SMP218', 'SMP220', 'SMP221', 'SMP227'],
+        's-CPDN3D': ['CB3508', 'SMP219', 'SMP222', 'SMP223', 'SMP227',
+                     'SMP232'],
+    }
+    expected = {
+        # (population union, selected union, all-valid union, receiving
+        #  population, selected target, all-valid target)
+        's-CPDN3B': (26, 22, 23, 25, 23, 25),
+        's-CPDN3C': (28, 19, 25, 32, 18, 24),
+        's-CPDN3D': (36, 25, 33, 37, 24, 30),
+    }
+    for target in targets:
+        ctx = contexts[target]
+        assert [s['type'] for s in ctx['sources']] == expected_sources[target]
+        assert 'SMP227' in [s['type'] for s in ctx['sources']]
+        assert ctx['truncated'] is False
+        pop, sel, all_valid, recv, sel_t, all_t = expected[target]
+        assert ctx['source_population_total'] == pop
+        assert len(ctx['selected_source_union_ids']) == sel
+        assert len(ctx['all_valid_source_union_ids']) == all_valid
+        assert ctx['receiving_count'] == recv
+        assert len(ctx['selected_target_union_ids']) == sel_t
+        assert len(ctx['all_valid_target_union_ids']) == all_t
+
+    # the merged backward row carries the dataset-wide scope
+    flows = []
+    pools = {}
+    for source in ('SMP227',):
+        chains = mapper.get_type_bridges(source, MCNS, FW, max_bridges=0)
+        by_end = {}
+        for chain in chains:
+            if chain and chain[-1].get('value'):
+                by_end.setdefault(chain[-1]['value'], []).append(chain)
+        for foreign, end_chains in by_end.items():
+            flows.append({
+                'source_dataset': MCNS, 'target_dataset': FW,
+                'source_type': source, 'foreign_type': foreign,
+                'source_count': 6, 'foreign_count': 0,
+                'matched_origin': f"type · '{source}'",
+                'bridges': end_chains[:2],
+            })
+    coverage = build_type_coverage(
+        {(MCNS, FW): flows}, pools,
+        reverse_contexts={(FW, r): contexts[r] for r in targets})
+    rows = {r['type']: r for r in coverage['reverse']}
+    for target in targets:
+        row = rows[target]
+        assert row['coverage_scope'] == 'dataset-wide incoming'
+        assert row['relationship'] == '1-to-N'
+        assert row['incoming_source_count'] == len(expected_sources[target])
+        assert 'SMP227' in row['active_query_sources']
+        assert 'active query: SMP227' in row['mapped_from']
+        for name in expected_sources[target]:
+            assert name in row['mapped_from']
+
+
+def test_mapper_snapshot_round_trip(mapper):
+    """§startup (2026-09-10): a fresh process restores the derived mapper
+    state from the snapshot instead of rebuilding (~1s vs ~7s), with
+    identical structures and answers; the snapshot version gate refuses
+    mismatched payloads."""
+    snap_path = mapper._mapper_snapshot_path()
+    assert snap_path is not None
+    # force a full rebuild once so the snapshot reflects the current
+    # datasets regardless of prior runs
+    assert mapper.load(force_reload=True) is True
+    assert snap_path.exists()
+    stamp = snap_path.stat().st_mtime_ns
+
+    fresh = CrossDatasetTypeMapper(verbose=False,
+                                   workspace_path=str(REPO_ROOT))
+    assert fresh.load() is True
+    # restore, not rebuild: the snapshot file was read, not rewritten
+    assert snap_path.stat().st_mtime_ns == stamp
+    assert fresh._loaded and fresh.last_load_error is None
+    assert len(fresh._conflicts) == len(mapper._conflicts)
+    assert fresh._type_mappings == mapper._type_mappings
+    assert (fresh.get_type_bridges('SMP227', MCNS, FW, max_bridges=0)
+            == mapper.get_type_bridges('SMP227', MCNS, FW, max_bridges=0))
+
+    # a version mismatch refuses the payload and leaves the mapper
+    # untouched for a full rebuild
+    refusing = CrossDatasetTypeMapper(verbose=False,
+                                      workspace_path=str(REPO_ROOT))
+    refusing.MAPPER_SNAPSHOT_VERSION = mapper.MAPPER_SNAPSHOT_VERSION + 1
+    assert refusing._restore_mapper_snapshot(snap_path) is False
+    assert not refusing._loaded
 
 
 def test_bridge_linker_text_warns_on_unverified_same_name():
@@ -1399,3 +1564,238 @@ def test_network_html_edge_label_font_size_control():
     assert 'function updateEdgeLabelFontSize' in html
     assert 'edgeLabelFontSize: globalEdgeLabelFontSize' in html
     assert "updateEdgeLabelFontSize(gs.edgeLabelFontSize)" in html
+
+
+# ---------------------------------------------------------------------------
+# Valid-mapper parity baseline (plan-valid-type-mapper-parity, Workstream A)
+# ---------------------------------------------------------------------------
+
+def test_resolver_rename_split_conflict_anchors():
+    """The shared resolver reproduces the panel's validity policy on the
+    three baseline anchors: unique rename, licensed split, and conflict."""
+    from comparison.type_resolver import (
+        STATUS_CONFLICT,
+        STATUS_VALID_SPLIT,
+        equivalence_key,
+        expansion_targets,
+        resolve_valid_targets,
+    )
+
+    mapper = get_type_mapper()
+    assert mapper._loaded
+
+    rename = resolve_valid_targets(mapper, 'MeVPLo2', MCNS, FW)
+    assert rename.status == 'mapped'
+    assert rename.target_types == ('MTe07',)
+    assert equivalence_key(rename) == 'MTe07'
+
+    split = resolve_valid_targets(mapper, 'VS', MCNS, FW)
+    assert split.status == STATUS_VALID_SPLIT
+    assert len(split.target_types) > 1
+    assert equivalence_key(split) is None
+    assert len(expansion_targets(split)) == len(split.target_types)
+
+    conflict = resolve_valid_targets(mapper, 'CB1011', BANC, MCNS)
+    assert conflict.status == STATUS_CONFLICT
+    assert conflict.target_types == ()
+    assert conflict.conflicts
+    assert expansion_targets(conflict) == ()
+
+
+def test_panel_and_resolver_parity():
+    """Panel backend (mapped_type_targets) and core resolver agree on the
+    anchors apart from UI-only fields."""
+    from comparison.type_resolver import resolve_valid_targets
+
+    mapper = get_type_mapper()
+    for foreign, foreign_ds, selected_ds in [
+            ('MeVPLo2', MCNS, FW), ('VS', MCNS, FW), ('CB1011', BANC, MCNS)]:
+        panel = mapped_type_targets(mapper, foreign, foreign_ds, selected_ds)
+        res = resolve_valid_targets(mapper, foreign, foreign_ds, selected_ds)
+        assert panel is not None
+        assert panel['kind'] == res.kind
+        assert panel['targets'] == list(res.target_types)
+        if res.status == 'mapped' and res.kind in ('renamed', 'same name'):
+            assert 'status' not in panel
+        else:
+            assert panel.get('status') == res.status
+
+
+def test_profile_expansion_follows_production_contract():
+    """expand_profile_types returns canonical_type -> numeric weight (the
+    production ``standardize_partner_types`` contract), maps the FAFB
+    rename to its canonical MCNS key, and counts the unmapped raw-name
+    fallback."""
+    from comparison.type_resolver import expand_profile_types
+
+    mapper = get_type_mapper()
+    expansion = expand_profile_types(
+        mapper, {'MTe07': 2.0, 'TotallyUnknownTypeZz': 1.0}, FW)
+    assert expansion.canonical.get('MeVPLo2') == 2.0
+    assert expansion.key_status.get('MeVPLo2') == 'mapped'
+    assert expansion.canonical.get('TotallyUnknownTypeZz') == 1.0
+    assert expansion.fallback_used is True
+    assert all(isinstance(w, float) for w in expansion.canonical.values())
+
+
+def test_split_expansion_distributes_weight_evenly():
+    """A valid split distributes its weight across every licensed target
+    (documented 'even' rule, no double counting)."""
+    from comparison.type_resolver import expand_profile_types
+
+    mapper = get_type_mapper()
+    expansion = expand_profile_types(
+        mapper, {'VS': 4.0}, MCNS, FW)
+    split_targets = [k for k in expansion.canonical if k.startswith('VS')]
+    assert len(split_targets) > 1
+    assert expansion.key_status[split_targets[0]] == 'valid_split_evidence'
+    assert sum(expansion.canonical[t] for t in split_targets) == pytest.approx(4.0)
+    assert expansion.split_policy == 'even'
+
+
+def test_compute_same_type_candidates_real_mapper():
+    """Regression (plan §2.3 defect 1): the real mapper's canonical->weight
+    contract must yield the renamed candidate.  The pre-fix helper unpacked
+    the standardized dict backwards and returned an empty set here."""
+    from comparison.profile_comparator import HomologFinder
+
+    mapper = get_type_mapper()
+    finder = HomologFinder.__new__(HomologFinder)
+    out = finder._compute_same_type_candidates(
+        ['MeVPLo2'], {101: 'MTe07', 102: 'Other'}, mapper, FW,
+        source_dataset=MCNS)
+    assert out == {101}
+
+
+def test_compute_same_type_candidates_conflict_fails_closed():
+    """A conflicted target type must not re-enter the candidate pool via
+    its raw same-name when auto mapping is active (plan §2.4 defect 3)."""
+    from comparison.profile_comparator import HomologFinder
+
+    mapper = get_type_mapper()
+    finder = HomologFinder.__new__(HomologFinder)
+    out = finder._compute_same_type_candidates(
+        ['CB1011'], {201: 'CB1011'}, mapper, BANC, source_dataset=MCNS)
+    assert out == set()
+
+
+def test_mapper_source_and_load_state_metadata():
+    """The default ACTIVE mapper is the v1.0 table (v0.9 stays auxiliary /
+    legacy data), and the metadata block records requested vs active
+    state, source, version, and a clean load error."""
+    from comparison.type_resolver import (
+        auto_mapping_metadata,
+        get_mapper_snapshot,
+    )
+
+    snapshot = get_mapper_snapshot(get_type_mapper())
+    meta = auto_mapping_metadata(snapshot)
+    assert meta['auto_type_mapping_requested'] is True
+    assert meta['auto_type_mapping_active'] is True
+    assert meta['auto_type_mapping_source'] == (
+        'male-cns_v1_0/male-cns_v1_0_allneurons_neuron_df.csv')
+    assert meta['auto_type_mapping_version_or_hash']
+    assert meta['auto_type_mapping_load_error'] is None
+    assert meta['mapping_policy_version']
+
+
+def test_failed_mapper_load_is_observable(tmp_path):
+    """A failed load is retryable and observable: ``last_load_error`` is
+    recorded, the snapshot reports inactive, and resolutions fail closed
+    with ``mapper_unavailable`` (plan Workstream E)."""
+    from comparison.type_resolver import (
+        STATUS_MAPPER_UNAVAILABLE,
+        get_mapper_snapshot,
+        resolve_valid_targets,
+    )
+
+    mapper = CrossDatasetTypeMapper(
+        neuron_df_path=str(tmp_path / 'missing.csv'), verbose=False)
+    assert mapper.load() is False
+    assert mapper.last_load_error
+
+    snapshot = get_mapper_snapshot(mapper)
+    assert snapshot.loaded is False
+    assert snapshot.load_error
+    res = resolve_valid_targets(
+        mapper, 'MeVPLo2', MCNS, FW, snapshot=snapshot)
+    assert res.status == STATUS_MAPPER_UNAVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# Canonical merge keys (plan-unify-mapper-backends, Workstream B)
+# ---------------------------------------------------------------------------
+
+def test_canonical_merge_key_branches():
+    """canonical_merge_key: licensed renames map to the canonical target,
+    same-namespace stays native, conflicts become dataset-scoped, and
+    unmapped types keep their raw name with a recorded fallback status."""
+    from comparison.type_resolver import canonical_merge_key
+
+    mapper = get_type_mapper()
+
+    # licensed rename (MCNS source is native; FAFB source maps)
+    assert canonical_merge_key(mapper, 'MeVPLo2', MCNS).key == 'MeVPLo2'
+    mapped = canonical_merge_key(mapper, 'MTe07', FW)
+    assert mapped.key == 'MeVPLo2' and mapped.status == 'mapped'
+
+    # conflict: dataset-scoped key, no raw same-name merging
+    conflict = canonical_merge_key(mapper, 'CB1011', BANC)
+    assert conflict.key == f'{BANC}:CB1011'
+    assert conflict.status == 'conflict'
+    # ...and the MCNS-side raw name keeps its own (distinct) key
+    assert canonical_merge_key(mapper, 'CB1011', MCNS).key == 'CB1011'
+
+    # unmapped long-tail fallback
+    fallback = canonical_merge_key(mapper, 'TotallyUnknownTypeZz', FW)
+    assert fallback.key == 'TotallyUnknownTypeZz'
+    assert fallback.status == 'unmapped'
+
+    # split parity: FAFB branches arrive per-branch as mapped; the MCNS
+    # split source itself stays native in the canonical namespace
+    assert canonical_merge_key(mapper, 'VS1', FW).key == 'VS'
+    native_split = canonical_merge_key(mapper, 'VS', MCNS)
+    assert native_split.key == 'VS'
+
+
+def test_canonical_merge_key_cache():
+    from comparison.type_resolver import canonical_merge_key
+
+    mapper = get_type_mapper()
+    cache = {}
+    first = canonical_merge_key(mapper, 'MTe07', FW, cache=cache)
+    second = canonical_merge_key(mapper, 'MTe07', FW, cache=cache)
+    assert first is second
+    assert list(cache.keys()) == [('flywire_FAFB_v783', 'MTe07',
+                                   'male-cns:v1.0')]
+
+
+def test_same_namespace_and_flow_status_policy():
+    """same_namespace + resolve_flow_status: the flow policy defined once —
+    conflict markers, bridge-end relabeling, and namespace guards."""
+    from comparison.type_resolver import (
+        same_namespace, resolve_flow_status, STATUS_BRIDGED,
+        STATUS_CONFLICT, STATUS_VALID_SPLIT,
+    )
+
+    mapper = get_type_mapper()
+    assert same_namespace(mapper, MCNS, MCNS) is True
+    assert same_namespace(mapper, MCNS, FW) is False
+
+    # conflict marker (caller skips the flow)
+    status, fields = resolve_flow_status(
+        mapper, 'CB1011', BANC, MCNS, bridge_end_count=3)
+    assert status == STATUS_CONFLICT and fields['conflicts']
+
+    # unmapped + single bridge end -> bridged; N ends -> valid split
+    status_one, _ = resolve_flow_status(
+        mapper, 'TotallyUnknownTypeZz', MCNS, FW, bridge_end_count=1)
+    assert status_one == STATUS_BRIDGED
+    status_n, _ = resolve_flow_status(
+        mapper, 'TotallyUnknownTypeZz', MCNS, FW, bridge_end_count=4)
+    assert status_n == STATUS_VALID_SPLIT
+
+    # mapped passthrough with scoped decision fields
+    status_m, fields_m = resolve_flow_status(mapper, 'MeVPLo2', MCNS, FW)
+    assert status_m == 'mapped'
+    assert fields_m['target_types'] == ['MTe07']

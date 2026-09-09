@@ -31,17 +31,34 @@ COMPOSED_NODE_CAP = 80
 # (user 2026-09-07).
 _WRAP = "white-space: normal; overflow-wrap: anywhere;"
 
+# §12.5: the four trailing coverage columns carry short visible labels;
+# the full dataset key and the selected/all-valid scope explanation ride
+# on each column's `tooltip` key, rendered by this header-cell slot.
+_HEADER_TOOLTIP_SLOT = (
+    '<q-th :props="props">'
+    '<q-tooltip v-if="props.col.tooltip" anchor="top middle" '
+    'self="bottom middle" max-width="26rem" '
+    'style="white-space: normal">{{ props.col.tooltip }}'
+    '</q-tooltip>'
+    '{{ props.col.label }}'
+    '</q-th>'
+)
+
 
 def _col(name: str, label: str, field: str, *,
-         max_w=None, min_w=None) -> Dict[str, Any]:
-    """A QTable column def with wrapping and an optional width cap."""
+         max_w=None, min_w=None, tooltip=None) -> Dict[str, Any]:
+    """A QTable column def with wrapping, an optional width cap, and an
+    optional header tooltip (rendered by ``_HEADER_TOOLTIP_SLOT``)."""
     bounds = ((f"max-width: {max_w}px;" if max_w else "")
               + (f"min-width: {min_w}px;" if min_w else ""))
-    return {
+    column = {
         "name": name, "label": label, "field": field, "align": "left",
         "headerStyle": _WRAP + bounds,
         "style": _WRAP + bounds,
     }
+    if tooltip:
+        column["tooltip"] = tooltip
+    return column
 
 
 def _pool_mapping_pair(flows, src, tgt, indexes, pools) -> None:
@@ -211,6 +228,30 @@ def _compute_type_mapping(queries, datasets, mode) -> Dict[str, Any]:
     # One canonical entry per unordered pair (§12 mirror dedupe).
     pair_flows = dedupe_mirrored_pairs(pair_flows, origins.keys())
 
+    # §12.3: dataset-wide incoming context for the backward coverage
+    # table — only for receiving types already present in the result,
+    # bounded, and cached per pair.  Explanatory evidence only; it never
+    # changes the mapper's accepted flows or the forward rows.
+    reverse_contexts: Dict[tuple, Dict[str, Dict[str, Any]]] = {}
+    if mapper is not None and getattr(mapper, "_loaded", False):
+        from ..neuron_index import build_reverse_type_contexts
+        for (src, tgt), flows in pair_flows.items():
+            receiving = sorted({f.get("foreign_type", "") for f in flows
+                                if f.get("foreign_type")})
+            if not receiving:
+                continue
+            try:
+                reverse_contexts[(src, tgt)] = build_reverse_type_contexts(
+                    mapper, src, tgt, receiving,
+                    source_index=indexes.get(src),
+                    target_index=indexes.get(tgt),
+                    coverage_indexes=_coverage_indexes_for(src, tgt),
+                    warm_pools=pools)
+            except Exception:
+                logger.warning(
+                    "reverse coverage context failed for %s → %s",
+                    src, tgt, exc_info=True)
+
     # W3 orphans: queried/expanded types with NO mapped counterpart in a
     # specific target dataset stay visible.
     orphans: Dict[tuple, List[Dict[str, Any]]] = {}
@@ -290,7 +331,8 @@ def _compute_type_mapping(queries, datasets, mode) -> Dict[str, Any]:
     meta["notes"] = notes + list(meta.get("notes", []))
     return {"pair_flows": pair_flows, "pools": pools, "meta": meta,
             "composed": html, "datasets": datasets,
-            "summary": summary, "orphans": orphans}
+            "summary": summary, "orphans": orphans,
+            "reverse_contexts": reverse_contexts}
 
 
 def create_type_mapping_entry(get_datasets: Callable[[], list]):
@@ -305,7 +347,8 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
 
     state: Dict[str, Any] = {"pair_flows": {}, "pools": {}, "meta": {},
                              "composed": None, "datasets": [],
-                             "summary": [], "orphans": {}}
+                             "summary": [], "orphans": {},
+                             "reverse_contexts": {}}
 
     def _ready() -> bool:
         datasets = list(get_datasets() or [])
@@ -556,49 +599,73 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                       on_click=lambda: _deliver_pair_csv(
                           src, tgt, flows, pools, stamp))
 
-    def _coverage_panel(src: str, tgt: str, flows, pools: dict) -> None:
+    def _coverage_panel(src: str, tgt: str, flows, pools: dict,
+                        contexts: dict) -> None:
         """Bidirectional type-level coverage for ONE dataset pair.
 
         Rendered at the results' top level (user 2026-09-07: outside
         the dataset-pair card again, with the pair named in the title):
         forward = each queried type's total mapped number (1-to-N
-        visible), backward = each receiving type and the sources
-        converging on it (N-to-1 visible).  Both tables name their
-        coverage columns by DATASET (user 2026-09-09: 'source/target
-        side' read as flipped in the backward view).
+        visible), backward = each receiving type and the sources that
+        map onto it, read from the receiving type back to its sources
+        (§12.1 user decision: several sources read `1-to-N`, never
+        `1-to-1`).  Rows with a dataset-wide incoming context (§12.3)
+        list the FULL incoming family with the active query marked, so
+        the table explains why one queried type's few neurons fan out to
+        a large target population.  Coverage columns carry short
+        `CODE · selected` / `CODE · all valid` labels with the full
+        dataset key and scope explanation on the header tooltip (§12.5).
         """
+        from utils.naming_utils import dataset_abbrev
         from comparison.mapping_visualization import (
             build_type_coverage,
             mapping_pool_key,
         )
 
+        src_code = dataset_abbrev(src) or src
+        tgt_code = dataset_abbrev(tgt) or tgt
+
+        # §12.4 scope wording — shared by the four header tooltips
+        _SELECTED_TIP = ("First supported bridge chain after deterministic "
+                         "evidence ordering; the primary chain behind edge "
+                         "weights and hovers. Not a biological adjudication.")
+        _ALL_VALID_TIP = ("Deduplicated union of bodyIds from every "
+                          "independently supported candidate bridge kept "
+                          "within the alternative budget; completeness of "
+                          "supported evidence, branches are not mutually "
+                          "exclusive.")
+
         # Coverage columns are named by the FULL dataset key (user
         # 2026-09-09): 'source/target side' read as flipped in the
         # backward view, and abbreviations collide for the two BANC
-        # releases (both "BANC").
+        # releases (both "BANC") — the full key lives on the tooltip.
         pair_pools = {}
         for flow in flows:
             key = mapping_pool_key(
                 src, tgt, flow.get("source_type"), flow.get("foreign_type"))
             if key in pools:
                 pair_pools[key] = pools[key]
-        coverage = build_type_coverage({(src, tgt): flows}, pair_pools)
+        coverage = build_type_coverage(
+            {(src, tgt): flows}, pair_pools,
+            reverse_contexts={(tgt, str(name)): ctx
+                              for name, ctx in (contexts or {}).items()})
         forward = coverage.get("forward") or []
         backward = coverage.get("reverse") or []
         if not (forward or backward):
             return
         with ui.expansion(
                 f"Type coverage — {src} → {tgt} "
-                f"(bidirectional, 1-to-N / N-to-1)",
+                f"(bidirectional, 1-to-N fan-out)",
                 icon="swap_vert").classes("w-full"):
             ui.label(
                 "Forward — each queried type: its neurons, the "
                 "targets it maps to, and how many of its bodyIds "
-                "carry the type-level evidence. Coverage shows both the "
-                "selected bridge and the union of all independently valid "
-                "bridge alternatives (pool of total, with the "
-                "share in parentheses; a 1-to-N row's target total is the "
-                "summed population of all mapped target types).  States: "
+                "carry the type-level evidence. Coverage columns: "
+                "selected = primary bridge chain; all-valid = union of "
+                "every independently supported alternative (pool of "
+                "total, with the share in parentheses; a 1-to-N row's "
+                "target total is the summed population of all mapped "
+                "target types).  States: "
                 "'not pooled' = no coverage pool at all, 'not measured' = "
                 "the side's coverage index is unavailable, '0 of n "
                 "(0.0%)' = measured zero.  No bodyId-to-bodyId pairing "
@@ -609,35 +676,48 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                     _col("type", "Queried type", "type", max_w=170),
                     _col("dataset", "Dataset", "dataset", max_w=180),
                     _col("count", "Neurons", "count", min_w=90),
-                    _col("maps_to", "Maps to", "maps_to", max_w=440),
+                    _col("maps_to", "Maps to", "maps_to", max_w=480),
                     _col("relationship", "Relationship",
                          "relationship", min_w=110),
                     _col("coverage_note", "Coverage interpretation",
-                         "coverage_note", max_w=330),
-                    _col("query_cov_selected",
-                         f"{src} side (bodyIds) — selected bridge",
-                         "query_cov_selected", min_w=190),
-                    _col("query_cov",
-                         f"{src} side (bodyIds) — all-valid union",
-                         "query_cov", min_w=205),
-                    _col("target_cov_selected",
-                         f"{tgt} side (bodyIds) — selected bridge",
-                         "target_cov_selected", min_w=190),
-                    _col("target_cov",
-                         f"{tgt} side (bodyIds) — all-valid union",
-                         "target_cov", min_w=205),
+                         "coverage_note", max_w=480),
+                    _col("query_cov_selected", f"{src_code} · selected",
+                         "query_cov_selected", min_w=135,
+                         tooltip=f"{src} side (bodyIds) — selected "
+                                 f"bridge. {_SELECTED_TIP}"),
+                    _col("query_cov", f"{src_code} · all valid",
+                         "query_cov", min_w=145,
+                         tooltip=f"{src} side (bodyIds) — all-valid "
+                                 f"union. {_ALL_VALID_TIP}"),
+                    _col("target_cov_selected", f"{tgt_code} · selected",
+                         "target_cov_selected", min_w=135,
+                         tooltip=f"{tgt} side (bodyIds) — selected "
+                                 f"bridge. {_SELECTED_TIP}"),
+                    _col("target_cov", f"{tgt_code} · all valid",
+                         "target_cov", min_w=145,
+                         tooltip=f"{tgt} side (bodyIds) — all-valid "
+                                 f"union. {_ALL_VALID_TIP}"),
                 ],
                 rows=forward,
-            ).classes("w-full")
+            ).classes("w-full").add_slot("header-cell",
+                                         _HEADER_TOOLTIP_SLOT)
             ui.label(
-                "Backward — each receiving type and the sources that "
-                "map onto it: several sources make the N-to-1 "
-                "explicit.  Same datasets as above — the coverage "
-                "columns show selected-bridge and all-valid-union scopes "
-                "by dataset (pool of total, percent "
-                "in parentheses), with no bodyId pairing inferred; the "
-                "same three states apply.  Split branches and overlapping "
-                "bodyId evidence are non-exclusive."
+                "Backward — each receiving type and the sources that map "
+                "onto it, read from the receiving type back to its source "
+                "types: several sources make the fan-out 1-to-N.  Rows "
+                "marked 'dataset-wide incoming' list every source type in "
+                "the source dataset that maps onto the receiving type "
+                "(the active query marked) — the context that explains why "
+                "one queried type's few neurons fan out to a large target "
+                "population; it is explanatory evidence, not a canonical "
+                "acceptance of every incoming source.  Coverage columns: "
+                "selected = primary bridge chain; all-valid = union of "
+                "every independently supported alternative (pool of "
+                "total, percent in parentheses; a dataset-wide row's "
+                "source denominator is the union population of ALL "
+                "incoming source types).  The same three states apply, no "
+                "bodyId pairing is inferred, and split branches plus "
+                "overlapping bodyId evidence are non-exclusive."
             ).classes("text-caption drocat-muted")
             ui.table(
                 columns=[
@@ -645,26 +725,31 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
                     _col("dataset", "Dataset", "dataset", max_w=180),
                     _col("count", "Neurons", "count", min_w=90),
                     _col("mapped_from", "Mapped from", "mapped_from",
-                         max_w=440),
+                         max_w=480),
                     _col("relationship", "Relationship",
                          "relationship", min_w=110),
                     _col("coverage_note", "Coverage interpretation",
-                         "coverage_note", max_w=330),
-                    _col("source_cov_selected",
-                         f"{src} side (bodyIds) — selected bridge",
-                         "source_cov_selected", min_w=190),
-                    _col("source_cov",
-                         f"{src} side (bodyIds) — all-valid union",
-                         "source_cov", min_w=205),
-                    _col("target_cov_selected",
-                         f"{tgt} side (bodyIds) — selected bridge",
-                         "target_cov_selected", min_w=190),
-                    _col("target_cov",
-                         f"{tgt} side (bodyIds) — all-valid union",
-                         "target_cov", min_w=205),
+                         "coverage_note", max_w=480),
+                    _col("source_cov_selected", f"{src_code} · selected",
+                         "source_cov_selected", min_w=135,
+                         tooltip=f"{src} side (bodyIds) — selected "
+                                 f"bridge. {_SELECTED_TIP}"),
+                    _col("source_cov", f"{src_code} · all valid",
+                         "source_cov", min_w=145,
+                         tooltip=f"{src} side (bodyIds) — all-valid "
+                                 f"union. {_ALL_VALID_TIP}"),
+                    _col("target_cov_selected", f"{tgt_code} · selected",
+                         "target_cov_selected", min_w=135,
+                         tooltip=f"{tgt} side (bodyIds) — selected "
+                                 f"bridge. {_SELECTED_TIP}"),
+                    _col("target_cov", f"{tgt_code} · all valid",
+                         "target_cov", min_w=145,
+                         tooltip=f"{tgt} side (bodyIds) — all-valid "
+                                 f"union. {_ALL_VALID_TIP}"),
                 ],
                 rows=backward,
-            ).classes("w-full")
+            ).classes("w-full").add_slot("header-cell",
+                                         _HEADER_TOOLTIP_SLOT)
 
     def _render_results() -> None:
         results.clear()
@@ -675,14 +760,14 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
             if composed:
                 with ui.row().classes("items-center gap-2 flex-wrap"):
                     stamp = time.strftime("%Y%m%d_%H%M%S")
-                    ui.button("Composed view (HTML)", icon="account_tree",
+                    ui.button("Mapping graph (HTML)", icon="account_tree",
                               on_click=lambda: _deliver(
                                   composed,
-                                  f"mapping_composed_{stamp}.html"))
+                                  f"mapping_graph_{stamp}.html"))
                     ui.button("Export mapping — all pairs (CSV)",
                               on_click=lambda: _deliver_combined_csv(stamp))
             else:
-                ui.label("No composed graph (nothing mapped across the "
+                ui.label("No mapping graph (nothing mapped across the "
                          "selected datasets).").classes(
                     "text-caption drocat-muted")
             for note in state["meta"].get("notes", []):
@@ -732,7 +817,10 @@ def create_type_mapping_entry(get_datasets: Callable[[], list]):
             for (src, tgt), flows in sorted(
                     pair_flows.items(),
                     key=lambda kv: (-len(kv[1]), kv[0])):
-                _coverage_panel(src, tgt, flows, pools)
+                _coverage_panel(
+                    src, tgt, flows, pools,
+                    (state.get("reverse_contexts") or {}).get((src, tgt))
+                    or {})
                 with ui.expansion(
                         f"{src} → {tgt} · {len(flows)} mapped pairs",
                         icon="compare_arrows").classes("w-full"):

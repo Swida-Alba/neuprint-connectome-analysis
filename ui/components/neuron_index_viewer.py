@@ -1560,11 +1560,15 @@ def _render_index(
                 ui.notify("No matched entries to export.", type="info")
                 return
             stamp = time.strftime("%Y%m%d_%H%M%S")
-            ui.download.content(
-                csv_text,
-                f"matched_entries_{dataset.replace(':', '_')}_{stamp}.csv",
-                "text/csv",
-            )
+            name = (
+                f"matched_entries_{dataset.replace(':', '_')}_{stamp}.csv")
+            ui.download.content(csv_text, name, "text/csv")
+            # Same persistent orange banner as every other download
+            # artifact (user 2026-09-10: unified, collapsible notices)
+            push_banner(
+                f"Matched entries exported as {name} — check your "
+                "browser's default downloads folder. Informational "
+                "only, please double check.")
 
         # Broad queries must not freeze the server building a giant CSV.
         EXPORT_ROWS_CAP = 100_000
@@ -1626,11 +1630,14 @@ def _render_index(
             else:
                 writer.writerows(result.rows)
             stamp = time.strftime("%Y%m%d_%H%M%S")
-            ui.download.content(
-                buffer.getvalue(),
-                f"{dataset.replace(':', '_')}_matched_rows_{stamp}.csv",
-                "text/csv",
-            )
+            name = f"{dataset.replace(':', '_')}_matched_rows_{stamp}.csv"
+            ui.download.content(buffer.getvalue(), name, "text/csv")
+            # Same persistent orange banner as every other download
+            # artifact (user 2026-09-10: unified, collapsible notices)
+            push_banner(
+                f"Matched rows exported as {name} — check your "
+                "browser's default downloads folder. Informational "
+                "only, please double check.")
 
         def _search_local_alias(name: str) -> None:
             """Refill the local search with an alias found in this dataset."""
@@ -2109,6 +2116,21 @@ def _render_index(
                     alias_scan["cache"]["key"] = cache_key
                     alias_scan["cache"]["matches"] = matches
                     _apply(matches)
+                    if not is_type_mapper_loaded():
+                        # §efficiency (user 2026-09-10): the isolated
+                        # worker keeps its own mapper copy; without this
+                        # warm the FIRST mapping-artifact download paid a
+                        # synchronous ~7s mapper load inside the click
+                        # handler.  Warm the UI-process copy off the
+                        # event loop; the mapper's load lock makes a
+                        # racing click safe.
+                        async def _warm_ui_mapper() -> None:
+                            from comparison.cross_dataset_type_mapper \
+                                import get_type_mapper
+
+                            await run.io_bound(get_type_mapper().load)
+
+                        asyncio.ensure_future(_warm_ui_mapper())
 
             if zero_hit:
                 if is_type_mapper_loaded():
@@ -2223,6 +2245,12 @@ def _render_index(
             if was_active:
                 return _dispatch_refresh(reset_page=True)
 
+        # §efficiency (user 2026-09-10): the four artifact buttons of one
+        # block used to rebuild flows + pools on EVERY click.  Cache per
+        # entry for the panel's lifetime; holding the entry in the value
+        # keeps `id(entry)` keys unique while the panel is alive.
+        _artifact_source_cache: Dict[int, tuple] = {}
+
         def _mapping_flows_and_pools(entry) -> tuple:
             """Flows + per-bridge bodyId pools for one foreign block.
 
@@ -2230,6 +2258,9 @@ def _render_index(
             linkers → pooled bodyIds per (source type, foreign type))
             feed the sankey ribbons and the linker-path graph.
             """
+            cached = _artifact_source_cache.get(id(entry))
+            if cached is not None and cached[0] is entry:
+                return cached[1], cached[2]
             from comparison.mapping_visualization import build_mapping_flows
 
             source_counts = count_types_in_index(
@@ -2237,6 +2268,7 @@ def _render_index(
             flows = build_mapping_flows(
                 [entry], dataset, source_counts=source_counts)
             if not flows:
+                _artifact_source_cache[id(entry)] = (entry, [], {})
                 return [], {}
             pools: Dict[tuple, Dict[str, Any]] = {}
             foreign_index = None
@@ -2268,6 +2300,7 @@ def _render_index(
                 if pool.get("resolution_status") != "supported":
                     continue
                 pools[(flow["source_type"], flow["foreign_type"])] = pool
+            _artifact_source_cache[id(entry)] = (entry, flows, pools)
             return flows, pools
 
         def _render_mapping_artifact(kind: str, variant: str,

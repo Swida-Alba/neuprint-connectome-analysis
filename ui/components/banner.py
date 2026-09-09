@@ -103,9 +103,11 @@ _STACKS: Dict[str, BannerStack] = {}
 
 def create_banner_stack() -> None:
     """Create the current client's banner stack (once per page build)."""
+    client = context.client
+    if client.id in _STACKS:
+        return
     stack = BannerStack()
     stack.build()
-    client = context.client
     _STACKS[client.id] = stack
     client.on_disconnect(lambda _c: _STACKS.pop(_c.id, None))
 
@@ -113,13 +115,32 @@ def create_banner_stack() -> None:
 def push_banner(message: str, *, icon: str = "download_done") -> None:
     """Push a persistent banner onto the current client's stack.
 
+    The stack is created on the page build, but its registration dies
+    with the client's first websocket disconnect — and a socket drop
+    that reconnects within NiceGUI's window keeps the SAME client (and
+    its DOM) alive without re-running the page builder.  Every download
+    after such a drop then fell back to a bare ``ui.notify`` and the old
+    pile of un-themed notifications returned.  So when the client
+    context is alive but has no stack anymore, rebuild it lazily: the
+    stack container is ``position: fixed``, so attaching it under the
+    client layout mid-session renders exactly like the page-build one.
     Falls back to a plain persistent ``ui.notify`` with an ``×`` close
-    button when no stack was created for this client (other pages, bare
-    test clients, background contexts).
+    button only when there is no live client context at all (background
+    threads, bare test clients).
     """
     try:
-        stack = _STACKS.get(context.client.id)
+        client = context.client
+        stack = _STACKS.get(client.id)
+        if stack is None:
+            with client.layout:
+                create_banner_stack()
+            stack = _STACKS.get(client.id)
     except RuntimeError:
+        stack = None
+    except Exception:
+        # A pruned/reconnecting client cannot accept new elements; the
+        # fallback still tells the user where the download went.
+        logger.debug("lazy banner stack rebuild failed", exc_info=True)
         stack = None
     if stack is not None:
         stack.push(message, icon=icon)

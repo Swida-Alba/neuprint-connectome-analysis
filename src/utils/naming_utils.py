@@ -19,6 +19,7 @@ Examples:
 
 from collections import Counter
 import re
+from functools import lru_cache
 
 
 DATASET_ABBREVIATIONS = {
@@ -78,6 +79,7 @@ def canonical_dataset_name(dataset) -> str:
     return text
 
 
+@lru_cache(maxsize=1024)
 def dataset_version(dataset) -> str | None:
     """Return a normalized version token from a dataset identifier.
 
@@ -88,6 +90,10 @@ def dataset_version(dataset) -> str | None:
 
     Dataset versions are intentionally extracted from the original identifier;
     callers can therefore distinguish releases that share a family abbreviation.
+
+    Memoized: the type mapper calls this per dataset-name lookup, and one
+    expanded search touched it ~1M times for ~a dozen unique names
+    (2026-09-10 profile).
     """
     if not dataset:
         return None

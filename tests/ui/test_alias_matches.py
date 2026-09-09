@@ -488,24 +488,34 @@ def test_mapping_visualizations_from_circadian_flows():
         # bridge derivation never appears on node hover titles
         assert '[' not in str(data.get('title', ''))
 
-    # the CL125 -> APDN3 mapping is a direct type-level edge whose weight
-    # is the SOURCE type's own neuron count (correct neuron number)
-    cl125_apdn3 = ('0|male-cns:v1.0|CL125', '1|flywire_FAFB_v783|APDN3')
+    # the CL125 -> APDN3 mapping is a direct type-level edge; the
+    # origin-side presentation draws it APDN3 (FAFB, layer 0) → CL125
+    # (MCNS, layer 1), and its weight stays the SOURCE (CL125) type's
+    # own neuron count, carried on source_count (correct neuron number)
+    cl125_apdn3 = ('0|flywire_FAFB_v783|APDN3', '1|male-cns:v1.0|CL125')
     assert graph.has_edge(*cl125_apdn3)
     edge = graph.edges[cl125_apdn3]
     local = count_type_in_index(index, 'CL125')
     assert local and edge['weight'] == local == edge['source_count']
     assert edge['foreign_count'] > 0
-    # the query entry sits at the rightmost layer; every edge into an
-    # entry comes from a foreign type and carries the foreign count
+    # §14 + origin-side fix: the query entry is owned by the dataset
+    # where the matched column lives — the FOREIGN dataset for these
+    # native-match flows — and the origin side is presented LEFT
+    # (layer 0), so the rendered flow reads entry → origin types →
+    # searched types exactly like the panel's exports
     entry_nodes = [n for n, d in graph.nodes(data=True)
                    if d['node_type'] == 'entry']
     assert entry_nodes
     for entry_node in entry_nodes:
-        assert int(str(entry_node).split('|', 1)[0]) == 2
-        for src, _tgt, data in graph.in_edges(entry_node, data=True):
-            assert src.startswith('1|')
+        origin_ds = str(entry_node).split('|')[1]
+        assert origin_ds in {'flywire_FAFB_v783', 'banc_v888', 'banc_v626'}
+        assert not list(graph.in_edges(entry_node))
+        for _src, tgt, data in graph.out_edges(entry_node, data=True):
+            assert tgt.startswith(f'0|{origin_ds}|')
+            assert data.get('entry_edge') is True
             assert data['weight'] > 0
+    assert not any(str(n).startswith(f'E|{MCNS}|')
+                   for n in entry_nodes)
     # bridge derivation lives exclusively on the pair edges (the few
     # name-similarity-only pairs are the honest exception)
     pair_edges = [(s, t, d) for s, t, d in graph.edges(data=True)
@@ -517,7 +527,8 @@ def test_mapping_visualizations_from_circadian_flows():
     # tokens are no longer derivable (derivation noise).
     assert len(with_text) >= len(pair_edges) - 9
     assert all(not d['bridge_texts']
-               for s, t, d in graph.edges(data=True) if t.startswith('2|'))
+               for s, t, d in graph.edges(data=True)
+               if s.startswith('E|') or t.startswith('E|'))
 
     # bridge text renders the full chain with type-identity endpoints,
     # names glued to their 4-char source, and the annotation hop carrying

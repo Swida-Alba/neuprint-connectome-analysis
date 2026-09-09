@@ -310,6 +310,67 @@ both surfaces report identical target sets and unique neuron counts
 (e.g. `circadian_clock`: 21 FAFB types / 242 neurons → 40 male-cns
 targets / 219 unique neurons on both).
 
+The Type Mapping panel's **Mapping graph (HTML)** preserves that provenance:
+when a query resolves through a taxonomy column such as FAFB `cell_type`, the
+query entry is owned by FAFB and connects only to its covered FAFB source
+types. It is not duplicated as an entry node in each target dataset; target
+summary counts remain separate from the query-entry population. The per-pair
+**Network (type-level)** downloads follow the same rule: a taxonomy query
+entry is keyed and drawn on the dataset where the query resolved, attached
+only to that side's source types, and its hover counts the origin-side
+population (unique source types and their neurons) — never the target-side
+received neurons.
+
+#### Bidirectional type coverage (the panel's tables)
+
+The panel's per-pair **Type coverage** expansion shows two tables over the
+same mapped pairs. Relationship cells follow the row subject's fan-out: a
+forward row (queried type → several targets) and a backward row (receiving
+type ← several sources) both read **1-to-N** — read the backward rows from
+the receiving type back to its sources; a multi-source row never reads
+`1-to-1`.
+
+Backward rows marked **dataset-wide incoming** list every source type in
+the source dataset that maps onto the receiving type (the active query
+members marked in `Mapped from`), with the incoming family's selected- and
+all-valid-union coverage — the context that explains why one queried type's
+few neurons fan out to a large target population (e.g. MCNS `SMP227`: 6
+neurons → 94 FAFB neurons across `s-CPDN3B/C/D`, whose incoming families
+are 4/4/6 MCNS types). This context is explanatory evidence only; it never
+changes which mappings the run accepts.
+
+The four coverage columns carry short `CODE · selected` / `CODE · all
+valid` labels; hover a header for the full dataset key and the scope
+explanation: **selected** = the first supported bridge chain after
+deterministic evidence ordering (the primary chain behind edge weights and
+hovers, not a biological adjudication); **all-valid union** = the
+deduplicated union of bodyIds from every independently supported candidate
+bridge (completeness of supported evidence; branches are not mutually
+exclusive). Neither column is a bodyId-to-bodyId correspondence.
+
+## The two label lanes (explicit vs automatic)
+
+DROCAT standardizes neuron type names through TWO independent lanes. They
+never mix implicitly, and the explicit lane always wins:
+
+1. **Explicit LabelMapper lane** — a user-provided `LabelMapper` (UI presets,
+   custom mapping files) is applied at connection-extraction time: the
+   connection builder writes `std_label_pre`/`std_label_post` and overwrites
+   the raw `type` columns BEFORE results are cached (`LabelMapper.
+   apply_to_dataframe`). Runs with an explicit mapper are compared under
+   those labels; auto mapping does not second-guess them.
+2. **Automatic mapper lane** — when no explicit mapper governs the run,
+   `CrossDatasetTypeMapper` (male-cns v1.0 tables) resolves names through the
+   shared validity resolver (`comparison/type_resolver.py`) at
+   comparison/merge time: homolog candidates, path/edge canonical merge keys,
+   profile expansion, query mapping, reports.
+
+Shared conventions across both lanes: `label_utils.is_untyped_type_label`
+is THE untyped-neuron predicate (pathfinding and comparison must agree on
+what counts as untyped), and the auto lane's conflict/split/fallback policy
+is the one documented in this guide (fail closed on conflicts; raw long-tail
+fallback is counted, never silent).
+
 ### 3. User Warnings and Double-Check Recommendation
 
 Auto type mapping is applied automatically, so runs surface what it changed
@@ -607,13 +668,30 @@ source_type)` for a direction-scoped conflict, and
 ### "Type mapper not loaded" warning
 
 This means the neuron_df file wasn't found. Check:
-1. File exists at `datasets/male-cns_v0_9/male-cns_v0_9_allneurons_neuron_df.csv`
+1. File exists at `datasets/male-cns_v1_0/male-cns_v1_0_allneurons_neuron_df.csv`
+   (the active default mapping source is male-cns **v1.0**; the retained
+   `datasets/male-cns_v0_9/` table is auxiliary/legacy compatibility data,
+   not the active source)
 2. The workspace path is correctly configured
+
+A failed load is observable and retryable: the mapper records the reason
+on `last_load_error` (also reported by
+`comparison.cross_dataset_type_mapper.get_type_mapper_state()`), and any
+subsequent mapper call retries the load. Profile-comparison results carry
+an `auto_type_mapping_*` metadata block in `parameters.json` (requested
+vs active, source, version, load error, per-status resolution counts,
+raw fallback flag) so a run that fell back to raw names can never be
+mistaken for a valid-mapper run.
 
 ### Type not found in mapping
 
 If a type has no cross-dataset mapping:
-- The original type name is preserved (identity mapping)
+- The original type name is preserved (identity mapping); this long-tail
+  fallback is counted in the result metadata (`raw_fallback_used` and the
+  `unmapped` status counts)
+- Types with a mapping CONFLICT (for example BANC `CB1011`) fail closed:
+  they are excluded from automatic cross-dataset comparison and are never
+  compared by raw same-name
 - This is expected for types unique to one dataset
 
 ### Unexpected similarity scores

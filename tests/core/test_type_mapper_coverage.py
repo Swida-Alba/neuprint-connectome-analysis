@@ -123,6 +123,49 @@ def test_flywire_rename_resolves_to_primary_type(rename_mapper):
     assert rename_mapper.get_canonical_type('APDN3', FW) == 'Mc249'
 
 
+def test_mapper_snapshot_fresh_workspace_first_run(tmp_path):
+    """§startup (2026-09-10): a FRESH DROCAT workspace must handle the
+    state snapshot gracefully at every stage — nothing initialized (no
+    crash, no snapshot, load refuses), first dataset initialized (rebuild
+    + snapshot written), and every later load restores from it without
+    rewriting it."""
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    uninitialized = CrossDatasetTypeMapper(
+        verbose=False, workspace_path=str(workspace))
+    snap = uninitialized._mapper_snapshot_path()
+    assert snap is not None
+    assert not snap.exists()
+    # nothing initialized yet: graceful refusal, no snapshot, no error
+    assert uninitialized.load() is False
+    assert 'neuron_df not found' in (uninitialized.last_load_error or '')
+
+    # the user initializes the male-cns dataset (conventional layout)
+    datasets = workspace / 'datasets' / 'male-cns_v1_0'
+    datasets.mkdir(parents=True)
+    csv = datasets / 'male-cns_v1_0_allneurons_neuron_df.csv'
+    csv.write_text(CSV_ROWS, encoding='utf-8')
+
+    first = CrossDatasetTypeMapper(
+        neuron_df_path=str(csv), verbose=False,
+        workspace_path=str(workspace))
+    assert first.load() is True
+    assert snap.exists()  # rebuilt once, snapshot written
+
+    # the next process (isolated worker, app restart) restores from it
+    second = CrossDatasetTypeMapper(
+        neuron_df_path=str(csv), verbose=False,
+        workspace_path=str(workspace))
+    stamp = snap.stat().st_mtime_ns
+    assert second.load() is True
+    assert snap.stat().st_mtime_ns == stamp  # restored, not rebuilt
+    assert second._loaded and not second.last_load_error
+    # the restored mapper answers like the built one
+    assert second.get_type_bridges('aMe12', MCNS, FW, max_bridges=0) == \
+        first.get_type_bridges('aMe12', MCNS, FW, max_bridges=0)
+    assert second.get_type_bridges('aMe12', MCNS, FW, max_bridges=0)
+
+
 def test_flywire_rename_comma_separated_additional_cell(rename_mapper):
     # one FAFB additional cell lists two old names; both map to LPN
     assert rename_mapper.get_mapped_type('McCB', MCNS, FW) == 'LPN'

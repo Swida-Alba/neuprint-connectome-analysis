@@ -3,8 +3,8 @@
 Covers the fold behaviour (older banners hide behind a "N earlier
 notices" row while the newest stays visible), re-folding on new
 arrivals, corner-× dismissal via the rendered close button, the entry
-cap, and the plain ui.notify fallback when no stack exists for the
-current client.
+cap, the lazy self-heal when a reconnecting client lost its stack, and
+the plain ui.notify fallback when no client context exists at all.
 """
 
 import sys
@@ -126,20 +126,59 @@ def test_entry_cap_keeps_only_the_newest_banners(stack_client):
     assert stack._entries[0]["message"] == "download info 3"
 
 
-def test_push_banner_falls_back_to_notify_without_a_stack(monkeypatch):
+def test_push_banner_self_heals_a_stack_lost_to_disconnect(
+        stack_client, monkeypatch):
+    """A websocket drop unregisters the stack while the browser keeps the
+    same client alive; the next push must lazily rebuild the stack (the
+    unified orange banner) instead of falling back to a bare
+    notification."""
+    calls = []
+    monkeypatch.setattr(
+        banner_module.ui, "notify",
+        lambda *a, **kw: calls.append((a, kw)))
+    stack = banner_module._STACKS[stack_client.id]
+    # simulate the disconnect cleanup of a reconnecting client
+    banner_module._STACKS.pop(stack_client.id, None)
+    with stack_client:
+        push_banner("download after reconnect")
+    healed = banner_module._STACKS.get(stack_client.id)
+    assert healed is not None and healed is not stack
+    assert calls == []
+    assert _labels(healed._body) == ["download after reconnect"]
+
+
+def test_self_heal_reuses_an_existing_stack(stack_client):
+    """create_banner_stack is idempotent per client: a second call (the
+    lazy self-heal racing a healthy stack) must not reset the stack."""
+    stack = banner_module._STACKS[stack_client.id]
+    with stack_client:
+        push_banner("first download info")
+        create_banner_stack()
+        push_banner("second download info")
+    assert banner_module._STACKS[stack_client.id] is stack
+    assert stack._entries == [
+        {"message": "first download info", "icon": "download_done"},
+        {"message": "second download info", "icon": "download_done"},
+    ]
+
+
+def test_push_banner_falls_back_to_notify_without_a_client(monkeypatch):
     calls = []
     monkeypatch.setattr(
         banner_module.ui, "notify",
         lambda *a, **kw: calls.append((a, kw)))
 
-    # A client whose page never built a stack (e.g. another page or a
-    # bare test client): the fallback must carry the message with an
-    # × close button instead of the old "Read" label.
-    client = Client(page("/banner-stack-fallback-test"))
-    with client:
-        push_banner("fallback download info", icon="warning")
+    # No live client context at all (background thread, bare test):
+    # the fallback must carry the message with an × close button
+    # instead of the old "Read" label.
+    class _NoClient:
+        @property
+        def client(self):
+            raise RuntimeError("no client context")
 
-    assert banner_module._STACKS.get(client.id) is None
+    monkeypatch.setattr(banner_module, "context", _NoClient())
+    push_banner("fallback download info", icon="warning")
+
     assert len(calls) == 1
     args, kwargs = calls[0]
     assert args[0] == "fallback download info"

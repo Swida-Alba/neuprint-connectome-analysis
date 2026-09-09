@@ -188,7 +188,13 @@
     <li><b>Search</b>: one query per chip (exact / starts with / contains /
       ends with / regex), with dataset-aware type suggestions. A chip that
       names a taxonomy value (e.g. FAFB <code>cell_type</code>
-      <code>circadian_clock</code>) expands to that label's member types.</li>
+      <code>circadian_clock</code>) expands to that label's member types. The
+      Mapping graph keeps that query entry on FAFB and connects it only to
+      the covered FAFB source types; target datasets do not receive duplicate
+      query-entry nodes. The per-pair <code>Network (type-level)</code>
+      downloads follow the same rule — the query entry is owned by the
+      dataset where the query resolved, attached only to that side's source
+      types, with the origin-side population on its hover.</li>
     <li><b>Summary table</b> (per dataset): Matched types, Neurons, Mapped
       pairs, Mapped types, <b>Mapped neurons</b> (each target's neurons
       counted ONCE — no per-flow double counting), Unmapped (orphans stay
@@ -215,26 +221,41 @@
       bidirectional): the FORWARD view lists each queried type with its
       neurons, mapped targets, <code>1-to-N</code>/<code>1-to-1</code>, and
       per-side coverage; the BACKWARD view lists each receiving type with
-      the sources converging on it (<code>N-to-1</code> made explicit).
-      Both tables name their coverage columns by DATASET — the full
-      dataset key, e.g. <code>flywire_FAFB_v783 side (bodyIds)</code> /
-      <code>banc_v888 side (bodyIds)</code> — the same two datasets in
-      both views, so nothing reads as flipped. Each dataset has a
-      <code>selected bridge</code> and <code>all-valid union</code> column.
-      Split branch rows are labeled as <code>branch evidence
-      (non-exclusive)</code>; overlap counts explain when the same source
-      bodyId supports multiple branches. Cells read <code>x of y
-      (share)</code> with
-      thousands separators; a side whose coverage index is unavailable
-      renders <code>not measured</code> (never a fake zero), and a row
-      without any pool renders <code>not pooled</code>.</li>
+      the sources that map onto it, read from the receiving type back to
+      its sources — relationship cells follow the row subject's fan-out, so
+      a row with several sources reads <code>1-to-N</code>, never
+      <code>1-to-1</code>. Backward rows marked <code>dataset-wide
+      incoming</code> list EVERY source type in the source dataset that
+      maps onto the receiving type (the active query marked in
+      <code>Mapped from</code>) — the context that explains why one
+      queried type's few neurons fan out to a large target population
+      (e.g. MCNS <code>SMP227</code>: 6 neurons &rarr; 94 FAFB neurons,
+      whose receiving types collect from 4/4/6 incoming MCNS types). This
+      context is explanatory evidence, not a canonical acceptance of every
+      incoming source. Coverage columns carry short labels such as
+      <code>MCNS &middot; selected</code>; hover a header for the full
+      dataset key and the scope explanation — <code>selected</code> = the
+      first supported bridge chain after deterministic evidence ordering
+      (the primary chain behind edge weights and hovers, not a biological
+      adjudication), <code>all valid</code> = the deduplicated union of
+      bodyIds from every independently supported candidate bridge
+      (completeness of supported evidence; branches are not mutually
+      exclusive). In a dataset-wide row the source denominator is the
+      union population of ALL incoming source types. Split branch rows
+      are labeled as <code>branch evidence (non-exclusive)</code>; overlap
+      counts explain when the same source bodyId supports multiple
+      branches. Cells read <code>x of y (share)</code> with thousands
+      separators; a side whose coverage index is unavailable renders
+      <code>not measured</code> (never a fake zero), and a row without any
+      pool renders <code>not pooled</code>.</li>
     <li><b>Same-name pairs</b>: a pair sharing its name derives through its
       metadata bridge when one exists (e.g.
       <code>flywireType 'DN1a'</code> — the male-cns crosswalk cell
       verifies it); the bare "same name — no metadata verification"
       warning appears only when no evidence connects the pair.</li>
     <li><b>Exports</b>: Sankey (type-level / linker), Network (type-level /
-      linker paths), and <b>Export mapping</b> (per pair and
+      linker paths), the <b>Mapping graph</b> (HTML, downloaded as
+      <code>mapping_graph_*.html</code>), and <b>Export mapping</b> (per pair and
       <b>all pairs (CSV)</b>; filenames <code>mapping_*.csv</code>).  One
       fixed column set: <code>source_dataset, source_entry, matched_column,
       source_type, target_dataset, target_type, relationship,

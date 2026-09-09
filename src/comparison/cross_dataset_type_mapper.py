@@ -34,6 +34,7 @@ import os
 import threading
 import warnings
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -832,9 +833,11 @@ class CrossDatasetTypeMapper:
         self._neuron_df: Optional[pd.DataFrame] = None
         self._mcns_v09_neuron_df: Optional[pd.DataFrame] = None
         self._loaded = False
+        # Last load failure, cleared on a successful (re)load.  A failed
         # load stays retryable — every public method re-invokes load()
         # while ``_loaded`` is False — but the reason must stay visible so
         # a transient data problem cannot masquerade as a healthy mapper.
+        self.last_load_error: Optional[str] = None
 
         # Type mappings: {source_dataset: {source_type: {target_dataset: target_type}}}
         self._type_mappings: Dict[str, Dict[str, Dict[str, str]]] = {}
@@ -889,6 +892,9 @@ class CrossDatasetTypeMapper:
         # Derived lookup for get_alias_candidates; rebuilt with the mappings.
         self._alias_n_to_1_cache: Optional[
             Dict[Tuple[str, str], List[TypeMappingConflict]]
+        ] = None
+        self._alias_one_to_n_cache: Optional[
+            Dict[Tuple[str, str, str], List[TypeMappingConflict]]
         ] = None
 
         # Reverse crosswalk index ({cell value: {male-cns primaries}});
@@ -1510,25 +1516,61 @@ class CrossDatasetTypeMapper:
             prefix = '⚠️ ' if level == 'warn' else ''
             print(f"[TypeMapper] {prefix}{message}")
     
+    # One load at a time, across threads: the viewer now warms the
+    # UI-process mapper in the background after an isolated scan, and a
+    # user click may race that warm (2026-09-10).  RLock guards against
+    # the same-thread re-entry the loader's helpers could introduce.
+    _load_lock = threading.RLock()
+
     def load(self, force_reload: bool = False) -> bool:
         """
         Load type mappings from neuron_df file.
-        
+
         Args:
             force_reload: Reload even if already loaded.
-            
+
         Returns:
             True if loading succeeded, False otherwise.
         """
         if self._loaded and not force_reload:
             return True
-        
+        with self._load_lock:
+            return self._load_locked(force_reload)
+
+    def _load_locked(self, force_reload: bool = False) -> bool:
+        """
+        Lock-held body of :meth:`load` — see there for the contract.
+        """
+        if self._loaded and not force_reload:
+            return True
+
+        # §startup (2026-09-10): the full rebuild below is a pure function
+        # of the dataset tables (it re-derives type mappings, conflicts,
+        # BANC vote overlays and the name indexes from unchanged CSVs),
+        # which costs ~7s of Python row work in EVERY fresh process.  A
+        # valid state snapshot restores the same structures in ~1.5s;
+        # the stored fingerprint (every file under datasets/ +
+        # neuron_indexes/ plus this module file) invalidates it on any
+        # data or code change.
+        if not force_reload:
+            snapshot_path = self._mapper_snapshot_path()
+            if (snapshot_path is not None
+                    and self._restore_mapper_snapshot(snapshot_path)):
+                self._loaded = True
+                self.last_load_error = None
+                self._log(
+                    "Type mapper state restored from snapshot "
+                    f"({os.path.basename(snapshot_path)}).")
+                return True
+
         cols_needed = [
             'bodyId', 'type', 'flywireType', 'hemibrainType', 'mancType']
         main_folder = Path(self._neuron_df_path).parent.name
         main_index = self._cached_mapper_index_path(
             self._neuron_df_path, main_folder, set(cols_needed))
         if not os.path.exists(self._neuron_df_path) and main_index is None:
+            self.last_load_error = (
+                f'neuron_df not found: {self._neuron_df_path}')
             self._log(f"Neuron DF file not found: {self._neuron_df_path}", level='warn')
             self._log("Auto type mapping will be disabled. Initialize male-cns dataset first.", level='warn')
             return False
@@ -1570,10 +1612,14 @@ class CrossDatasetTypeMapper:
             self._banc_label_table_paths = {}
             self._body_id_to_primary = {}
             self._loaded = True
-            
+            self.last_load_error = None
+
             self._log(f"Loaded {len(self._neuron_df):,} neurons with type mappings")
+            snapshot_path = self._mapper_snapshot_path()
+            if snapshot_path is not None:
+                self._write_mapper_snapshot(snapshot_path)
             return True
-            
+
         except Exception as e:
             # Source-map grounding failures (BRIDGE_SOURCE_MAP: …) are
             # attributed as such — a drifted table must not read like a
@@ -1581,9 +1627,136 @@ class CrossDatasetTypeMapper:
             prefix = ("Type mapper not loaded"
                       if str(e).startswith("BRIDGE_SOURCE_MAP:")
                       else "Error loading neuron_df")
+            self.last_load_error = f'{prefix}: {e}'
             self._log(f"{prefix}: {e}", level='warn')
             return False
-    
+
+    # ------------------------------------------------------------------
+    # Derived-state snapshot (§startup, 2026-09-10)
+    #
+    # Bump MAPPER_SNAPSHOT_VERSION whenever the code that BUILDS the
+    # derived structures changes what it produces (type-mapping rules,
+    # conflict derivation, bridge-edge construction, …).  The snapshot
+    # additionally invalidates on any file change under the workspace's
+    # datasets/ and neuron_indexes/ trees and on edits to this module
+    # file, so stale state can never survive an unnoticed bump.
+    # ------------------------------------------------------------------
+    MAPPER_SNAPSHOT_VERSION = 1
+    _SNAPSHOT_EXCLUDED_ATTRS = frozenset({
+        'last_load_error',      # runtime diagnostics, rebuilt per load
+        '_unsupported_dataset_warnings',  # runtime log-once bookkeeping
+        '_load_lock',           # thread primitive (class attribute anyway)
+    })
+
+    def _mapper_snapshot_path(self) -> Optional[Path]:
+        """Snapshot file location, or None without a workspace."""
+        workspace = getattr(self, '_workspace_path', None)
+        if not workspace:
+            return None
+        return (Path(workspace) / 'neuron_indexes'
+                / f'type_mapper_snapshot_v{self.MAPPER_SNAPSHOT_VERSION}.pkl')
+
+    def _mapper_snapshot_fingerprint(self) -> Tuple[Any, ...]:
+        """Every input the rebuild depends on, as (path, mtime_ns, size).
+
+        The loaders read from the conventional ``datasets/<folder>`` tables
+        and their ``neuron_indexes/<folder>`` Parquet projections, and the
+        derived state also encodes this module's build rules — so the
+        fingerprint walks both trees and stats this source file.  Walking
+        is stat-only (milliseconds); excluding the snapshot's own file
+        keeps the fingerprint self-consistent.
+        """
+        workspace = Path(self._workspace_path)
+        entries: List[Tuple[str, int, int]] = []
+        for tree in ('datasets', 'neuron_indexes'):
+            root = workspace / tree
+            if not root.is_dir():
+                continue
+            for dirpath, _dirnames, filenames in os.walk(root):
+                for filename in filenames:
+                    # Skip the snapshot family itself (every version plus
+                    # pid-unique temp files from crashed writers): they are
+                    # outputs, never inputs, and must not poison the
+                    # fingerprint.
+                    if filename.startswith('type_mapper_snapshot_v'):
+                        continue
+                    file_path = Path(dirpath) / filename
+                    try:
+                        stat = file_path.stat()
+                    except OSError:
+                        continue
+                    entries.append((str(file_path.relative_to(workspace)),
+                                    stat.st_mtime_ns, stat.st_size))
+        module_file = Path(__file__)
+        try:
+            stat = module_file.stat()
+            entries.append((str(module_file), stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            pass
+        return tuple(sorted(entries))
+
+    def _write_mapper_snapshot(self, snapshot_path: Path) -> None:
+        """Best-effort persist of the loaded state; never breaks load()."""
+        try:
+            import pickle
+
+            payload = {
+                'version': self.MAPPER_SNAPSHOT_VERSION,
+                'fingerprint': self._mapper_snapshot_fingerprint(),
+                'state': {
+                    key: value for key, value in self.__dict__.items()
+                    if key not in self._SNAPSHOT_EXCLUDED_ATTRS
+                },
+            }
+            blob = pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
+            snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+            # A pid-unique temp name: on the FIRST run the UI process and
+            # the isolated scan worker can both finish rebuilds and race
+            # this write; atomic replace per process keeps the winner
+            # valid and the loser's temp file out of the way.
+            temporary = snapshot_path.with_name(
+                f'{snapshot_path.name}.{os.getpid()}.tmp')
+            temporary.write_bytes(blob)
+            os.replace(temporary, snapshot_path)
+            self._log(
+                f"Type mapper snapshot written "
+                f"({len(blob) / 1e6:.0f} MB).")
+        except Exception as exc:
+            # A snapshot is an optimization; any failure leaves the
+            # next load on the rebuild path.
+            self._log(f"Type mapper snapshot write skipped: {exc}",
+                      level='warn')
+
+    def _restore_mapper_snapshot(self, snapshot_path: Path) -> bool:
+        """Restore the derived state from a valid snapshot.
+
+        Returns True only when the stored version and fingerprint match
+        this workspace and module exactly; any mismatch, corruption, or
+        pickling error leaves the mapper untouched for a full rebuild.
+        A MISSING snapshot is the normal fresh-machine / first-run case
+        and returns False quietly.
+        """
+        if not snapshot_path.is_file():
+            return False
+        try:
+            import pickle
+
+            payload = pickle.loads(snapshot_path.read_bytes())
+            if payload.get('version') != self.MAPPER_SNAPSHOT_VERSION:
+                return False
+            if payload.get('fingerprint') != \
+                    self._mapper_snapshot_fingerprint():
+                return False
+            state = payload.get('state')
+            if not isinstance(state, dict) or not state.get('_loaded'):
+                return False
+            self.__dict__.update(state)
+            return True
+        except Exception as exc:
+            self._log(f"Type mapper snapshot restore failed: {exc}",
+                      level='warn')
+            return False
+
     def _verify_source_map(self) -> None:
         """Verify BRIDGE_SOURCE_MAP against the loaded tables (§9I).
 
@@ -1720,6 +1893,7 @@ class CrossDatasetTypeMapper:
         # Drop the alias-candidate lookup caches; they derive from the
         # conflicts rebuilt below.
         self._alias_n_to_1_cache = None
+        self._alias_one_to_n_cache = None
         self._crosswalk_parts_cache = None
         self._crosswalk_reverse_cache = None
         self._dataset_types = defaultdict(set)
@@ -3062,6 +3236,27 @@ class CrossDatasetTypeMapper:
                 mcns_type = target_maps.get('male-cns:v1.0', src_type) if src_dataset != 'male-cns:v1.0' else src_type
                 self._reverse_mappings[src_dataset][src_type] = mcns_type
     
+    def has_conflicts(self) -> bool:
+        """True when scoped mapping conflicts were recorded at load."""
+        return bool(self._conflicts)
+
+    def get_type_mapping_key(self, dataset: str) -> str:
+        """Public namespace key for a dataset (release normalization).
+
+        Family versions share one registry key; external consumers should
+        use this instead of the private ``_get_type_mapping_key``.
+        """
+        return self._get_type_mapping_key(dataset)
+
+    def detect_type_source(self, type_name: str) -> Optional[str]:
+        """Public namespace detection for one type name."""
+        return self._detect_type_source(type_name)
+
+    def get_type_neuron_count(self, type_name: str, dataset: str) -> int:
+        """Neuron count for one type in a dataset (0 when unknown)."""
+        key = self._get_type_mapping_key(dataset)
+        return len(self._dataset_types.get(key, {}).get(type_name, set()) or set())
+
     def get_mapped_type(
         self, 
         type_name: str, 
@@ -3070,14 +3265,21 @@ class CrossDatasetTypeMapper:
     ) -> Optional[str]:
         """
         Get the equivalent type name in target dataset.
-        
+
+        COMPATIBILITY-ONLY single-target API.  It returns ``None`` for
+        splits, evidence-only relations, and conflicts, and carries no
+        status/provenance.  New analysis code must use
+        :mod:`comparison.type_resolver` (``resolve_valid_targets`` /
+        ``resolve_one_target``) so split and conflict policy stays
+        consistent with the Type Mapping panel.
+
         Args:
             type_name: Type name in source dataset.
             source_dataset: Source dataset name.
             target_dataset: Target dataset name.
-            
+
         Returns:
-            Mapped type name, or None if no mapping exists.
+            Mapped type name, or None if no unique mapping exists.
         """
         if not self._loaded:
             if not self.load():
@@ -3123,6 +3325,7 @@ class CrossDatasetTypeMapper:
         
         return None
     
+    @lru_cache(maxsize=1024)
     def _normalize_dataset_name(self, dataset: str) -> str:
         """Normalize a dataset name without discarding its release.
 
@@ -3137,6 +3340,10 @@ class CrossDatasetTypeMapper:
         Bare family names retain the historical default release because they
         are aliases for the supported mapping columns (for example ``banc``
         means BANC v626).  Explicit versions are always preserved.
+
+        Memoized (2026-09-10 profile): one expanded search called this
+        ~1M times for ~a dozen unique names through the per-name mapper
+        lookups; the parse is pure, so the cache is exact.
         """
         if dataset is None:
             return dataset
@@ -3160,6 +3367,7 @@ class CrossDatasetTypeMapper:
 
         return raw_dataset
 
+    @lru_cache(maxsize=1024)
     def _get_type_mapping_key(self, dataset: str) -> str:
         """Return the crosswalk namespace used for *dataset*.
 
@@ -3180,6 +3388,9 @@ class CrossDatasetTypeMapper:
 
         Keeping this translation separate prevents a release collision from
         either losing a valid mapping or renaming one release into another.
+
+        Memoized (2026-09-10 profile): pure per-dataset translation called
+        ~1M times per expanded search before the cache.
         """
         normalized = self._normalize_dataset_name(dataset)
 
@@ -3242,12 +3453,17 @@ class CrossDatasetTypeMapper:
     ) -> Dict[str, Optional[str]]:
         """
         Resolve a type name to equivalent types in multiple datasets.
-        
+
+        COMPATIBILITY-ONLY one-target-per-dataset resolver.  Splits collapse
+        to ``None`` (or an arbitrary branch in some paths), and status and
+        provenance are lost.  New analysis code must use
+        :mod:`comparison.type_resolver`.
+
         Args:
             type_name: Type name to resolve.
             datasets: List of target datasets.
             source_dataset: Optional source dataset hint. If None, will auto-detect.
-            
+
         Returns:
             Dict mapping dataset -> equivalent type name (or None if not found).
         """
@@ -4579,6 +4795,28 @@ class CrossDatasetTypeMapper:
             self._alias_n_to_1_cache = cache
         return cache
 
+    def _one_to_n_by_pair_cache(
+        self,
+    ) -> Dict[Tuple[str, str, str], List[TypeMappingConflict]]:
+        """Index 1-to-N conflicts by (source ns, source name, target ns).
+
+        Same rationale as :meth:`_n_to_1_by_source_cache`, for the split
+        side of :meth:`get_alias_candidates`: the conflicts are fixed
+        after load, so re-deriving the 16k-conflict scan per queried name
+        (2026-09-10 profile: ~35ms per call, dominating the expanded
+        search) buys nothing.
+        """
+        cache = getattr(self, '_alias_one_to_n_cache', None)
+        if cache is None:
+            cache = defaultdict(list)
+            for conflict in self.get_1_to_n_conflicts():
+                cache[(self._get_type_mapping_key(
+                    conflict.source_dataset), conflict.source_type,
+                    self._get_type_mapping_key(
+                        conflict.target_dataset))].append(conflict)
+            self._alias_one_to_n_cache = cache
+        return cache
+
     def get_alias_candidates(
         self,
         type_name: Union[str, int, None],
@@ -4645,13 +4883,7 @@ class CrossDatasetTypeMapper:
         # namespace.  A bare ``source_type`` index is unsafe for repeated
         # names and was the reason a valid split could be confused with a
         # BANC vote conflict in a different pair.
-        one_to_n_by_pair: Dict[Tuple[str, str, str], List[TypeMappingConflict]] = {}
-        for conflict in self.get_1_to_n_conflicts():
-            source_key = self._get_type_mapping_key(conflict.source_dataset)
-            target_key = self._get_type_mapping_key(conflict.target_dataset)
-            one_to_n_by_pair.setdefault(
-                (source_key, conflict.source_type, target_key), []).append(
-                    conflict)
+        one_to_n_by_pair = self._one_to_n_by_pair_cache()
 
         outcomes: Dict[str, Dict[str, any]] = {}
         for dataset in datasets:
@@ -4709,6 +4941,98 @@ class CrossDatasetTypeMapper:
                 'candidates': candidates,
             }
         return outcomes
+
+    def incoming_type_names(
+        self,
+        source_dataset: str,
+        target_dataset: str,
+        target_type: str,
+        *,
+        max_candidates: int = 400,
+        max_depth: int = 4,
+    ) -> Tuple[List[str], bool]:
+        """Source types with a valid bridge onto one receiving type (§12).
+
+        The dataset-wide backward coverage table needs, for a receiving
+        type, every ``source_dataset`` type that maps onto it — the
+        reverse question of ``get_type_bridges``.  A full forward sweep
+        over the source registry costs minutes per direction, so discovery
+        walks the SAME name graph backwards from the receiving type (the
+        neighbor relation stores its legs in both directions: crosswalk
+        forward/reverse, annotation alt/primary, same-name membership) up
+        to ``max_depth`` — the forward walk's derivation-hop limit — and
+        then VERIFIES every candidate with the real forward
+        ``get_type_bridges``.  The returned names are therefore exactly
+        the forward-derived incoming family (verified end value), while
+        the walk only bounds the search.  Bounded: at most
+        ``max_candidates`` candidates are verified; the boolean reports
+        whether the candidate walk or the candidate cap truncated the
+        discovery (a flagged explanatory context, never a silently
+        partial answer).
+        """
+        if not self._loaded:
+            if not self.load():
+                return [], False
+        target_type = str(target_type or "").strip()
+        if (not target_type or self._is_untyped_value(target_type)):
+            return [], False
+        source_key = self._get_type_mapping_key(source_dataset)
+        target_key = self._get_type_mapping_key(target_dataset)
+        if (not source_key or not target_key
+                or source_key == target_key):
+            return [], False
+
+        start = (target_key, target_type)
+        seen = {start}
+        frontier = [start]
+        candidates: Set[str] = set()
+        truncated = False
+        for _depth in range(max(int(max_depth), 0)):
+            next_frontier: List[Tuple[str, str]] = []
+            for ns, name in frontier:
+                try:
+                    neighbors = self._name_neighbors(ns, name)
+                except Exception:
+                    continue
+                for neighbor in neighbors:
+                    n_ns, n_name = neighbor[0], neighbor[1]
+                    node = (n_ns, n_name)
+                    if node in seen:
+                        continue
+                    seen.add(node)
+                    if (n_ns == source_key and n_name
+                            and not self._is_untyped_value(n_name)):
+                        candidates.add(n_name)
+                    next_frontier.append(node)
+                if len(seen) >= 5000:
+                    truncated = True
+                    break
+            if truncated:
+                break
+            frontier = next_frontier
+            if not frontier:
+                break
+        ordered = sorted(candidates)
+        if len(ordered) > max_candidates:
+            ordered = ordered[:max_candidates]
+            truncated = True
+
+        verified: List[str] = []
+        for name in ordered:
+            try:
+                chains = self.get_type_bridges(
+                    name, source_dataset, target_dataset, max_bridges=0)
+            except Exception:
+                chains = []
+            hit = any(
+                chain
+                and self._get_type_mapping_key(
+                    str(chain[-1].get("dataset", ""))) == target_key
+                and str(chain[-1].get("value", "")) == target_type
+                for chain in chains)
+            if hit:
+                verified.append(name)
+        return verified, truncated
 
     def _namespace_names(self, key: str) -> set:
         """Every type name known to one namespace (mapping key)."""
@@ -5513,11 +5837,19 @@ _global_type_mapper_lock = threading.RLock()
 def get_type_mapper(workspace_path: Optional[str] = None, force_reload: bool = False) -> CrossDatasetTypeMapper:
     """
     Get the global CrossDatasetTypeMapper instance.
-    
+
+    Load-failure behavior: the singleton is published regardless of load
+    success, but a failed load stays RETRYABLE — every public mapper
+    method re-invokes ``load()`` while ``_loaded`` is False — and the
+    reason is recorded on ``mapper.last_load_error`` (also surfaced by
+    :func:`get_type_mapper_state` and the
+    ``comparison.type_resolver`` snapshot metadata).  Callers must check
+    ``_loaded``/state before treating a run as valid-mapper output.
+
     Args:
         workspace_path: Optional workspace path for initialization.
         force_reload: Force reloading of mappings.
-        
+
     Returns:
         CrossDatasetTypeMapper instance.
     """
@@ -5535,3 +5867,38 @@ def get_type_mapper(workspace_path: Optional[str] = None, force_reload: bool = F
             _global_type_mapper.load()
 
         return _global_type_mapper
+
+
+def get_type_mapper_state() -> Dict[str, Any]:
+    """
+    Load-state facts about the process-wide mapper singleton.
+
+    Returns:
+        Dict with ``exists`` (singleton constructed), ``loaded``,
+        ``source`` (dataset-relative table path), ``version`` token, and
+        ``load_error`` from the last failed load (None when healthy or
+        never loaded).  Lets analysis code distinguish a healthy v1.0
+        mapper from a failed load without reaching into privates.
+    """
+    mapper = _global_type_mapper
+    if mapper is None:
+        return {'exists': False, 'loaded': False, 'source': None,
+                'version': None, 'load_error': None}
+    source = None
+    version = None
+    path = getattr(mapper, '_neuron_df_path', None)
+    if path:
+        parts = Path(path).parts
+        source = '/'.join(parts[-2:]) if len(parts) >= 2 else str(path)
+        try:
+            st = os.stat(path)
+            version = f'{st.st_mtime_ns}:{st.st_size}'
+        except OSError:
+            version = None
+    return {
+        'exists': True,
+        'loaded': bool(mapper._loaded),
+        'source': source,
+        'version': version,
+        'load_error': getattr(mapper, 'last_load_error', None),
+    }

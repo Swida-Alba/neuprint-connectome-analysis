@@ -212,12 +212,60 @@ pair, keeps BANC label-vote conflicts blocked, and distinguishes an accepted
 mapping from `valid_split_evidence` and `evidence_only`. A split can therefore
 remain inspectable without being mistaken for one canonical target.
 
+### 4.1 The comparison-layer resolver (`comparison/type_resolver.py`)
+
+`comparison/type_resolver.py` is THE shared backend for analysis code. The
+panel's validity policy — status/evidence-aware target resolution plus
+canonical profile expansion — lives here, in the comparison layer; no
+analysis consumer imports a UI module, and the UI
+(`mapped_type_targets`) is a thin adapter over the same core.
+
+- `MapperSnapshot` — one load-state record per analysis run (source table,
+  version token from the v1.0 CSV, `load_error`, decision cache). Obtained
+  once per run and passed through candidate discovery, query mapping, and
+  scoring so every step observes the same mapper state.
+- `resolve_valid_targets()` — the typed resolution record
+  (`TypeResolution`): status vocabulary `mapped | bridged |
+  valid_split_evidence | evidence_only | conflict | unmapped |
+  mapper_unavailable`, ordered target list, equivalence key, bridge
+  provenance, and scoped conflicts. `bridged` is the single bridge-derived
+  target case emitted by `get_mapping_decision(include_bridges=True)`; it
+  keeps its own status and is never silently rewritten to curated `mapped`.
+- `expansion_targets()` — the analysis policy: mapped/bridged/splits
+  contribute their targets, conflicts and evidence-only relations fail
+  closed, unmapped types keep the raw name as the explicitly counted
+  long-tail fallback.
+- `expand_profile_types()` — status-aware profile canonicalization for
+  scoring: each canonical key records WHICH mapping status produced it,
+  valid splits distribute weight EVENLY across every licensed target
+  (`split_policy='even'`, total mass preserved), conflicts are excluded,
+  and unmapped types stay raw with a fallback flag.
+- `auto_mapping_result_metadata()` (in `profile_comparator.py`) — the
+  standard `auto_type_mapping_*` metadata block saved with results:
+  requested vs active, source, version, load error, per-status resolution
+  counts, raw-fallback flag, and the mapping-policy version.
+
+Consumers: homolog finding (candidate expansion, same-type rescue, the
+mapping-aware vector prefilter, type-level same-type marking),
+connectivity-profile comparison (query mapping, inter-dataset and
+explicit matrices), the cross-dataset HTML report (type-count grouping
+and canonical row keys), the mapping flow builders
+(`resolve_flow_status`), and the comparison analyzer/parameters type
+resolution. This lane is separate from the explicit LabelMapper lane
+(`std_label_*`, applied at connection extraction) — see 'The two label
+lanes' in docs/AUTO_TYPE_MAPPING.md. The
+legacy `get_mapped_type()` / `resolve_type_across_datasets()` remain as
+compatibility-only wrappers (None for splits/conflicts, no provenance);
+new analysis code must use the resolver.
+
 ## 5. Shared backend and surface parity
 
 `mapped_type_targets()` resolves one foreign type as the **union** of
 (a) the alias/stored resolution (`get_alias_candidates`: rename, same
 name, refused N-to-1 members) and (b) the derivation-bridge ends
-(`get_type_bridges`). Both UI surfaces consume it:
+(`get_type_bridges`). The core union decision lives in
+`comparison.type_resolver.resolve_valid_targets` (§4.1); this UI function
+is the response-shape adapter, and both UI surfaces consume it:
 
 - **'See available neurons' viewer** — `enrich_native_type_matches`
   annotates every covered foreign type; the mapped-type view lists the
@@ -367,9 +415,55 @@ eight distinct source neurons.
   `FB: not measured` / `not pooled`); long cells wrap within capped
   column widths so every column stays visible.  The summary strip
   splits received vs issued mapped neurons.
+- **Mapping graph query-entry provenance**: the downloaded Mapping graph keeps
+  a taxonomy/metadata query entry on the dataset where it resolved. For
+  example, FAFB `cell_type · 'circadian_clock'` is one FAFB-owned entry linked
+  to its 21 FAFB source types and titled with the 242-neuron query population;
+  it is not recreated under MCNS or BANC, and target summary counts remain
+  separate. The graph carries structured `origin_dataset`, `origin_column`,
+  `origin_value`, and `origin_type` flow metadata while retaining the legacy
+  `matched_origin` display field.
+- **Per-pair network query-entry ownership** (§14, user 2026-09-09): the
+  per-pair `Network (type-level)` export follows the same contract —
+  `build_mapping_network_graph` keys a non-`type` query entry
+  `E|<origin_dataset>|<label>` from the structured origin metadata (legacy
+  flows fall back to the flow's source dataset), attaches it only to the
+  ORIGIN-side source types in the entry → source direction, and titles it
+  with the unique origin types and their source-side counts (the
+  `circadian_clock` FAFB→MCNS export reads `covers 21 types, 242 neurons`).
+  The old contract keyed the entry under the TARGET dataset, converged the
+  target-side types into it, and summed the foreign counts — the same
+  defect class the Mapping graph had already shed.
+- **Dataset-wide backward coverage** (§12, user 2026-09-09): the panel's
+  backward table upgrades receiving-type rows to the dataset-wide incoming
+  scope. `CrossDatasetTypeMapper.incoming_type_names()` discovers the full
+  incoming family for one receiving type by walking the name graph
+  backwards (the neighbor relation is stored both ways) and verifying every
+  candidate with the real forward `get_type_bridges` — exact for the
+  audited families, ~0.1 s per receiving type where a full forward sweep
+  costs minutes. `build_reverse_type_contexts()` materializes each
+  incoming pair's prioritized bridge pool and accumulates the per-receiving
+  unions; `build_type_coverage(..., reverse_contexts=...)` merges them so a
+  backward row lists the full family (active query marked), labels the
+  relationship from the row subject's fan-out (`1-to-N`; a multi-source
+  row never reads `1-to-1` — §12.1 user decision), measures coverage with
+  the incoming population union as the source denominator, and keeps the
+  query-scoped slice on `query_scope_*` fields plus
+  `coverage_scope`/`incoming_source_count`/`active_query_sources`/
+  `truncated` metadata. For MCNS `SMP227` the incoming families are
+  4/4/6 types with source unions 22/26, 23/26 · 19/28, 25/28 · 25/36,
+  33/36 selected/all-valid — the context that explains the 6 → 94 forward
+  fan-out.
+- **Coverage-table layout** (§12.5, user 2026-09-09): the four trailing
+  coverage columns shrink to 135/145 px minimums with short
+  `CODE · selected` / `CODE · all valid` headers; the full dataset key and
+  the selected/all-valid scope explanation ride on each header's tooltip
+  (a Quasar `header-cell` slot rendering each column's `tooltip` key), and
+  the reclaimed width goes to `Maps to` / `Mapped from` and
+  `Coverage interpretation` (480 px caps).
 - **One shared per-pair weight** (`pair_flow_weight`, user 2026-09-07):
   the Sankey ribbon, the network pair edge, the linker-path edges and
-  the composed-graph edges all draw the SAME number for a mapped pair —
+  the mapping-graph edges all draw the SAME number for a mapped pair —
   per side the pooled bodyId count when pooled, else that side's neuron
   count, collapsed by `min`.  Before, the network duplicated the SOURCE
   type's whole count onto every edge (all edges of a 12-neuron type
@@ -439,11 +533,12 @@ eight distinct source neurons.
 | `tests/core/test_type_mapper_source_map.py` | declarative licensing vs the tables, per-pair sweeps |
 | `tests/core/test_type_mapper_bridge_rules.py` | the algebra: reverse crosswalk legs, connector licenses, BANC ban, no-flip order, untyped exclusion, label-hop terminality + primary-valued-alt refusal (the `l-LNv → BM_*` regression), the designed `aT`→`ACT` standard, real-data acceptance |
 | `tests/core/test_type_mapper_annotation_bridge.py` | overlay precedence, exports, release-name resolution |
-| `tests/core/test_type_mapper_real_datasets.py` | circadian parity (panel == viewer, 219 unique), linker layout + header legend chips, direct BANC label routes, normalized-auto MeVPLo2 pools, SMP227 selected/all-valid coverage and overlap, CB1011 conflict blocking, two-linker cap, APDN3 pair weights == Sankey ribbons, APDN3 pool-union hover, Sankey no parallel links, edge-label size control |
+| `tests/core/test_type_mapper_real_datasets.py` | circadian parity (panel == viewer, 219 unique), linker layout + header legend chips, direct BANC label routes, normalized-auto MeVPLo2 pools, SMP227 selected/all-valid coverage and overlap, CB1011 conflict blocking, two-linker cap, APDN3 pair weights == Sankey ribbons, APDN3 pool-union hover, Sankey no parallel links, edge-label size control, per-pair network FAFB-owned circadian entry (§14), SMP227 reverse-context incoming families and dataset-wide unions (§12) |
 | `tests/core/test_banc_release_and_mcns_version.py` | BANC label votes/verification, `auto:`-stripped label provenance, duplicated root relation, MCNS v0.9 alias/native fallback |
 | `tests/core/test_dataset_release_registry.py` | shared recommendation policy and unavailable-release behavior |
 | `tests/ui/test_dataset_release_notice.py` | explicit single/multi selector recommendation action and suppression |
-| `tests/core/test_type_mapping_composed.py` | mapping-CSV fixed-width contract (`source_dataset`…`pool_coverage_basis`), extended selected/all-valid scope and raw/canonical linker export, `format_coverage` states, `not measured` coverage rows, shared `pair_flow_weight` formula, pool-count union, forward 1-to-N + reverse N-to-1 coverage rows |
+| `tests/core/test_type_mapping_composed.py` | mapping-CSV fixed-width contract (`source_dataset`…`pool_coverage_basis`), extended selected/all-valid scope and raw/canonical linker export, `format_coverage` states, `not measured` coverage rows, shared `pair_flow_weight` formula, pool-count union, forward 1-to-N + reverse row-subject `1-to-N` fan-out labeling with dataset-wide incoming contexts (§12), Mapping graph query-entry ownership, per-pair network entry ownership + legacy fallback + no type-query entry (§14) |
+| `tests/ui/test_type_mapping_panel.py` | entrance enable/disable, global search composition, short coverage headers with dataset-key + selected/all-valid tooltips, dataset-wide backward scope rows, per-pair artifact actions, panel-scoped history |
 | `tests/ui/test_alias_matches.py` | viewer enrichment, source-scoped conflict rendering, mapped-type view, pool granularity |
 | `tests/ui/test_neuron_index_viewer.py` | independent endpoint pools, two-sided support semantics, prioritized fallback after an unsupported chain |
 

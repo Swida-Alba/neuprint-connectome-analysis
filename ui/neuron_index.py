@@ -16,6 +16,7 @@ from __future__ import annotations
 import atexit
 import asyncio
 import html
+import logging
 import multiprocessing
 import re
 import threading
@@ -29,6 +30,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .config import PROJECT_ROOT
+
+logger = logging.getLogger(__name__)
 from .dataset_service import dataset_to_folder
 from .search_logic import (
     SearchStage,
@@ -3391,6 +3394,204 @@ def resolve_prioritized_bridge_pool(
     return result
 
 
+def build_reverse_type_contexts(
+        mapper,
+        source_dataset: str,
+        target_dataset: str,
+        receiving_types,
+        *,
+        source_index: Optional["CachedNeuronIndex"] = None,
+        target_index: Optional["CachedNeuronIndex"] = None,
+        coverage_indexes: Optional[Dict[str, Any]] = None,
+        warm_pools: Optional[Dict[tuple, Dict[str, Any]]] = None,
+        max_sources: int = 24,
+) -> Dict[str, Dict[str, Any]]:
+    """Dataset-wide incoming context for the backward coverage rows (§12.3).
+
+    For each receiving type, expand the direction-scoped set of source
+    types in ``source_dataset`` with a valid bridge onto it (the mapper's
+    ``incoming_type_names``), materialize every incoming pair's
+    prioritized bridge pool with :func:`resolve_prioritized_bridge_pool`,
+    and accumulate the per-receiving-type unions the backward rows
+    display: the selected/all-valid source-side unions over ALL incoming
+    types (denominator: the incoming types' population union), the
+    target-side unions on the receiving type itself, and the per-branch
+    overlaps.  Pure with respect to the UI — no NiceGUI state is touched.
+
+    ``warm_pools`` is read (never written) for pools the forward search
+    already resolved, so a query member's pair is not resolved twice.
+    Fresh resolutions go into a context-local cache only, so the forward
+    artifacts' pool set stays exactly what the forward flows resolved.
+    ``max_sources`` bounds how many incoming sources are LISTED per
+    receiving type; ``incoming_source_count`` and ``truncated`` stay
+    honest about the full incoming family.
+    """
+    from comparison.mapping_visualization import mapping_pool_key
+
+    coverage_indexes = {
+        ds: idx for ds, idx in (coverage_indexes or {}).items()
+        if idx is not None}
+    local_pools: Dict[tuple, Dict[str, Any]] = {}
+    counts_cache: Dict[str, Dict[str, int]] = {}
+    contexts: Dict[str, Dict[str, Any]] = {}
+
+    def _count(dataset: str, name: str) -> int:
+        cache = counts_cache.setdefault(dataset, {})
+        if name not in cache:
+            index = (source_index if dataset == source_dataset
+                     else target_index)
+            cache[name] = (int(count_types_in_index(index, [name])
+                               .get(name, 0))
+                           if index is not None else 0)
+        return cache[name]
+
+    def _pool(name: str, receiving: str) -> Optional[Dict[str, Any]]:
+        key = mapping_pool_key(
+            source_dataset, target_dataset, name, receiving)
+        for cache in (local_pools, warm_pools or {}):
+            pool = cache.get(key)
+            if pool is not None:
+                return pool
+        try:
+            chains = [
+                chain for chain in mapper.get_type_bridges(
+                    name, source_dataset, target_dataset, max_bridges=0)
+                if chain and chain[-1].get("value") == receiving]
+        except Exception:
+            chains = []
+        if not chains:
+            return None
+        pool = resolve_prioritized_bridge_pool(
+            source_dataset, target_dataset, chains, name, receiving,
+            indexes=coverage_indexes)
+        if pool.get("resolution_status") == "supported":
+            local_pools[key] = pool
+            return pool
+        return None
+
+    for raw_receiving in receiving_types or []:
+        receiving = str(raw_receiving or "").strip()
+        if not receiving:
+            continue
+        try:
+            verified, discovery_truncated = mapper.incoming_type_names(
+                source_dataset, target_dataset, receiving)
+        except Exception:
+            logger.warning(
+                "reverse context discovery failed for %r (%s → %s)",
+                receiving, source_dataset, target_dataset, exc_info=True)
+            continue
+        truncated = bool(discovery_truncated) or len(verified) > max_sources
+        listed = verified[:max_sources] if max_sources else verified
+
+        members: List[Dict[str, Any]] = []
+        sel_src: set = set()
+        all_src: set = set()
+        sel_tgt: set = set()
+        all_tgt: set = set()
+        sel_src_branches: List[set] = []
+        all_src_branches: List[set] = []
+        sel_tgt_branches: List[set] = []
+        all_tgt_branches: List[set] = []
+        sel_src_measured = all_src_measured = False
+        sel_tgt_measured = all_tgt_measured = False
+        pooled_any = False
+        for name in listed:
+            sel_s: set = set()
+            all_s: set = set()
+            sel_t: set = set()
+            all_t: set = set()
+            record = {
+                "type": name,
+                "count": _count(source_dataset, name),
+                "pooled": False,
+                "selected_source_pool_size": 0,
+                "selected_target_pool_size": 0,
+                "all_valid_source_pool_size": 0,
+                "all_valid_target_pool_size": 0,
+            }
+            pool = _pool(name, receiving)
+            if pool and pool.get("resolution_status") == "supported":
+                pooled_any = True
+                sel_s = set(pool.get("source_body_ids") or [])
+                sel_t = set(pool.get("target_body_ids") or [])
+                all_s = set(
+                    pool.get("all_valid_source_body_ids")
+                    if pool.get("all_valid_source_body_ids") is not None
+                    else pool.get("source_body_ids") or [])
+                all_t = set(
+                    pool.get("all_valid_target_body_ids")
+                    if pool.get("all_valid_target_body_ids") is not None
+                    else pool.get("target_body_ids") or [])
+                s_measured = pool.get("source_basis") != "unmeasured"
+                t_measured = pool.get("target_basis") != "unmeasured"
+                s_all_measured = pool.get(
+                    "all_valid_source_basis",
+                    pool.get("source_basis")) != "unmeasured"
+                t_all_measured = pool.get(
+                    "all_valid_target_basis",
+                    pool.get("target_basis")) != "unmeasured"
+                record.update({
+                    "pooled": True,
+                    "selected_source_pool_size": len(sel_s),
+                    "selected_target_pool_size": len(sel_t),
+                    "all_valid_source_pool_size": len(all_s),
+                    "all_valid_target_pool_size": len(all_t),
+                })
+                if s_measured:
+                    sel_src |= sel_s
+                    sel_src_branches.append(sel_s)
+                    sel_src_measured = True
+                if t_measured:
+                    sel_tgt |= sel_t
+                    sel_tgt_branches.append(sel_t)
+                    sel_tgt_measured = True
+                if s_all_measured:
+                    all_src |= all_s
+                    all_src_branches.append(all_s)
+                    all_src_measured = True
+                if t_all_measured:
+                    all_tgt |= all_t
+                    all_tgt_branches.append(all_t)
+                    all_tgt_measured = True
+            members.append(record)
+
+        def _overlap(branch_lists: List[set]) -> set:
+            from collections import Counter
+
+            counts = Counter()
+            for branch in branch_lists:
+                counts.update(branch)
+            return {body_id for body_id, count in counts.items()
+                    if count > 1}
+
+        contexts[receiving] = {
+            "source_dataset": source_dataset,
+            "target_dataset": target_dataset,
+            "receiving_type": receiving,
+            "receiving_count": _count(target_dataset, receiving),
+            "sources": members,
+            "incoming_source_count": len(verified),
+            "truncated": truncated,
+            "source_population_total": sum(
+                m["count"] for m in members),
+            "pooled": pooled_any,
+            "selected_source_union_ids": sorted(sel_src),
+            "all_valid_source_union_ids": sorted(all_src),
+            "selected_target_union_ids": sorted(sel_tgt),
+            "all_valid_target_union_ids": sorted(all_tgt),
+            "source_overlap_selected_ids": sorted(_overlap(sel_src_branches)),
+            "source_overlap_all_valid_ids": sorted(_overlap(all_src_branches)),
+            "target_overlap_selected_ids": sorted(_overlap(sel_tgt_branches)),
+            "target_overlap_all_valid_ids": sorted(_overlap(all_tgt_branches)),
+            "selected_source_measured": sel_src_measured,
+            "selected_target_measured": sel_tgt_measured,
+            "all_valid_source_measured": all_src_measured,
+            "all_valid_target_measured": all_tgt_measured,
+        }
+    return contexts
+
+
 def _load_alias_index(dataset: str) -> Optional["CachedNeuronIndex"]:
     """Load (and memoize) the cached index used for alias counting."""
     path = neuron_index_path(dataset)
@@ -4242,128 +4443,46 @@ def mapped_type_targets(mapper, foreign_type: str, foreign_ds: str,
                         bridge_cache: Optional[Dict[Tuple[str, str, str],
                                                       List[List[Dict[str, str]]]]] = None,
                         ) -> Optional[Dict[str, Any]]:
-    """Canonical mapped-target resolution — THE shared backend (§backend
-    unification, user 2026-09-07).
+    """Canonical mapped-target resolution — the UI adapter.
 
-    Both the 'See available neurons' auto-initiated type mapping (the
-    viewer's mapped view via ``enrich_native_type_matches``) and the
-    cross-dataset tab's Type Mapping panel (its summary via
-    ``_compute``) resolve every foreign type through THIS function: the
-    union of the stored-mapping/alias resolution
-    (``get_alias_candidates``) and the derivation-bridge ends
-    (``get_type_bridges``).  Bridge-only pairs (FAFB LPN ->
-    LPN_a/LPN_b) and overlay 1-to-N splits (5th-LNv -> 5thsLNv_LNd6 +
-    s-LNv) therefore resolve identically on every surface.
-
-    Returns ``{'kind', 'targets'}`` or None; ``alias_cache`` optionally
-    memoizes the alias half across calls.
+    The core validity-aware decision lives in the comparison layer
+    (``comparison.type_resolver.resolve_valid_targets``), shared with
+    homolog finding and connectivity-profile comparison; this wrapper only
+    reshapes the typed :class:`TypeResolution` into the response shape this
+    module's callers consume (``{'kind', 'targets'[, 'status', ...]}`` or
+    ``None``).  Both the 'See available neurons' auto-initiated type
+    mapping (the viewer's mapped view via ``enrich_native_type_matches``)
+    and the cross-dataset tab's Type Mapping panel (its summary via
+    ``_compute``) resolve every foreign type through THIS function.
     """
-    alias_key = (str(foreign_type), str(foreign_ds), str(selected_ds))
-    if alias_cache is not None and alias_key in alias_cache:
-        ann = alias_cache[alias_key]
-    elif alias_cache is not None and foreign_type in alias_cache:
-        # Compatibility with older callers that supplied a name-only cache;
-        # new entries are always direction-scoped.
-        ann = alias_cache[foreign_type]
-    else:
-        try:
-            res = mapper.get_alias_candidates(
-                foreign_type, [selected_ds], source_dataset=foreign_ds)
-            info = res.get(selected_ds) or {}
-            candidates = info.get("candidates", [])
-            if info.get("outcome") != "matched" or not candidates:
-                ann = None
-            elif any(c["kind"] == "splits into" for c in candidates):
-                # A crosswalk-backed split is valid multi-target evidence;
-                # never choose the first branch merely because it sorts first.
-                ann = {
-                    "kind": "splits into",
-                    "targets": sorted({
-                        c["name"] for c in candidates
-                        if c["kind"] == "splits into"
-                    }),
-                    "status": "valid_split_evidence",
-                }
-            elif any(c["kind"] == "one of N" for c in candidates):
-                # The reverse aggregation is refused: show every local
-                # type that corresponds to the foreign name.
-                ann = {
-                    "kind": "one of N",
-                    "targets": sorted(
-                        c["name"] for c in candidates
-                        if c["kind"] == "one of N"
-                    ),
-                }
-            else:
-                cand = candidates[0]
-                ann = {
-                    "kind": cand["kind"],
-                    "targets": [cand["name"]],
-                }
-        except Exception:
-            ann = None
-        if alias_cache is not None:
-            alias_cache[alias_key] = ann
-    bridge_key = (str(foreign_type), str(foreign_ds), str(selected_ds))
-    if bridge_cache is not None and bridge_key in bridge_cache:
-        chains = bridge_cache[bridge_key]
-    else:
-        try:
-            chains = mapper.get_type_bridges(
-                foreign_type, foreign_ds, selected_ds, max_bridges=8)
-        except Exception:
-            chains = []
-        if bridge_cache is not None:
-            bridge_cache[bridge_key] = chains
-    ends = {
-        str(c[-1]['value']) for c in (chains or [])
-        if c and c[-1].get('value')
-    }
-    decision = None
-    try:
-        decision = mapper.get_mapping_decision(
-            foreign_type, foreign_ds, selected_ds, include_bridges=False)
-    except Exception:
-        decision = None
-    # A same-name chain can still exist for a type whose label evidence is
-    # explicitly conflicted (for example BANC CB1011).  The chain is useful
-    # for diagnostics, but it must not turn an unresolved vote into an
-    # alias-derived mapped-neuron count.
-    if decision and decision.get("status") == "conflict":
+    from comparison.type_resolver import (
+        STATUS_BRIDGED, STATUS_CONFLICT, STATUS_EVIDENCE_ONLY,
+        STATUS_MAPPER_UNAVAILABLE, STATUS_MAPPED, STATUS_UNMAPPED,
+        STATUS_VALID_SPLIT, resolve_valid_targets,
+    )
+
+    res = resolve_valid_targets(
+        mapper, foreign_type, foreign_ds, selected_ds,
+        alias_cache=alias_cache, bridge_cache=bridge_cache)
+    if res.status == STATUS_MAPPER_UNAVAILABLE:
+        return None
+    if res.status == STATUS_CONFLICT:
         return {
-            "kind": "conflict",
-            "targets": [],
-            "status": "conflict",
-            "source_dataset": foreign_ds,
-            "target_dataset": selected_ds,
-            "conflicts": decision.get("conflicts", []),
+            'kind': 'conflict',
+            'targets': [],
+            'status': 'conflict',
+            'source_dataset': res.source_dataset,
+            'target_dataset': res.target_dataset,
+            'conflicts': [dict(c) for c in res.conflicts],
         }
-    if not ends:
-        if ann:
-            ann = dict(ann)
-            if decision and decision.get("status") in {
-                    "evidence_only", "valid_split_evidence"}:
-                ann.setdefault("status", decision["status"])
-        return ann
-    targets = set(ends)
-    if ann:
-        targets.update(ann.get('targets') or [])
-    if len(targets) == 1 and ann:
-        result = dict(ann)
-        result.update({'targets': sorted(targets)})
-        return result
-    split_evidence = bool(
-        ann and ann.get("kind") == "splits into") or bool(
-            decision and decision.get("status") == "valid_split_evidence")
-    evidence_only = bool(
-        decision and decision.get("status") == "evidence_only")
-    return {
-        'kind': 'splits into' if split_evidence and len(targets) > 1
-        else ('one of N' if len(targets) > 1 else 'bridged'),
-        'targets': sorted(targets),
-        'status': ('valid_split_evidence' if split_evidence
-                   else ('evidence_only' if evidence_only else 'mapped')),
-    }
+    if res.status == STATUS_UNMAPPED and not res.target_types:
+        return None
+    result: Dict[str, Any] = {'kind': res.kind, 'targets': list(res.target_types)}
+    if res.status != STATUS_MAPPED or res.kind in ('one of N', 'splits into'):
+        result['status'] = res.status
+    if res.status == STATUS_CONFLICT:
+        result['conflicts'] = [dict(c) for c in res.conflicts]
+    return result
 
 
 def enrich_native_type_matches(

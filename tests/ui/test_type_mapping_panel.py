@@ -3,7 +3,7 @@
 Drives the real entrance button + dialog for male-cns v1.0 + FAFB v783
 with NiceGUI's test client: the button is enabled when both datasets have
 cached indexes, the global search composes the mapping across the
-selection, and the composed view + per-pair cards + CSV actions appear.
+selection, and the mapping graph + per-pair cards + CSV actions appear.
 Needs the local cached indexes; skipped when they are absent.
 """
 
@@ -161,12 +161,12 @@ def test_global_search_composes_the_selection(panel_client):
     search.add_values(['APDN3'])
     assert _click_button(client, 'Search mappings')
     labels = _labels(client)
-    # the composed view + per-pair card for the selection appear; the
+    # the mapping graph + per-pair card for the selection appear; the
     # exact chip resolves in FAFB, so the origin-seeded pair runs
     # FAFB -> male-cns (§12 direction rule: the query lives where it
     # matched)
-    assert any('Composed view (HTML)' in label for label in labels) or \
-        any('Composed view' in b_text for b_text in
+    assert any('Mapping graph (HTML)' in label for label in labels) or \
+        any('Mapping graph' in b_text for b_text in
             [str(getattr(b, 'text', '')) for b in _buttons(client)])
     assert any('flywire_FAFB_v783 → male-cns:v1.0' in label
                for label in labels)
@@ -176,23 +176,41 @@ def test_global_search_composes_the_selection(panel_client):
         'Type coverage — flywire_FAFB_v783 → male-cns:v1.0' in label
         and 'bidirectional' in label
         for label in labels)
-    # 2026-09-09: the second view is "Backward" (not "Reverse"), and both
-    # views name their coverage columns by DATASET so nothing reads as
-    # flipped
+    # 2026-09-09: the second view is "Backward" (not "Reverse"), and the
+    # coverage columns carry SHORT `CODE · scope` labels with the full
+    # dataset key and the selected/all-valid explanation on the header
+    # tooltip (§12.4/§12.5)
     assert any(label.startswith('Backward —') for label in labels)
     assert not any(label.startswith('Reverse —') for label in labels)
     coverage_tables = [
         e for e in client.elements.values()
         if type(e).__name__ == 'Table'
-        and any('side (bodyIds)' in c.get('label', '')
+        and any('· selected' in c.get('label', '')
                 for c in e._props.get('columns', []))]
-    assert coverage_tables, 'dataset-named coverage columns missing'
+    assert coverage_tables, 'short coverage column labels missing'
     for table in coverage_tables:
-        column_labels = {c['label'] for c in table._props['columns']}
-        assert 'flywire_FAFB_v783 side (bodyIds) — selected bridge' in column_labels
-        assert 'flywire_FAFB_v783 side (bodyIds) — all-valid union' in column_labels
-        assert 'male-cns:v1.0 side (bodyIds) — selected bridge' in column_labels
-        assert 'male-cns:v1.0 side (bodyIds) — all-valid union' in column_labels
+        by_label = {c['label']: c for c in table._props['columns']}
+        assert {'FAFB · selected', 'FAFB · all valid',
+                'MCNS · selected', 'MCNS · all valid'} <= set(by_label)
+        assert 'flywire_FAFB_v783 side (bodyIds)' in (
+            by_label['FAFB · selected'].get('tooltip', ''))
+        assert 'Not a biological adjudication' in (
+            by_label['FAFB · selected'].get('tooltip', ''))
+        assert 'male-cns:v1.0 side (bodyIds)' in (
+            by_label['MCNS · all valid'].get('tooltip', ''))
+        assert 'not mutually exclusive' in (
+            by_label['MCNS · all valid'].get('tooltip', ''))
+    # §12.3: the backward rows carry the dataset-wide incoming scope —
+    # the full incoming family with the active query marked
+    backward_rows = [
+        r for table in coverage_tables for r in table._props.get('rows', [])
+        if 'mapped_from' in r]
+    assert backward_rows
+    assert any(r.get('coverage_scope') == 'dataset-wide incoming'
+               for r in backward_rows)
+    assert all(r.get('relationship') != '1-to-1'
+               for r in backward_rows
+               if int(r.get('incoming_source_count') or 1) > 1)
     # artifact + CSV actions of the per-pair card are present
     for action in ('Sankey (type-level)', 'Sankey (linker)',
                    'Network (type-level)', 'Network (linker)',
@@ -240,7 +258,7 @@ def test_history_rows_show_dataset_and_column_hints(panel_client):
 def test_empty_search_produces_no_results(panel_client):
     client, button, _selection = panel_client
     assert _click_button(client, 'Search mappings')
-    # no composed view and no per-pair cards without a search
-    assert not any('Composed view (HTML)' in str(getattr(b, 'text', ''))
+    # no mapping graph and no per-pair cards without a search
+    assert not any('Mapping graph (HTML)' in str(getattr(b, 'text', ''))
                    for b in _buttons(client))
     assert not any('mapped pairs' in label for label in _labels(client))
