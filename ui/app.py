@@ -1038,10 +1038,16 @@ html, body {
 .drocat-data-viewer-table .drocat-neuron-map-value {
     /* Fixed-width inner box: keeps the pinned column geometry stable no
        matter how long the map text is (auto table layout would otherwise
-       expand the cell and desync the pinned offsets). */
+       expand the cell and desync the pinned offsets). Quasar tables keep
+       white-space: nowrap unless wrap-cells is enabled, so long map text
+       would paint past the pinned cell and get covered by the neighbour
+       or clipped by the scroll edge; confine it to the cell with a
+       truncation ellipsis — the full text stays reachable through the
+       cell's hover title (__map_bridge). */
     width: 100%;
-    overflow-wrap: anywhere;
-    word-break: break-word;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 .drocat-data-viewer-table mark.drocat-neuron-match-text {
     padding: 0 .08em;

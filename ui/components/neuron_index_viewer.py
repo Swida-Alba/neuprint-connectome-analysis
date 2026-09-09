@@ -2641,22 +2641,30 @@ def _render_index(
         if mapped_view.get("active"):
             # Provenance columns: precomputed at enter time — which foreign
             # types mapped to this row's type, and where the match came
-            # from. The bridge derivation rides on the floating cells as a
-            # hover title (__map_bridge).
+            # from. The cells keep their fixed pinned width, so the full
+            # cell text rides on them as a hover title (__map_bridge)
+            # together with the bridge derivation.
             provenance = mapped_view.get("provenance", {})
             pools = mapped_view.get("pools", {})
             for row in current_rows:
                 entries = provenance.get(str(row.get("type", "")), [])
                 if entries:
-                    row["__map_foreign"] = "; ".join(
-                        e["foreign_text"] for e in entries
-                    )
-                    row["__map_origin"] = "; ".join(
-                        e["origin_text"] for e in entries
-                    )
+                    # One origin often reaches the row through several
+                    # foreign types; repeating it in the cell buries the
+                    # information and overflows the pinned width, so join
+                    # first occurrences only.
+                    foreign_texts = list(dict.fromkeys(
+                        str(e["foreign_text"]) for e in entries))
+                    origin_texts = list(dict.fromkeys(
+                        str(e["origin_text"]) for e in entries))
+                    row["__map_foreign"] = "; ".join(foreign_texts)
+                    row["__map_origin"] = "; ".join(origin_texts)
                     # §9.4: the per-bridge pool granularity reads next to
                     # the derivation (e.g. pool 4 to 4 bodyIds)
-                    hover_lines = []
+                    hover_lines = [
+                        f"Foreign type(s): {row['__map_foreign']}",
+                        f"Matched column: {row['__map_origin']}",
+                    ]
                     for e in entries:
                         pool = pools.get(
                             (str(row.get("type", "")),

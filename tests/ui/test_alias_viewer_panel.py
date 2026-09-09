@@ -384,6 +384,21 @@ def test_mapped_view_pinned_columns_and_bridge_hover(viewer_client):
     assert stamped
     assert all(str(r.get('__map_bridge', '')).strip() for r in stamped)
 
+    # hover titles lead with the full cell text, so content covered by the
+    # fixed pinned width stays readable without widening the columns
+    assert all(
+        str(r['__map_bridge']).startswith('Foreign type(s): ')
+        and '\nMatched column: ' in str(r['__map_bridge'])
+        for r in stamped
+    )
+    # per-row cells join first occurrences only: one matched column often
+    # reaches the row through several foreign types and must not repeat
+    for row in stamped:
+        foreign_parts = str(row['__map_foreign']).split('; ')
+        assert len(foreign_parts) == len(set(foreign_parts))
+        origin_parts = str(row['__map_origin']).split('; ')
+        assert len(origin_parts) == len(set(origin_parts))
+
 
 def test_mapping_visualization_icons(viewer_client):
     """Sankey and Network buttons are visually distinguishable icons."""
