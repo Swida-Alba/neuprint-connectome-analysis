@@ -614,18 +614,17 @@ class ComparisonAnalyzer:
             # Fallback for polars issues (schema inference, etc.)
             return pd.read_csv(filepath, encoding='utf-8', **kwargs)
     
-    def _collect_result_types(self) -> Set[str]:
-        """Collect all neuron types present in comparison results.
-        
-        This scans raw_results for type names in result DataFrames.
-        raw_results structure: {dataset: {threshold: DataFrame}}
-        
-        Returns:
-            Set of all unique type names (strings only).
+    def _collect_result_types_by_dataset(self) -> Dict[str, Set[str]]:
+        """Collect result type names while retaining their source dataset.
+
+        ``raw_results`` is keyed by dataset and then threshold.  Keeping the
+        first key through this scan lets report consumers resolve a raw name
+        in the namespace where it was actually observed instead of guessing
+        from the name alone.
         """
-        all_types = set()
-        
+        types_by_dataset: Dict[str, Set[str]] = {}
         for dataset, thresh_results in self.raw_results.items():
+            dataset_types = types_by_dataset.setdefault(dataset, set())
             for threshold, result in thresh_results.items():
                 # Handle DataFrame directly (path/edge analysis results)
                 if isinstance(result, pd.DataFrame) and not result.empty:
@@ -633,7 +632,8 @@ class ComparisonAnalyzer:
                     for col in ['type_pre', 'type_post', 'from_type', 'to_type', 
                                 'std_label_pre', 'std_label_post']:
                         if col in result.columns:
-                            all_types.update(result[col].dropna().unique())
+                            dataset_types.update(
+                                result[col].dropna().unique())
                 
                 # Handle dict structure if present (legacy format)
                 elif isinstance(result, dict):
@@ -643,10 +643,22 @@ class ComparisonAnalyzer:
                             for col in ['from', 'to', 'from_type', 'to_type',
                                         'type_pre', 'type_post']:
                                 if col in df.columns:
-                                    all_types.update(df[col].dropna().unique())
+                                    dataset_types.update(
+                                        df[col].dropna().unique())
         
-        # Filter to only string types
-        return {t for t in all_types if isinstance(t, str)}
+        return {
+            dataset: {value for value in values if isinstance(value, str)}
+            for dataset, values in types_by_dataset.items()
+            if any(isinstance(value, str) for value in values)
+        }
+
+    def _collect_result_types(self) -> Set[str]:
+        """Collect all unique neuron types present in comparison results."""
+        return {
+            type_name
+            for values in self._collect_result_types_by_dataset().values()
+            for type_name in values
+        }
 
     def get_hemisphere_symmetry_summaries(self) -> Dict[int, Dict[str, Dict]]:
         """Load hemisphere symmetry summaries for all datasets and thresholds.
@@ -7417,6 +7429,15 @@ class ComparisonAnalyzer:
         # Generate VisualizePath interactive heatmaps (no separate network files)
         self._generate_vispath_visualizations(vis_dir)
 
+        # Generate the conserved-path network files consumed by the report.
+        # The per-threshold helper already handles Standard and combinations;
+        # without this orchestration call the report can only render a dash
+        # even when the alignment contains conserved edges.
+        try:
+            self.visualize_conserved_paths_all_thresholds()
+        except Exception as e:
+            self._log(f"Warning: Failed to generate conserved path graphs: {e}")
+
         # Generate conserved reciprocal graphs when enabled
         if getattr(self.parameters, 'find_reciprocal', False):
             try:
@@ -7559,87 +7580,132 @@ class ComparisonAnalyzer:
         """Query-aware wrapper used by advanced similarity metrics."""
         return self._get_path_data_for_threshold(query)
     
-    def _get_path_hop_weights_for_threshold(self, threshold: int) -> Dict[str, Dict[str, List[float]]]:
-        """
-        Get hop weights for each path across all datasets for a given threshold.
-        
-        Returns:
-            Dict mapping path_key -> {safe_dataset_name: [hop_weight1, hop_weight2, ...]}
+    def _get_path_hop_weights_for_threshold(
+            self, threshold: Any) -> Dict[str, Dict[str, List[float]]]:
+        """Get hop weights for a scalar threshold or a query threshold map.
+
+        Query reports pass the complete query object so each dataset is read
+        from its own requested ``minsyn_<threshold>`` directory.  The source
+        files exist in two layouts: a path/weights table and a
+        source/target/weights table.  Both are normalized into the same path
+        key consumed by the report renderer.
         """
         import ast
+
+        query_map = (threshold.get('thresholds', {})
+                     if isinstance(threshold, dict) else None)
+        scalar_threshold = None if query_map is not None else threshold
         dataset_names = self.parameters.get_dataset_names()
-        all_hop_weights = {}  # path_key -> {safe_name: [weights]}
-        
+        all_hop_weights = {}
+
+        def _parse_weights(value) -> List[float]:
+            if value is None or (isinstance(value, float) and pd.isna(value)):
+                return []
+            if isinstance(value, (list, tuple, np.ndarray)):
+                raw_values = list(value)
+            else:
+                text = str(value).strip()
+                if not text or text.lower() == 'nan':
+                    return []
+                raw_values = None
+                try:
+                    parsed = ast.literal_eval(text)
+                    if isinstance(parsed, (list, tuple)):
+                        raw_values = list(parsed)
+                except (ValueError, SyntaxError):
+                    pass
+                if raw_values is None:
+                    raw_values = text.strip('[]()').split(',')
+            weights = []
+            for item in raw_values:
+                try:
+                    weights.append(float(item))
+                except (TypeError, ValueError):
+                    return []
+            return weights
+
         for dataset_name in dataset_names:
+            dataset_threshold = (
+                query_map.get(dataset_name)
+                if query_map is not None else scalar_threshold
+            )
+            if dataset_threshold is None:
+                continue
             safe_name = self.parameters._sanitize_name(dataset_name)
             dataset_output_path = os.path.join(
                 self.parameters.full_output_path,
                 'dataset_data',
                 safe_name,
-                f'minsyn_{threshold}'
+                f'minsyn_{dataset_threshold}'
             )
-            
-            # Try multiple path file patterns
+
             path_files_to_try = [
-                os.path.join(dataset_output_path, f'minsyn_{threshold}_data_original_paths.csv'),
+                os.path.join(
+                    dataset_output_path,
+                    f'minsyn_{dataset_threshold}_data_original_paths.csv'),
             ]
-            
-            # Also check for source_to_target_allpaths_type.csv pattern
             if os.path.exists(dataset_output_path):
-                for f in os.listdir(dataset_output_path):
-                    if f.endswith('_allpaths_type.csv'):
-                        path_files_to_try.append(os.path.join(dataset_output_path, f))
-            
-            # Try to read from available files
+                for filename in os.listdir(dataset_output_path):
+                    if filename.endswith('_allpaths_type.csv'):
+                        path_files_to_try.append(
+                            os.path.join(dataset_output_path, filename))
+
             df = None
             for path_file in path_files_to_try:
                 if os.path.exists(path_file):
                     try:
                         df = self._read_csv(path_file)
                         break
-                    except Exception as e:
-                        self._log(f"Warning: Could not read {path_file}: {e}")
-            
-            if df is not None and 'path' in df.columns and 'weights' in df.columns:
-                for _, row in df.iterrows():
-                    original_path_key = row['path']
-                    weights_str = str(row.get('weights', ''))
-                    
-                    # Parse weights column
-                    hop_weights = []
-                    if weights_str and weights_str != 'nan':
-                        if weights_str.startswith('['):
-                            try:
-                                hop_weights = ast.literal_eval(weights_str)
-                            except:
-                                pass
-                        elif ',' in weights_str:
-                            try:
-                                hop_weights = [float(w.strip()) for w in weights_str.split(',')]
-                            except:
-                                pass
-                    
-                    if hop_weights:
-                        # Apply type mapping to path key if auto_type_mapping is enabled
-                        if self.parameters.auto_type_mapping and self.parameters._auto_type_mapper:
-                            # Parse path nodes
-                            if '->' in str(original_path_key):
-                                path_nodes = [n.strip() for n in str(original_path_key).split('->')]
-                            elif ' → ' in str(original_path_key):
-                                path_nodes = [n.strip() for n in str(original_path_key).split(' → ')]
-                            else:
-                                path_nodes = [str(original_path_key)]
-                            
-                            # Build canonical key for merging
-                            canonical_key, _ = self._build_path_key_with_mapping(path_nodes, dataset_name)
-                            path_key = canonical_key
-                        else:
-                            path_key = original_path_key
-                        
-                        if path_key not in all_hop_weights:
-                            all_hop_weights[path_key] = {}
-                        all_hop_weights[path_key][safe_name] = hop_weights
-        
+                    except Exception as exc:
+                        self._log(
+                            f"Warning: Could not read {path_file}: {exc}")
+            if df is None:
+                continue
+
+            has_path = 'path' in df.columns
+            has_endpoints = {'source', 'target'} <= set(df.columns)
+            weight_column = next(
+                (column for column in ('weights', 'hop_weights')
+                 if column in df.columns), None)
+            if weight_column is None or not (has_path or has_endpoints):
+                continue
+
+            for _, row in df.iterrows():
+                if has_path and not pd.isna(row.get('path')):
+                    original_path_key = row.get('path')
+                elif has_endpoints:
+                    source = row.get('source')
+                    target = row.get('target')
+                    if pd.isna(source) or pd.isna(target):
+                        continue
+                    original_path_key = f"{source} → {target}"
+                else:
+                    continue
+                hop_weights = _parse_weights(row.get(weight_column))
+                if not hop_weights:
+                    continue
+
+                original_path_key = str(original_path_key)
+                if (self.parameters.auto_type_mapping
+                        and self.parameters._auto_type_mapper):
+                    if '->' in original_path_key:
+                        path_nodes = [
+                            node.strip()
+                            for node in original_path_key.split('->')]
+                    elif ' → ' in original_path_key:
+                        path_nodes = [
+                            node.strip()
+                            for node in original_path_key.split(' → ')]
+                    else:
+                        path_nodes = [original_path_key]
+                    path_key, _ = self._build_path_key_with_mapping(
+                        path_nodes, dataset_name)
+                else:
+                    path_key = original_path_key
+
+                all_hop_weights.setdefault(path_key, {})[safe_name] = \
+                    hop_weights
+
         return all_hop_weights
     
     def _get_ratio_data_for_threshold(self, threshold: int) -> pd.DataFrame:
@@ -9307,7 +9373,11 @@ class ComparisonAnalyzer:
             )
         os.makedirs(output_folder, exist_ok=True)
         
-        base_filename = f"conserved_network_t{display_threshold}"
+        filename_threshold = (
+            self._safe_query_filename_id(display_threshold)
+            if query else display_threshold
+        )
+        base_filename = f"conserved_network_t{filename_threshold}"
         
         self._log(f"  Creating VisualizePath visualization with {len(edges_df)} edges...")
         
@@ -9620,7 +9690,11 @@ class ComparisonAnalyzer:
             )
         os.makedirs(output_folder, exist_ok=True)
 
-        base_filename = f"conserved_reciprocal_t{display_threshold}"
+        filename_threshold = (
+            self._safe_query_filename_id(display_threshold)
+            if query else display_threshold
+        )
+        base_filename = f"conserved_reciprocal_t{filename_threshold}"
 
         vp = VisualizePath(
             path_file=edges_df,

@@ -173,6 +173,7 @@ def _compute_type_mapping(queries, datasets, mode) -> Dict[str, Any]:
     # search (labels) below.
     resolved = resolve_type_matches(queries, mode, datasets, indexes)
     origins = resolved["origins"]
+    origin_matches = resolved.get("origin_matches", {})
     notes = list(resolved["notes"])
 
     pair_flows: Dict[tuple, list] = {}
@@ -187,7 +188,8 @@ def _compute_type_mapping(queries, datasets, mode) -> Dict[str, Any]:
             if target == origin:
                 continue
             flows = origin_seeded_flows(
-                origin, o_types, target, source_counts=source_counts)
+                origin, o_types, target, source_counts=source_counts,
+                matched_origins=origin_matches.get(origin))
             if not flows:
                 continue
             ends = sorted({f["foreign_type"] for f in flows})
@@ -287,9 +289,6 @@ def _compute_type_mapping(queries, datasets, mode) -> Dict[str, Any]:
         recv_neurons = (sum(count_types_in_index(
             indexes[ds], sorted(recv_types)).values())
                         if recv_types else 0)
-        issued_types = {f.get("foreign_type") or ""
-                        for (s, t), fl in pair_flows.items()
-                        if s == ds for f in fl}
         issued_sources = {f.get("source_type") or ""
                           for (s, _t), fl in pair_flows.items()
                           if s == ds for f in fl
@@ -304,7 +303,7 @@ def _compute_type_mapping(queries, datasets, mode) -> Dict[str, Any]:
             "types": len(matched),
             "neurons": neurons,
             "pairs": pairs,
-            "mapped_types": len(recv_types | issued_types),
+            "mapped_types": len(recv_types | issued_sources),
             "mapped_neurons": recv_neurons,
             "issued_neurons": issued_neurons,
             "unmapped": unmapped,

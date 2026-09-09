@@ -369,9 +369,10 @@ columns; listed per type per side, never paired across datasets.
   `pool_coverage` stays the human-readable `source covered …; target
   …` field.  `source_body_ids` / `target_body_ids` carry the FULL
   per-type populations (every bodyId of the mapped type in its own
-  dataset, one quoted JSON array per cell — user 2026-09-09, after
-  ';'-joined lists made spreadsheet delimiter sniffing split them into
-  pseudo-columns): listed per type per side, never a bodyId-to-bodyId
+  dataset, one brace-wrapped comma-separated list quoted as one CSV field
+  per cell — user 2026-09-09, after ';'-joined lists made spreadsheet
+  delimiter sniffing split them into pseudo-columns): listed per type per
+  side, never a bodyId-to-bodyId
   pairing.  The export never represents bodyId
   pairings.
 
@@ -383,7 +384,7 @@ columns; listed per type per side, never paired across datasets.
 | `tests/core/test_type_mapper_bridge_rules.py` | the algebra: reverse crosswalk legs, connector licenses, BANC ban, no-flip order, untyped exclusion, label-hop terminality + primary-valued-alt refusal (the `l-LNv → BM_*` regression), the designed `aT`→`ACT` standard, real-data acceptance |
 | `tests/core/test_type_mapper_annotation_bridge.py` | overlay precedence, exports, release-name resolution |
 | `tests/core/test_type_mapper_real_datasets.py` | circadian parity (panel == viewer, 219 unique), linker layout + header legend chips, direct BANC label routes, two-linker cap, APDN3 pair weights == Sankey ribbons, APDN3 pool-union hover, Sankey no parallel links, edge-label size control |
-| `tests/core/test_banc_release_and_mcns_version.py` | BANC label votes/verification, auto-label exclusion, duplicated root relation, MCNS v0.9 alias/native fallback |
+| `tests/core/test_banc_release_and_mcns_version.py` | BANC label votes/verification, `auto:`-stripped label provenance, duplicated root relation, MCNS v0.9 alias/native fallback |
 | `tests/core/test_dataset_release_registry.py` | shared recommendation policy and unavailable-release behavior |
 | `tests/ui/test_dataset_release_notice.py` | explicit single/multi selector recommendation action and suppression |
 | `tests/core/test_type_mapping_composed.py` | mapping-CSV fixed-width contract (`source_dataset`…`pool_coverage_basis`), `format_coverage` states, `not measured` coverage rows, shared `pair_flow_weight` formula, pool-count union, forward 1-to-N + reverse N-to-1 coverage rows |

@@ -234,9 +234,9 @@
       target_pool/target_total</code>, the FULL per-type bodyId
       populations (<code>source_body_ids</code> /
       <code>target_body_ids</code> — every bodyId of the mapped type in
-      its own dataset, one quoted JSON array per cell so spreadsheet
-      delimiters never split it; listed per type, never paired across
-      datasets), plus the human-readable
+      its own dataset, one brace-wrapped comma-separated list quoted as one
+      CSV field per cell so spreadsheet delimiters never split it; listed
+      per type, never paired across datasets), plus the human-readable
       <code>pool_coverage</code> and <code>pool_coverage_basis</code>
       columns.  The full mapping is never silently dropped — a
       <code>+N more flows</code> notice points at the CSV when the drawn

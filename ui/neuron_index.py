@@ -3700,6 +3700,7 @@ def resolve_type_matches(queries, mode: str, datasets,
     ``_type_match_expression``).  Returns::
 
         {'origins': {dataset: [written type names]},
+         'origin_matches': {dataset: {type: [{column, value}]}},
          'fallback_chips': [chips that matched NOTHING anywhere],
          'notes': [human-readable resolution notes]}
 
@@ -3711,8 +3712,19 @@ def resolve_type_matches(queries, mode: str, datasets,
 
     indexes = dict(indexes or {})
     origins: Dict[str, List[str]] = {ds: [] for ds in datasets}
+    origin_matches: Dict[str, Dict[str, set]] = {}
     fallback_chips: List[str] = []
     notes: List[str] = []
+
+    def _record_origin(dataset: str, type_name: str, column: str,
+                       value: str) -> None:
+        type_name = str(type_name or '').strip()
+        column = str(column or '').strip()
+        value = str(value or '').strip()
+        if not type_name or not column:
+            return
+        origin_matches.setdefault(dataset, {}).setdefault(
+            type_name, set()).add((column, value or type_name))
 
     def _label_matches_mode(label: str, chip: str, mode: str) -> bool:
         """Apply the panel's filter mode to one taxonomy label."""
@@ -3752,6 +3764,8 @@ def resolve_type_matches(queries, mode: str, datasets,
                 if names:
                     matched_any = True
                     origins[ds].extend(names)
+                    for name in names:
+                        _record_origin(ds, name, "type", name)
         if not matched_any:
             # Taxonomy-scope resolution (H2-1): a chip that names a
             # taxonomy VALUE (e.g. FAFB cell_type 'circadian_clock')
@@ -3766,25 +3780,33 @@ def resolve_type_matches(queries, mode: str, datasets,
                 labels, _trunc = _native_label_matches(
                     index, chip, 10 ** 9, 10 ** 9)
                 member: Dict[str, int] = {}
-                label_column = ""
-                label_written = ""
                 for m in labels:
                     label = str(m.get("label", ""))
                     if not _label_matches_mode(label, chip, mode):
                         continue
-                    label_column = m.get("column", label_column)
-                    label_written = label
+                    label_column = str(m.get("column", "") or "")
                     for t in m.get("types", []):
                         name = str(t.get("name", ""))
                         if name:
                             member[name] = int(t.get("count", 0))
+                            _record_origin(ds, name, label_column, label)
                 if member:
                     matched_any = True
                     origins[ds].extend(sorted(member))
+                    label_columns = sorted({
+                        column for name in member
+                        for column, _value in origin_matches.get(
+                            ds, {}).get(name, set())
+                    })
+                    label_values = sorted({
+                        value for name in member
+                        for _column, value in origin_matches.get(
+                            ds, {}).get(name, set())
+                    })
                     notes.append(
                         f"'{chip}' resolved via taxonomy column "
-                        f"'{label_column}' in {ds} (label "
-                        f"'{label_written}'): {len(member)} types, "
+                        f"'{', '.join(label_columns)}' in {ds} (label "
+                        f"'{', '.join(label_values)}'): {len(member)} types, "
                         f"{sum(member.values())} neurons")
         if not matched_any:
             fallback_chips.append(chip)
@@ -3794,6 +3816,16 @@ def resolve_type_matches(queries, mode: str, datasets,
     return {
         "origins": {ds: sorted(set(v))
                     for ds, v in origins.items() if v},
+        "origin_matches": {
+            ds: {
+                type_name: [
+                    {"column": column, "value": value}
+                    for column, value in sorted(records)
+                ]
+                for type_name, records in sorted(by_type.items())
+            }
+            for ds, by_type in sorted(origin_matches.items())
+        },
         "fallback_chips": fallback_chips,
         "notes": notes,
     }

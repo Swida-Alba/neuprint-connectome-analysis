@@ -764,7 +764,7 @@ class CrossDatasetTypeMapper:
         self._release_alias_diagnostics: Dict[str, Any] = {}
         self._banc_label_edges: Dict[tuple, List[Tuple[str, str, str, str]]] = defaultdict(list)
         self._banc_release_edges: Dict[tuple, List[Tuple[str, str, str, str]]] = defaultdict(list)
-        self._banc_label_votes: Dict[tuple, Dict[str, int]] = {}
+        self._banc_label_votes: Dict[tuple, Dict[str, Any]] = {}
         self._banc_release_votes: Dict[tuple, Dict[str, int]] = {}
 
         # Dataset type index: {dataset: {type_name, ...}}.  Body IDs are
@@ -1940,6 +1940,20 @@ class CrossDatasetTypeMapper:
     def _is_auto_label(value: Any) -> bool:
         return str(value or '').strip().lower().startswith('auto:')
 
+    @classmethod
+    def _normalize_banc_label_token(cls, value: Any) -> Tuple[str, bool]:
+        """Return a BANC label token and whether its ``auto:`` prefix was stripped.
+
+        BANC label columns mix curated values with machine-generated values in
+        the same column.  The prefix identifies the source tier, not a
+        different type namespace, so the type vote should use the name after
+        the prefix while retaining the tier for provenance and diagnostics.
+        """
+        token = str(value or '').strip()
+        if cls._is_auto_label(token):
+            return token.split(':', 1)[1].strip(), True
+        return token, False
+
     def _banc_label_targets(self, column: str) -> Set[str]:
         return {
             'fafb_cell_type': {'flywire_FAFB_v783'},
@@ -1958,27 +1972,45 @@ class CrossDatasetTypeMapper:
         }.get(column)
 
     def _banc_label_candidates(self, value: Any, column: str) -> Set[str]:
-        candidates: Set[str] = set()
+        return {
+            candidate
+            for candidate, _auto_stripped in
+            self._banc_label_candidate_details(value, column)
+        }
+
+    def _banc_label_candidate_details(
+            self, value: Any, column: str) -> List[Tuple[str, bool]]:
+        """Resolve BANC label cells, retaining ``auto:`` provenance."""
+        details: List[Tuple[str, bool]] = []
         for token in self._split_type_cell(value):
-            if self._is_auto_label(token) or self._is_untyped_value(token):
+            token, auto_stripped = self._normalize_banc_label_token(token)
+            if not token or self._is_untyped_value(token):
                 continue
+            token_candidates: Set[str] = set()
             targets = self._banc_label_targets(column)
             for target_key in targets:
                 if target_key == 'flywire_FAFB_v783':
                     resolved = self._resolve_flywire_names([token], target_key)
-                    candidates.update(
+                    token_candidates.update(
                         name for name in resolved
                         if name in self._flywire_primaries.get(target_key, set())
                     )
                 elif target_key == 'male-cns:v1.0':
                     if token in self._dataset_types.get(target_key, {}):
-                        candidates.add(token)
+                        token_candidates.add(token)
                 else:
                     # MANC/HEMI primaries are not required to be locally
                     # grounded for this overlay; their curated non-auto
                     # labels are accepted as-is.
-                    candidates.add(token)
-        return candidates
+                    token_candidates.add(token)
+            for candidate in token_candidates:
+                # Keep one vote per candidate per source row, matching the
+                # historical set-based candidate semantics for a cell such as
+                # ``A, A``.
+                detail = (candidate, auto_stripped)
+                if detail not in details:
+                    details.append(detail)
+        return details
 
     def _banc_label_vote_batches_polars(
         self, banc_key: str, table, column: str, target_keys: List[str]
@@ -2007,7 +2039,6 @@ class CrossDatasetTypeMapper:
             .alias("__banc_label"),
         )
 
-        token_lower = pl.col("__token").str.to_lowercase()
         type_lower = pl.col("__banc_type").str.to_lowercase()
         tokens = (
             selected.select(["__banc_row", "__banc_type", "__banc_label"])
@@ -2017,22 +2048,33 @@ class CrossDatasetTypeMapper:
             .with_columns(
                 pl.col("__token").cast(pl.Utf8, strict=False).fill_null("")
                 .str.strip_chars().alias("__token"))
+            .with_columns(
+                pl.col("__token").str.to_lowercase().str.starts_with(
+                    "auto:").alias("__auto_stripped"),
+                pl.when(pl.col("__token").str.to_lowercase().str.starts_with(
+                    "auto:"))
+                .then(pl.col("__token").str.slice(5).str.strip_chars())
+                .otherwise(pl.col("__token"))
+                .alias("__token"),
+            )
+            .with_columns(
+                pl.col("__token").str.to_lowercase().alias("__token_lower"))
             .filter(
                 (pl.col("__banc_type") != "")
                 & ~type_lower.is_in(["unknown", "nan", "none"])
                 & ~type_lower.str.contains(r"^[0-9]+$", literal=False)
                 & (pl.col("__token") != "")
-                & ~token_lower.is_in(["unknown", "nan", "none"])
-                & ~token_lower.str.starts_with("auto:")
-                & ~token_lower.str.contains(r"^[0-9]+$", literal=False)
+                & ~pl.col("__token_lower").is_in(
+                    ["unknown", "nan", "none"])
+                & ~pl.col("__token_lower").str.contains(
+                    r"^[0-9]+$", literal=False)
             )
             # ``_banc_label_candidates`` returns a set per row.  Deduplicating
             # here preserves that one-vote-per-row behavior for cells such as
             # ``A, A`` while keeping the operation in the column engine.
-            .unique(
-                subset=["__banc_row", "__banc_type", "__token"],
-                maintain_order=True,
-            )
+            .group_by(["__banc_row", "__banc_type", "__token"],
+                      maintain_order=True)
+            .agg(pl.col("__auto_stripped").any().alias("__auto_stripped"))
         )
         if tokens.is_empty():
             return []
@@ -2058,6 +2100,7 @@ class CrossDatasetTypeMapper:
             return []
 
         votes_by_type: Dict[str, Counter] = defaultdict(Counter)
+        auto_stripped_by_type: Dict[str, Counter] = defaultdict(Counter)
         first_row_by_type: Dict[str, int] = {}
         vote_counts = evidence.group_by(
             ["__banc_type", "__candidate"]
@@ -2072,6 +2115,11 @@ class CrossDatasetTypeMapper:
                 first_row_by_type.get(banc_type, int(first_row)),
                 int(first_row),
             )
+        auto_counts = evidence.filter(pl.col("__auto_stripped")).group_by(
+            ["__banc_type", "__candidate"]
+        ).agg(pl.len().alias("__count"))
+        for banc_type, candidate, count in auto_counts.iter_rows():
+            auto_stripped_by_type[str(banc_type)][str(candidate)] += int(count)
 
         verified_by_type: Dict[str, Counter] = defaultdict(Counter)
         conflicts_by_type: Dict[str, Counter] = defaultdict(Counter)
@@ -2115,6 +2163,7 @@ class CrossDatasetTypeMapper:
                 votes,
                 verified_by_type.get(banc_type, Counter()),
                 conflicts_by_type.get(banc_type, Counter()),
+                auto_stripped_by_type.get(banc_type, Counter()),
             )
             for banc_type, votes in sorted(
                 votes_by_type.items(),
@@ -2132,15 +2181,18 @@ class CrossDatasetTypeMapper:
         added_conflicts = 0
 
         def record_votes(banc_key, column, target_keys, banc_type,
-                         votes, verified_votes, verification_conflicts):
+                         votes, verified_votes, verification_conflicts,
+                         auto_stripped_votes=None):
             """Apply one already-aggregated source-type vote set."""
             nonlocal added_maps, added_conflicts
+            auto_stripped_votes = auto_stripped_votes or Counter()
             self._banc_label_votes[(
                 banc_key, column, banc_type
             )] = {
                 'votes': dict(votes),
                 'verified_votes': dict(verified_votes),
                 'verification_conflicts': dict(verification_conflicts),
+                'auto_stripped_votes': dict(auto_stripped_votes),
             }
             winner = self._dominant_vote(votes)
             if winner is None:
@@ -2189,6 +2241,11 @@ class CrossDatasetTypeMapper:
                     'votes': dict(votes),
                     'verified_votes': dict(verified_votes),
                     'verification_conflicts': dict(verification_conflicts),
+                    'auto_stripped_votes': dict(auto_stripped_votes),
+                    'winner_auto_stripped_votes': int(
+                        auto_stripped_votes.get(winner, 0)),
+                    'winner_derived_from_auto': bool(
+                        auto_stripped_votes.get(winner, 0)),
                     'alternates': alternates,
                 }
                 self._bridge_provenance[(
@@ -2200,6 +2257,11 @@ class CrossDatasetTypeMapper:
                     'votes': dict(votes),
                     'verified_votes': dict(verified_votes),
                     'verification_conflicts': dict(verification_conflicts),
+                    'auto_stripped_votes': dict(auto_stripped_votes),
+                    'winner_auto_stripped_votes': int(
+                        auto_stripped_votes.get(winner, 0)),
+                    'winner_derived_from_auto': bool(
+                        auto_stripped_votes.get(winner, 0)),
                     'alternates': alternates,
                 }
 
@@ -2213,14 +2275,14 @@ class CrossDatasetTypeMapper:
                 target_keys = sorted(self._banc_label_targets(column))
                 if not target_keys:
                     continue
-                for banc_type, votes, verified_votes, conflicts in (
+                for banc_type, votes, verified_votes, conflicts, auto_stripped in (
                         self._banc_label_vote_batches_polars(
                             banc_key, table, column, target_keys)):
                     banc_type = str(banc_type or '').strip()
                     if banc_type and not self._is_untyped_value(banc_type):
                         record_votes(
                             banc_key, column, target_keys, banc_type,
-                            votes, verified_votes, conflicts)
+                            votes, verified_votes, conflicts, auto_stripped)
 
         for banc_key, table in getattr(self, '_banc_label_tables', {}).items():
             if isinstance(table, pl.DataFrame):
@@ -2248,9 +2310,12 @@ class CrossDatasetTypeMapper:
                     votes = Counter()
                     verified_votes = Counter()
                     verification_conflicts = Counter()
+                    auto_stripped_votes = Counter()
                     for _, row in rows.iterrows():
-                        row_candidates = self._banc_label_candidates(
+                        candidate_details = self._banc_label_candidate_details(
                             row.get(column, ''), column)
+                        row_candidates = {candidate for candidate, _ in
+                                          candidate_details}
                         if not row_candidates:
                             continue
                         match_id = self._normalize_body_id(
@@ -2267,10 +2332,15 @@ class CrossDatasetTypeMapper:
                                 break
                         for candidate in row_candidates:
                             votes[candidate] += 1
+                        for candidate in {
+                                candidate for candidate, was_auto in
+                                candidate_details if was_auto}:
+                            auto_stripped_votes[candidate] += 1
                     if votes:
                         record_votes(
                             banc_key, column, target_keys, banc_type, votes,
-                            verified_votes, verification_conflicts)
+                            verified_votes, verification_conflicts,
+                            auto_stripped_votes)
 
         # Normal cold loads retain only the path to the BANC table.  Read one
         # narrow label projection per release (rather than the full metadata
@@ -2784,7 +2854,8 @@ class CrossDatasetTypeMapper:
                 mapped = self._type_mappings[src_mapping_key][base_name].get(tgt_mapping_key)
                 if mapped and hemi_suffix:
                     return f"{mapped}{hemi_suffix}"
-                return mapped
+                if mapped:
+                    return mapped
         
         return None
     

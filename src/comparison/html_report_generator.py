@@ -16,6 +16,7 @@ Structure:
 import json
 import os
 import html
+import html as html_module
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple
@@ -703,22 +704,42 @@ def _generate_query_html_report(analyzer, dataset_names, comparison_points,
 
     def render_query_matrix_section(section_id, section_header, intro, table_builder, export_pattern):
         """Query tabs + per-dataset-across-queries view for one matrix type."""
-        out = [f'<div id="{section_id}" class="section"><div class="section-header">{section_header}</div><div class="section-content">']
+        section_attr = html.escape(str(section_id), quote=True)
+        root_json = json.dumps(str(section_id))
+        by_query_id = f'{section_id}_by_query'
+        by_dataset_id = f'{section_id}_by_dataset'
+        dataset_keys = {}
+        used_dataset_keys = set()
+        for dataset in dataset_names:
+            base_key = _js_ident(nickname_map.get(dataset, dataset))
+            key = base_key
+            suffix = 2
+            while key in used_dataset_keys:
+                key = f'{base_key}_{suffix}'
+                suffix += 1
+            used_dataset_keys.add(key)
+            dataset_keys[dataset] = key
+
+        out = [f'<div id="{section_attr}" class="section"><div class="section-header">{section_header}</div><div class="section-content">']
         out.append(f'<p class="card">{intro}</p>')
         out.append('<div style="margin-bottom: 15px;"><span style="font-weight: 600; margin-right: 10px;">View by:</span>'
-                   f'<button class="tab-btn active" id="{section_id}_mode_query" onclick="switch_{section_id}_mode(\'query\')">Query</button>'
-                   f'<button class="tab-btn" id="{section_id}_mode_dataset" onclick="switch_{section_id}_mode(\'dataset\')">Dataset</button></div>')
+                   '<button class="tab-btn active" data-matrix-mode="query">Query</button>'
+                   '<button class="tab-btn" data-matrix-mode="dataset">Dataset</button></div>')
         # By-query view
-        out.append(f'<div id="{section_id}_by_query" class="tabs"><div class="tab-buttons">')
+        out.append(f'<div id="{by_query_id}" class="tabs"><div class="tab-buttons">')
         for i, row in enumerate(point_rows):
             active = 'active' if i == 0 else ''
-            out.append(f'<button class="tab-btn {active}" onclick="show_{section_id}_query_tab(\'{_query_report_slug(row["query_id"])}\')">{esc(row["query_id"])}</button>')
+            query_key = _query_report_slug(row["query_id"])
+            out.append(
+                f'<button class="tab-btn {active}" '
+                f'data-matrix-query-key="{html.escape(query_key, quote=True)}">'
+                f'{esc(row["query_id"])}</button>')
         out.append('</div>')
         for i, row in enumerate(point_rows):
             query_id = row['query_id']
             safe = _query_report_slug(query_id)
             active = 'active' if i == 0 else ''
-            out.append(f'<div id="{section_id}_query_tab_{safe}" class="tab-content {active}">')
+            out.append(f'<div id="{section_id}_query_tab_{html.escape(safe, quote=True)}" class="tab-content {active}">')
             caption = (f"{query_id} — {row['query_label']} (requested: "
                        + ', '.join(f"{nickname_map.get(ds, ds)}={row['requested_thresholds'].get(ds)}"
                                    for ds in dataset_names) + ')')
@@ -727,16 +748,20 @@ def _generate_query_html_report(analyzer, dataset_names, comparison_points,
             out.append('</div>')
         out.append('</div>')
         # By-dataset view: one dataset across all queries
-        out.append(f'<div id="{section_id}_by_dataset" class="tabs" style="display: none;"><div class="tab-buttons">')
+        out.append(f'<div id="{by_dataset_id}" class="tabs" style="display: none;"><div class="tab-buttons">')
         for i, ds in enumerate(dataset_names):
             active = 'active' if i == 0 else ''
             nick = nickname_map.get(ds, ds)
-            out.append(f'<button class="tab-btn {active}" onclick="show_{section_id}_dataset_tab(\'{esc(nick)}\')">{esc(nick)}</button>')
+            out.append(
+                f'<button class="tab-btn {active}" '
+                f'data-matrix-dataset-key="{html.escape(dataset_keys[ds], quote=True)}">'
+                f'{esc(nick)}</button>')
         out.append('</div>')
         for i, ds in enumerate(dataset_names):
             nick = nickname_map.get(ds, ds)
             active = 'active' if i == 0 else ''
-            out.append(f'<div id="{section_id}_dataset_tab_{esc(nick)}" class="tab-content {active}">')
+            dataset_key = dataset_keys[ds]
+            out.append(f'<div id="{section_id}_dataset_tab_{html.escape(dataset_key, quote=True)}" class="tab-content {active}">')
             out.append(_query_dataset_across_points_table(
                 point_rows, aligned_by_id, path_by_id, ds, dataset_names,
                 nickname_map, section_id))
@@ -744,24 +769,38 @@ def _generate_query_html_report(analyzer, dataset_names, comparison_points,
         out.append('</div>')
         out.append(f'''
         <script>
-            function switch_{section_id}_mode(mode) {{
-                document.getElementById('{section_id}_mode_query').classList.toggle('active', mode === 'query');
-                document.getElementById('{section_id}_mode_dataset').classList.toggle('active', mode === 'dataset');
-                document.getElementById('{section_id}_by_query').style.display = mode === 'query' ? 'block' : 'none';
-                document.getElementById('{section_id}_by_dataset').style.display = mode === 'dataset' ? 'block' : 'none';
-            }}
-            function show_{section_id}_query_tab(key) {{
-                document.querySelectorAll('#{section_id}_by_query .tab-content').forEach(el => el.classList.remove('active'));
-                document.querySelectorAll('#{section_id}_by_query .tab-btn').forEach(el => el.classList.remove('active'));
-                document.getElementById('{section_id}_query_tab_' + key).classList.add('active');
-                event.target.classList.add('active');
-            }}
-            function show_{section_id}_dataset_tab(nick) {{
-                document.querySelectorAll('#{section_id}_by_dataset .tab-content').forEach(el => el.classList.remove('active'));
-                document.querySelectorAll('#{section_id}_by_dataset .tab-btn').forEach(el => el.classList.remove('active'));
-                document.getElementById('{section_id}_dataset_tab_' + nick).classList.add('active');
-                event.target.classList.add('active');
-            }}
+            (function() {{
+                const root = document.getElementById({root_json});
+                if (!root) return;
+                const byQuery = document.getElementById({json.dumps(by_query_id)});
+                const byDataset = document.getElementById({json.dumps(by_dataset_id)});
+                const setActive = (buttons, selected) => {{
+                    buttons.forEach(button => button.classList.toggle('active', button === selected));
+                }};
+                const switchMode = (mode, button) => {{
+                    setActive(root.querySelectorAll('[data-matrix-mode]'), button);
+                    byQuery.style.display = mode === 'query' ? 'block' : 'none';
+                    byDataset.style.display = mode === 'dataset' ? 'block' : 'none';
+                }};
+                const showQuery = (key, button) => {{
+                    byQuery.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+                    const panel = document.getElementById({json.dumps(section_id + '_query_tab_')} + key);
+                    if (panel) panel.classList.add('active');
+                    setActive(byQuery.querySelectorAll('.tab-btn'), button);
+                }};
+                const showDataset = (key, button) => {{
+                    byDataset.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+                    const panel = document.getElementById({json.dumps(section_id + '_dataset_tab_')} + key);
+                    if (panel) panel.classList.add('active');
+                    setActive(byDataset.querySelectorAll('.tab-btn'), button);
+                }};
+                root.querySelectorAll('[data-matrix-mode]').forEach(button =>
+                    button.addEventListener('click', () => switchMode(button.dataset.matrixMode, button)));
+                root.querySelectorAll('[data-matrix-query-key]').forEach(button =>
+                    button.addEventListener('click', () => showQuery(button.dataset.matrixQueryKey, button)));
+                root.querySelectorAll('[data-matrix-dataset-key]').forEach(button =>
+                    button.addEventListener('click', () => showDataset(button.dataset.matrixDatasetKey, button)));
+            }})();
         </script>
         ''')
         out.append('</div></div>')
@@ -780,7 +819,8 @@ def _generate_query_html_report(analyzer, dataset_names, comparison_points,
         'Paths follow the Standard report\'s Len column (number of hops); the dataset view shows one dataset across all queries.',
         lambda query_id, caption: _generate_path_presence_table(
             analyzer, path_by_id.get(query_id, pd.DataFrame()), dataset_names,
-            nickname_map, caption_override=caption),
+            nickname_map, threshold=query_by_id.get(query_id),
+            caption_override=caption),
         'path_presence_matrix_query_{safe}.csv'))
 
     # Conservation: per-query distribution donuts plus the per-query
@@ -852,12 +892,13 @@ def _generate_query_html_report(analyzer, dataset_names, comparison_points,
     parts.append('''<div class="card" style="margin-top: 30px;"><h3>Conserved Graph Visualizations</h3><table><thead><tr><th>Query</th><th>Conserved Paths</th><th>Conserved Reciprocal Graph</th></tr></thead><tbody>''')
     for row in point_rows:
         query_id = row['query_id']
+        query_file_id = _query_report_slug(query_id)
         conserved_path_file = os.path.join(
             output_root, 'conserved_paths',
-            f'conserved_network_t{query_id}_network.html')
+            f'conserved_network_t{query_file_id}_network.html')
         conserved_recip_file = os.path.join(
             output_root, 'conserved_reciprocal_graph',
-            f'conserved_reciprocal_t{query_id}_network.html')
+            f'conserved_reciprocal_t{query_file_id}_network.html')
         parts.append(
             f'<tr><td><strong>{esc(query_id)}</strong></td>'
             f'<td>{_make_link(conserved_path_file, output_root)}</td>'
@@ -871,7 +912,11 @@ def _generate_query_html_report(analyzer, dataset_names, comparison_points,
     for i, row in enumerate(point_rows):
         active = 'active' if i == 0 else ''
         safe = _query_report_slug(row['query_id'])
-        parts.append(f'<button class="tab-btn {active}" onclick="showOverlapTab(\'{safe}\')">{esc(row["query_id"])}</button>')
+        parts.append(
+            f'<button class="tab-btn {active}" '
+            f'data-overlap-dom-key="{html.escape(safe, quote=True)}" '
+            f'onclick="showOverlapTab({_html_js_arg(safe)}, this)">'
+            f'{esc(row["query_id"])}</button>')
     parts.append('</div>')
     for i, row in enumerate(point_rows):
         query_id = row['query_id']
@@ -903,11 +948,14 @@ def _generate_query_html_report(analyzer, dataset_names, comparison_points,
             edge_matrix, path_matrix, active=(i == 0)))
     parts.append('''</div>
         <script>
-            function showOverlapTab(key) {
+            function showOverlapTab(key, button) {
                 document.querySelectorAll('#overlap-matrices .tab-content').forEach(el => el.classList.remove('active'));
                 document.querySelectorAll('#overlap-matrices .tab-btn').forEach(el => el.classList.remove('active'));
-                document.getElementById('overlap_tab_' + key).classList.add('active');
-                event.target.classList.add('active');
+                const domKey = button && button.dataset.overlapDomKey;
+                const panel = domKey ? document.getElementById('overlap_tab_' + domKey) : null;
+                if (!panel) return;
+                panel.classList.add('active');
+                if (button) button.classList.add('active');
             }
         </script>''')
     parts.append('</div></div>')
@@ -921,7 +969,11 @@ def _generate_query_html_report(analyzer, dataset_names, comparison_points,
     for i, row in enumerate(point_rows):
         active = 'active' if i == 0 else ''
         safe = _query_report_slug(row['query_id'])
-        parts.append(f'<button class="tab-btn {active}" onclick="showStatsTab(\'{safe}\')">{esc(row["query_id"])}</button>')
+        parts.append(
+            f'<button class="tab-btn {active}" '
+            f'data-stats-dom-key="{html.escape(safe, quote=True)}" '
+            f'onclick="showStatsTab({_html_js_arg(safe)}, this)">'
+            f'{esc(row["query_id"])}</button>')
     parts.append('</div>')
     for i, row in enumerate(point_rows):
         query_id = row['query_id']
@@ -938,11 +990,14 @@ def _generate_query_html_report(analyzer, dataset_names, comparison_points,
         parts.append('</div>')
     parts.append('''</div>
         <script>
-            function showStatsTab(key) {
+            function showStatsTab(key, button) {
                 document.querySelectorAll('#statistics .tab-content').forEach(el => el.classList.remove('active'));
                 document.querySelectorAll('#statistics .tab-btn').forEach(el => el.classList.remove('active'));
-                document.getElementById('stats_tab_' + key).classList.add('active');
-                event.target.classList.add('active');
+                const domKey = button && button.dataset.statsDomKey;
+                const panel = domKey ? document.getElementById('stats_tab_' + domKey) : null;
+                if (!panel) return;
+                panel.classList.add('active');
+                if (button) button.classList.add('active');
             }
         </script>''')
     try:
@@ -2255,14 +2310,20 @@ def _generate_hemisphere_symmetry_section(analyzer, dataset_names: List[str], th
         return ''.join(html_parts)
 
     html_parts.append('<div class="tabs"><div class="tab-buttons">')
+    threshold_dom_keys = _unique_dom_keys(thresholds)
     for i, t in enumerate(thresholds):
         active = 'active' if i == 0 else ''
-        html_parts.append(f'<button class="tab-btn {active}" onclick="showSymTab({t})">t = {t}</button>')
+        html_parts.append(
+            f'<button class="tab-btn {active}" '
+            f'data-sym-dom-key="{threshold_dom_keys[i]}" '
+            f'onclick="showSymTab({_html_js_arg(t)}, this)">t = {t}</button>')
     html_parts.append('</div>')
 
     for i, threshold in enumerate(thresholds):
         active = 'active' if i == 0 else ''
-        html_parts.append(f'<div id="sym_tab_{threshold}" class="tab-content {active}">')
+        html_parts.append(
+            f'<div id="sym_tab_{threshold_dom_keys[i]}" '
+            f'class="tab-content {active}">')
         html_parts.append('<div class="card">')
         html_parts.append(f'<h3>Hemisphere Symmetry at Threshold = {threshold}</h3>')
         html_parts.append('<table><thead><tr>'
@@ -2305,11 +2366,14 @@ def _generate_hemisphere_symmetry_section(analyzer, dataset_names: List[str], th
     html_parts.append("""
                 </div>
                 <script>
-                    function showSymTab(threshold) {
+                    function showSymTab(threshold, button) {
                         document.querySelectorAll('#hemisphere-symmetry .tab-content').forEach(el => el.classList.remove('active'));
                         document.querySelectorAll('#hemisphere-symmetry .tab-btn').forEach(el => el.classList.remove('active'));
-                        document.getElementById('sym_tab_' + threshold).classList.add('active');
-                        event.target.classList.add('active');
+                        const domKey = button && button.dataset.symDomKey;
+                        const panel = domKey ? document.getElementById('sym_tab_' + domKey) : null;
+                        if (!panel) return;
+                        panel.classList.add('active');
+                        if (button) button.classList.add('active');
                     }
                 </script>
             </div>
@@ -2342,6 +2406,9 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
     if point_labels is None:
         point_labels = [f"{tab_label_prefix}{k}" for k in point_keys]
     js_keys = [json.dumps(k) for k in point_keys]
+    dom_keys = _unique_dom_keys(point_keys)
+    dom_key_by_key = {key: dom_keys[index]
+                      for index, key in enumerate(point_keys)}
     key_label_by_key = {k: point_labels[i] for i, k in enumerate(point_keys)}
 
     def resolve_network_aligned(k):
@@ -2363,6 +2430,7 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
         return None
 
     thresholds_json = json.dumps(point_keys)
+    dom_keys_json = json.dumps(dom_keys)
     num_networks = len(point_keys)
     # Responsive grid: 1 col on small, 2 cols if 2+ networks
     grid_cols = min(num_networks, 2)
@@ -2440,20 +2508,27 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
                     window.hideDeadEndNodes = {{}}; // Per-threshold dead-end state
                     window.allNetworks = {{}};
                     window.allThresholds = {thresholds_json};
+                    window.networkDomKeys = {{}};
+                    const networkDomKeys = {dom_keys_json};
                     
                     // Initialize per-threshold states
-                    window.allThresholds.forEach(t => {{
+                    window.allThresholds.forEach((t, index) => {{
                         window.networkFilterMode[t] = 0;  // 0=All, 1=Conserved, 2=NoUnique
                         window.networkPhysicsEnabled[t] = false;
                         window.hideDeadEndNodes[t] = false;
+                        window.networkDomKeys[String(t)] = networkDomKeys[index];
                     }});
+
+                    function networkDomKey(threshold) {{
+                        return window.networkDomKeys[String(threshold)] || String(threshold);
+                    }}
                     
                     // Per-network toggle functions
                     function toggleNetworkFilter(threshold) {{
                         // Cycle through modes: 0 (All) -> 1 (Conserved) -> 2 (No Unique) -> 0
                         window.networkFilterMode[threshold] = (window.networkFilterMode[threshold] + 1) % 3;
                         const mode = window.networkFilterMode[threshold];
-                        const btn = document.getElementById('filter_btn_' + threshold);
+                        const btn = document.getElementById('filter_btn_' + networkDomKey(threshold));
                         
                         const modeLabels = ['🌐 Show All', '✅ Conserved Only', '🚫 No Unique'];
                         const modeColors = ['var(--secondary-color)', '#22c55e', '#f59e0b'];
@@ -2465,7 +2540,7 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
                     
                     function toggleDeadEndNodes(threshold) {{
                         window.hideDeadEndNodes[threshold] = !window.hideDeadEndNodes[threshold];
-                        const btn = document.getElementById('deadend_btn_' + threshold);
+                        const btn = document.getElementById('deadend_btn_' + networkDomKey(threshold));
                         
                         if (window.hideDeadEndNodes[threshold]) {{
                             btn.innerHTML = '🚫 Hide Dead-ends';
@@ -2480,7 +2555,7 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
                     
                     function toggleNetworkPhysics(threshold) {{
                         window.networkPhysicsEnabled[threshold] = !window.networkPhysicsEnabled[threshold];
-                        const btn = document.getElementById('physics_btn_' + threshold);
+                        const btn = document.getElementById('physics_btn_' + networkDomKey(threshold));
                         
                         if (window.networkPhysicsEnabled[threshold]) {{
                             btn.innerHTML = '💥 Duang Mode';
@@ -2502,7 +2577,7 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
                     
                     function toggleHemisphereMirror(threshold) {{
                         window.hemisphereMirrorEnabled[threshold] = !window.hemisphereMirrorEnabled[threshold];
-                        const btn = document.getElementById('mirror_btn_' + threshold);
+                        const btn = document.getElementById('mirror_btn_' + networkDomKey(threshold));
                         
                         if (window.hemisphereMirrorEnabled[threshold]) {{
                             btn.innerHTML = '🪞 Mirrored';
@@ -2875,6 +2950,11 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
     
     # Mode toggle (Threshold vs Dataset)
     nicknames = [nickname_map[d] for d in dataset_names]
+    dataset_dom_keys = _unique_dom_keys(nicknames)
+    dataset_dom_key_by_nick = {
+        nick: dataset_dom_keys[index]
+        for index, nick in enumerate(nicknames)
+    }
     nicknames_json = json.dumps(nicknames)
 
     html_parts.append(f'''
@@ -2890,16 +2970,25 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
     html_parts.append('<div id="network_by_threshold" class="tabs"><div class="tab-buttons">')
     for i, (k, js_key, k_label) in enumerate(zip(point_keys, js_keys, point_labels)):
         active = 'active' if i == 0 else ''
-        html_parts.append(f'<button class="tab-btn {active}" onclick="showNetworkTab({js_key})">{html.escape(k_label)}</button>')
+        dom_key = dom_keys[i]
+        html_parts.append(
+            f'<button class="tab-btn {active}" '
+            f'data-network-dom-key="{dom_key}" '
+            f'onclick="showNetworkTab({_html_js_arg(k)}, this)">'
+            f'{html.escape(k_label)}</button>')
     html_parts.append('</div>')
 
     # Network containers (only first visible initially)
     for i, k in enumerate(point_keys):
         active = 'active' if i == 0 else ''
-        html_parts.append(f'<div id="network_tab_{_js_ident(k)}" class="tab-content {active}">')
+        dom_key = dom_keys[i]
+        html_parts.append(
+            f'<div id="network_tab_{dom_key}" '
+            f'data-network-key="{html.escape(str(k), quote=True)}" '
+            f'class="tab-content {active}">')
         html_parts.append(_generate_conservation_network(
             analyzer, dataset_names, k, nickname_map,
-            key=k, display_label=point_labels[i],
+            key=k, dom_key=dom_key, display_label=point_labels[i],
             aligned_override=(resolve_network_aligned(k)
                               if aligned_network_getter else None),
             path_override=(resolve_paths(k) if path_getter else None)))
@@ -2912,20 +3001,30 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
     for i, d in enumerate(dataset_names):
         active = 'active' if i == 0 else ''
         nick = nickname_map[d]
-        html_parts.append(f'<button class="tab-btn {active}" onclick="showNetworkDatasetTab(\'{nick}\')">{nick}</button>')
+        dataset_dom_key = dataset_dom_keys[i]
+        html_parts.append(
+            f'<button class="tab-btn {active}" '
+            f'data-network-dom-key="{dataset_dom_key}" '
+            f'onclick="showNetworkDatasetTab({_html_js_arg(nick)}, this)">'
+            f'{html.escape(str(nick))}</button>')
     html_parts.append('</div>')
 
     # Dataset-centric network containers (showing all points for one dataset)
     for i, d in enumerate(dataset_names):
         nick = nickname_map[d]
         active = 'active' if i == 0 else ''
-        html_parts.append(f'<div id="network_dataset_tab_{nick}" class="tab-content {active}">')
+        dataset_dom_key = dataset_dom_keys[i]
+        html_parts.append(
+            f'<div id="network_dataset_tab_{dataset_dom_key}" '
+            f'data-network-dataset-key="{html.escape(str(nick), quote=True)}" '
+            f'class="tab-content {active}">')
         html_parts.append(_generate_dataset_network(
             analyzer, d, thresholds, nickname_map,
             keys=point_keys, key_labels=point_labels,
             aligned_getter=aligned_getter, path_getter=path_getter,
             key_noun_plural=key_noun_plural,
-            key_noun_singular=key_noun_singular))
+            key_noun_singular=key_noun_singular,
+            dom_key=dataset_dom_key))
         html_parts.append('</div>')
     
     html_parts.append('</div>')  # Close network_by_dataset tabs div
@@ -2946,7 +3045,7 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
                                 // Only redraw the active threshold network
                                 const activeTab = document.querySelector('#network_by_threshold .tab-content.active');
                                 if (activeTab) {
-                                    const threshold = activeTab.id.replace('network_tab_', '');
+                                    const threshold = activeTab.dataset.networkKey;
                                     if (window.allNetworks && window.allNetworks[threshold]) {
                                         window.allNetworks[threshold].network.redraw();
                                         window.allNetworks[threshold].network.fit({ animation: true });
@@ -2956,13 +3055,12 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
                                 // Only redraw the active dataset networks
                                 const activeTab = document.querySelector('#network_by_dataset .tab-content.active');
                                 if (activeTab) {
-                                    const dataset = activeTab.id.replace('network_dataset_tab_', '');
-                                    Object.keys(window.allNetworks || {}).forEach(function(key) {
-                                        if (key.startsWith(dataset + '_')) {
-                                            window.allNetworks[key].network.redraw();
-                                            window.allNetworks[key].network.fit({ animation: true });
-                                        }
-                                    });
+                                    const dataset = activeTab.dataset.networkDatasetKey;
+                                    const netData = window.allNetworks && window.allNetworks[dataset + '_dataset'];
+                                    if (netData && netData.network) {
+                                        netData.network.redraw();
+                                        netData.network.fit({ animation: true });
+                                    }
                                 }
                             }
                         }, 100);
@@ -2986,15 +3084,18 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
                         }, 300);
                     });
                     
-                    function showNetworkTab(threshold) {
+                    function showNetworkTab(threshold, button) {
                         // Hide all network tabs in threshold view
                         document.querySelectorAll('#network_by_threshold .tab-content').forEach(el => el.classList.remove('active'));
                         // Remove active from all buttons in threshold view
                         document.querySelectorAll('#network_by_threshold .tab-btn').forEach(el => el.classList.remove('active'));
                         // Show selected tab
-                        document.getElementById('network_tab_' + threshold).classList.add('active');
+                        const domKey = button && button.dataset.networkDomKey;
+                        const panel = domKey ? document.getElementById('network_tab_' + domKey) : null;
+                        if (!panel) return;
+                        panel.classList.add('active');
                         // Mark button as active
-                        event.target.classList.add('active');
+                        if (button) button.classList.add('active');
                         
                         // Re-fit the network since it may have been hidden
                         // Must call redraw() first to recalculate canvas dimensions
@@ -3007,25 +3108,27 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
                         }
                     }
                     
-                    function showNetworkDatasetTab(dataset) {
+                    function showNetworkDatasetTab(dataset, button) {
                         // Hide all network tabs in dataset view
                         document.querySelectorAll('#network_by_dataset .tab-content').forEach(el => el.classList.remove('active'));
                         // Remove active from all buttons in dataset view
                         document.querySelectorAll('#network_by_dataset .tab-btn').forEach(el => el.classList.remove('active'));
                         // Show selected tab
-                        document.getElementById('network_dataset_tab_' + dataset).classList.add('active');
+                        const domKey = button && button.dataset.networkDomKey;
+                        const panel = domKey ? document.getElementById('network_dataset_tab_' + domKey) : null;
+                        if (!panel) return;
+                        panel.classList.add('active');
                         // Mark button as active
-                        event.target.classList.add('active');
+                        if (button) button.classList.add('active');
                         
                         // Re-fit the network since it may have been hidden
                         // Must call redraw() first to recalculate canvas dimensions
                         setTimeout(function() {
-                            Object.keys(window.allNetworks || {}).forEach(function(key) {
-                                if (key.startsWith(dataset + '_')) {
-                                    window.allNetworks[key].network.redraw();
-                                    window.allNetworks[key].network.fit({ animation: true });
-                                }
-                            });
+                            const netData = window.allNetworks && window.allNetworks[dataset + '_dataset'];
+                            if (netData && netData.network) {
+                                netData.network.redraw();
+                                netData.network.fit({ animation: true });
+                            }
                         }, 100);
                     }
                 </script>
@@ -3232,7 +3335,8 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
                                     nickname_map: Dict[str, str], max_edges: int = 500,
                                     key=None, display_label: str = None,
                                     aligned_override: pd.DataFrame = None,
-                                    path_override: pd.DataFrame = None) -> str:
+                                    path_override: pd.DataFrame = None,
+                                    dom_key: str = None) -> str:
     """Generate network with conservation-based edge coloring and role-based node coloring.
 
     Args:
@@ -3248,7 +3352,7 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
         path_override: Pre-resolved path data (query-aware callers).
     """
     point_key = threshold if key is None else key
-    dom_key = str(point_key)
+    dom_key = dom_key or _js_ident(point_key)
     js_key = json.dumps(point_key)
     card_title = display_label if display_label is not None \
         else f"Network at Threshold = {threshold}"
@@ -3775,22 +3879,22 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
                     <strong>{len(nodes)}</strong> neurons | <strong>{len(edges)}</strong> edges{conserved_info}{unique_info}{dead_end_info}
                 </div>
                 <div style="display: flex; gap: 8px;">
-                    <button id="filter_btn_{dom_key}" onclick="toggleNetworkFilter({js_key})"
+                    <button id="filter_btn_{dom_key}" onclick="toggleNetworkFilter({_html_js_arg(point_key)})"
                         style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color);
                                background: var(--secondary-color); color: white; cursor: pointer; font-size: 12px; white-space: nowrap;">
                         🌐 Show All
                     </button>
-                    <button id="deadend_btn_{dom_key}" onclick="toggleDeadEndNodes({js_key})"
+                    <button id="deadend_btn_{dom_key}" onclick="toggleDeadEndNodes({_html_js_arg(point_key)})"
                         style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color);
                                background: var(--secondary-color); color: white; cursor: pointer; font-size: 12px; white-space: nowrap;">
                         👁️ Show Dead-ends
                     </button>
-                    <button id="physics_btn_{dom_key}" onclick="toggleNetworkPhysics({js_key})"
+                    <button id="physics_btn_{dom_key}" onclick="toggleNetworkPhysics({_html_js_arg(point_key)})"
                         style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color);
                                background: var(--secondary-color); color: white; cursor: pointer; font-size: 12px; white-space: nowrap;">
                         📌 Static Mode
                     </button>
-                    <button id="mirror_btn_{dom_key}" onclick="toggleHemisphereMirror({js_key})" {mirror_disabled_attr}
+                    <button id="mirror_btn_{dom_key}" onclick="toggleHemisphereMirror({_html_js_arg(point_key)})" {mirror_disabled_attr}
                         title="{mirror_btn_title}"
                         style="{mirror_btn_style}">
                         🪞 Mirror Hemispheres
@@ -3802,6 +3906,7 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
         </div>
         <script>
             (function() {{
+                if (typeof vis === 'undefined') return;
                 const allNodes = {nodes_json};
                 const allEdges = {edges_json};
                 const conservedEdgeIds = new Set({conserved_ids_json});
@@ -3812,7 +3917,7 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
                 
                 const nodes = new vis.DataSet(allNodes);
                 const edges = new vis.DataSet(allEdges);
-                const container = document.getElementById('{div_id}');
+                const container = document.getElementById({json.dumps(div_id)});
                 const data = {{ nodes: nodes, edges: edges }};
                 
                 // Initialize with hierarchical layout for proper layer-like positioning
@@ -3885,7 +3990,8 @@ def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
                                keys: List = None, key_labels: List[str] = None,
                                aligned_getter=None, path_getter=None,
                                key_noun_plural: str = 'thresholds',
-                               key_noun_singular: str = 'threshold') -> str:
+                               key_noun_singular: str = 'threshold',
+                               dom_key: str = None) -> str:
     """Generate network visualization for a single dataset across all points.
 
     Standard mode iterates the scalar ``thresholds``; Custom combination mode
@@ -3896,9 +4002,15 @@ def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
     if key_labels is None:
         key_labels = [f"t={k}" for k in point_keys]
     key_label_by_key = {k: key_labels[i] for i, k in enumerate(point_keys)}
+    point_dom_keys = _unique_dom_keys(point_keys)
+    point_dom_key_by_key = {
+        key: point_dom_keys[index]
+        for index, key in enumerate(point_keys)
+    }
     num_thresholds = len(point_keys)
 
     nick = nickname_map[dataset]
+    dataset_dom_key = dom_key or _js_ident(nick)
 
     # Get path data for filtering (use first point with data)
     all_path_edges = set()
@@ -4090,10 +4202,12 @@ def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
 
         edge_id += 1
 
-    div_id = f"network_{nick}_dataset"
+    div_id = f"network_{dataset_dom_key}_dataset"
     nodes_json = json.dumps(nodes)
     edges_json = json.dumps(edges)
-    edges_by_threshold_json = json.dumps({str(_js_ident(k)): ids for k, ids in edges_by_key.items()})
+    # Runtime filter state uses the raw comparison-point key.  DOM ids use a
+    # sanitized key, so keep the two namespaces separate.
+    edges_by_threshold_json = json.dumps({str(k): ids for k, ids in edges_by_key.items()})
     thresholds_json = json.dumps(point_keys)
     conserved_ids_json = json.dumps(conserved_edge_ids)
     unique_ids_json = json.dumps(unique_edge_ids)
@@ -4121,9 +4235,10 @@ def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
     threshold_buttons = []
     for k in point_keys:
         count = len(edges_by_key[k])
-        k_dom = _js_ident(k)
-        btn_html = (f'<button id="t_btn_{nick}_{k_dom}" class="threshold-filter-btn active" '
-                    f'onclick="toggleDatasetThreshold(\'{nick}\', {json.dumps(k_dom)})" '
+        k_dom = point_dom_key_by_key[k]
+        btn_html = (f'<button id="t_btn_{dataset_dom_key}_{k_dom}" class="threshold-filter-btn active" '
+                    f'onclick="toggleDatasetThreshold({_html_js_arg(nick)}, {_html_js_arg(k)}, '
+                    f'{_html_js_arg(dataset_dom_key)}, {_html_js_arg(k_dom)})" '
                     f'style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-color); '
                     f'background: #22c55e; color: white; cursor: pointer; font-size: 11px; margin-right: 4px;">'
                     f'{html.escape(key_label_by_key[k])} ({count})</button>')
@@ -4131,18 +4246,18 @@ def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
 
     return f'''
         <div class="card">
-            <h3>{nick}: Cross-{key_noun_plural.title()} Network</h3>
+            <h3>{html.escape(str(nick))}: Cross-{key_noun_plural.title()} Network</h3>
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
                 <div style="color: var(--secondary-color);">
                     <strong>{len(nodes)}</strong> neurons | <strong>{total_edges}</strong> edges | {stats_str}
                 </div>
                 <div style="display: flex; gap: 8px;">
-                    <button id="deadend_btn_{nick}" onclick="toggleDatasetDeadEnd('{nick}')" 
+                    <button id="deadend_btn_{dataset_dom_key}" onclick="toggleDatasetDeadEnd({_html_js_arg(nick)}, {_html_js_arg(dataset_dom_key)})"
                         style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color); 
                                background: var(--secondary-color); color: white; cursor: pointer; font-size: 12px;">
                         👁️ Show Dead-ends
                     </button>
-                    <button id="physics_btn_{nick}" onclick="toggleDatasetNetworkPhysics('{nick}')" 
+                    <button id="physics_btn_{dataset_dom_key}" onclick="toggleDatasetNetworkPhysics({_html_js_arg(nick)}, {_html_js_arg(dataset_dom_key)})"
                         style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color); 
                                background: var(--secondary-color); color: white; cursor: pointer; font-size: 12px;">
                         📌 Static Mode
@@ -4161,6 +4276,7 @@ def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
         </div>
         <script>
             (function() {{
+                if (typeof vis === 'undefined') return;
                 const allNodes = {nodes_json};
                 const allEdges = {edges_json};
                 const edgesByThreshold = {edges_by_threshold_json};
@@ -4172,7 +4288,7 @@ def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
                 
                 const nodes = new vis.DataSet(allNodes);
                 const edges = new vis.DataSet(allEdges);
-                const container = document.getElementById('{div_id}');
+                const container = document.getElementById({json.dumps(div_id)});
                 const data = {{ nodes: nodes, edges: edges }};
                 
                 const options = {{
@@ -4213,7 +4329,7 @@ def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
                 }}, 200);
                 
                 // Register with global toggle
-                window.allNetworks['{nick}_dataset'] = {{
+                window.allNetworks[{json.dumps(nick)} + '_dataset'] = {{
                     network: network,
                     nodes: nodes,
                     edges: edges,
@@ -4234,14 +4350,14 @@ def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
             if (!window.datasetNetworkPhysicsEnabled) {{
                 window.datasetNetworkPhysicsEnabled = {{}};
             }}
-            window.datasetNetworkPhysicsEnabled['{nick}'] = false;
+            window.datasetNetworkPhysicsEnabled[{json.dumps(nick)}] = false;
             
-            function toggleDatasetThreshold(dataset, threshold) {{
+            function toggleDatasetThreshold(dataset, threshold, datasetDomKey, thresholdDomKey) {{
                 const netData = window.allNetworks[dataset + '_dataset'];
                 if (!netData) return;
                 
                 const tStr = String(threshold);
-                const btn = document.getElementById('t_btn_' + dataset + '_' + threshold);
+                const btn = document.getElementById('t_btn_' + datasetDomKey + '_' + thresholdDomKey);
                 
                 if (netData.activeThresholds.has(tStr)) {{
                     netData.activeThresholds.delete(tStr);
@@ -4254,12 +4370,12 @@ def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
                 updateDatasetNetworkDisplay(dataset);
             }}
             
-            function toggleDatasetDeadEnd(dataset) {{
+            function toggleDatasetDeadEnd(dataset, datasetDomKey) {{
                 const netData = window.allNetworks[dataset + '_dataset'];
                 if (!netData) return;
                 
                 netData.hideDeadEnds = !netData.hideDeadEnds;
-                const btn = document.getElementById('deadend_btn_' + dataset);
+                const btn = document.getElementById('deadend_btn_' + datasetDomKey);
                 
                 if (netData.hideDeadEnds) {{
                     btn.innerHTML = '🚫 Hide Dead-ends';
@@ -4400,9 +4516,9 @@ def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
                 }}, 200);
             }}
             
-            function toggleDatasetNetworkPhysics(dataset) {{
+            function toggleDatasetNetworkPhysics(dataset, datasetDomKey) {{
                 window.datasetNetworkPhysicsEnabled[dataset] = !window.datasetNetworkPhysicsEnabled[dataset];
-                const btn = document.getElementById('physics_btn_' + dataset);
+                const btn = document.getElementById('physics_btn_' + datasetDomKey);
                 const netData = window.allNetworks[dataset + '_dataset'];
                 
                 if (!netData) return;
@@ -4465,6 +4581,8 @@ def _generate_edge_matrices_section(analyzer, dataset_names: List[str], threshol
     """Generate edge presence matrices section with dual toggle (by threshold and by dataset)."""
     html_parts = []
     nicknames = [nickname_map[d] for d in dataset_names]
+    threshold_dom_keys = _unique_dom_keys(thresholds)
+    dataset_dom_keys = _unique_dom_keys(nicknames)
     nicknames_json = json.dumps(nicknames)
     thresholds_json = json.dumps(thresholds)
     
@@ -4490,12 +4608,17 @@ def _generate_edge_matrices_section(analyzer, dataset_names: List[str], threshol
     
     for i, t in enumerate(thresholds):
         active = 'active' if i == 0 else ''
-        html_parts.append(f'<button class="tab-btn {active}" onclick="showEdgeTab({t})">t = {t}</button>')
+        html_parts.append(
+            f'<button class="tab-btn {active}" '
+            f'data-edge-dom-key="{threshold_dom_keys[i]}" '
+            f'onclick="showEdgeTab({_html_js_arg(t)}, this)">t = {t}</button>')
     html_parts.append('</div>')
     
     for i, threshold in enumerate(thresholds):
         active = 'active' if i == 0 else ''
-        html_parts.append(f'<div id="edge_tab_{threshold}" class="tab-content {active}">')
+        html_parts.append(
+            f'<div id="edge_tab_{threshold_dom_keys[i]}" '
+            f'class="tab-content {active}">')
         html_parts.append(_generate_presence_table(analyzer.get_aligned_data(threshold), dataset_names, nickname_map, threshold))
         html_parts.append('</div>')
     
@@ -4511,14 +4634,20 @@ def _generate_edge_matrices_section(analyzer, dataset_names: List[str], threshol
     for i, d in enumerate(dataset_names):
         active = 'active' if i == 0 else ''
         nick = nickname_map[d]
-        html_parts.append(f'<button class="tab-btn {active}" onclick="showEdgeDatasetTab(\'{nick}\')">{nick}</button>')
+        html_parts.append(
+            f'<button class="tab-btn {active}" '
+            f'data-edge-dataset-dom-key="{dataset_dom_keys[i]}" '
+            f'onclick="showEdgeDatasetTab({_html_js_arg(nick)}, this)">'
+            f'{html.escape(str(nick))}</button>')
     html_parts.append('</div>')
     
     # Generate dataset-centric tables (showing all thresholds for one dataset)
     for i, d in enumerate(dataset_names):
         nick = nickname_map[d]
         active = 'active' if i == 0 else ''
-        html_parts.append(f'<div id="edge_dataset_tab_{nick}" class="tab-content {active}">')
+        html_parts.append(
+            f'<div id="edge_dataset_tab_{dataset_dom_keys[i]}" '
+            f'class="tab-content {active}">')
         html_parts.append(_generate_edge_dataset_table(analyzer, d, thresholds, nickname_map))
         html_parts.append('</div>')
     
@@ -4533,18 +4662,24 @@ def _generate_edge_matrices_section(analyzer, dataset_names: List[str], threshol
                         document.getElementById('edge_by_dataset').style.display = mode === 'dataset' ? 'block' : 'none';
                     }}
                     
-                    function showEdgeTab(threshold) {{
+                    function showEdgeTab(threshold, button) {{
                         document.querySelectorAll('#edge_by_threshold .tab-content').forEach(el => el.classList.remove('active'));
                         document.querySelectorAll('#edge_by_threshold .tab-btn').forEach(el => el.classList.remove('active'));
-                        document.getElementById('edge_tab_' + threshold).classList.add('active');
-                        event.target.classList.add('active');
+                        const domKey = button && button.dataset.edgeDomKey;
+                        const panel = domKey ? document.getElementById('edge_tab_' + domKey) : null;
+                        if (!panel) return;
+                        panel.classList.add('active');
+                        if (button) button.classList.add('active');
                     }}
                     
-                    function showEdgeDatasetTab(dataset) {{
+                    function showEdgeDatasetTab(dataset, button) {{
                         document.querySelectorAll('#edge_by_dataset .tab-content').forEach(el => el.classList.remove('active'));
                         document.querySelectorAll('#edge_by_dataset .tab-btn').forEach(el => el.classList.remove('active'));
-                        document.getElementById('edge_dataset_tab_' + dataset).classList.add('active');
-                        event.target.classList.add('active');
+                        const domKey = button && button.dataset.edgeDatasetDomKey;
+                        const panel = domKey ? document.getElementById('edge_dataset_tab_' + domKey) : null;
+                        if (!panel) return;
+                        panel.classList.add('active');
+                        if (button) button.classList.add('active');
                     }}
                 </script>
             </div>
@@ -4632,21 +4767,75 @@ def _generate_type_mapping_section(analyzer, dataset_names: List[str]) -> str:
             or mapper is None:
         return ''
     try:
-        result_types = list(analyzer._collect_result_types())
+        result_types_by_dataset = \
+            analyzer._collect_result_types_by_dataset()
     except Exception:
-        return ''
-    if not result_types:
+        try:
+            result_types = list(analyzer._collect_result_types())
+        except Exception:
+            return ''
+        result_types_by_dataset = {None: set(result_types)}
+
+    raw_type_count = sum(
+        len(types) for types in result_types_by_dataset.values())
+    if not raw_type_count:
         return ''
 
-    cap = 100
-    shown = result_types[:cap]
-    rows = []
-    for t in shown:
+    def _canonical_for(type_name, source_dataset):
         try:
-            mappings = mapper.resolve_type_across_datasets(t, dataset_names)
+            if source_dataset is not None:
+                return mapper.get_canonical_type(
+                    type_name, source_dataset=source_dataset)
+            return mapper.get_canonical_type(type_name)
+        except TypeError:
+            try:
+                return mapper.get_canonical_type(type_name)
+            except Exception:
+                return type_name
         except Exception:
-            mappings = {ds: t for ds in dataset_names}
-        rows.append((t, mappings))
+            return type_name
+
+    def _resolve_for(type_name, source_dataset):
+        try:
+            if source_dataset is not None:
+                return mapper.resolve_type_across_datasets(
+                    type_name, dataset_names,
+                    source_dataset=source_dataset) or {}
+            return mapper.resolve_type_across_datasets(
+                type_name, dataset_names) or {}
+        except TypeError:
+            try:
+                return mapper.resolve_type_across_datasets(
+                    type_name, dataset_names) or {}
+            except Exception:
+                return {}
+        except Exception:
+            return {}
+
+    # Canonicalize first, then cap.  A raw type can occur in several source
+    # namespaces, so each canonical row unions its per-dataset names.
+    canonical_rows: Dict[str, Dict[str, set]] = {}
+    for source_dataset, source_types in result_types_by_dataset.items():
+        source_hint = (source_dataset
+                       if source_dataset in dataset_names else None)
+        for raw_type in sorted(source_types):
+            canonical = str(_canonical_for(raw_type, source_hint)
+                            or raw_type)
+            row = canonical_rows.setdefault(
+                canonical, {dataset: set() for dataset in dataset_names})
+            mappings = _resolve_for(raw_type, source_hint)
+            for dataset in dataset_names:
+                value = mappings.get(dataset)
+                if value:
+                    row[dataset].add(str(value))
+            # A mapper may not return a same-namespace value for a source
+            # hint.  Preserve the observed raw name in that dataset rather
+            # than displaying a misleading blank cell.
+            if source_dataset in dataset_names and not row[source_dataset]:
+                row[source_dataset].add(str(raw_type))
+
+    cap = 100
+    shown = sorted(canonical_rows.items(), key=lambda item: item[0])[:cap]
 
     conflicts_total = len(getattr(mapper, '_conflicts', []) or [])
     html = ['<div id="type-mapping" class="section">',
@@ -4654,20 +4843,24 @@ def _generate_type_mapping_section(analyzer, dataset_names: List[str]) -> str:
             '<div class="section-content">',
             '<p style="color: var(--secondary-color);">',
             'Canonical (male-cns) type name → equivalent type in each dataset, '
-            'for the types involved in this run.</p>',
+            'for the types involved in this run. Names without a male-cns '
+            'counterpart remain under their observed name as an explicit '
+            'fallback row.</p>',
             '<div style="overflow-x: auto;"><table><thead><tr><th>Canonical type</th>']
     for d in dataset_names:
-        html.append(f'<th>{d}</th>')
+        html.append(f'<th>{html_module.escape(str(d))}</th>')
     html.append('</tr></thead><tbody>')
-    for t, mappings in rows:
-        html.append(f'<tr><td><strong>{t}</strong></td>')
+    for t, mappings in shown:
+        html.append(f'<tr><td><strong>{html_module.escape(str(t))}</strong></td>')
         for d in dataset_names:
-            val = mappings.get(d)
-            html.append(f'<td>{val if val else "—"}</td>')
+            values = sorted(mappings.get(d) or ())
+            val = ', '.join(values) if values else "—"
+            html.append(f'<td>{html_module.escape(val)}</td>')
         html.append('</tr>')
     html.append('</tbody></table></div>')
-    html.append(f'<p style="color:#666; font-size:0.9em;">Showing {len(rows)} '
-                f'of {len(result_types)} involved types'
+    html.append(f'<p style="color:#666; font-size:0.9em;">Showing {len(shown)} '
+                f'of {len(canonical_rows)} canonical rows from '
+                f'{raw_type_count} involved types'
                 + (f'; {conflicts_total} mapping conflicts recorded — see '
                    f'auto_type_mapping_conflicts.csv' if conflicts_total else '; no mapping conflicts')
                 + '.</p></div></div>')
@@ -4702,6 +4895,8 @@ def _generate_path_matrices_section(analyzer, dataset_names: List[str], threshol
     """Generate path presence matrices section with dual toggle (by threshold and by dataset)."""
     html_parts = []
     nicknames = [nickname_map[d] for d in dataset_names]
+    threshold_dom_keys = _unique_dom_keys(thresholds)
+    dataset_dom_keys = _unique_dom_keys(nicknames)
     
     html_parts.append(f"""
         <div id="path-matrices" class="section">
@@ -4726,12 +4921,17 @@ def _generate_path_matrices_section(analyzer, dataset_names: List[str], threshol
     
     for i, t in enumerate(thresholds):
         active = 'active' if i == 0 else ''
-        html_parts.append(f'<button class="tab-btn {active}" onclick="showPathTab({t})">t = {t}</button>')
+        html_parts.append(
+            f'<button class="tab-btn {active}" '
+            f'data-path-dom-key="{threshold_dom_keys[i]}" '
+            f'onclick="showPathTab({_html_js_arg(t)}, this)">t = {t}</button>')
     html_parts.append('</div>')
     
     for i, threshold in enumerate(thresholds):
         active = 'active' if i == 0 else ''
-        html_parts.append(f'<div id="path_tab_{threshold}" class="tab-content {active}">')
+        html_parts.append(
+            f'<div id="path_tab_{threshold_dom_keys[i]}" '
+            f'class="tab-content {active}">')
         path_data = analyzer._get_path_data_for_threshold(threshold)
         if path_data is not None and not path_data.empty:
             html_parts.append(_generate_path_presence_table(analyzer, path_data, dataset_names, nickname_map, threshold))
@@ -4751,14 +4951,20 @@ def _generate_path_matrices_section(analyzer, dataset_names: List[str], threshol
     for i, d in enumerate(dataset_names):
         active = 'active' if i == 0 else ''
         nick = nickname_map[d]
-        html_parts.append(f'<button class="tab-btn {active}" onclick="showPathDatasetTab(\'{nick}\')">{nick}</button>')
+        html_parts.append(
+            f'<button class="tab-btn {active}" '
+            f'data-path-dataset-dom-key="{dataset_dom_keys[i]}" '
+            f'onclick="showPathDatasetTab({_html_js_arg(nick)}, this)">'
+            f'{html.escape(str(nick))}</button>')
     html_parts.append('</div>')
     
     # Generate dataset-centric tables (showing all thresholds for one dataset)
     for i, d in enumerate(dataset_names):
         nick = nickname_map[d]
         active = 'active' if i == 0 else ''
-        html_parts.append(f'<div id="path_dataset_tab_{nick}" class="tab-content {active}">')
+        html_parts.append(
+            f'<div id="path_dataset_tab_{dataset_dom_keys[i]}" '
+            f'class="tab-content {active}">')
         html_parts.append(_generate_path_dataset_table(analyzer, d, thresholds, nickname_map))
         html_parts.append('</div>')
     
@@ -4773,18 +4979,24 @@ def _generate_path_matrices_section(analyzer, dataset_names: List[str], threshol
                         document.getElementById('path_by_dataset').style.display = mode === 'dataset' ? 'block' : 'none';
                     }}
                     
-                    function showPathTab(threshold) {{
+                    function showPathTab(threshold, button) {{
                         document.querySelectorAll('#path_by_threshold .tab-content').forEach(el => el.classList.remove('active'));
                         document.querySelectorAll('#path_by_threshold .tab-btn').forEach(el => el.classList.remove('active'));
-                        document.getElementById('path_tab_' + threshold).classList.add('active');
-                        event.target.classList.add('active');
+                        const domKey = button && button.dataset.pathDomKey;
+                        const panel = domKey ? document.getElementById('path_tab_' + domKey) : null;
+                        if (!panel) return;
+                        panel.classList.add('active');
+                        if (button) button.classList.add('active');
                     }}
                     
-                    function showPathDatasetTab(dataset) {{
+                    function showPathDatasetTab(dataset, button) {{
                         document.querySelectorAll('#path_by_dataset .tab-content').forEach(el => el.classList.remove('active'));
                         document.querySelectorAll('#path_by_dataset .tab-btn').forEach(el => el.classList.remove('active'));
-                        document.getElementById('path_dataset_tab_' + dataset).classList.add('active');
-                        event.target.classList.add('active');
+                        const domKey = button && button.dataset.pathDatasetDomKey;
+                        const panel = domKey ? document.getElementById('path_dataset_tab_' + domKey) : null;
+                        if (!panel) return;
+                        panel.classList.add('active');
+                        if (button) button.classList.add('active');
                     }}
                 </script>
             </div>
@@ -4795,7 +5007,7 @@ def _generate_path_matrices_section(analyzer, dataset_names: List[str], threshol
 
 
 def _generate_path_presence_table(analyzer, data: pd.DataFrame, dataset_names: List[str],
-                                   nickname_map: Dict[str, str], threshold: int = None,
+                                   nickname_map: Dict[str, str], threshold=None,
                                    caption_override: str = None) -> str:
     """Generate path presence table with hop weights shown as -w1-w2- with min bolded."""
     if data is None or data.empty:
@@ -4805,9 +5017,8 @@ def _generate_path_presence_table(analyzer, data: pd.DataFrame, dataset_names: L
     if not available:
         return '<p>No datasets available.</p>'
 
-    # Get path hop weights from analyzer.  Query keys have no scalar
-    # threshold to read hop weights from, so they fall back to no hop
-    # annotations rather than failing.
+    # Get path hop weights from analyzer.  A query report passes the complete
+    # per-dataset threshold map so each cell can retain its hop annotation.
     path_hop_weights = {}
     if threshold is not None and hasattr(analyzer, '_get_path_hop_weights_for_threshold'):
         try:
@@ -5322,6 +5533,33 @@ def _js_ident(key) -> str:
     return ident or 'point'
 
 
+def _html_js_arg(value) -> str:
+    """Encode a JSON value for use inside a double-quoted HTML attribute.
+
+    Generated reports contain a few inline handlers for backwards-compatible
+    controls.  Raw ``json.dumps`` output is not safe in an attribute because
+    string arguments contain double quotes, which terminate the attribute
+    before the browser can hand the handler to JavaScript.
+    """
+    return html.escape(json.dumps(value), quote=True)
+
+
+def _unique_dom_keys(values) -> List[str]:
+    """Return stable, unique DOM-safe keys for generated controls."""
+    used = set()
+    result = []
+    for value in values:
+        base = _js_ident(value)
+        candidate = base
+        suffix = 2
+        while candidate in used:
+            candidate = f'{base}_{suffix}'
+            suffix += 1
+        used.add(candidate)
+        result.append(candidate)
+    return result
+
+
 def _render_overlap_point_card(dom_key: str, title: str, labels: List[str],
                                edge_overlap: list, path_overlap: list,
                                chart_size: int = 450,
@@ -5552,6 +5790,7 @@ def _generate_overlap_matrices_section(analyzer, dataset_names: List[str], thres
     """
     html_parts = []
     nicknames = [nickname_map[d] for d in dataset_names]
+    threshold_dom_keys = _unique_dom_keys(thresholds)
     thresholds_json = json.dumps(thresholds)
     
     html_parts.append(f"""
@@ -5568,7 +5807,10 @@ def _generate_overlap_matrices_section(analyzer, dataset_names: List[str], thres
     
     for i, t in enumerate(thresholds):
         active = 'active' if i == 0 else ''
-        html_parts.append(f'<button class="tab-btn {active}" onclick="showOverlapTab({t})">t = {t}</button>')
+        html_parts.append(
+            f'<button class="tab-btn {active}" '
+            f'data-overlap-dom-key="{threshold_dom_keys[i]}" '
+            f'onclick="showOverlapTab({_html_js_arg(t)}, this)">t = {t}</button>')
     html_parts.append('</div>')
     
     for i, threshold in enumerate(thresholds):
@@ -5586,7 +5828,9 @@ def _generate_overlap_matrices_section(analyzer, dataset_names: List[str], thres
         
         if n == 0:
             active = 'active' if i == 0 else ''
-            html_parts.append(f'<div id="overlap_tab_{threshold}" class="tab-content {active}"><p>No datasets configured.</p></div>')
+            html_parts.append(
+                f'<div id="overlap_tab_{threshold_dom_keys[i]}" '
+                f'class="tab-content {active}"><p>No datasets configured.</p></div>')
             continue
         
         # Compute edge overlap matrix (asymmetric)
@@ -5619,17 +5863,20 @@ def _generate_overlap_matrices_section(analyzer, dataset_names: List[str], thres
         # helper so the Custom query section stays in lockstep.
         labels = [nickname_map[d] for d in available]
         html_parts.append(_render_overlap_point_card(
-            str(threshold), f"Dataset Overlap at Threshold = {threshold}",
+            threshold_dom_keys[i], f"Dataset Overlap at Threshold = {threshold}",
             labels, edge_overlap, path_overlap, active=(i == 0)))
     
     html_parts.append(f"""
                 </div>
                 <script>
-                    function showOverlapTab(threshold) {{
+                    function showOverlapTab(threshold, button) {{
                         document.querySelectorAll('#overlap-matrices .tab-content').forEach(el => el.classList.remove('active'));
                         document.querySelectorAll('#overlap-matrices .tab-btn').forEach(el => el.classList.remove('active'));
-                        document.getElementById('overlap_tab_' + threshold).classList.add('active');
-                        event.target.classList.add('active');
+                        const domKey = button && button.dataset.overlapDomKey;
+                        const panel = domKey ? document.getElementById('overlap_tab_' + domKey) : null;
+                        if (!panel) return;
+                        panel.classList.add('active');
+                        if (button) button.classList.add('active');
                     }}
                 </script>
             </div>
@@ -5643,6 +5890,7 @@ def _generate_statistics_section(analyzer, dataset_names: List[str], thresholds:
                                   nickname_map: Dict[str, str]) -> str:
     """Generate statistics section."""
     html_parts = []
+    threshold_dom_keys = _unique_dom_keys(thresholds)
     html_parts.append("""
         <div id="statistics" class="section">
             <div class="section-header">📉 Statistics</div>
@@ -5655,23 +5903,31 @@ def _generate_statistics_section(analyzer, dataset_names: List[str], thresholds:
     html_parts.append('<div class="tabs"><div class="tab-buttons">')
     for i, t in enumerate(thresholds):
         active = 'active' if i == 0 else ''
-        html_parts.append(f'<button class="tab-btn {active}" onclick="showStatsTab({t})">t = {t}</button>')
+        html_parts.append(
+            f'<button class="tab-btn {active}" '
+            f'data-stats-dom-key="{threshold_dom_keys[i]}" '
+            f'onclick="showStatsTab({_html_js_arg(t)}, this)">t = {t}</button>')
     html_parts.append('</div>')
     
     for i, threshold in enumerate(thresholds):
         active = 'active' if i == 0 else ''
-        html_parts.append(f'<div id="stats_tab_{threshold}" class="tab-content {active}">')
+        html_parts.append(
+            f'<div id="stats_tab_{threshold_dom_keys[i]}" '
+            f'class="tab-content {active}">')
         html_parts.append(_generate_stats_table(analyzer, dataset_names, threshold, nickname_map))
         html_parts.append('</div>')
     
     html_parts.append("""
                 </div>
                 <script>
-                    function showStatsTab(threshold) {
+                    function showStatsTab(threshold, button) {
                         document.querySelectorAll('#statistics .tab-content').forEach(el => el.classList.remove('active'));
                         document.querySelectorAll('#statistics .tab-btn').forEach(el => el.classList.remove('active'));
-                        document.getElementById('stats_tab_' + threshold).classList.add('active');
-                        event.target.classList.add('active');
+                        const domKey = button && button.dataset.statsDomKey;
+                        const panel = domKey ? document.getElementById('stats_tab_' + domKey) : null;
+                        if (!panel) return;
+                        panel.classList.add('active');
+                        if (button) button.classList.add('active');
                     }
                 </script>
 """)

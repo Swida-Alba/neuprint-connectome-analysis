@@ -341,6 +341,7 @@ def build_mapping_flows(entries, source_dataset: str,
 def origin_seeded_flows(origin_dataset: str, matched_types, target_dataset: str,
                         *, source_counts: Optional[Dict[str, int]] = None,
                         foreign_counts: Optional[Dict[str, int]] = None,
+                        matched_origins: Optional[Dict[str, Any]] = None,
                         max_chains_per_flow: int = 6,
                         max_types: int = 500) -> List[Dict[str, Any]]:
     """Map one ORIGIN dataset's matched types into a target dataset (§12).
@@ -374,6 +375,25 @@ def origin_seeded_flows(origin_dataset: str, matched_types, target_dataset: str,
 
     flows: List[Dict[str, Any]] = []
     seen: set = set()
+
+    def _matched_origin(type_name: str) -> str:
+        records = (matched_origins or {}).get(type_name) or []
+        if isinstance(records, dict):
+            records = [records]
+        if records:
+            record = sorted(
+                records,
+                key=lambda item: (
+                    str(item.get("column", "")),
+                    str(item.get("value", "")),
+                ),
+            )[0]
+            column = str(record.get("column", "") or "").strip()
+            value = str(record.get("value", "") or type_name).strip()
+            if column and column != "type":
+                return f"{column} · '{value}'"
+        return f"type · '{type_name}'"
+
     for type_name in types:
         try:
             chains = mapper.get_type_bridges(
@@ -404,7 +424,7 @@ def origin_seeded_flows(origin_dataset: str, matched_types, target_dataset: str,
                 "foreign_type": foreign_type,
                 "source_count": int(counts_o.get(type_name) or 0),
                 "foreign_count": int(counts_t.get(foreign_type) or 0),
-                "matched_origin": f"type \u00b7 '{type_name}'",
+                "matched_origin": _matched_origin(type_name),
                 "bridges": by_end[foreign_type][:max_chains_per_flow],
             })
     return flows
@@ -2062,8 +2082,9 @@ def build_bridges_csv(flows, *, pools=None) -> Optional[str]:
     rendered preferred bridge and its standardized linker columns,
     machine-readable per-side pool coverage, and the FULL per-type
     bodyId populations (``source_body_ids`` / ``target_body_ids``: every
-    bodyId of the mapped type in its OWN dataset, one quoted JSON array
-    per cell so spreadsheet delimiters never split it — listed per type,
+    bodyId of the mapped type in its OWN dataset, one brace-wrapped
+    comma-separated list per cell so spreadsheet delimiters never split it
+    — listed per type,
     never paired across datasets).  The column set is fixed,
     so per-pair and all-pairs files share one header and the old
     union-of-bridge-columns concatenation hack is gone.  Uniform field
@@ -2078,7 +2099,6 @@ def build_bridges_csv(flows, *, pools=None) -> Optional[str]:
         preferred_bridge_chain,
         standardize_bridge,
     )
-    import json as _json
 
     pools = pools or {}
     flows = [f for f in (flows or []) if f]
@@ -2086,12 +2106,11 @@ def build_bridges_csv(flows, *, pools=None) -> Optional[str]:
         return None
 
     def _body_ids_cell(ids) -> str:
-        # JSON array (user 2026-09-09): a ';'-joined list made delimiter
-        # sniffing flip (Tablecruncher split thousands of semicolons into
-        # pseudo-columns).  A quoted JSON array is ONE field for any CSV
-        # reader and still human- and machine-readable.  A pool without
-        # the key (legacy/synthetic) stays an empty cell.
-        return "" if ids is None else _json.dumps(list(ids))
+        # Brace-wrapped comma-separated IDs are ONE CSV field while matching
+        # the documented export contract.  A pool without the key
+        # (legacy/synthetic) stays an empty cell.
+        return "" if ids is None else "{" + ", ".join(
+            str(body_id) for body_id in ids) + "}"
 
     header = [
         "source_dataset", "source_entry", "matched_column", "source_type",
@@ -2127,8 +2146,11 @@ def build_bridges_csv(flows, *, pools=None) -> Optional[str]:
         origin = flow.get("matched_origin", "")
         origin_column, _, origin_value = origin.partition(" · ")
         if origin_column and origin_column != "type":
-            matched_column = origin_value.strip("'")
-            source_entry = matched_column
+            matched_column = origin_column
+            source_entry = origin_value.strip("'")
+        elif origin_column == "type":
+            matched_column = "type"
+            source_entry = origin_value.strip("'") or src_type
         else:
             matched_column = "type"
             source_entry = src_type

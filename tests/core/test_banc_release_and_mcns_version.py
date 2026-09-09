@@ -50,7 +50,8 @@ def _build_mapper(
         "6263,T626,,Other,2,FType,f1\n"
         "6264,TBad,,Shared,2,,\n"
         "6265,AutoType,,auto:machine,1,,\n"
-        "6266,SameName,,,,,\n",
+        "6266,SameName,,,,,\n"
+        "6267,AutoShared,,auto:Shared,1,,\n",
         encoding="utf-8",
     )
     banc888 = tmp_path / "banc888.csv"
@@ -113,6 +114,18 @@ def test_banc_label_overlay_uses_curated_columns_and_verification(tmp_path):
     assert mapper.get_mapped_type("TBad", BANC626, MCNS) == "Shared"
     # Machine-only labels are not automatic evidence.
     assert mapper.get_mapped_type("AutoType", BANC626, MCNS) is None
+
+    # ``auto:`` is a provenance tier, not a separate type namespace.  A
+    # stripped machine label that names a current MCNS type participates in
+    # the vote and records that provenance on both bridge directions.
+    assert mapper.get_mapped_type("AutoShared", BANC626, MCNS) == "Shared"
+    auto_provenance = mapper._bridge_provenance[(
+        BANC626, "AutoShared", MCNS)]
+    assert auto_provenance["winner_derived_from_auto"] is True
+    assert auto_provenance["auto_stripped_votes"] == {"Shared": 1}
+    assert mapper._banc_label_votes[(
+        BANC626, "malecns_cell_type", "AutoShared"
+    )]["auto_stripped_votes"] == {"Shared": 1}
 
     # A direct FAFB label is separately exposed as FAFB↔BANC evidence.
     assert mapper.get_mapped_type("FType", FAFB, BANC626) == "T626"

@@ -203,6 +203,16 @@ def _build_query_report(tmp_path, extra_parameters=None):
             )
 
         @staticmethod
+        def _get_path_hop_weights_for_threshold(threshold):
+            if isinstance(threshold, dict):
+                return {
+                    "source -> inter -> target": {
+                        dataset: [10, 7] for dataset in datasets
+                    }
+                }
+            return {}
+
+        @staticmethod
         def _path_provenance_row(dataset, threshold):
             return {
                 "dataset": dataset,
@@ -267,8 +277,13 @@ def test_combination_html_uses_full_query_keyed_report_shell(tmp_path):
     assert 'id="threshold-provenance"' in report
     # Standard network controls are reused per query (Phase B item 6).
     assert report.count('id="network_combo_00') == 2
-    assert 'toggleNetworkFilter("combo_001")' in report
-    assert 'toggleNetworkFilter("combo_002")' in report
+    # JSON string arguments are HTML-escaped inside inline attributes; the
+    # browser decodes these entities before executing the handler.
+    assert 'toggleNetworkFilter(&quot;combo_001&quot;)' in report
+    assert 'toggleNetworkFilter(&quot;combo_002&quot;)' in report
+    assert 'showNetworkTab(&quot;combo_001&quot;, this)' in report
+    assert 'showNetworkTab(&quot;combo_002&quot;, this)' in report
+    assert 'event.target' not in report
     # Per-query similarity heatmap cards use the shared four-metric set.
     assert 'id="edge_rank_combo_001"' in report
     assert 'id="cosine_combo_001"' in report
@@ -292,6 +307,13 @@ def test_combination_html_uses_full_query_keyed_report_shell(tmp_path):
     assert 'id="edge-matrices_query_tab_combo_001"' in report
     assert 'id="edge-matrices_dataset_tab_d1"' in report
     assert 'id="path-matrices_query_tab_combo_002"' in report
+    assert 'data-matrix-mode="query"' in report
+    assert 'data-matrix-query-key="combo_001"' in report
+    assert 'data-matrix-dataset-key="d1"' in report
+    assert 'switch_edge-matrices_mode' not in report
+    assert 'show_path-matrices_query_tab' not in report
+    assert 'onclick="switch_' not in report
+    assert '<strong>7</strong>' in report
     assert 'Plotly.newPlot' in report
     assert 'edge_presence_matrix_query_combo_001.csv' in report
     assert 'edge_presence_matrix_combination_' not in report
@@ -525,6 +547,11 @@ def test_standard_and_custom_pathfinding_suppress_ratio_probability(tmp_path, mo
             analyzer._query_record = lambda _k: {
                 "id": "q1", "thresholds": {datasets[0]: 3, datasets[1]: 3}}
             analyzer.comparison_report = {}
+        # This test covers the visualizer callback contract.  The conserved
+        # graph orchestration has its own regression test and should not write
+        # generated HTML into the repository during this callback test.
+        analyzer._generate_vispath_visualizations = lambda _dir: None
+        analyzer.visualize_conserved_paths_all_thresholds = lambda **kw: []
         analyzer._generate_visualizations(str(tmp_path / mode))
         return captured
 

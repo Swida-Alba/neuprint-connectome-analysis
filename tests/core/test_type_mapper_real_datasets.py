@@ -1112,6 +1112,12 @@ def test_panel_and_viewer_share_mapped_type_backend(mapper):
                                [MCNS, FW])
     origins = res['origins']
     assert set(origins) == {FW}
+    assert res['origin_matches'][FW]
+    assert all(
+        any(record['column'] == 'cell_type'
+            and record['value'] == 'circadian_clock'
+            for record in records)
+        for records in res['origin_matches'][FW].values())
 
     # shared-engine panel side
     idx = {MCNS: load_cached_neuron_index(MCNS), FW: load_cached_neuron_index(FW)}

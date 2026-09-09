@@ -506,6 +506,27 @@ def test_generate_networks_section(analyzer):
     assert "Conservation" in html
 
 
+def test_network_tabs_escape_string_keys_and_use_dom_keys(analyzer):
+    html = hrg._generate_networks_section(
+        analyzer,
+        DATASETS,
+        [],
+        {"ds_one": "D 1", "ds_two": "D'2"},
+        point_keys=["query/one", "query two"],
+        point_labels=["First", "Second"],
+        aligned_network_getter=analyzer.get_aligned_data_for_network,
+        aligned_getter=analyzer.get_aligned_data,
+        path_getter=analyzer._get_path_data_for_threshold,
+        mode_labels=("Query", "Dataset"),
+    )
+    assert 'showNetworkTab(&quot;query/one&quot;, this)' in html
+    assert 'showNetworkTab(&quot;query two&quot;, this)' in html
+    assert 'id="network_tab_query_one"' in html
+    assert 'id="network_tab_query_two"' in html
+    assert 'id="network_dataset_tab_D_1"' in html
+    assert 'event.target' not in html
+
+
 def test_generate_networks_section_self_edges(tmp_path):
     # source == target triggers the self-edge detection branch
     fa = FakeAnalyzer(tmp_path, source_neurons=("A",), target_neurons=("A",))
@@ -695,6 +716,55 @@ def test_generate_html_report_with_auto_type_mapping(tmp_path):
         fa, DATASETS, THRESHOLDS, "", [], _key_findings()
     )
     assert "</html>" in html
+
+
+def test_type_mapping_report_canonicalizes_by_source_dataset():
+    """Raw names from FAFB/BANC merge into the MCNS canonical row."""
+    from types import SimpleNamespace
+
+    datasets = ["mcns", "fafb", "banc"]
+
+    class Mapper:
+        _conflicts = []
+
+        def get_canonical_type(self, type_name, source_dataset=None):
+            if source_dataset in {"mcns", "fafb", "banc"} \
+                    and type_name in {"MeVPLo2", "MTe07"}:
+                return "MeVPLo2"
+            return type_name
+
+        def resolve_type_across_datasets(self, type_name, dataset_names,
+                                         source_dataset=None):
+            if type_name == "MeVPLo2" and source_dataset == "mcns":
+                return {"mcns": "MeVPLo2", "fafb": "MTe07",
+                        "banc": "MTe07"}
+            if type_name == "MTe07" and source_dataset in {"fafb", "banc"}:
+                return {"mcns": "MeVPLo2", "fafb": "MTe07",
+                        "banc": "MTe07"}
+            if type_name == "CB2399":
+                return {"mcns": None, "fafb": "CB2399",
+                        "banc": "CB2399"}
+            return {dataset: None for dataset in dataset_names}
+
+    class Analyzer:
+        parameters = SimpleNamespace(
+            auto_type_mapping=True,
+            _auto_type_mapper=Mapper(),
+        )
+
+        @staticmethod
+        def _collect_result_types_by_dataset():
+            return {
+                "mcns": {"MeVPLo2"},
+                "fafb": {"MTe07"},
+                "banc": {"MTe07", "CB2399"},
+            }
+
+    report = hrg._generate_type_mapping_section(Analyzer(), datasets)
+    assert report.count("<strong>MeVPLo2</strong>") == 1
+    assert "<strong>MTe07</strong>" not in report
+    assert "MeVPLo2</strong></td><td>MeVPLo2</td><td>MTe07</td><td>MTe07</td>" in report
+    assert "CB2399</strong></td><td>—</td><td>CB2399</td><td>CB2399</td>" in report
 
 
 def test_generate_html_report_empty_data(empty_analyzer):

@@ -182,6 +182,11 @@ def test_collect_result_types(analyzer):
     types = analyzer._collect_result_types()
     assert {"A", "B", "C", "D"} <= types
     assert 5 not in types
+    by_dataset = analyzer._collect_result_types_by_dataset()
+    assert {"A", "B"} <= by_dataset[DS1]
+    assert {"C", "D"} <= by_dataset[DS2]
+    assert all(isinstance(name, str)
+               for names in by_dataset.values() for name in names)
 
 
 def test_mode_specific_note(analyzer):
@@ -1583,20 +1588,23 @@ def test_generate_visualizations_import_error(tmp_path, monkeypatch):
 def test_generate_visualizations_with_fake_visualizer(tmp_path, monkeypatch):
     a = ComparisonAnalyzer(_params(), verbose=False)
     a.raw_results = _standard_results()
-    saved = []
+    calls = []
 
     class _FakeViz:
         def __init__(self, verbose=False):
             pass
 
         def save_all_plots(self, **kwargs):
-            saved.append(True)
+            calls.append("plots")
 
     fake_mod = types.ModuleType("comparison.visualizations")
     fake_mod.ComparisonVisualizer = _FakeViz
     monkeypatch.setitem(sys.modules, "comparison.visualizations", fake_mod)
+    monkeypatch.setattr(
+        a, "visualize_conserved_paths_all_thresholds",
+        lambda **kw: calls.append("paths"))
     a._generate_visualizations(str(tmp_path))
-    assert saved == [True]
+    assert calls == ["plots", "paths"]
 
 
 def test_generate_visualizations_reciprocal_branch(tmp_path, monkeypatch):
@@ -1616,10 +1624,13 @@ def test_generate_visualizations_reciprocal_branch(tmp_path, monkeypatch):
     fake_mod.ComparisonVisualizer = _FakeViz
     monkeypatch.setitem(sys.modules, "comparison.visualizations", fake_mod)
     monkeypatch.setattr(
+        a, "visualize_conserved_paths_all_thresholds",
+        lambda **kw: calls.append("paths"))
+    monkeypatch.setattr(
         a, "visualize_conserved_reciprocal_graph_all_thresholds",
         lambda **kw: calls.append("reciprocal"))
     a._generate_visualizations(str(tmp_path))
-    assert "reciprocal" in calls
+    assert calls == ["plots", "paths", "reciprocal"]
 
 
 # --- APPEND-POINT-2 ---
@@ -1667,6 +1678,22 @@ def test_get_path_hop_weights_for_threshold(tmp_path):
         os.path.join(d2, "to_target_allpaths_type.csv"), index=False)
     hop = a._get_path_hop_weights_for_threshold(1)
     assert isinstance(hop, dict)
+
+    d1q = _ds_dir(params, DS1, 3)
+    pd.DataFrame({"source": ["Src"], "target": ["Tgt"], "weight": [10],
+                  "weights": ["[11, 4]"]}).to_csv(
+        os.path.join(d1q, "minsyn_3_data_original_paths.csv"), index=False)
+    d2q = _ds_dir(params, DS2, 5)
+    pd.DataFrame({"path": ["Src -> Tgt"], "min_weight": [9],
+                  "weights": ["[9, 2]"]}).to_csv(
+        os.path.join(d2q, "to_target_allpaths_type.csv"), index=False)
+    query_hop = a._get_path_hop_weights_for_threshold({
+        "thresholds": {DS1: 3, DS2: 5},
+    })
+    flattened = [weights for per_dataset in query_hop.values()
+                 for weights in per_dataset.values()]
+    assert [11.0, 4.0] in flattened
+    assert [9.0, 2.0] in flattened
 
 
 def test_get_ratio_and_prob_data_for_threshold(tmp_path):
