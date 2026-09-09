@@ -6,7 +6,8 @@ A new **local caching system** has been added to dramatically speed up repeated 
 
 ## Key Benefits
 
-- ⚡ **10-100x faster** for repeated analyses
+- ⚡ **Much faster repeated analyses** (local cache reads instead of
+  network API calls)
 - 💾 **Automatic caching** of all Neuprint API calls
 - 🌐 **Works offline** once data is cached
 - 🎯 **Smart cache keys** based on neurons and parameters
@@ -226,4 +227,5 @@ A: Clear cache manually after known updates.
 **Status**: Production-ready ✅  
 **Default**: Enabled  
 **Storage**: Local disk (not committed to git)  
-**Performance**: 10-100x faster for repeated analyses
+**Performance**: repeated analyses read from local cache instead of
+  the network API

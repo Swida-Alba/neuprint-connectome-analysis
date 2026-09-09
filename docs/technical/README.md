@@ -466,10 +466,11 @@ Adding new cached data types:
 - 500 neurons: 95s
 - 1000 neurons: 380s (with cache)
 
-**Cache Performance**:
+**Cache Performance** (representative single-query timings, not a
+maintained benchmark):
 - First query: 2-5s
 - Cached query: 0.05-0.2s
-- Speedup: 10-100x
+- Speedup: 10-100x for the measured workload
 
 **Polars Optimization**:
 - CSV writing: 10-100x faster

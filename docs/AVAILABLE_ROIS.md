@@ -1,6 +1,6 @@
 # Available ROI Meshes by Dataset
 
-This document lists all available Region of Interest (ROI) meshes for each NeuPrint dataset.
+This document lists all available Region of Interest (ROI) meshes for each supported dataset (NeuPrint, the FAFB local release, and the BANC standalone releases).
 Use these ROI names with the `mesh_roi` parameter in `VisualizeSkeleton`.
 
 ## Usage
@@ -195,7 +195,41 @@ Extensive column ROIs for right hemisphere optic lobe:
 vs = VisualizeSkeleton(
     dataset='flywire_FAFB_v783',
     mesh_roi=['EB', 'LH(R)', 'AL(R)'],  # Use male-cns ROI names
-    brain_mesh='template',  # Uses native FLYWIRE coordinates
+    brain_mesh='native',  # Uses native FLYWIRE coordinates
+)
+```
+
+---
+
+## banc_v626 / banc_v888 (BANC standalone releases)
+
+BANC ships **no named ROI product**. Its `mesh_roi` options come in two
+groups with different availability:
+
+**Native aggregate outlines (always offered).** The public
+`region_outlines` CloudVolume layer provides four whole-CNS aggregates in
+nanometre BANC space, so they render without any transform:
+
+| ROI | Description |
+| --- | ----------- |
+| `BANC_outline` | Full CNS outline (brain + nerve cord) |
+| `BANC_neuropil` | Full CNS neuropil |
+| `BANC_brain_neuropil` | Brain neuropil only |
+| `BANC_vnc_neuropil` | VNC neuropil only |
+
+**Named ROIs (conditional).** Named regions such as `AL(R)` reuse the
+male-cns ROI set, bridged into BANC space at render time and cached under
+`cache/<ds>/meshes_transformed/BANC/`. They appear in the offered ROI list
+only when a male-cns `available_rois.json` cache exists. On a cache miss the
+mesh is fetched from the male-cns source, which requires a NeuPrint token —
+without one, named-ROI requests fail while the four aggregates keep working.
+
+**Usage:**
+```python
+vs = VisualizeSkeleton(
+    dataset='banc_v888',
+    mesh_roi=['BANC_vnc_neuropil'],  # native aggregate, no token needed
+    brain_mesh='BANC',
 )
 ```
 
@@ -217,3 +251,4 @@ vs = VisualizeSkeleton(
    - `cache/manc_v1_0/available_rois.json`
    - `cache/optic-lobe_v1_1/available_rois.json`
    - FlyWire FAFB uses ROIs transformed from the male-cns:v0.9 dataset.
+   - BANC named ROIs depend on a cached male-cns ROI list (`cache/banc_v888/available_rois.json` in the current local layout); the four aggregate outlines are always offered without it.

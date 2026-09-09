@@ -99,7 +99,7 @@ fc.InitializeNeuronInfo()
 fc.FindDirectConnections()
 ```
 
-## 2.5. Local FAFB/BANC Analysis (NEW! 10-100x faster!)
+## 2.5. Local FAFB/BANC Analysis (NEW! local-cache fast path)
 
 Use the matching local-release source for fast FAFB or standalone BANC analysis.
 

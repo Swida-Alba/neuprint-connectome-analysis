@@ -9,7 +9,8 @@ Supported Datasets
 ------------------
 - **NeuPrint datasets**: hemibrain:v1.2.1, optic-lobe:v1.1, manc:v1.0, male-cns:v0.9
 - **FAFB local release**: flywire_FAFB_v783 (FlyWire/Codex or CAVE-backed)
-- **BANC local release**: banc_v626 (standalone public-release bucket; no CAVE)
+- **BANC local releases**: banc_v626, banc_v888 (standalone public-release
+  bucket; no CAVE)
 
 Key Features
 ------------

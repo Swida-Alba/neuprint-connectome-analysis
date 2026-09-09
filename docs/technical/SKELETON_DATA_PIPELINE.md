@@ -65,11 +65,14 @@ Decision flow: [malecns_skeleton_flow.html](../visualizations/malecns_skeleton_f
    chain); skeletons arrive in **JRCFIB2022Mraw voxel** coordinates and are
    persisted back into the raw store in that frame.
 
-### 1.3 BANC (`banc_v888`, public GCS bucket, no authentication)
+### 1.3 BANC (`banc_v626` / `banc_v888`, public GCS bucket, no authentication)
 
 Decision flow: [banc_skeleton_flow.html](../visualizations/banc_skeleton_flow.html).
 
-One SWC per neuron under `compiled_data/banc_888/banc_banc_space_swc/`, with a
+Both standalone releases are supported and fetch from the same public
+products; every skeleton is served by its 888-namespace file name (v626
+bodyIds resolve through the id crosswalk). One SWC per neuron under
+`compiled_data/banc_888/banc_banc_space_swc/`, with a
 **per-neuron fallback chain** (mutually exclusive products — probed: no neuron
 ships both):
 
@@ -268,22 +271,29 @@ Decision flow: [malecns_roi_resolution.html](../visualizations/malecns_roi_resol
 ### 6.3 Exact resolution order for one `mesh_roi` entry on a BANC scene
 
 As coded in `VisualizeSkeleton.plot_mesh()` (decision flow:
-[banc_roi_resolution.html](../visualizations/banc_roi_resolution.html)):
+[banc_roi_resolution.html](../visualizations/banc_roi_resolution.html)).
+Cache locations differ by mesh kind: **aggregate** outlines are always
+stored under the fixed `cache/banc_v888/` folder regardless of the selected
+release, while **transformed named-ROI** meshes and raw male-cns downloads
+use the selected scene dataset's cache directory (`<ds>` below is
+`banc_v626` or `banc_v888`):
 
-1. **Dataset cache lookup** — `cache/banc_v888/meshes/{X}.json` (case-safe
-   name; `_get_mesh_file_path`).
+1. **Dataset cache lookup** — `cache/banc_v888/meshes/{X}.json` for BANC
+   aggregate outlines (case-safe name; `_get_banc_mesh_dir` fixes this to
+   the `banc_v888` folder so cross-template selections find the products).
 2. **BANC aggregate check** — if `{X}` is in the region-name map
    (`region_name_map.json`, from the release's `segment_properties/info`),
    resolve through `_banc_mesh_file_path` (clean plain names for the
    aggregates — the generic case-safe encoding cannot see names with lowercase
    letters, e.g. `BANC_neuropil`) and fetch from CloudVolume on miss. Loaded
    with `source = BANC` → **no transform**.
-3. **Transformed-cache check** — `cache/banc_v888/meshes_transformed/BANC/{X}.json`:
+3. **Transformed-cache check** — `cache/<ds>/meshes_transformed/BANC/{X}.json`:
    on hit, load and render as-is (no transform).
 4. **male-cns fetch** — `neu.fetch_roi(X, client=male-cns:v0.9)`; the raw mesh
-   (JRCFIB2022Mraw) is saved into the dataset cache dir, then bridged
-   `JRCFIB2022Mraw → JRCFIB2022M → BANC` and written to the transformed cache.
-   Failures are logged. The generic hemibrain fallback that non-FAFB datasets
+   (JRCFIB2022Mraw) is saved into the selected dataset's cache dir, then
+   bridged `JRCFIB2022Mraw → JRCFIB2022M → BANC` and written to the
+   transformed cache. This step needs a NeuPrint token. Failures are logged.
+   The generic hemibrain fallback that non-FAFB datasets
    use is **excluded for BANC** — a name missing from male-cns is skipped with
    a warning rather than mis-framed.
 

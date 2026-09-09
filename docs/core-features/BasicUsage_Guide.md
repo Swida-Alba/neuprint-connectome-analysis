@@ -439,7 +439,8 @@ local_data/flylight/SS01015_{timestamp}/
 | `optic-lobe:v1.1`   | NeuPrint | Optic lobe detailed         |
 | `manc:v1.2.3`       | NeuPrint | Male ventral nerve cord     |
 | `flywire_FAFB_v783` | Local    | FlyWire female adult brain  |
-| `banc_v626` | Local    | Standalone BANC brain + nerve cord (public release) |
+| `banc_v888` | Local    | Standalone BANC brain + nerve cord (public release, current) |
+| `banc_v626` | Local    | Standalone BANC brain + nerve cord (public release, older) |
 
 ### Neuron Selection (Regex Support)
 
@@ -546,7 +547,7 @@ min_ratio = min_traversal_probability * 0.3
 
 | Parameter             | Description                     | Impact          |
 | --------------------- | ------------------------------- | --------------- |
-| `use_cache=True`      | Cache API results locally       | 10-100x speedup |
+| `use_cache=True`      | Cache API results locally       | Much faster repeat queries (local reads) |
 | `skip_bodyId=True`    | Skip individual neuron analysis | 50% faster      |
 | `output_format='csv'` | Use CSV instead of Excel        | 2-5x faster     |
 | `filter_by='type'`    | Filter at type level            | Fewer edges     |

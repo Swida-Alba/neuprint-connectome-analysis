@@ -19,7 +19,7 @@ vs = VisualizeSkeleton(
     output_dir="/abs/output/skeleton",
     output_format="csv",                # merged synapse export: "csv" | "xlsx"
     skeleton_mode="line",               # "line" | "tube" (start with line)
-    brain_mesh="template",
+    brain_mesh="native",                # "native" | "BANC" | "FAFB" | "male-cns" | "none" ("template" is a legacy alias for "native")
     vnc_mesh=None,
     legend_mode="layer",                # "single" | "type" | "layer"
     neuron_alpha=1.0,
@@ -74,15 +74,18 @@ vs.export_video(fps=30, export_gif=True, gif_scale=0.2)
 - BANC (`banc_v626` / `banc_v888`) is supported and renders in native BANC
   space from the public release bucket (no token): SWC skeletons, ROI meshes
   from the public `region_outlines` layer, and brain/VNC outline templates
-  (`brain_mesh="template"` shows the brain portion, `vnc_mesh=True` the VNC
-  portion; both cut at the neck coordinate y = 350,000 nm). Saved HTML/PNGs
-  open on the calibrated BANC frontal view (anterior at -Y).
+  (`brain_mesh="native"` — or the explicit `"BANC"` — shows the brain
+  portion, `vnc_mesh=True` the VNC
+  portion; both cut at the neck coordinate y = 350,000 nm). Current mesh
+  choices are `native`, `BANC`, `FAFB`, `male-cns`, `none`; the old
+  `template`/`whole` names remain accepted as compatibility aliases. Saved
+  HTML/PNGs open on the calibrated BANC frontal view (anterior at -Y).
 - BANC knobs: the skeleton chain is unified — 888 L2 first, else the 888
   full-resolution skeleton, else the v626-era pcg-skel set (µm scaled to
   nm). L2 tubes skip face decimation (cache-level product); full-res tubes
   decimate FAFB-style, floored at 4,000 kept faces. The deprecated
   `banc_skeleton_resolution` argument is accepted but ignored. Tube radii
-  are normalized to a 120 nm median by default
+  are normalized to a 240 nm median by default
   (`banc_normalize_radius`, `banc_radius_target_nm`).
 - BANC synapses default to `skip`: opting in downloads a ~3.9 GB per-synapse
   table once (resumable) and draws pre-synaptic site markers only (the

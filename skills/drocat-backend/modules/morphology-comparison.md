@@ -39,14 +39,16 @@ results = comparer.run()   # {"output_folder", "types_compared",
 - **vector_v2**: warms the per-dataset `SkeletonVectorCacheV2` via
   `vectors_for`; with `fetch_online=True` (default) cache misses are
   fetched through the API — `fetch_skeletons_on_demand_batch` on NeuPrint,
-  `load_flywire_skeletons_batch` (FAFB healed bundle → CAVE, or standalone
-  BANC public-release SWCs) on local releases —
-  and re-vectorized with the cache's own `_vectorize_neuron`, mirroring
-  Find Similar's cache-direct contract. It then scores the standardized +
-  ZCA-whitened rows with
+  `load_flywire_skeletons_batch` (FAFB healed bundle → CAVE) on local
+  releases — and re-vectorized with the cache's own `_vectorize_neuron`,
+  mirroring Find Similar's cache-direct contract. It then scores the
+  standardized + ZCA-whitened rows with
   `v2_pairwise_matrix` (shape/spatial 0.30/0.70) — the exact Find Similar
   space. Neurons without local skeletons carry NaN cells and are reported
-  in `members.csv` as `no vector`.
+  in `members.csv` as `no vector`. The BANC branch of the loader chain is
+  unreachable from here: BANC morphological comparison is deferred
+  (vector-quality validation pending), so BANC datasets are rejected
+  before any skeleton is fetched.
 - **nblast**: reuses `MorphologyComparer`'s dotprops pipeline
   (`_dotprops_for_ids`), scores both orientations per pair and averages
   (the forward NBLAST score is asymmetric). Type means exclude

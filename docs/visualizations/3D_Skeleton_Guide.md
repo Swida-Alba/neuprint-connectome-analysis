@@ -562,6 +562,8 @@ pip install selenium webdriver-manager
 - **hemibrain:v1.2.1** / **optic-lobe:v1.1**: Adult brain
 - **manc:v1.2.3**: Male VNC (ventral nerve cord)
 - **male-cns:v0.9**: Full CNS (brain + VNC combined)
+- **flywire_FAFB_v783**: FAFB local release (FlyWire/Codex or CAVE-backed)
+- **banc_v626** / **banc_v888**: Standalone BANC brain + nerve cord releases (public bucket, no token; skeletons fetched on demand through the unified L2 → full → v626-pcg chain)
 
 **Brain Mesh Options:**
 

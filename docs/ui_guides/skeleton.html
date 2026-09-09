@@ -26,7 +26,9 @@
     <li>In the <b>Layer Structure</b> tree, three layer rows are ready by
       default — add neurons to them, or click <b>Add Layer</b> for more
       rows.</li>
-    <li>Pick the dataset; keep <b>Brain Mesh = template</b>. ROI meshes are
+    <li>Pick the dataset; keep <b>Brain Mesh = native</b> (each dataset
+      draws its own template outline; for BANC scenes this is the brain
+      portion of the whole-CNS outline). ROI meshes are
       optional and start unselected.</li>
     <li>Click <b>Generate 3D Skeleton</b>.</li>
   </ol>
@@ -178,8 +180,11 @@
           It always opens with the configured Background; static exports
           (view PNGs, per-neuron files, video) keep the fixed background, and
           neuron/synapse colors stay as generated.</li>
-        <li><b>Brain Mesh</b>: template, whole, or none; <b>VNC Mesh</b>
-          toggle for male-cns/manc. <b>Brain Mesh Color</b> defaults to
+        <li><b>Brain Mesh</b>: <b>native</b> (dataset's own template),
+          <b>BANC</b> (explicit BANC whole-CNS outline), <b>FAFB</b>,
+          <b>male-cns</b>, or <b>none</b>; the old <b>template</b>/<b>whole</b>
+          names still work as compatibility aliases. <b>VNC Mesh</b>
+          toggle for male-cns/manc/BANC. <b>Brain Mesh Color</b> defaults to
           <b>Auto</b> (adaptive: light tone on white background, dark tone on
           black); uncheck it to pick a fixed outline color, with opacity
           defaulting to 5% (half the original auto setting's subtlety).</li>

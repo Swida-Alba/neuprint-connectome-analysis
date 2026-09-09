@@ -332,10 +332,15 @@ Budget floor. A `[combined threshold]` note is appended to
 - Golden-master: type-level outputs byte-identical with/without the
   optimizations; per-threshold sets nested (`threshold_sensitivity.csv`
   monotone).
-- Real-data matrix (male-cns:v1.0 + FAFB v783 — BANC under
-  reconstruction): JO→VNC motor, JO→DN, visual→DN at L4–L5 — see
+- Real-data matrix (male-cns:v1.0 + FAFB v783): JO→VNC motor, JO→DN,
+  visual→DN at L4–L5 — see
   `plan-cross-dataset-report-fixes.md` §2b and the sensorimotor harness
-  under `local_data/sensorimotor_optim_test/`.
+  under `local_data/sensorimotor_optim_test/`. BANC is operational for
+  connectivity and pathfinding (standalone local-release path, covered by
+  `tests/e2e/test_banc_ame12_ppl_e2e.py` with current-data aMe12→PPL runs);
+  that sensorimotor matrix simply predates the BANC integration and has not
+  been rerun on it. The only deferred BANC features are morphology
+  similarity/comparison (vector-quality validation pending).
 
 ## 7. Decision log
 

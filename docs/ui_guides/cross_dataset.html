@@ -45,7 +45,7 @@
     <tr><th>Example</th><th>Behavior</th></tr>
     <tr><td>Datasets: male-cns:v0.9, hemibrain:v1.2.1</td><td>Two datasets compared using their automatic display names</td></tr>
     <tr><td>Thresholds: <code>3, 5, 10</code></td><td>Separate analyses per threshold</td></tr>
-    <tr><td style="white-space:nowrap">Rough equivalence</td><td>Whole-dataset hint (connection-pair density per neuron): BANC ≥ 3 ≈ FAFB ≥ ~6–7 ≈ male-cns ≥ ~7–9; BANC ≥ 5 ≈ FAFB ≥ ~9–11 ≈ male-cns ≥ ~12–15. The <code>threshold_alignment_*.csv</code> files are raw-run density diagnostics (and are marked as such in combination mode); actual advanced comparisons use the query manifest.</td></tr>
+    <tr><td style="white-space:nowrap">Rough equivalence</td><td>Whole-dataset hint (connection-pair density per neuron, re-baselined 2026-09-07 on the refreshed bucket tables — dated reference table in the Cross-Dataset guide): BANC ≥ 3 ≈ FAFB ≥ 3 ≈ male-cns ≥ 5 (46–47 pairs/neuron for BANC/FAFB); BANC ≥ 5 ≈ FAFB ≥ 8 ≈ male-cns ≥ 8; from τ ≥ 5, FAFB ≈ 2x BANC and male-cns ≈ 2.7x BANC, growing with τ. Thresholds are empirical calibrations, not interchangeable by rule — per-query alignment differs. The <code>threshold_alignment_*.csv</code> files are raw-run density diagnostics (and are marked as such in combination mode); actual advanced comparisons use the query manifest.</td></tr>
     <tr><td>Mode: <code>edge</code></td><td>Edges compared by weight only</td></tr>
     <tr><td>Mode: <code>path</code> (default)</td><td>Edges discovered through paths</td></tr>
     <tr><td>Path Enumeration: <code>shortest</code></td><td>Per-dataset runs keep only per-pair minimum-hop paths (all ties)</td></tr>

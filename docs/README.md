@@ -19,7 +19,7 @@ defines this completion contract.
 ## 🆕 Recent Updates (January 2026) - V4.4.0
 
 ### 🚀 Local FAFB + Standalone BANC Dataset Support (RECOMMENDED)
-- **Local-first architecture**: Store FAFB locally and prepare BANC from its own public release bucket for 10-100x faster access
+- **Local-first architecture**: Store FAFB locally and prepare BANC from its own public release bucket so repeated queries avoid network round-trips entirely
 - **Mixed mode**: Seamlessly combines local cache + API fallback  
 - **Zero API latency**: Instant queries for cached neurons
 - **Automatic caching**: Build your cache once, reuse forever
@@ -127,7 +127,7 @@ Essential functionality documentation:
 - **✨ [Connectivity Profiling](./CONNECTIVITY_PROFILING.md)**: Intra-dataset profile comparison with heatmap visualization (NEW)
 - **Path Finding**: Multi-hop connection discovery
 - **Custom Groups**: Flexible neuron grouping for custom analysis
-- **Cache System**: High-performance local storage (10-100x speedup)
+- **Cache System**: High-performance local storage for repeat queries
 - **Filtering**: Connection and neuron filtering options
 
 ### ⚙️ [Technical](./technical/)
@@ -189,7 +189,7 @@ Advanced technical documentation:
 - **✨ [Cross-Dataset Comparison](./core-features/CrossDatasetComparison_Guide.md)**: Multi-dataset analysis
 - **✨ [Connectivity Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)**: Verify neuron types across datasets
 - **✨ [Connectivity Profiling](./CONNECTIVITY_PROFILING.md)**: Intra-dataset profile comparison with heatmaps (NEW)
-- **[Cache System Guide](./core-features/CacheSystem_Guide.md)**: Caching for 10-100x speedup
+- **[Cache System Guide](./core-features/CacheSystem_Guide.md)**: Caching for fast repeat queries
 - **[Path Finding](./core-features/FindAllPath_Documentation.md)**: Multi-hop path discovery
 - **[Custom Groups](./core-features/CustomGroups_Feature.md)**: Flexible neuron grouping
 

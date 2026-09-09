@@ -23,17 +23,23 @@ Selecting `banc_v888` or `banc_v626` in any tool prepares the dataset
 automatically from the public bucket (`~134 MB`, one time):
 
 - **Neuron metadata** from `compiled_data/banc_888/banc_888_meta.feather`
-  (188,508 neurons; ids, curated `cell_type`, `Alternative Cell Type(s)`,
+  (ids, curated `cell_type`, `Alternative Cell Type(s)`,
   `fafb_cell_type`, `malecns_cell_type`, `hemibrain_cell_type`,
   `manc_cell_type`, match bodyIds, classes, neurotransmitters, proofread
-  flags).
+  flags). Row counts are release-specific: the 2026-09-04 bucket snapshot
+  yields **188,508** rows for `banc_v888` (ids as served) and **185,165**
+  rows for `banc_v626` (ids resolved through `root_626`, then
+  deduplicated — the coarser v626 materialization carries duplicate ids).
 - **Connections** from `neuron_connectivity/<version>/synapses_v1_..._
   connectioncountsperneuropil_countthresh3.parquet` (per-neuropil pair
   counts; synapse size >= 3 and connection count >= 3 thresholds are baked
   into the product — matching what the Codex download provided).
 
 The raw products stay in `datasets/<dataset>/downloads/` so re-runs are
-offline. The written `metadata.json` records `source: banc_public_gcs`.
+offline. The sidecar is written as `<dataset>_metadata.json` (e.g.
+`datasets/banc_v626/banc_v626_metadata.json`,
+`datasets/banc_v888/banc_v888_metadata.json`) and records
+`source: banc_public_gcs`.
 Preparation also fills the neuron table's `post` column (post-synaptic
 counts) from the merged connections, matching what the manual Codex path
 produced.
@@ -109,9 +115,12 @@ compiled_data/banc_888/banc_banc_space_swc/<root_888_id>_<resolution>.swc
   or `_l2.swc` (coarse L2 approximation for everything else). A 404 on the
   preferred resolution transparently falls back to the other.
 - `banc_v888` body ids resolve directly; `banc_v626` ids resolve through the
-  meta-feather crosswalk (`root_626` -> `banc_888_id`), reaching **99.1%**
-  coverage (v888: 99.3%). The remaining ~1% are tiny fragments with no
-  skeleton anywhere; they are skipped with a warning.
+  meta-feather crosswalk (`root_626` -> `banc_888_id`). In the current
+  snapshot every crosswalk row carries an 888 id (100% id resolution,
+  measured over `cache/banc_v626/banc_id_crosswalk.parquet`). Skeleton
+  availability is a separate metric: neurons with no skeleton in any chain
+  tier below (a small residual of tiny fragments) are skipped with a
+  warning.
 - Fetched skeletons cache into the shared raw skeleton store
   (`cache/<dataset>/skeletons/raw_skeletons/<id>.swc.zst`, raw level 0 with
   a provenance header that also records which source served the neuron),
@@ -132,8 +141,9 @@ the first source that exists for the neuron —
 3. **v626 pcg-skel** — `neuron_skeletons/swcs-from-pcg-skel/{root_626}.swc`
    (micrometres, scaled ×1000 on fetch; v888 ids are translated through the
    id crosswalk). This covers the neurons absent from the 888 export in
-   both resolutions (~1.7 % of the release, e.g. one aMe12 and one l-LNv
-   body).
+   both resolutions — the loader documents this tier at roughly **1.7% of
+   the release** (e.g. one aMe12 and one l-LNv body); only fragments with
+   no skeleton in any tier are skipped.
 
 The old **BANC Skeleton Resolution** select (`l2` / `full` / `full_auto`)
 was removed from the Skeleton tab — the chain is always L2 → full → pcg.
@@ -190,20 +200,30 @@ table is newer — no manual cache step and no CAVE token. Notes:
 - ROI-based path filters are unavailable (the release ships no primary ROI
   list); `roi_coverage` in the metadata sidecar is marked
   `not_available_for_banc`.
-- `metadata.json` statistics are regenerated from the tables on every
-  preparation (neuron counts, real type coverage excluding `'Unknown'`,
-  synapse totals).
+- `<dataset>_metadata.json` statistics are regenerated from the tables on
+  every preparation (neuron counts, real type coverage excluding
+  `'Unknown'`, synapse totals).
 
 ## ROI meshes, brain and VNC outlines
 
-The public `region_outlines` CloudVolume layer provides four aggregates
+BANC `mesh_roi` options come in two groups with different availability:
+
+**Native aggregate outlines — always offered.** The public
+`region_outlines` CloudVolume layer provides four aggregates
 (`BANC_outline`, `BANC_neuropil`, `BANC_brain_neuropil`, `BANC_vnc_neuropil`),
 all in nanometres — the same frame as the skeletons, so they render without
-any transform. The release publishes **no named ROI meshes**, so named ROIs
-(e.g. `AL(R)`) use the same handling as FAFB: fetched from **male-cns**
-(`JRCFIB2022Mraw`) and bridged into BANC space at render time, cached under
-`cache/<ds>/meshes_transformed/BANC/`. The offered ROI list is the male-cns
-set plus the four native aggregates. `brain_mesh='native'` (or the explicit `brain_mesh='BANC'`) draws the
+any transform.
+
+**Named ROIs — conditional.** The release publishes **no named ROI meshes**,
+so named ROIs (e.g. `AL(R)`) use the same handling as FAFB: fetched from
+**male-cns** (`JRCFIB2022Mraw`) and bridged into BANC space at render time,
+cached under `cache/<ds>/meshes_transformed/BANC/`. They appear in the
+offered ROI list only when a male-cns `available_rois.json` cache exists,
+and a cache miss fetches from the male-cns source, which requires a
+NeuPrint token — without one the four aggregates keep working but named-ROI
+requests fail.
+
+`brain_mesh='native'` (or the explicit `brain_mesh='BANC'`) draws the
 **brain portion** of the whole-CNS outline and `vnc_mesh=True` the **VNC
 portion**: the two are segmented by the neck coordinate
 (`y = 470 µm` waist; cut at `y = 350 µm` so the neck stays with the VNC),
@@ -215,10 +235,12 @@ centroid so brain and VNC meet without a crack.
 ```python
 from coana import FindNeuronConnection
 
+# bodyIds verified against the prepared banc_v888 table (aMe12 -> PPL101,
+# the same pair exercised by tests/e2e/test_banc_ame12_ppl_e2e.py)
 fnc = FindNeuronConnection()
-fnc.dataset = 'banc_v626'
-fnc.sourceNeurons = ['720575940596125868']
-fnc.targetNeurons = ['720575940597856265']
+fnc.dataset = 'banc_v888'
+fnc.sourceNeurons = ['720575941596944935']  # aMe12
+fnc.targetNeurons = ['720575941416009108']  # PPL101
 fnc.InitializeNeuronInfo()
 fnc.FindAllPath()
 ```
@@ -239,14 +261,23 @@ vs.plot_neurons()
 ## Notes
 
 * **Root IDs** are very large integers; DROCAT keeps them as exact strings.
-* **`type` coverage**: ~75% of neurons carry a curated `cell_type`; the rest
-  are `'Unknown'` (same convention as the Codex tables). The
+* **`type` coverage**: roughly **63%** of neurons carry a curated
+  `cell_type` (counting non-empty values other than `'Unknown'`); the rest
+  are `'Unknown'` (same convention as the Codex tables). Measured on the
+  2026-09-04 bucket snapshot: 116,906/185,165 (63.1%) for `banc_v626` and
+  118,748/188,508 (63.0%) for `banc_v888` — counts are release- and
+  snapshot-dependent, and the same predicate is what the converter's
+  regenerated metadata reports. The
   `Alternative Cell Type(s)` column aggregates the curated name plus the
   per-dataset cross-fly type matches and remains fully wired into the
   cross-dataset auto type mapper (which reads the CSV form of the table).
 * **Synapse coordinates**: BANC per-synapse tables are nanometres; the local
-  merged-connections table aggregates weights per neuropil, so precise
-  synapse-site rendering for BANC is a future item.
+  merged-connections table aggregates weights per neuropil, so exact
+  per-synapse/post-site rendering is not supported. What BANC does support
+  is an **opt-in per-pair pre-site marker mode**: a derived synapse table
+  (`<dataset>_synapse_table.parquet`) drives approximate pre-site markers
+  per connected pair when the option is enabled in the 3D skeleton view —
+  useful as a connectivity diagnostic, but it is not a per-synapse display.
 * The v626 metadata also carries a `root_626` -> `banc_888_id` skeleton
   resolution crosswalk (cached at `cache/<dataset>/banc_id_crosswalk.parquet`);
   skeletons are always fetched by their 888-namespace file name. This

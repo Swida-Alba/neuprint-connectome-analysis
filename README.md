@@ -41,9 +41,9 @@ DROCAT is a Python toolkit for analyzing and visualizing connectome data from **
 | **Dataset Support** | NeuPrint (hemibrain, male-cns, optic-lobe, manc) + FAFB + standalone BANC releases, inter-dataset analysis |
 | **EM↔LM Mapping** | NeuronBridge integration for GAL4/Split-GAL4 driver line discovery |
 | **Visualization** | 3D skeletons, interactive networks, Sankey diagrams, heatmaps |
-| **Similarity Tabs** | Connectivity (find similar + comparison, cross-dataset capable) and Morphology (find similar, intra-dataset) with connectivity-expanded candidates, ROI filtering, full-morphology downloads |
+| **Similarity Tabs** | Connectivity (find similar + comparison, cross-dataset capable) and Morphology (find similar, intra-dataset) with connectivity-expanded candidates, ROI filtering, full-morphology downloads. Morphology similarity/comparison work on cached-skeleton datasets; for BANC they are deferred pending skeleton vector-quality validation (BANC 3D visualization and pathfinding are supported) |
 | **Analysis** | Multi-hop pathfinding, cross-dataset comparison, hemisphere-aware analysis |
-| **Performance** | 10-100x speedup with local caching, Polars acceleration |
+| **Performance** | Substantially faster repeat queries through local caching and Polars acceleration (local releases avoid the network round-trips of API-backed access) |
 
 ---
 
@@ -141,16 +141,16 @@ All NeuPrint server datasets are supported (verified against `api.neuprint.janel
 | `banc_v888` | Brain and Nerve Cord (BANC v888; standalone public-bucket tables + skeletons) |
 | `banc_v626` | Brain and Nerve Cord, older (BANC v626; standalone public-bucket tables + skeletons) |
 
-> BANC (Brain And Nerve Cord) is a standalone source analyzed from its own public release bucket as `banc_v888`/`banc_v626` — datasets, connections and skeletons all prepare automatically, with no login or CAVE token. The NeuPrint server metadata also lists a hidden `banc:v888` entry, but it is not queryable through the NeuPrint API and is therefore not supported.
+> BANC (Brain And Nerve Cord) is a standalone source analyzed from its own public release bucket as `banc_v888`/`banc_v626` — neuron metadata and connections prepare automatically (~134 MB once, no login or CAVE token), and 3D skeletons are fetched on demand and cached, so no bulk skeleton download is required. The NeuPrint server metadata also lists a hidden `banc:v888` entry, but it is not queryable through the NeuPrint API; the supported BANC path is the standalone local release above, not the NeuPrint-backed one.
 
-📖 **[FAFB + BANC Setup Guide](docs/FLYWIRE_USAGE.md)** · **[Available ROI Meshes](docs/AVAILABLE_ROIS.md)**
+📖 **[FAFB + BANC Setup Guide](docs/FLYWIRE_USAGE.md)** · **[Available ROI Meshes](docs/AVAILABLE_ROIS.md)** · **[BANC Integration Guide](docs/BANC_INTEGRATION.md)**
 
 ---
 
 ## What's New in v4.5.0
 
 - **Script-first analysis with coding agents** — run pathfinding, comparison, NeuronBridge, FlyLight, homolog, profile, PlotPath, and 3D skeleton scripts without the UI, via the [`drocat-usage`](skills/drocat-usage/SKILL.md) skill and its `run_direct.py` launcher.
-- **Local FAFB + standalone BANC dataset support** — local-first FAFB caching and public-bucket BANC caching for 10-100x faster local-release access ([FAFB Integration](docs/FAFB_INTEGRATION.md), [BANC Integration](docs/BANC_INTEGRATION.md)).
+- **Local FAFB + standalone BANC dataset support** — local-first FAFB caching and public-bucket BANC caching so repeated local-release queries avoid network round-trips entirely; Polars-backed matrix/CSV steps measured 10-100x faster in the [December 2025 benchmarks](docs/technical/PERFORMANCE_OPTIMIZATIONS_DEC2025.md) ([FAFB Integration](docs/FAFB_INTEGRATION.md), [BANC Integration](docs/BANC_INTEGRATION.md)).
 - **NT visualization & grouping** — neurotransmitter edge groups, custom groups, export/import ([Network Features](docs/visualizations/VisualizePath_Network_Features.md)).
 - **Similarity tab reorganization** — the Similarity group is now two main tabs, each with Find Similar / Comparison sub-tabs: **Connectivity** (find similar = homolog search across datasets or within one dataset via Target = Source; comparison = multi-dataset connectivity profiling) and **Morphology** (find similar = intra-dataset vector/NBLAST search; comparison = intra-dataset N×N morphology comparison with type-level + bodyId-level matrices, heatmaps, and a report — `vector_v2` or NBLAST scoring, NBLAST capped at 30 total neurons). The old "Connectivity similarity" mode is folded into Find Similar — it was intra-dataset homolog finding under another name. Morphological find-similar details: multiple queries run independently, connectivity-expanded candidates read directly from the connection cache (top-N×3 similar *types* expanded to all their members), ROI filtering, intra-type reference data, dual result tables (bodyId-level `results.csv` + type-level `type_summary.csv`), and query-plus-top-N 3D skeleton visualizations. NBLAST type means use ipsilateral pairs only (mirror scores are unreliable); the vector method lateral-normalizes and uses both sides. A full-morphology mode downloads every skeleton with a resumable progress/ETA pull and compares against the whole local population ([Connectivity guide](docs/ui_guides/connectivity.html), [Morphology guide](docs/ui_guides/morphology.html), [Comparison guide](docs/ui_guides/morphology_comparison.html)).
 - **Palette editor** — drag-and-drop reordering of discrete palette colors, a range slider applied directly to the displayed palette, a reset button beside the preview, and lateral range labels.

@@ -98,7 +98,8 @@ REGION_OUTLINES_URL = (
 BANC_BRAIN_VNC_Y_CUTOFF = 350_000
 
 # Aggregated outline segments in the region_outlines layer (nm coordinates).
-# (The rendered tube radius target lives in the renderer/UI: 120 nm default.)
+# (The rendered tube radius target lives in the renderer/UI: 240 nm default
+# via banc_radius_target_nm.)
 REGION_AGGREGATES = {
     1: "BANC_outline",
     2: "BANC_neuropil",

@@ -378,3 +378,41 @@ class TestSkipInvalidTokenChain:
         monkeypatch.setattr(ds_mod, "_shared_token_manager", _Counting())
         assert svc.get_token() == "revoked-tok"
         assert probe_calls == []
+
+
+class TestBancFallbackCounts:
+    """BANC last-resort display counts must track the release-count
+    contract: the 2026-09-04 public-bucket snapshot (v888 as served,
+    v626 after root_626 dedup). When the local prepared tables are
+    present, the constants must equal their actual row counts so the
+    UI never shows a stale no-data estimate."""
+
+    RELEASE_CONTRACT = {"banc_v888": 188508, "banc_v626": 185165}
+
+    def test_constants_match_release_contract(self):
+        for dataset, expected in self.RELEASE_CONTRACT.items():
+            entry = DatasetService.CODEX_DATASETS.get(dataset) or {}
+            assert entry.get("neurons") == expected, (
+                f"{dataset} fallback count drifted from the release "
+                f"contract ({expected}); refresh it from the current "
+                "prepared tables and update the comment in "
+                "ui/dataset_service.py")
+
+    def test_constants_match_local_prepared_tables(self):
+        pytest.importorskip("pandas")
+        import pandas as pd
+
+        project_root = Path(__file__).resolve().parents[2]
+        checked = 0
+        for dataset, expected in self.RELEASE_CONTRACT.items():
+            table = (project_root / "datasets" / dataset /
+                     f"{dataset}_allneurons_neuron_df.parquet")
+            if not table.exists():
+                continue
+            actual = len(pd.read_parquet(table, columns=["bodyId"]))
+            assert actual == expected, (
+                f"{dataset}: fallback constant {expected} != prepared "
+                f"table rows {actual}; refresh both together")
+            checked += 1
+        if not checked:
+            pytest.skip("no local prepared BANC tables")

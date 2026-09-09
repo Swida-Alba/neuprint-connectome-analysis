@@ -95,7 +95,8 @@ fc = FindNeuronConnection(
 
 ### Performance Benefits
 
-- **10-100x faster** for repeated queries
+- **Dramatically faster repeated queries** — a cached query is a
+  local read (tenths of a second) instead of a network API call (seconds)
 - **Offline analysis** once data is cached
 - **Flexible filtering** without re-fetching
 - **No redundant API calls**

@@ -918,7 +918,8 @@ This ensures lines that rank well in both algorithms appear first.
 | `hemibrain:v1.2.1`  | NeuPrint | Hemibrain connectome    |
 | `male-cns:v0.9`     | NeuPrint | Male CNS (brain + VNC)  |
 | `flywire_FAFB_v783` | FAFB     | FAFB full brain         |
-| `banc_v626` | BANC     | Standalone BANC brain + nerve cord |
+| `banc_v888` | BANC     | Standalone BANC brain + nerve cord (public release, current) |
+| `banc_v626` | BANC     | Standalone BANC brain + nerve cord (public release, older) |
 | `vnc:v0.5`          | NeuPrint | VNC (older version)     |
 | `manc:v1.2.1`       | NeuPrint | MANC dataset            |
 
@@ -928,6 +929,7 @@ The module automatically normalizes dataset names for comparison:
 - `flywire_FAFB_v783` ↔ `flywire_fafb:v783`
 - `hemibrain_v1_2_1` ↔ `hemibrain:v1.2.1`
 - `male-cns_v0_9` ↔ `male-cns:v0.9`
+- `flywire_BANC_v626` / `flywire_BANC_v888` ↔ `banc_v626` / `banc_v888` (NeuronBridge library names `FlyWire_BANC*` map to the standalone local releases)
 
 This allows seamless matching between local folder names and NeuronBridge API responses.
 

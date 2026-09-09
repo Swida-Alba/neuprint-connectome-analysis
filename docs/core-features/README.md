@@ -372,7 +372,8 @@ paths_df = fap.find_all_paths()
 ## Cache System
 
 ### [Cache System Guide](./CacheSystem_Guide.md)
-Comprehensive guide to the local caching system that provides 10-100x speedup.
+Comprehensive guide to the local caching system that speeds up repeated
+queries by serving them from local storage.
 
 **Key Topics**:
 - First-time setup and configuration
@@ -595,7 +596,8 @@ filterBy = {
 
 ### Performance Tips
 
-1. **Always use cache**: 10-100x speedup on repeated queries
+1. **Always use cache**: repeated queries are served from local storage
+   instead of the network API
 2. **Use Polars optimization**: Automatic 10-100x faster CSV/matrix operations
 3. **Use appropriate filters**: Reduce unnecessary computation
 4. **Forward-only mode**: Faster and more biologically realistic

@@ -97,8 +97,11 @@ aggregate IPSILATERAL pairs only; contralateral rows stay in results.csv,
 and types with exclusively contralateral evidence are omitted from the
 type ranking. The vector method lateral-normalizes and uses both sides.
 NBLAST on FAFB scores the whole candidate pool from the healed bundle
-skeletons; standalone BANC scores its public-release SWCs. Both run against
-the V2 skeleton-vector cache (never the mesh cache).
+skeletons. Both methods run against
+the V2 skeleton-vector cache (never the mesh cache). **BANC is excluded
+from both methods**: morphological similarity on its public-release SWCs
+is deferred pending vector-quality validation, so the backend raises a
+deferred-feature error and the loader chain is never exercised for scoring.
 
 **Two-pass type reevaluation** (`expand_top_types=20`, `expand_per_type=10`,
 `0` disables): after the first scoring pass, the remaining members of the

@@ -73,7 +73,10 @@
       the top screen-ranked <b>types</b> (bounded by <b>Candidate Cap</b>)
       are kept and expanded to <b>all their member neurons</b>; raw
       skeletons are then fetched for the pool and shared for reuse. FAFB uses healed raw skeletons
-      or the CAVE fallback; BANC uses its public-release SWCs without CAVE. Mesh and simp90 visualization files are never
+      or the CAVE fallback. <b>BANC is not selectable for morphological
+      find-similar</b>: the public L2/full skeletons still need
+      vector-quality validation, so the feature is deferred (BANC 3D
+      visualization and pathfinding work). Mesh and simp90 visualization files are never
       candidates for either method.</li>
     <li><b>roi</b>: the ROI-distribution screen only. Requires the dataset's
       ROI-count table and metadata sidecar (missing sidecars are fetched
@@ -95,7 +98,7 @@
     screen is truncated to this many neurons, which become the scoring pool
     (it also serves as the NBLAST prefilter of <b>cache</b>-mode searches;
     pure <b>cache</b> vector searches compare the whole local population).
-    Fetched raw skeletons are always persisted as portable <code>.swc.gz</code>
+    Fetched raw skeletons are always persisted as compressed <code>.swc.zst</code>
     files in the shared dataset cache at
     <code>skeletons/raw_skeletons/</code> for reuse by every workflow. The
     computed <b>raw vectors</b> are persisted into the vector cache — the
@@ -118,8 +121,9 @@
   <h2>Full-morphology mode &amp; skeleton download</h2>
   <p>Use <b>Settings → Dataset Cache → Download All Skeletons</b> to download
     a complete raw skeleton population. The button sits beside Pull Complete
-    Connections, before Cancel. New bulk files use portable
-    <code>{bodyId}.swc.gz</code>; older pickle files remain readable. Both
+    Connections, before Cancel. New bulk files use compressed
+    <code>{bodyId}.swc.zst</code>; legacy <code>.swc.gz</code> and pickle
+    files remain readable. Both
     the download and vector-cache update are resumable. After a raw download, build the vector cache and
     run with <b>Candidate Source = cache</b> to compare the query against the
     entire local skeleton population. The healed FAFB skeleton bundle remains

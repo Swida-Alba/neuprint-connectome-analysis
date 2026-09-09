@@ -94,8 +94,13 @@ bridge for the corresponding namespace:
 The labels are voted per BANC primary type. A single candidate, or a
 candidate with more than half of the votes and at least twice the runner-up,
 wins; unresolved splits become a `TypeMappingConflict`. A known match-bodyId
-whose target `type` contradicts a FAFB/MCNS label removes that row's vote.
-The `auto:` prefix is provenance, not a separate type namespace: a normalized
+whose target `type` agrees or disagrees with a FAFB/MCNS label never changes
+the vote itself: every row's candidate keeps its vote, and the observation
+is recorded separately as `verified_votes` (match-bodyId found among the
+row's candidates) or `verification_conflicts` (match-bodyId points at a
+different type). Those tallies are diagnostics for confidence review — they
+do not add or remove votes in the final decision. The
+`auto:` prefix is provenance, not a separate type namespace: a normalized
 `auto:<name>` token is eligible only when `<name>` resolves to a known target
 type. The raw token and its auto evidence tier are retained in bridge
 provenance and exports. Unknown `auto:` tokens, `Unknown`, empty labels, and
@@ -656,25 +661,20 @@ Caveats:
 
 ### Reference values (whole dataset, pairs per neuron)
 
-| t | BANC v626 | BANC v888 | FAFB v783 | male-cns v1.0 |
-|---|---|---|---|---|
-| 3 | 23.2 | 19.2 | 47.3 | 60.5 |
-| 5 | 12.2 | 9.7 | 26.8 | 35.9 |
-| 8 | 6.5 | 5.0 | 15.0 | 20.9 |
-| 10 | 4.8 | 3.6 | 11.2 | 15.9 |
+The dated, maintained reference table lives in the
+[Cross-Dataset Comparison guide](./core-features/CrossDatasetComparison_Guide.md)
+(re-baselined 2026-09-07 on the refreshed 2026-09-04 BANC bucket tables).
+Use that table for the current values; the headline calibration is:
 
-Best threshold matches under the pairs-per-neuron criterion:
-
-| anchor | → FAFB | → male-cns |
-|---|---|---|
-| BANC v888 @3 (19.2) | **7** (17.8) | **8–9** (20.9 / 18.1) |
-| BANC v626 @3 (23.2) | 6 | 7–8 |
-| BANC v888 @5 (9.7) | 11 | 15 |
-| BANC v626 @5 (12.2) | 9–10 | 12 |
-
-Rule of thumb: **FAFB threshold ≈ 2.2–2.3x BANC, male-cns ≈ 2.8–3x BANC.**
-BANC has the lowest edge density at every threshold; FAFB and male-cns sit
-at an analogous scale (within ~1.5x of each other).
+- **τ = 3**: BANC v626/v888 (46.8/46.1 pairs per neuron) are directly
+  comparable with FAFB @3 (47.3); male-cns sits ≈ 1.3x BANC (≈ male-cns @5).
+- **τ ≥ 5**: the classic multipliers re-emerge and grow with τ — FAFB ≈ 2x
+  BANC at τ=5 rising to ≈ 2.7–2.8x at τ=10; male-cns ≈ 2.7x at τ=5 rising
+  to ≈ 3.8–3.9x at τ=10 (BANC @5 ≈ FAFB @8 ≈ male-cns @8).
+- The pre-refresh numbers (BANC 23.2/19.2 @3; "FAFB ≈ 2.2–2.3x BANC,
+  male-cns ≈ 2.8–3x BANC at every threshold"; "BANC lowest at every
+  threshold") described the 2026-08 downloads and **no longer hold** — the
+  table refresh roughly doubled BANC's τ=3 density. Do not reuse them.
 
 ### Where the per-query alignment comes from
 

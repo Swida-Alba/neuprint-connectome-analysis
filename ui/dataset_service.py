@@ -133,11 +133,15 @@ class DatasetService:
         "banc_v626",
     ]
 
-    # Codex display info (fetched from codex.flywire.ai rendered page)
+    # Codex display info (fetched from codex.flywire.ai rendered page).
+    # BANC counts are the prepared-table row counts from the 2026-09-04
+    # public-bucket snapshot: v888 as served (188,508) and v626 after the
+    # root_626 dedup (185,165). Only used when no local table can supply a
+    # count — kept in sync by tests/ui/test_dataset_service.py.
     CODEX_DATASETS = {
         "flywire_FAFB_v783": {"display": "FAFB v783 (CB)", "desc": "Female Adult Fly Brain", "neurons": 139255},
-        "banc_v888": {"display": "BANC v888 (CNS)", "desc": "Brain and Nerve Cord — public BANC release", "neurons": 158262},
-        "banc_v626": {"display": "BANC v626 (CNS)", "desc": "Brain and Nerve Cord — public BANC release (older)", "neurons": 115151},
+        "banc_v888": {"display": "BANC v888 (CNS)", "desc": "Brain and Nerve Cord — public BANC release", "neurons": 188508},
+        "banc_v626": {"display": "BANC v626 (CNS)", "desc": "Brain and Nerve Cord — public BANC release (older)", "neurons": 185165},
     }
 
     NEUPRINT_SERVER = "https://neuprint.janelia.org"
@@ -830,7 +834,8 @@ class DatasetService:
             )
             if "type" in lazy.collect_schema().names():
                 # NOTE: do not apply a frame-level `.sum()` to `pl.len()` -
-                # that corrupts the total (e.g. 158262 rows -> 3572024164).
+                # that corrupts the total (observed as a ~158k-row table
+                # summing to billions).
                 row = lazy.select(
                     pl.len().alias("total"),
                     (

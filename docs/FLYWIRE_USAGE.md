@@ -64,7 +64,9 @@ the local Parquet tables automatically. No login, CAVE token, or manual
 `neurons.csv.gz`/`connections_princeton.csv.gz` download is required.
 
 Skeletons are fetched on demand from the same public bucket and cached as
-`.swc.zst` files under `cache/<dataset>/skeletons/`. See the [BANC Integration
+`.swc.zst` files under `cache/<dataset>/skeletons/raw_skeletons/` (derived
+release caches, if a workflow builds one, live beside that `skeletons/`
+directory). See the [BANC Integration
 Guide](BANC_INTEGRATION.md) for the release layout and source details.
 
 If an offline legacy BANC CSV bundle is already available, the converter still
@@ -90,11 +92,13 @@ release workflow; it is not routed through NeuPrint or CAVE.
 from coana import FindNeuronConnection
 
 # Initialize connection finder
+# bodyIds verified against the prepared banc_v888 table (aMe12 -> PPL101,
+# the same pair exercised by tests/e2e/test_banc_ame12_ppl_e2e.py)
 fc = FindNeuronConnection(
     token='dummy_token',  # Token is ignored for local files
-    dataset='banc_v626', # or 'flywire_FAFB_v783'
-    sourceNeurons=['720575940621039145'],  # Use Root IDs
-    targetNeurons=['720575940619419758'],
+    dataset='banc_v888', # or 'banc_v626' or 'flywire_FAFB_v783'
+    sourceNeurons=['720575941596944935'],  # aMe12 (BANC bodyId)
+    targetNeurons=['720575941416009108'],  # PPL101
     min_synapse_num=5
 )
 
@@ -119,7 +123,7 @@ from coana import VisualizeSkeleton
 
 vs = VisualizeSkeleton(
     dataset='flywire_FAFB_v783',
-    neuron_layers=['720575940621039145'],
+    neuron_layers=['720575940596125868'],  # FAFB root ID present in the local table
     brain_mesh='native',    # Uses the FAFB (FLYWIRE) template
     FAFB_template_correction=True # Default: True. Corrects the slight tilt of the FAFB template.
 )
