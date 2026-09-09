@@ -325,6 +325,18 @@ eight distinct source neurons.
 
 ## 7. Visualization contract
 
+- **Native source labels in transformed query overlays**: auto type mapping
+  uses crosswalk columns such as `flywireType` to resolve/search comparable
+  types, but it does not overwrite the source row's primary `type` for the
+  query morphology. A cross-dataset `query_transformed_*` overlay therefore
+  keeps a source label such as MCNS `SMP227` even when its mapped
+  `flywireType` cell contains `CB1449,CB2843`.
+- **Tree bodyId presentation**: interactive `legend_mode='tree'` marks
+  custom-layer groups explicitly. A custom group with one unique neuron item
+  is rendered as a direct bodyId-level row with count `1` and no redundant
+  child leaf. Counts are based on unique neuron items, so a skeleton trace
+  plus a companion soma mesh still represents one neuron; multi-neuron groups
+  retain their expandable rows.
 - **Panel result presentation** (user 2026-09-07, refreshed 2026-09-09):
   the Type Mapping panel's results are presentation-refined around the
   FAFB `APDN3` ↔ male-cns example.  `build_type_coverage` derives two

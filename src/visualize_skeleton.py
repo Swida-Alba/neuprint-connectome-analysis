@@ -1793,6 +1793,12 @@ class VisualizeSkeleton:
     - **Smart caching**: Efficient storage of raw compressed-SWC skeletons
       and analysis results
     - **Export options**: HTML (interactive), PNG (multiple views), video animations
+    - **Tree legends**: Interactive HTML legends can expose custom groups,
+      types, and individual neurons without counting companion Plotly traces
+      (such as a soma mesh) as additional neurons
+    - **Cross-dataset overlays**: Transformed query neurons retain their
+      source-native type label while crosswalk columns remain available for
+      mapping and comparison
     
     FAFB Features
     ---------------------
@@ -1862,6 +1868,12 @@ class VisualizeSkeleton:
         - 'single': Each neuron gets its own legend entry ({bodyId}_{layer_name})
         - 'type': Group by neuron type within each layer. If a layer has multiple types,
                   each type gets a separate legend entry.
+        - 'tree': Interactive Plotly HTML gets a collapsible legend. Without
+                  custom layer names the hierarchy is type -> bodyId/instance;
+                  with custom layer names it is group -> type -> bodyId/instance.
+                  A custom group containing one neuron renders as one direct
+                  row with count 1 and no redundant child leaf. Counts use
+                  unique neuron items rather than raw Plotly trace count.
         - 'layer': Merge all neurons in a layer into one legend entry.
                    Auto-named as {type1}_{type2}_etc if 3+ types present.
     
@@ -2046,7 +2058,10 @@ class VisualizeSkeleton:
     render space, or the selected template's space when brain_mesh is an
     explicit 'BANC'/'FAFB'/'male-cns' selection. Used for cross-dataset
     overlays such as the homolog visualizer's
-    ``query_transformed_{neuron name}`` layer.
+    ``query_transformed_{neuron name}`` layer. When source metadata is
+    available, the interactive tree legend uses the overlay source row's
+    native ``type`` label rather than a mapped cross-dataset field such as
+    ``flywireType``.
     '''
 
     search_columns: str = 'auto'
@@ -2084,6 +2099,11 @@ class VisualizeSkeleton:
         custom_layer_names=['DN1', 'LN', 'Output']  # Full specification for 3 layers
         custom_layer_names=['MyLayer1']             # Only name first layer, auto-name rest
         custom_layer_names=['', '', 'Output']       # Skip first two, name only third layer
+
+    In ``legend_mode='tree'``, these names form the outer group level. A
+    singleton group is rendered directly as its bodyId-level row; it does
+    not gain a redundant child row, and its count remains one even when
+    rendering emits multiple companion traces for that neuron.
     '''
 
     layer_map_csv: str = None
@@ -2547,10 +2567,15 @@ class VisualizeSkeleton:
     - 'type': Group by neuron type within each layer. If a layer has multiple
               neuron types, each type gets a separate legend entry.
     - 'tree': Same legend as 'type', plus the exported interactive HTML
-                   embeds a collapsible type -> neuron legend panel at the
-                   original legend position (top-right; a type row expands to
-                   its bodyId rows, each toggleable).
-                   Static exports keep the plain type-level legend.
+                   embeds a collapsible neuron legend panel at the original
+                   legend position (top-right). Ordinary layers use
+                   type -> bodyId/instance; custom layers use
+                   group -> type -> bodyId/instance. A singleton custom group
+                   is one direct row with count 1 and no redundant child;
+                   counts are unique neuron items, not companion traces.
+                   Cross-dataset query overlays use the source row's native
+                   type instead of a mapped crosswalk label. Static exports
+                   keep the plain type-level legend.
     - 'layer': Merge all neurons in a layer into one legend entry.
                Auto-named as {type1}_{type2}_etc if 3+ types present.
     '''
@@ -3647,7 +3672,7 @@ class VisualizeSkeleton:
         )
         return button_html + style_html + script_html
 
-    def _tree_neuron_label(self, neuron_id, source_row):
+    def _tree_neuron_label(self, neuron_id, source_row, source_dataset=None):
         """BodyId leaf label for the tree legend panel.
 
         NeuPrint datasets: ``'{bodyId}_{instance}'`` (e.g. ``11309_aMe4_L``).
@@ -3656,6 +3681,11 @@ class VisualizeSkeleton:
         then the raw neuron id. Legacy navis neuron names of the form
         ``'{instance} ({bodyId})'`` are normalized to the same
         ``'{bodyId}_{instance}'`` shape so every leaf reads alike.
+
+        For a cross-dataset overlay, prefer the source row's native ``type``
+        over its mapped ``flywireType``. The latter is useful for ordinary
+        FAFB/BANC rows, but is not the source neuron's native label (for
+        example, MCNS ``SMP227`` can map to a ``CB*`` flywireType).
         """
         base = str(neuron_id)
         suffix = None
@@ -3671,7 +3701,16 @@ class VisualizeSkeleton:
             is_local_release = is_local_connectome_dataset(self.dataset)
             if is_local_release:
                 ntype = None
-                for col in ('flywireType', 'type'):
+                is_cross_dataset_overlay = (
+                    source_dataset is not None
+                    and str(source_dataset).strip()
+                    and str(source_dataset).strip() != str(self.dataset).strip()
+                )
+                type_columns = (
+                    ('type', 'flywireType') if is_cross_dataset_overlay
+                    else ('flywireType', 'type')
+                )
+                for col in type_columns:
                     val = source_row.get(col)
                     if val is not None and pd.notna(val) and str(val).strip():
                         ntype = str(val).strip()
@@ -3721,18 +3760,28 @@ class VisualizeSkeleton:
 
         Custom groups come from custom_layer_names (or a layer_map_csv,
         which fills the same field); each layer then holds a mixed set of
-        neurons, so the tree becomes group > type > bodyId.
+        neurons, so the tree becomes group > type > bodyId. In the generated
+        HTML, a custom group with one unique neuron item is flattened to one
+        direct row; group counts are unique neuron items, not raw Plotly
+        traces such as a skeleton plus its soma mesh.
         """
         return bool(getattr(self, 'custom_layer_names', None))
 
     def _legend_tree_html(self):
-        """Build the collapsible type -> neuron legend panel for viewer HTML.
+        """Build the collapsible neuron legend panel for viewer HTML.
 
         Injected only for ``legend_mode='tree'`` on the permanent
         viewer copies. The panel is built client-side from the
         ``drocatLegend`` meta tags written at legend-assignment time, so
         the row-to-trace mapping can never drift from the figure. The
-        native Plotly legend is hidden on these pages; static exports
+        hierarchy is type -> bodyId/instance for ordinary layers and
+        group -> type -> bodyId/instance when custom layer names are used.
+        Custom singleton groups are rendered as direct rows with one unique
+        neuron count and no redundant child leaf; multi-trace neurons still
+        count once. Cross-dataset query overlays use their source row's
+        native type for the bodyId label, rather than a mapped crosswalk
+        value such as ``flywireType``. The native Plotly legend is hidden on
+        these pages; static exports
         never receive this injection and keep the native type-level
         legend. Type toggles cover the type's skeleton plus its pre/post
         site traces; synapse-group and mesh traces get their own rows,
@@ -3843,10 +3892,11 @@ class VisualizeSkeleton:
         if (!groups[lg.group]) {
           groups[lg.group] = {rank: Infinity, types: {}, typeOrder: [],
                               direct: {}, directOrder: [], sites: [],
-                              indices: []};
+                              indices: [], custom: false};
           groupOrder.push(lg.group);
         }
         var g = groups[lg.group];
+        g.custom = g.custom || !!lg.customGroup;
         if (typeof tr.legendrank === 'number') {
           g.rank = Math.min(g.rank, tr.legendrank);
         }
@@ -3903,6 +3953,17 @@ class VisualizeSkeleton:
     meshOrder.sort(function(a, b) { return meshes[a].rank - meshes[b].rank; });
     return {groups: groups, groupOrder: groupOrder, meshes: meshes,
             meshOrder: meshOrder, synapses: synapses, synOrder: synOrder};
+  }
+
+  function groupNeuronItemCount(g) {
+    /* Plotly may emit multiple traces for one neuron (skeleton + soma mesh).
+       Count the unique item rows, not the raw trace indices. */
+    var count = 0;
+    g.typeOrder.forEach(function(t) {
+      count += g.types[t].itemOrder.length;
+    });
+    count += g.directOrder.length;
+    return count;
   }
 
   function groupColor(data, g, groupName) {
@@ -4068,6 +4129,35 @@ class VisualizeSkeleton:
     return itemsEl;
   }
 
+  function attachDirectRow(parent, labelText, color, count, eyeIndices) {
+    /* A singleton custom bodyId group is already the desired legend row.
+       Keep its toggle/isolate behavior, but do not create a child leaf. */
+    var row = makeEl('div', 'drocat-lt-row drocat-lt-group-row');
+    var swatch = makeEl('span', 'drocat-lt-swatch');
+    swatch.style.background = color;
+    var label = makeEl('span', 'drocat-lt-label', labelText);
+    label.title = labelText;
+    var countEl = makeEl('span', 'drocat-lt-count', count);
+    var eye = makeEl('span', 'drocat-lt-eye');
+    row.appendChild(swatch);
+    row.appendChild(label);
+    row.appendChild(countEl);
+    row.appendChild(eye);
+    parent.appendChild(row);
+    records.push({row: row, eye: eye, indices: eyeIndices});
+    eye.addEventListener('click', function(e) {
+      e.stopPropagation();
+      var gd = graphDiv();
+      if (!gd) { return; }
+      var on = eyeIndices.every(function(i) { return isVisible(gd.data[i]); });
+      Plotly.restyle(gd, {visible: !on}, eyeIndices);
+      sync();
+    });
+    row.addEventListener('click', function() {
+      if (isDoubleClick(eyeIndices)) { isolate(eyeIndices); }
+    });
+  }
+
   function attachLeaf(parent, labelText, color, indices) {
     var irow = makeEl('div', 'drocat-lt-row drocat-lt-item-row');
     var isw = makeEl('span', 'drocat-lt-swatch drocat-lt-swatch-item');
@@ -4115,7 +4205,12 @@ class VisualizeSkeleton:
     model.groupOrder.forEach(function(name) {
       var g = model.groups[name];
       var color = groupColor(data, g, name);
-      var neuronCount = g.indices.length - g.sites.length;
+      var neuronItemCount = groupNeuronItemCount(g);
+      var neuronCount = neuronItemCount || (g.indices.length - g.sites.length);
+      if (g.custom && neuronItemCount === 1 && g.sites.length === 0) {
+        attachDirectRow(panel, name, color, 1, g.indices);
+        return;
+      }
       var itemsEl = attachExpandable(panel, name, color, neuronCount,
                                      g.indices);
       var sitesByType = {};
@@ -4138,7 +4233,8 @@ class VisualizeSkeleton:
            neurons; singletons and untyped neurons become direct leaves. */
         g.typeOrder.forEach(function(t) {
           var tt = g.types[t];
-          if (tt.indices.length < 2) {
+          var typeNeuronCount = tt.itemOrder.length;
+          if (typeNeuronCount < 2) {
             /* Singleton type: no sub-row, show its bodyId directly. */
             tt.itemOrder.forEach(function(itemName) {
               attachLeaf(itemsEl, itemName, color, tt.items[itemName]);
@@ -4148,7 +4244,7 @@ class VisualizeSkeleton:
           }
           var eyeIdx = tt.indices.concat(sitesByType[t] || []);
           var subEl = attachExpandable(itemsEl, t, color,
-                                       tt.indices.length, eyeIdx);
+                                       typeNeuronCount, eyeIdx);
           tt.itemOrder.forEach(function(itemName) {
             attachLeaf(subEl, itemName, color, tt.items[itemName]);
           });
@@ -4351,7 +4447,9 @@ class VisualizeSkeleton:
         banner is added after Plotly has generated the document so it remains
         visible in both the main and per-neuron pages, and permanent viewer
         copies can additionally carry the light/dark theme switch and the
-        collapsible tree legend panel.
+        collapsible tree legend panel. In that panel, custom singleton
+        bodyId groups are direct rows with unique-neuron counts; companion
+        skeleton/soma traces do not create extra child leaves.
         """
         kwargs.setdefault('auto_open', False)
         kwargs.setdefault('full_html', True)
@@ -6191,6 +6289,9 @@ class VisualizeSkeleton:
         dataset's table, which does not know the source dataset's bodyIds.
         Reads the source dataset's neuron index / allneurons table (local
         files, no network) and returns the rows for *bids*, or ``None``.
+        The source ``type`` and crosswalk columns are retained so tree
+        legend labels can distinguish a native source type from a mapped
+        target label.
         """
         from pathlib import Path
 
@@ -6246,7 +6347,10 @@ class VisualizeSkeleton:
         sees the overlay as a real layer (not only in the rendered traces).
         The overlay is inserted at index 0 so ``query_transformed_{name}``
         sits as layer 1, before the rank-1 homolog. Called once per instance;
-        a second call is a no-op.
+        a second call is a no-op. For the tree legend, source metadata on
+        these overlays is used to keep a transformed query's native type
+        label (for example, MCNS ``SMP227``) instead of a target crosswalk
+        value such as ``CB*``.
         """
         self._custom_neurons_by_layer = {}
         if getattr(self, '_custom_neurons_injected', False):
@@ -11718,8 +11822,23 @@ class VisualizeSkeleton:
                             source_row = None
                             if self.neuron_dfs[i] is not None and source_index < len(self.neuron_dfs[i]):
                                 source_row = self.neuron_dfs[i].iloc[source_index]
+                            overlay_source_dataset = None
+                            if is_custom_layer and custom_layer_neurons is not None:
+                                try:
+                                    overlay_source_dataset = getattr(
+                                        custom_layer_neurons[source_index],
+                                        '_drocat_source_dataset', None)
+                                except (IndexError, TypeError):
+                                    pass
+                            if overlay_source_dataset is None:
+                                try:
+                                    overlay_source_dataset = getattr(
+                                        neuron_vols[source_index],
+                                        '_drocat_source_dataset', None)
+                                except (IndexError, TypeError):
+                                    pass
                             tree_label = self._tree_neuron_label(
-                                neuron_id, source_row)
+                                neuron_id, source_row, overlay_source_dataset)
                             try:
                                 display_color = self._get_opaque_color(
                                     neuron_color)
@@ -11742,6 +11861,7 @@ class VisualizeSkeleton:
                                     'type': neuron_type or None,
                                     'item': tree_label,
                                     'color': display_color,
+                                    'customGroup': True,
                                 }
                             else:
                                 tree_meta['drocatLegend'] = {

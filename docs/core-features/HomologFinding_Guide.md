@@ -163,6 +163,27 @@ results = finder.find_homologs_fast(
 )
 ```
 
+### Cross-dataset overlay labels and bodyId legends
+
+For a cross-dataset search, the query neuron is transformed into the target
+coordinate space and included in the target `bodyId_level/` and `type_level/`
+scenes as a `query_transformed_*` overlay. In interactive HTML with
+`legend_mode='tree'`:
+
+- The query overlay's bodyId rows use the source neuron's native `type`, not a
+  mapped crosswalk field. For example, an MCNS `SMP227` row remains `SMP227`
+  even when its `flywireType` value is `CB1449,CB2843`.
+- BodyId-level custom groups with one neuron are shown as one direct row with
+  count `1`; skeleton and soma companion traces do not create a redundant
+  child leaf or inflate the count.
+- Groups containing multiple neurons remain expandable, and their counts are
+  the number of unique neuron items. Static exports retain the ordinary Plotly
+  legend.
+
+Auto Type Mapping still standardizes connectivity partner types for candidate
+finding and comparison. It does not rewrite the source neuron's native label
+in the transformed visualization overlay.
+
 ## Finding Methods
 
 ### find_homologs()

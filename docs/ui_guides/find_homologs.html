@@ -84,7 +84,14 @@
       transformed into the target brain and rendered inside the target scenes
       as the <code>query_transformed_*</code> overlay layer (a standalone
       source-dataset scene is only drawn as a fallback when the transform is
-      unavailable).</li>
+      unavailable). In the interactive tree legend, the query uses its
+      source-native <code>type</code> label rather than a mapped
+      <code>flywireType</code> value; an MCNS <code>SMP227</code> query therefore
+      stays labeled <code>SMP227</code> in FAFB.</li>
+    <li><b>BodyId-level tree legend</b>: a custom group containing one neuron
+      is shown as one direct row with count <code>1</code>. Skeleton and soma
+      companion traces do not create a redundant child leaf or count as two
+      neurons. Multi-neuron groups remain expandable.</li>
     <li>Analysis visualizations default to <b>Skeleton Mode = line</b> for
       speed. For high-quality morphology, use <b>Visualization → Skeleton</b>,
       or select <b>tube</b> with the <b>fine</b> method and 95% simplification

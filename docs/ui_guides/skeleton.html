@@ -147,15 +147,24 @@
           neuron entry (brain mesh, then VNC mesh, last).</li>
         <li><b>Expandable legend (tree)</b>: the exported interactive HTML
           replaces the flat legend with a collapsible panel at the original
-          legend position (top-right). Each
-          type row shows a color swatch and neuron count and expands to
-          per-neuron bodyId rows; toggling a type hides its skeleton and
+          legend position (top-right). Without custom layer names the
+          hierarchy is <i>type → bodyId/instance</i>; with custom layer names
+          or a layer-map CSV it is <i>group → type → bodyId/instance</i>.
+          Each expandable row shows a color swatch and a count of unique
+          neuron items. A singleton custom bodyId group is rendered as one
+          direct row with count <code>1</code>, so a skeleton plus its soma
+          mesh does not become two neurons or a redundant child leaf.
+          Toggling a type hides its skeleton and
           pre/post site traces, individual neurons toggle separately, and
           synapse/mesh rows sit below the types (meshes last). Pre/post site
           traces also appear as their own <i>pre sites</i> / <i>post sites</i>
           leaves under their type (or group), and any item list longer than
           10 rows expands into a mini scrollable area. Static exports
-          keep the plain type-level legend. The panel also shows the
+          keep the plain type-level legend. Cross-dataset transformed query
+          overlays use the source neuron's native <code>type</code> label in
+          their bodyId row rather than a mapped <code>flywireType</code> value
+          (for example, MCNS <code>SMP227</code> remains <code>SMP227</code>).
+          The panel also shows the
           double-click interval: a second click on the same row under 300 ms
           isolates that row; repeat the double-click to restore all rows.</li>
         <li><b>Background</b>: white or black. The default neuron palette

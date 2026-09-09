@@ -482,6 +482,10 @@ class ComparisonParameters:
     When enabled, uses the type mapping columns from male-cns (flywireType, hemibrainType, mancType)
     to automatically resolve equivalent neuron types across datasets. This allows comparing neurons
     by their biological identity even when type names differ (e.g., MeVPLo2 in male-cns = MTe07 in flywire).
+    These columns define comparison/search mappings; they do not overwrite a
+    source dataset's native ``type`` label in a transformed query overlay.
+    For example, an MCNS ``SMP227`` query remains labeled ``SMP227`` in the
+    target scene even when its ``flywireType`` value is a ``CB*`` name.
     
     Features:
     - Auto-loads mappings from male-cns_v1_0_allneurons_neuron_df.csv

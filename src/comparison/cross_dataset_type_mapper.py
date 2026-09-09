@@ -8,6 +8,8 @@ The mapping is type-evidence-based: dataset type names and their published
 cross-dataset type columns establish bridges.  BodyIds remain useful for
 release-local population counts and optional provenance diagnostics, but a
 bodyId-to-bodyId relation is never required to establish a type bridge.
+The crosswalk values are mapping evidence, not replacements for a source
+dataset's native ``type`` label in a transformed query morphology overlay.
 
 FAFB and BANC releases also publish release-specific additional-type columns
 (FAFB: ``additional_type(s)``, BANC: ``Alternative Cell Type(s)``) that record

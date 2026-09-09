@@ -103,6 +103,22 @@ def test_tree_neuron_label_fafb_uses_type_and_hemisphere():
     assert visualizer._tree_neuron_label('x', row3) == '7205759406_Tm3'
 
 
+def test_tree_neuron_label_cross_dataset_overlay_prefers_native_type():
+    import pandas as pd
+
+    visualizer = _make_visualizer()
+    visualizer.dataset = 'flywire_FAFB_v783'
+    row = pd.Series({
+        'bodyId': 42274,
+        'type': 'SMP227',
+        'flywireType': 'CB1449,CB2843',
+        'somaSide': 'L',
+    })
+    assert visualizer._tree_neuron_label(
+        'x', row, source_dataset='male-cns:v1.0'
+    ) == '42274_SMP227_L'
+
+
 def test_tree_neuron_label_normalizes_legacy_names():
     """Legacy navis neuron names ('{instance} ({bodyId})') normalize to the
     same '{bodyId}_{instance}' shape as properly resolved labels."""
@@ -143,6 +159,15 @@ def test_legend_tree_html_contains_panel_and_markers():
     # the exported panel explains the configured timing to users
     assert 'Double-click window: under ' in html
     assert 'CONFIG.doubleClickMs' in html
+    # Custom bodyId layers with skeleton + soma traces count one neuron and
+    # render as one direct row instead of a redundant child leaf.
+    assert 'custom: false' in html
+    assert 'g.custom = g.custom || !!lg.customGroup;' in html
+    assert 'function groupNeuronItemCount(g)' in html
+    assert 'var neuronCount = neuronItemCount || (g.indices.length - g.sites.length);' in html
+    assert 'if (g.custom && neuronItemCount === 1 && g.sites.length === 0)' in html
+    assert 'attachDirectRow(panel, name, color, 1, g.indices);' in html
+    assert 'var typeNeuronCount = tt.itemOrder.length;' in html
     # explicit closed/open caret glyphs keep the direction in sync with state
     assert '\\u25B6' in html
     assert r"caret.textContent = open ? '\u25BC' : '\u25B6';" in html

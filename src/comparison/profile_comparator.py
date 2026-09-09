@@ -7834,7 +7834,8 @@ class HomologFinder:
 
             # Cross-dataset: the query source is also rendered INSIDE the
             # target brain as a transformed overlay layer, labeled
-            # query_transformed_{neuron name} (naming spec).
+            # query_transformed_{neuron name} (naming spec). Interactive tree
+            # legends use the source row's native type for these overlays.
             query_overlay = None          # per-neuron entries (bodyId level)
             query_overlay_grouped = None  # single grouped layer (type level)
             if not same_dataset and query_bodyids:
@@ -7938,7 +7939,9 @@ class HomologFinder:
                             set_default_client(target_client)
                         
                         # Create single VisualizeSkeleton with all bodyIds as separate layers
-                        # legend_mode='layer' ensures each bodyId gets its own legend entry
+                        # legend_mode='layer' gives each bodyId its own call-site
+                        # group name; an interactive tree legend collapses each
+                        # singleton group to one direct bodyId row.
                         vs_bodyid = VisualizeSkeleton(**_visualizer_kwargs(
                             {
                                 'show_fig': False,
@@ -8396,7 +8399,10 @@ class HomologFinder:
         and a grouped variant (one ``query_transformed_{label}`` layer with
         every neuron — for type-level scenes). Returns (None, None) when
         there is nothing to overlay (same space, no bodyIds, or
-        fetch/transform unavailable).
+        fetch/transform unavailable). Each transformed neuron retains its
+        source dataset marker, so the interactive tree legend can use the
+        source row's native ``type`` label rather than a mapped crosswalk
+        value such as ``flywireType``.
         """
         if not query_bodyids:
             return None

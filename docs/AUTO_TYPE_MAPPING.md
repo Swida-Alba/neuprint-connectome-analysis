@@ -37,6 +37,15 @@ These crosswalk columns may list several names in one cell, separated by
 `,`; each name is used individually (a male-cns type pointing at several
 flywire types becomes a 1-to-N conflict instead of a bogus joined name).
 
+#### Mapping labels versus display labels
+
+Crosswalk columns are used to resolve equivalent type names for search and
+connectivity comparison. They do not replace the source dataset's native
+`type` label in a transformed query visualization. For example, an MCNS row
+with `type = SMP227` and `flywireType = CB1449,CB2843` is mapped through the
+`flywireType` value for cross-dataset analysis, but the query overlay in a
+target FAFB scene remains labeled `SMP227`.
+
 #### Renamed FlyWire types (additional Type(S) columns)
 
 FAFB and BANC releases publish release-specific additional-type columns that

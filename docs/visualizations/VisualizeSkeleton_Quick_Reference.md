@@ -164,7 +164,7 @@ vs = VisualizeSkeleton(
 ```python
 vs = VisualizeSkeleton(
     neuron_layers=['KC.*', 'MBON.*'],
-    legend_mode='type',    # 'layer', 'type', or 'single'
+    legend_mode='tree',    # 'layer', 'type', 'tree', or 'single'
 )
 ```
 
@@ -172,7 +172,17 @@ vs = VisualizeSkeleton(
 | ---------- | ------------------------------------------------ | ------------------ |
 | `'layer'`  | One legend entry per layer (all neurons grouped) | Layer colors       |
 | `'type'`   | Separate entry per neuron type (toggleable)      | Keeps layer colors |
+| `'tree'`   | Collapsible group/type/bodyId legend in HTML     | Keeps layer colors |
 | `'single'` | Individual entry per neuron (toggleable)         | Keeps layer colors |
+
+**Tree legend details:** In interactive HTML, custom layer names create a
+`group → type → bodyId/instance` hierarchy. A singleton custom bodyId group is
+shown as one direct row with count `1`; a skeleton and its soma mesh do not
+inflate that count or create a redundant child leaf. Multi-neuron groups keep
+their expandable child rows. For cross-dataset query overlays, the row uses
+the source neuron's native `type` (for example, `SMP227`) rather than a mapped
+`flywireType` value such as `CB*`. Static exports retain the ordinary Plotly
+legend.
 
 ---
 

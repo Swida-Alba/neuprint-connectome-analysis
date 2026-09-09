@@ -96,7 +96,7 @@ vs = VisualizeSkeleton(
     neuron_alpha=0.2,                   # Neuron transparency (legend shows full opacity)
     synapse_size=3,                     # Synapse marker size
     skeleton_mode='tube',               # 'tube' or 'line'
-    legend_mode='layer',                # 'layer', 'type', or 'single'
+    legend_mode='layer',                # 'layer', 'type', 'tree', or 'single'
     expand_colors='interpolation',      # Color expansion: 'interpolation' or 'darken'
     show_fig=True
 )
@@ -273,6 +273,7 @@ vs = VisualizeSkeleton(
     # Legend mode options:
     legend_mode='layer',   # Default: one entry per layer (grouped)
     # legend_mode='type',  # Group by neuron type within layers
+    # legend_mode='tree',  # Interactive group/type/bodyId legend in HTML
     # legend_mode='single', # Each neuron gets its own entry
 )
 ```
@@ -283,9 +284,31 @@ vs = VisualizeSkeleton(
 | ---------- | -------------------------------------------------------- | ------------------------------------- |
 | `'layer'`  | One legend entry per layer (all neurons grouped)         | Clean overview, many neurons          |
 | `'type'`   | Separate entry for each neuron type (keeps layer colors) | Mixed types per layer, toggling types |
+| `'tree'`   | Collapsible interactive group/type/bodyId legend in HTML | Multi-layer and bodyId inspection     |
 | `'single'` | Individual entry for each neuron ({bodyId}_{layer_name}) | Tracking specific neurons, few IDs    |
 
 **Note:** In `'type'` and `'single'` modes, neurons **keep their layer colors** (from `neuron_colors`) but get separate legend entries. This allows you to toggle visibility of individual types/neurons while maintaining consistent coloring within each layer.
+
+### Interactive tree legend
+
+`legend_mode='tree'` adds a collapsible legend panel to interactive Plotly
+HTML exports. Static PNG, video, and other non-HTML exports keep the normal
+Plotly legend. The panel uses the following hierarchy:
+
+- Without custom layer names: `type → bodyId/instance`.
+- With `custom_layer_names` or `layer_map_csv`: `group → type → bodyId/instance`.
+
+Counts represent unique neuron items, not raw Plotly traces. This matters when
+one neuron emits both a skeleton trace and a soma mesh trace: a custom group
+containing that one body is shown as a single direct row with count `1` and no
+redundant child leaf. Groups containing multiple neurons remain expandable.
+
+For a cross-dataset overlay, such as a homolog search's
+`query_transformed_*` layer, the bodyId row uses the source neuron's native
+`type` label. Crosswalk fields such as MCNS `flywireType` are used for mapping
+and comparison, not as a replacement display label. Thus an MCNS `SMP227`
+query whose mapped `flywireType` is `CB1449,CB2843` remains labeled `SMP227`
+in the target FAFB scene.
 
 ### Per-Neuron Colors via CSV
 
