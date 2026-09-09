@@ -677,6 +677,31 @@ def test_conflict_repr():
     assert 'N-to-1' in repr(c) and 'T' in repr(c)
 
 
+def test_mapping_decision_labels_target_fan_in(mapper):
+    """A mapped pair whose target also receives other source types reads
+    N-to-1, not a hardcoded 1-to-1 (user 2026-09-10: 5th-LNv and
+    LNd_CRY+_ITP+ both resolve to MCNS 5thsLNv_LNd6)."""
+    agg = mapper.get_mapping_decision('AggA', MCNS, FW)
+    assert agg['status'] == 'mapped'
+    assert agg['target_type'] == 'AggFW'
+    assert agg['relationship'] == 'N-to-1'
+    # its sibling converging on the same target gets the same label
+    sibling = mapper.get_mapping_decision('AggB', MCNS, FW)
+    assert sibling['status'] == 'mapped'
+    assert sibling['relationship'] == 'N-to-1'
+    # unique pairs stay 1-to-1
+    lone = mapper.get_mapping_decision('aMe12', MCNS, FW)
+    assert lone['status'] == 'mapped'
+    assert lone['relationship'] == '1-to-1'
+    same = mapper.get_mapping_decision('Same1', MCNS, FW)
+    assert same['status'] == 'mapped'
+    assert same['relationship'] == '1-to-1'
+    # the reverse query still goes through the conflict record untouched
+    reverse = mapper.get_mapping_decision('AggFW', FW, MCNS)
+    assert reverse['status'] == 'evidence_only'
+    assert reverse['relationship'] == 'N-to-1'
+
+
 def test_warn_if_conflicting(mapper):
     with pytest.warns(TypeMappingWarning):
         assert mapper.warn_if_conflicting('AggFW', [FW]) is True

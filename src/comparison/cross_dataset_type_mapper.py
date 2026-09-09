@@ -832,9 +832,19 @@ class CrossDatasetTypeMapper:
         self._neuron_df: Optional[pd.DataFrame] = None
         self._mcns_v09_neuron_df: Optional[pd.DataFrame] = None
         self._loaded = False
+        # load stays retryable — every public method re-invokes load()
+        # while ``_loaded`` is False — but the reason must stay visible so
+        # a transient data problem cannot masquerade as a healthy mapper.
 
         # Type mappings: {source_dataset: {source_type: {target_dataset: target_type}}}
         self._type_mappings: Dict[str, Dict[str, Dict[str, str]]] = {}
+
+        # Fan-in index over the crosswalk, built lazily per (source
+        # namespace, target namespace): {target_type: {source base names}}.
+        # Lets get_mapping_decision label a pair N-to-1 when several
+        # source types converge on one target instead of hardcoding
+        # 1-to-1 (user 2026-09-10 report).
+        self._fan_in_index: Dict[Tuple[str, str], Dict[str, Set[str]]] = {}
 
         # Reverse mappings for lookup
         self._reverse_mappings: Dict[str, Dict[str, str]] = {}  # {dataset: {type: canonical_type}}
@@ -1832,6 +1842,9 @@ class CrossDatasetTypeMapper:
             'manc:v1.0': {},
             'manc:v1.2.1': {},
         }
+        # The crosswalk is being rebuilt, so any previously cached fan-in
+        # view of it is stale.
+        self._fan_in_index = {}
 
         # BANC primary names are native to their selected release.  Their
         # body-ID pools are populated by the coverage layer, not from MCNS.
@@ -3607,6 +3620,35 @@ class CrossDatasetTypeMapper:
             and (base_type is None or conflict.source_type == base_type)
         ]
 
+    def _mapped_sources_for_target(
+        self,
+        source_dataset: str,
+        target_dataset: str,
+        target_type: str,
+    ) -> Set[str]:
+        """Return the source base names whose crosswalk mapping equals
+        ``target_type``.
+
+        Backs the pair-level N-to-1 label in
+        :meth:`get_mapping_decision`: two source types resolving to the
+        same target mean that pair is a convergence, not 1-to-1.  The
+        index is built lazily per namespace pair from ``_type_mappings``
+        and cached until the crosswalk is rebuilt.
+        """
+        src_key = self._get_type_mapping_key(source_dataset)
+        tgt_key = self._get_type_mapping_key(target_dataset)
+        index = self._fan_in_index.get((src_key, tgt_key))
+        if index is None:
+            index = {}
+            for src_name, target_maps in self._type_mappings.get(
+                    src_key, {}).items():
+                mapped = target_maps.get(tgt_key)
+                if mapped:
+                    index.setdefault(mapped, set()).add(src_name)
+            self._fan_in_index[(src_key, tgt_key)] = index
+        base_target, _ = self._split_hemi_suffix(target_type)
+        return index.get(base_target, set())
+
     def get_mapping_decision(
         self,
         source_type: Union[str, int, None],
@@ -3699,7 +3741,14 @@ class CrossDatasetTypeMapper:
             result['target_type'] = mapped
             result['target_types'] = [mapped]
             result['status'] = 'mapped'
-            result['relationship'] = '1-to-1'
+            # The mapping itself is per-pair, but the label must reflect
+            # the target's fan-in: several source types resolving to one
+            # target is a convergence (N-to-1), not 1-to-1.
+            result['relationship'] = (
+                'N-to-1'
+                if len(self._mapped_sources_for_target(
+                    source_dataset, target_dataset, mapped)) > 1
+                else '1-to-1')
             return result
 
         # Some sanctioned overlays (notably a direct BANC label bridge in
@@ -3721,11 +3770,21 @@ class CrossDatasetTypeMapper:
                 result['target_types'] = bridge_targets
                 result['target_type'] = (
                     bridge_targets[0] if len(bridge_targets) == 1 else None)
-                result['relationship'] = (
-                    '1-to-N' if len(bridge_targets) > 1 else '1-to-1')
-                result['status'] = (
-                    'valid_split_evidence' if len(bridge_targets) > 1
-                    else 'bridged')
+                if len(bridge_targets) > 1:
+                    result['relationship'] = '1-to-N'
+                    result['status'] = 'valid_split_evidence'
+                else:
+                    # A single bridge end can still be shared with other
+                    # source types; consult the crosswalk fan-in when the
+                    # target is indexed there (bridge-only fan-in is not
+                    # scanned).
+                    result['relationship'] = (
+                        'N-to-1'
+                        if len(self._mapped_sources_for_target(
+                            source_dataset, target_dataset,
+                            bridge_targets[0])) > 1
+                        else '1-to-1')
+                    result['status'] = 'bridged'
         return result
     
     def _scoped_conflicts_for_type(

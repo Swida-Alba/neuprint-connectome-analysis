@@ -1586,9 +1586,10 @@ def build_type_coverage(pair_flows,
 
     * ``forward`` — one row per QUERIED (source) type: its neuron count,
       the target types it maps to, the relationship (``1-to-N`` when the
-      query fans out), how many of its OWN bodyIds the mapping reaches
-      in total (union over its pairs) and how many target-side bodyIds
-      the targets cover.
+      query fans out, ``N-to-1``/``N-to-N`` when a target also receives
+      other queried types), how many of its OWN bodyIds the mapping
+      reaches in total (union over its pairs) and how many target-side
+      bodyIds the targets cover.
     * ``reverse`` — one row per RECEIVING (target) type: the source
       types that converge on it — several sources make an N-to-1
       explicit (three FAFB types mapping onto male-cns ``SMP227``) —
@@ -1713,6 +1714,15 @@ def build_type_coverage(pair_flows,
             return "not measured"
         return format_coverage(len(union), total)
 
+    # Fan-in across the queried pool: how many distinct source types
+    # reach each target, so a 2-into-1 convergence reads N-to-1 instead
+    # of two 1-to-1 rows (user 2026-09-10 report).
+    sources_by_target: Dict[tuple, set] = {}
+    for fwd_row in forward.values():
+        for target_key in fwd_row["targets"]:
+            sources_by_target.setdefault(target_key, set()).add(
+                (fwd_row["dataset"], fwd_row["type"]))
+
     forward_rows: List[Dict[str, Any]] = []
     for row in forward.values():
         groups: Dict[str, List[str]] = {}
@@ -1813,8 +1823,10 @@ def build_type_coverage(pair_flows,
                 f"{code}: {', '.join(names)}"
                 for code, names in sorted(groups.items())),
             "targets": len(row["targets"]),
-            "relationship": ("1-to-N" if len(row["targets"]) > 1
-                             else "1-to-1"),
+            "relationship": _pair_relationship(
+                len(row["targets"]),
+                max((len(sources_by_target.get(key, ()))
+                     for key in row["targets"]), default=0)),
             "query_cov": _cov(query_union, row["count"],
                               row["any_pooled"], query_measured),
             "target_cov": _cov(target_union, target_total,
@@ -2477,6 +2489,23 @@ def render_composed_mapping_html(pair_flows, *, pools=None,
     return html, meta
 
 
+def _pair_relationship(fwd: int, rev: int) -> str:
+    """Pair-level cardinality label from both fan directions.
+
+    ``fwd`` counts the distinct targets one source type reaches and
+    ``rev`` the distinct source types converging on one target, so a
+    2-into-1 convergence reads ``N-to-1`` instead of two ``1-to-1``
+    rows (user 2026-09-10 report).
+    """
+    if fwd > 1 and rev > 1:
+        return "N-to-N"
+    if fwd > 1:
+        return "1-to-N"
+    if rev > 1:
+        return "N-to-1"
+    return "1-to-1"
+
+
 def build_bridges_csv(flows, *, pools=None, extended: bool = False) -> Optional[str]:
     """Mapping CSV for one pair's flows (user 2026-09-09 redesign).
 
@@ -2546,10 +2575,14 @@ def build_bridges_csv(flows, *, pools=None, extended: bool = False) -> Optional[
     ]
     header = extended_header if extended else legacy_header
     targets_by_source: Dict[str, set] = {}
+    sources_by_target: Dict[str, set] = {}
     for flow in flows:
         targets_by_source.setdefault(
             str(flow.get("source_type", "")), set()).add(
             str(flow.get("foreign_type", "")))
+        sources_by_target.setdefault(
+            str(flow.get("foreign_type", "")), set()).add(
+            str(flow.get("source_type", "")))
 
     buffer = io.StringIO()
     writer = _csv.writer(buffer, quoting=_csv.QUOTE_MINIMAL)
@@ -2586,9 +2619,9 @@ def build_bridges_csv(flows, *, pools=None, extended: bool = False) -> Optional[
         else:
             matched_column = "type"
             source_entry = src_type
-        relationship = ("1-to-N"
-                        if len(targets_by_source.get(src_type, ())) > 1
-                        else "1-to-1")
+        relationship = _pair_relationship(
+            len(targets_by_source.get(src_type, ())),
+            len(sources_by_target.get(foreign, ())))
         # Keep one compact human-readable field, but expose BOTH
         # independent sides.  ``coverage`` remains the historical
         # target-side alias for old callers and synthetic fixtures.

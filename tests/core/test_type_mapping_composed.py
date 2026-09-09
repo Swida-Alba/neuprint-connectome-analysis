@@ -174,6 +174,63 @@ def test_bridges_csv_contract():
     assert build_bridges_csv([]) is None
 
 
+def test_bridges_csv_relationship_reflects_fan_in():
+    """Pair rows label cardinality from BOTH fan directions: two source
+    types converging on one target read N-to-1 instead of two 1-to-1 rows
+    (user 2026-09-10: 5th-LNv and LNd_CRY+_ITP+ both map to MCNS
+    5thsLNv_LNd6); forward fan-out stays 1-to-N and both directions give
+    N-to-N."""
+    import csv as _csv
+    import io as _io
+
+    flows = [
+        _flow(MCNS, 'T1', FAFB, 'T1', 4, 4, linkers=False),
+        _flow(MCNS, '5th-LNv', FAFB, 'Shared', 2, 4, linkers=False),
+        _flow(MCNS, 'LNd_CRY+_ITP+', FAFB, 'Shared', 2, 4, linkers=False),
+        _flow(MCNS, 'Splitter', FAFB, 'SplitA', 3, 1, linkers=False),
+        _flow(MCNS, 'Splitter', FAFB, 'SplitB', 3, 1, linkers=False),
+        _flow(MCNS, 'MeshA', FAFB, 'MeshX', 1, 1, linkers=False),
+        _flow(MCNS, 'MeshA', FAFB, 'MeshY', 1, 1, linkers=False),
+        _flow(MCNS, 'MeshB', FAFB, 'MeshX', 1, 1, linkers=False),
+        _flow(MCNS, 'MeshB', FAFB, 'MeshY', 1, 1, linkers=False),
+    ]
+    rows = list(_csv.reader(_io.StringIO(build_bridges_csv(flows))))
+    relationship = {(r[3], r[5]): r[6] for r in rows[1:]}
+    assert relationship[('T1', 'T1')] == '1-to-1'
+    assert relationship[('5th-LNv', 'Shared')] == 'N-to-1'
+    assert relationship[('LNd_CRY+_ITP+', 'Shared')] == 'N-to-1'
+    assert relationship[('Splitter', 'SplitA')] == '1-to-N'
+    assert relationship[('Splitter', 'SplitB')] == '1-to-N'
+    assert relationship[('MeshA', 'MeshX')] == 'N-to-N'
+    assert relationship[('MeshA', 'MeshY')] == 'N-to-N'
+    assert relationship[('MeshB', 'MeshX')] == 'N-to-N'
+    assert relationship[('MeshB', 'MeshY')] == 'N-to-N'
+
+
+def test_coverage_forward_rows_label_converging_sources_n_to_1():
+    """Forward coverage rows escalate to N-to-1 when the target also
+    receives other queried types; pure fan-out keeps 1-to-N."""
+    from comparison.mapping_visualization import build_type_coverage
+
+    pair_flows = {
+        (MCNS, FAFB): [
+            _flow(MCNS, '5th-LNv', FAFB, 'Shared', 2, 4, linkers=False),
+            _flow(MCNS, 'LNd_CRY+_ITP+', FAFB, 'Shared', 2, 4,
+                  linkers=False),
+            _flow(MCNS, 'T1', FAFB, 'T1', 4, 4, linkers=False),
+            _flow(MCNS, 'Splitter', FAFB, 'SplitA', 3, 1, linkers=False),
+            _flow(MCNS, 'Splitter', FAFB, 'SplitB', 3, 1, linkers=False),
+        ],
+    }
+    coverage = build_type_coverage(pair_flows)
+    relationship = {r['type']: r['relationship']
+                    for r in coverage['forward']}
+    assert relationship['5th-LNv'] == 'N-to-1'
+    assert relationship['LNd_CRY+_ITP+'] == 'N-to-1'
+    assert relationship['T1'] == '1-to-1'
+    assert relationship['Splitter'] == '1-to-N'
+
+
 def test_zero_count_endpoints_still_render_labeled():
     """A mapped type with 0 rows in the SELECTED table (the BANC v888
     DN1pE report: the name resolves in the mapper's v626-keyed BANC
