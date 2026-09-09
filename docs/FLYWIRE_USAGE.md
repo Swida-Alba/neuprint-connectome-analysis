@@ -10,23 +10,21 @@ fetching; BANC never uses CAVE.
 
 ## 1. Data Preparation
 
-### Step 1: Download Data Files
-You need to download the required CSV files from the Codex Download Page (or equivalent source).
+### FAFB: Manual local-release preparation
 
-**For FAFB (flywire_FAFB_v783):**
-- See [FAFB Integration Guide](FAFB_INTEGRATION.md) for the full file list.
+FAFB raw files come from the Codex/FlyWire portal. See the [FAFB Integration
+Guide](FAFB_INTEGRATION.md) for the full file list.
 
-**For BANC (`banc_v626` or `banc_v888`):**
-- See [BANC Integration Guide](BANC_INTEGRATION.md).
-- **Preparation is automatic:** metadata + connections download from the
-  public BANC release bucket (no login, no token), and 3D skeleton
-  visualization works in native BANC space with skeletons fetched from the
-  same bucket.
+#### Step 1: Download FAFB data files
 
-### Step 2: Place Files in Directory
-Create the directory structure in your project folder and place the downloaded files there.
+Download the required FAFB CSV files and optional healed skeleton bundle from
+the Codex Download Page (or an equivalent authorized source).
 
-**For FAFB:**
+#### Step 2: Place FAFB files in the dataset directory
+
+Create the directory structure in your project folder and place the downloaded
+files there:
+
 ```
 datasets/
   └── flywire_FAFB_v783/
@@ -42,43 +40,49 @@ datasets/
             └── sk_lod1_783_healed.zip                    (optional)
 ```
 
-**For BANC:**
-```
-datasets/
-  └── banc_v626/
-      └── downloads/
-            ├── neurons.csv.gz
-            ├── connections_princeton.csv.gz
-```
+#### Step 3: Convert FAFB files
 
-### Step 3: Run Conversion
-You can run the conversion script manually, or it will run automatically the first time you try to use the dataset.
+The converter can be run manually, or it runs automatically when the dataset
+is first used:
 
-**Manual Conversion (FAFB):**
 ```bash
 python src/FAFB_file_converter.py
 ```
 
-**Manual Conversion (BANC v626 default):**
-```bash
-python src/BANC_file_converter.py
-```
-
-For v888, pass the selected dataset name to the converter function:
-
-```bash
-python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter import ensure_banc_data; d='banc_v888'; ensure_banc_data(d, 'datasets/' + d)"
-```
-
-This script will:
+The FAFB converter will:
 1.  Read the CSV files from the `downloads` folder.
 2.  Merge and enrich the neuron metadata.
 3.  Convert the data into optimized Parquet files (`.parquet`) for fast loading.
 4.  Save the processed files in the dataset folder.
 
+### BANC: Automatic public-release preparation
+
+BANC (`banc_v626` or `banc_v888`) does not use the Codex/FlyWire download
+workflow. On first use, DROCAT downloads the selected BANC metadata and
+connection product from the public `banc_public_gcs` release bucket and builds
+the local Parquet tables automatically. No login, CAVE token, or manual
+`neurons.csv.gz`/`connections_princeton.csv.gz` download is required.
+
+Skeletons are fetched on demand from the same public bucket and cached as
+`.swc.zst` files under `cache/<dataset>/skeletons/`. See the [BANC Integration
+Guide](BANC_INTEGRATION.md) for the release layout and source details.
+
+If an offline legacy BANC CSV bundle is already available, the converter still
+supports it as a compatibility fallback. Place the files in the matching
+`datasets/<dataset>/downloads/` directory and run:
+
+```bash
+python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter import ensure_banc_data; d='banc_v888'; ensure_banc_data(d, 'datasets/' + d)"
+```
+
+This fallback reads the existing CSVs and writes the canonical BANC Parquet
+tables; it is not part of the normal public-bucket setup.
+
 ## 2. Using FAFB/BANC Data in Analysis
 
-Once the data is prepared, you can use it just like any other NeuPrint dataset.
+Once the appropriate local source is available, you can use FAFB and BANC in
+the same analysis APIs. BANC's tables and skeletons remain owned by its public
+release workflow; it is not routed through NeuPrint or CAVE.
 
 ### Example: Finding Connections
 
@@ -101,9 +105,10 @@ fc.FindDirectConnections()
 
 ### Example Script
 
-Select the prepared dataset in the UI or in a direct `FindNeuronConnection`
-script. The first run automatically checks the matching `downloads/` folder
-and converts the raw files if the generated tables are absent.
+Select the dataset in the UI or in a direct `FindNeuronConnection` script. For
+FAFB, the first run checks the matching `downloads/` folder and converts the
+raw files if the generated tables are absent. For BANC, the first run prepares
+the metadata and connection tables from the public release bucket.
 
 ### Example: Visualizing Skeletons
 
@@ -122,9 +127,9 @@ vs = VisualizeSkeleton(
 vs.plot_neurons()
 ```
 
-For BANC, select `banc_v626` or `banc_v888`; missing skeletons are fetched
-on demand from the public release bucket and cached as `.swc.zst` files in
-the BANC cache namespace. No CAVE token is involved.
+For BANC, select `banc_v626` or `banc_v888`; missing skeletons are fetched on
+demand from the public release bucket and cached as `.swc.zst` files in the
+BANC cache namespace. No manual skeleton download or CAVE token is involved.
 
 ### FAFB Tilt Correction
 The FAFB/FlyWire template mesh has a slight tilt relative to the standard view axes. By default (`FAFB_template_correction=True`), `VisualizeSkeleton` applies a rotation correction to align the brain:
@@ -135,6 +140,6 @@ This ensures that the brain appears straight in standard views (Front, Top, etc.
 
 ## 3. Important Notes
 
--   **Storage**: The converted Parquet files are much smaller and faster than the raw CSVs, but the initial raw files can be large. Ensure you have enough disk space.
--   **Updates**: If you want to update the data, simply delete the files in the dataset folder and place new CSV files in the `downloads` folder. The converter will run again.
+-   **Storage**: FAFB raw CSVs and bundles can be large. BANC's metadata and connection products are cached under the dataset `downloads/` folder after automatic preparation; BANC skeletons are cached as compressed SWCs under `cache/`.
+-   **Updates**: For FAFB, replace the files in the `downloads` folder and rerun the converter. For BANC, remove the generated local tables and cached release products before rerunning automatic preparation.
 -   **IDs**: FAFB and BANC use long integer Root IDs (e.g., `720575940...`). Ensure you use these IDs in your queries.

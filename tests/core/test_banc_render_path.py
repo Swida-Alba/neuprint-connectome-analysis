@@ -695,15 +695,21 @@ class TestOverlayDropWarning:
 
 
 class TestResolutionKnob:
-    def test_banc_notice_is_not_the_fafb_mesh_cache_notice(self):
-        """The BANC render branch must identify its public SWC source."""
-        source = Path(visualize_skeleton.__file__).read_text(encoding='utf-8')
-        assert "BANC public release source selected" in source
-        assert "(SWC-first; public bucket; no CAVE token)." in source
-        assert (
-            'BANC public release source selected '
-            '(SWC-first; FAFB prepared mesh cache bypassed' not in source
-        )
+    def test_banc_notice_is_emitted_by_runtime_source_selector(self):
+        """The runtime selector identifies BANC's public SWC source."""
+        emitted = []
+        vs = _make_visualizer(dataset='flywire_BANC_v888')
+        vs._vprint = lambda message, **kwargs: emitted.append(
+            (message, kwargs))
+
+        vs._log_local_release_source_selection(use_api_fetching=False)
+
+        assert len(emitted) == 1
+        message, kwargs = emitted[0]
+        assert message == (
+            '  ℹ️  BANC public release source selected '
+            '(SWC-first; public bucket; no CAVE token).')
+        assert kwargs['level'] == 'simple'
 
     def test_resolver_uses_unified_chain(self, tmp_path, monkeypatch):
         """Source selection is removed: the resolver never forwards a

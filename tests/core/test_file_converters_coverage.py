@@ -303,6 +303,23 @@ def test_banc_ensure_data_full_pipeline(tmp_path, capsys):
     assert "Post counts already populated" in output
 
 
+def test_banc_ensure_data_canonicalizes_legacy_alias(tmp_path):
+    dataset_dir = tmp_path / "datasets" / "banc_v626"
+    downloads = dataset_dir / "downloads"
+    downloads.mkdir(parents=True)
+    _write_gz(downloads / "neurons.csv.gz", _banc_neuron_rows())
+    _write_gz(downloads / "connections_princeton.csv.gz", "\n".join([
+        "pre_root_id,post_root_id,neuropil,syn_count,nt_type",
+        "720575940000000002,720575940000000001,B,4,ACh",
+    ]))
+
+    assert banc.ensure_banc_data("flywire_BANC", str(dataset_dir)) is True
+    assert (dataset_dir / "banc_v626_allneurons_neuron_df.parquet").exists()
+    assert (dataset_dir / "banc_v626_merged_connections.parquet").exists()
+    assert not (dataset_dir /
+                "flywire_BANC_allneurons_neuron_df.parquet").exists()
+
+
 def test_banc_ensure_data_missing_files(tmp_path, monkeypatch):
     # Bucket preparation unavailable (offline): falls back to the manual
     # Codex instructions and reports failure.  Downloads are stubbed out so

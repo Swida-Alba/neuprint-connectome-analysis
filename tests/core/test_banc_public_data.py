@@ -292,8 +292,11 @@ class TestMetaFeatherMapping:
         assert row2["type"] == "Unknown"
         assert row2["Alternative Cell Type(s)"] == ""
 
-    def test_prepare_dataset_tables_writes_tables(self, tmp_path, fake_net,
-                                                  meta_frame, monkeypatch):
+    @pytest.mark.parametrize("dataset_name", [
+        "banc_v888", "flywire_BANC_v888",
+    ])
+    def test_prepare_dataset_tables_writes_canonical_tables(
+            self, tmp_path, fake_net, meta_frame, monkeypatch, dataset_name):
         import polars as pl
 
         conn = pl.DataFrame({
@@ -312,7 +315,7 @@ class TestMetaFeatherMapping:
         })
 
         dataset_dir = tmp_path / "datasets" / "banc_v888"
-        assert bpd.prepare_dataset_tables("banc_v888", str(dataset_dir),
+        assert bpd.prepare_dataset_tables(dataset_name, str(dataset_dir),
                                           project_root=tmp_path) is True
         neurons = pd.read_parquet(dataset_dir / "banc_v888_allneurons_neuron_df.parquet")
         assert len(neurons) == 2

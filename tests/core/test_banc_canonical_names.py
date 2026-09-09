@@ -83,6 +83,28 @@ class TestCacheNamespaces:
         assert _dataset_folder("flywire_BANC_v888") == "banc_v888"
 
 
+class TestBancPublicDataAliases:
+    def test_public_release_version_uses_canonical_alias(self):
+        import banc_public_data as bpd
+
+        assert bpd._connection_version("banc") == "v626"
+        assert bpd._connection_version("flywire_BANC") == "v626"
+        assert bpd._connection_version("flywire_BANC_v626") == "v626"
+        assert bpd._connection_version("flywire_BANC_v888") == "v888"
+
+    def test_v626_crosswalk_applies_to_bare_legacy_alias(self, tmp_path,
+                                                         monkeypatch):
+        import banc_public_data as bpd
+
+        monkeypatch.setattr(
+            bpd, "get_id_crosswalk",
+            lambda dataset, project_root=None: {"626-id": "888-id"},
+        )
+        assert bpd.resolve_banc_stem(
+            "flywire_BANC", "626-id", project_root=tmp_path
+        ) == "888-id"
+
+
 class TestMapperNamespace:
     def _mapper(self):
         from comparison.cross_dataset_type_mapper import CrossDatasetTypeMapper
@@ -165,6 +187,7 @@ class TestUiDatasetNames:
 
         svc = _Svc()
         assert _dataset_label_parts("banc_v888", svc)[1] == "[BANC]"
+        assert _dataset_label_parts("flywire_BANC_v888", svc)[1] == "[BANC]"
         assert _dataset_label_parts("flywire_FAFB_v783", svc)[1] == "[FAFB]"
         assert _dataset_label_parts("male-cns:v1.0", svc)[1] == "[NP]" 
 

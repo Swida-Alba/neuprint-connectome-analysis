@@ -3060,6 +3060,29 @@ class VisualizeSkeleton:
         else:
             print(msg, **kwargs)
 
+    def _log_local_release_source_selection(self, use_api_fetching=False):
+        """Emit the source notice for a local FAFB/BANC render.
+
+        Keeping this selection in one runtime helper makes the BANC-vs-FAFB
+        provenance observable and directly testable.  BANC is checked first
+        so legacy ``flywire_BANC_*`` aliases can never inherit a FAFB notice.
+        """
+        if is_banc_dataset(self.dataset):
+            self._vprint(
+                '  ℹ️  BANC public release source selected '
+                '(SWC-first; public bucket; no CAVE token).',
+                level='simple')
+        elif use_api_fetching:
+            self._vprint(
+                '  ℹ️  force_API_fetching=True: skeletonizing every FAFB '
+                'body through CAVE',
+                level='simple')
+        elif is_fafb_dataset(self.dataset):
+            self._vprint(
+                '  ℹ️  FAFB sources resolved SWC-first (raw cache / healed '
+                'bundle); missing or extruded bodies are CAVE-skeletonized',
+                level='full')
+
     def _warn_neuprint_token_rejected(self, from_env=False):
         """Print actionable guidance when NeuPrint rejects the token (401).
 
@@ -10791,15 +10814,8 @@ class VisualizeSkeleton:
                     )
             all_local_body_ids = list(set(all_local_body_ids))
 
-            if is_banc:
-                self._vprint(
-                    '  ℹ️  BANC public release source selected '
-                    '(SWC-first; public bucket; no CAVE token).',
-                    level='simple')
-            elif use_api_fetching:
-                self._vprint(f'  ℹ️  force_API_fetching=True: skeletonizing every FAFB body through CAVE', level='simple')
-            elif is_fafb:
-                self._vprint(f'  ℹ️  FAFB sources resolved SWC-first (raw cache / healed bundle); missing or extruded bodies are CAVE-skeletonized', level='full')
+            self._log_local_release_source_selection(
+                use_api_fetching=use_api_fetching)
 
             if is_banc:
                 # BANC resolves through its own public-bucket path; the

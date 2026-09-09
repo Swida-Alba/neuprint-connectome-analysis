@@ -367,10 +367,9 @@ def refresh_dataset_selector_statuses(service=None) -> int:
 
 def _dataset_label_parts(ds: str, service) -> List[str]:
     """Build the option label parts with source + local status tags."""
-    normalized = (ds or "").strip().lower()
-    if normalized.startswith("banc"):
+    if is_banc_dataset(ds):
         src_tag = "[BANC]"
-    elif normalized.startswith("flywire_"):
+    elif is_fafb_dataset(ds):
         src_tag = "[FAFB]"
     else:
         src_tag = "[NP]"

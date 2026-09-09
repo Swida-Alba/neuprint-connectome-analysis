@@ -4,9 +4,17 @@ from datetime import datetime, timezone
 import pandas as pd
 
 try:
-    from .flywire_ids import canonicalize_flywire_id_expr, normalize_flywire_id_columns
+    from .flywire_ids import (
+        canonicalize_flywire_id_expr,
+        dataset_folder,
+        normalize_flywire_id_columns,
+    )
 except ImportError:
-    from flywire_ids import canonicalize_flywire_id_expr, normalize_flywire_id_columns
+    from flywire_ids import (
+        canonicalize_flywire_id_expr,
+        dataset_folder,
+        normalize_flywire_id_columns,
+    )
 
 try:
     from .utils.flywire_readiness import print_download_instructions
@@ -331,6 +339,7 @@ def update_neuron_post_counts(neuron_path, conn_path, save_csv_path=None):
 
 def _patch_dataset_metadata(dataset_dir, dataset_name, source, notes=None):
     """Record the preparation provenance in the dataset metadata.json."""
+    dataset_name = dataset_folder(dataset_name)
     meta_path = os.path.join(dataset_dir, f"{dataset_name}_metadata.json")
     try:
         if os.path.exists(meta_path):
@@ -393,7 +402,7 @@ def build_connection_cache_from_tables(dataset_dir, cache_dir=None):
     import polars as pl
 
     dataset_dir = str(dataset_dir)
-    dataset_name = os.path.basename(os.path.normpath(dataset_dir))
+    dataset_name = dataset_folder(os.path.basename(os.path.normpath(dataset_dir)))
     merged = os.path.join(dataset_dir,
                           f"{dataset_name}_merged_connections.parquet")
     if not os.path.exists(merged):
@@ -499,6 +508,7 @@ def _regenerate_banc_metadata(dataset_name, dataset_dir,
     counting ``'Unknown'`` as typed).  Only tables are read here — never
     cache state.
     """
+    dataset_name = dataset_folder(dataset_name)
     meta_path = os.path.join(dataset_dir, f"{dataset_name}_metadata.json")
     data = {}
     if os.path.exists(meta_path):
@@ -564,6 +574,9 @@ def ensure_banc_data(dataset_name, dataset_dir):
     """
     Ensure BANC data is available and converted for the given dataset.
     """
+    # Legacy ``flywire_BANC_*`` and hidden ``banc:v888`` spellings must share
+    # the same safe file namespace as their canonical dataset directories.
+    dataset_name = dataset_folder(dataset_name)
     print(f"\nChecking BANC data for {dataset_name}...")
     print("  ℹ️  One-time preparation: raw downloads in downloads/ are converted "
           "into the local parquet tables used by every DROCAT workflow. "
@@ -662,7 +675,8 @@ def ensure_banc_data(dataset_name, dataset_dir):
             print("=" * 60)
             print("MISSING CRITICAL FILES")
             print("Please download missing files to:", downloads_dir)
-            print("See https://codex.flywire.ai/api/download?dataset=banc")
+            print("Standard BANC preparation uses the public release bucket; "
+                  "see docs/BANC_INTEGRATION.md")
             print("=" * 60 + "\n")
         return False
 

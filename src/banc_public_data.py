@@ -139,16 +139,28 @@ def _project_root(project_root) -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def _canonical_banc_name(dataset) -> str:
+    """Return the canonical spelling used by every BANC release operation."""
+    return canonical_dataset_name(str(dataset or "").strip())
+
+
 def _dataset_folder(dataset) -> str:
-    return canonical_dataset_name(str(dataset or "").strip()).replace(
-        ":", "_").replace(".", "_")
+    return _canonical_banc_name(dataset).replace(":", "_").replace(".", "_")
 
 
 def _connection_version(dataset) -> str:
-    version = (dataset_version(dataset) or "").lower()
+    # ``banc`` and ``flywire_BANC`` are pinned by the shared canonicalizer to
+    # the v626 release.  Extract the version AFTER that normalization or the
+    # aliases silently fall through to the v888 default.
+    version = (dataset_version(_canonical_banc_name(dataset)) or "").lower()
     if version in CONNECTION_PRODUCTS:
         return version
     return DEFAULT_CONNECTION_VERSION
+
+
+def _is_v626_release(dataset) -> bool:
+    """Return whether *dataset* addresses the v626 BANC id namespace."""
+    return _connection_version(dataset) == "v626"
 
 
 # ---------------------------------------------------------------------------
@@ -346,7 +358,7 @@ def resolve_banc_stem(dataset, body_id, project_root=None) -> str:
     crosswalk is unavailable).
     """
     body_id = str(body_id).strip()
-    if "v626" not in str(dataset or "").lower():
+    if not _is_v626_release(dataset):
         return body_id
     crosswalk = get_id_crosswalk(dataset, project_root=project_root)
     return crosswalk.get(body_id, body_id)
@@ -409,7 +421,7 @@ def fetch_banc_swc(dataset, body_id, resolution: str = DEFAULT_RESOLUTION,
     # neurons whose compiled_data export is missing entirely — including
     # v888 dataset ids via the reverse crosswalk.
     pcg_candidates = []
-    if "v626" in str(dataset or "").lower():
+    if _is_v626_release(dataset):
         pcg_candidates.append(body_id)
     else:
         reverse = get_id_crosswalk_reverse(dataset, project_root)
@@ -853,6 +865,11 @@ def prepare_dataset_tables(dataset_name, dataset_dir,
         process_neurons_dataframe,
     )
 
+    # Keep the dataset directory, but make every filename and release lookup
+    # use the same safe canonical namespace.  This preserves legacy callers
+    # that pass ``flywire_BANC_*`` or ``banc:v888`` while avoiding split table
+    # names inside the canonical dataset directory.
+    dataset_name = _dataset_folder(dataset_name)
     version = _connection_version(dataset_name)
     dataset_dir = str(dataset_dir)
     # The caller's dataset_dir wins: derive the downloads root from it so
