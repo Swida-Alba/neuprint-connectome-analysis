@@ -152,9 +152,19 @@ def test_bridges_csv_contract():
     # the comma in the type name)
     assert '"T2, X"' in lines[2] and 'same name' in lines[2]
     assert 'source covered 2 of 2 (100.0%); target covered 2 of 3 (66.7%)' in lines[2]
-    assert '900; 901' in lines[2] and '400; 401; 402' in lines[2]
+    # bodyIds export as JSON arrays: ONE quoted CSV field (a ';'-joined
+    # list made delimiter sniffing split them into pseudo-columns), still
+    # human- and machine-readable
+    import csv as _csv
+    import io as _io
+    import json as _json
+
+    rows = list(_csv.reader(_io.StringIO(text)))
+    assert len(rows[0]) == 20
+    assert _json.loads(rows[2][16]) == ['900', '901']
+    assert _json.loads(rows[2][17]) == ['400', '401', '402']
     # a pool without the per-type keys leaves the bodyId cells empty
-    assert lines[1].endswith(',,')
+    assert rows[1][16] == '' and rows[1][17] == ''
     assert build_bridges_csv([]) is None
 
 

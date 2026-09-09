@@ -369,8 +369,10 @@ columns; listed per type per side, never paired across datasets.
   `pool_coverage` stays the human-readable `source covered …; target
   …` field.  `source_body_ids` / `target_body_ids` carry the FULL
   per-type populations (every bodyId of the mapped type in its own
-  dataset, ';'-joined — user 2026-09-09): listed per type per side,
-  never a bodyId-to-bodyId pairing.  The export never represents bodyId
+  dataset, one quoted JSON array per cell — user 2026-09-09, after
+  ';'-joined lists made spreadsheet delimiter sniffing split them into
+  pseudo-columns): listed per type per side, never a bodyId-to-bodyId
+  pairing.  The export never represents bodyId
   pairings.
 
 ## 8. Testing matrix

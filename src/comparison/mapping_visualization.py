@@ -2062,8 +2062,9 @@ def build_bridges_csv(flows, *, pools=None) -> Optional[str]:
     rendered preferred bridge and its standardized linker columns,
     machine-readable per-side pool coverage, and the FULL per-type
     bodyId populations (``source_body_ids`` / ``target_body_ids``: every
-    bodyId of the mapped type in its OWN dataset, ';'-joined — listed
-    per type, never paired across datasets).  The column set is fixed,
+    bodyId of the mapped type in its OWN dataset, one quoted JSON array
+    per cell so spreadsheet delimiters never split it — listed per type,
+    never paired across datasets).  The column set is fixed,
     so per-pair and all-pairs files share one header and the old
     union-of-bridge-columns concatenation hack is gone.  Uniform field
     counts, proper quoting.  Returns None when there is nothing to
@@ -2077,11 +2078,20 @@ def build_bridges_csv(flows, *, pools=None) -> Optional[str]:
         preferred_bridge_chain,
         standardize_bridge,
     )
+    import json as _json
 
     pools = pools or {}
     flows = [f for f in (flows or []) if f]
     if not flows:
         return None
+
+    def _body_ids_cell(ids) -> str:
+        # JSON array (user 2026-09-09): a ';'-joined list made delimiter
+        # sniffing flip (Tablecruncher split thousands of semicolons into
+        # pseudo-columns).  A quoted JSON array is ONE field for any CSV
+        # reader and still human- and machine-readable.  A pool without
+        # the key (legacy/synthetic) stays an empty cell.
+        return "" if ids is None else _json.dumps(list(ids))
 
     header = [
         "source_dataset", "source_entry", "matched_column", "source_type",
@@ -2159,8 +2169,8 @@ def build_bridges_csv(flows, *, pools=None) -> Optional[str]:
             # FULL per-type populations (user 2026-09-09): every bodyId of
             # the mapped type in its OWN dataset — never a cross-dataset
             # bodyId pairing.
-            "; ".join(pool.get("source_type_body_ids") or []),
-            "; ".join(pool.get("target_type_body_ids") or []),
+            _body_ids_cell(pool.get("source_type_body_ids")),
+            _body_ids_cell(pool.get("target_type_body_ids")),
             pool_coverage,
             pool.get("coverage_basis") or "",
         ])
