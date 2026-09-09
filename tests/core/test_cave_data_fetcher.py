@@ -98,7 +98,7 @@ def test_banc_cache_namespace_keeps_requested_release(tmp_path):
     )
     assert Path(
         fetcher._get_skeleton_cache_path("72057594037927937")).as_posix().endswith(
-        "cache/banc_v888/skeletons/raw_skeletons/"
+        "cache/banc_v888/skeletons/cave_skeletons/"
         "72057594037927937.swc.zst"
     )
 
@@ -157,8 +157,16 @@ def test_skeleton_cache_roundtrip_is_written_only_for_cache_enabled_call(
         42, use_cache=True, simplify_mesh=0.0, denoise_twigs=None
     )
     cache_path = tmp_path / "cache" / "flywire_FAFB_v783" \
-        / "skeletons" / "raw_skeletons" / "42.swc.zst"
+        / "skeletons" / "cave_skeletons" / "42.swc.zst"
     assert first is not None and cache_path.exists()
+    # Replacements carry provenance: they are CAVE-derived trees, never
+    # healed-bundle mirrors.
+    import zstandard as zstd
+    with open(cache_path, "rb") as handle:
+        with zstd.ZstdDecompressor().stream_reader(handle) as reader:
+            head = reader.read(512).decode("utf-8", "replace").splitlines()
+    assert "# DROCAT simpl: 0" in head
+    assert "# DROCAT source: cave_mesh_wavefront" in head
 
     monkeypatch.setattr(
         fetcher, "fetch_mesh",

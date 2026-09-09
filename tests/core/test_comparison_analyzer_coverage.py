@@ -343,7 +343,7 @@ def test_run_edge_analysis_query(monkeypatch, analyzer):
 def test_query_edges_dispatch(monkeypatch, analyzer):
     monkeypatch.setattr(analyzer, "_query_edges_local", lambda *a, **k: "local")
     monkeypatch.setattr(analyzer, "_query_edges_neuprint", lambda *a, **k: "neuprint")
-    assert analyzer._query_edges_for_dataset("flywire_v1", [], [], 1) == "local"
+    assert analyzer._query_edges_for_dataset("flywire_FAFB_v783", [], [], 1) == "local"
     assert analyzer._query_edges_for_dataset("fafb_v2", [], [], 1) == "local"
     assert analyzer._query_edges_for_dataset("banc", [], [], 1) == "local"
     assert analyzer._query_edges_for_dataset(DS1, [], [], 1) == "neuprint"

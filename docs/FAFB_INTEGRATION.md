@@ -129,7 +129,10 @@ vs.plot_neurons()
 
 ### CAVE API Fetching (force_API_fetching)
 
-For more up-to-date skeleton data, you can fetch skeletons directly from the CAVE API instead of using the local ZIP file:
+To route FAFB skeleton resolution through CAVE instead of the local ZIP file,
+set `force_API_fetching=True`. With `cache_neurons=True`, existing
+`cave_skeletons` entries may be reused; set `cache_neurons=False` for an
+online-only fetch that neither reads nor writes the replacement store:
 
 ```python
 from coana import VisualizeSkeleton
@@ -145,18 +148,18 @@ vs = VisualizeSkeleton(
     show_fig=True,
     brain_mesh='template',
     cache_neurons=True,
-    force_API_fetching=True,  # Fetch from CAVE API instead of local ZIP
+    force_API_fetching=True,  # Use the CAVE resolution path
 )
 
 vs.plot_neurons()
 ```
 
 **Key Features:**
-- **Source priority (tube mode, caching on)**: prepared CAVE mesh cache → shared raw SWC cache (`.swc.zst`) → healed skeleton bundle → CAVE API. Prepared meshes are CAVE-derived (extrusion-free) and already at the render preparation level.
-- **Source priority (line mode)**: SWC-first — raw SWC cache → healed bundle → CAVE API — so every scene renders from reconstruction skeletons; mesh sources would have to be skeletonized in memory with different geometry.
-- **force_API_fetching=True**: routes every body straight to the CAVE API (meshes cached in the prepared mesh cache when caching is enabled).
-- **Automatic Fallback**: bodies missing from every local source fall through to the CAVE API automatically.
-- **Updated Data**: Use `force_API_fetching=True` to ensure you're using the most up-to-date neuron morphologies from the CAVE API.
+- **Source priority (every render mode)**: shared raw SWC cache (`.swc.zst`) → healed skeleton bundle → extrusion check. Missing or extrusion-affected bodies use the dedicated CAVE replacement store when available, then CAVE skeletonization. Every FAFB source is a TreeNeuron, so all pipelines render from the same geometry.
+- **CAVE skeletonization**: missing or extrusion-flagged bodies are replaced by wavefront-skeletonizing the raw CAVE mesh (no pre-decimation — measured to match the healed bundle's node density within ~11%). The level-0 tree is cached in the dedicated `cache/{dataset}/skeletons/cave_skeletons/` store with a `# DROCAT source: cave_mesh_wavefront` header, so the replacement never overwrites the healed-bundle mirror. Later runs can skip the network for bodies present in that store.
+- **force_API_fetching=True**: routes every body through CAVE resolution. With `cache_neurons=True`, an existing CAVE replacement may be reused; with `cache_neurons=False`, the fetch is online-only.
+- **Automatic Fallback**: bodies missing from every local source fall through to CAVE skeletonization automatically.
+- **Updated Data**: Use `force_API_fetching=True, cache_neurons=False` when you need to bypass the local CAVE replacement store and request current data from the API.
 
 ### Fixing Skeleton Extrusion Issues
 
@@ -188,19 +191,22 @@ vs.plot_neurons()
 ```
 
 **How auto_fix_extrusions works:**
-1. When loading skeletons from ZIP, each is converted to a simplified mesh
+1. When loading skeletons from the raw cache or healed bundle, each is converted to a simplified mesh
 2. Edge length analysis detects abnormal "spiky" geometry (edge ratio > 10x median)
-3. Problematic neurons are automatically fetched fresh from CAVE API
+3. Problematic neurons are replaced by wavefront-skeletonizing their raw CAVE mesh (one-time ~5-20s per neuron, then cached)
 4. If a CAVE fetch fails, the long parent→child edge is mapped back to the local
    tree and only that child subtree is pruned when the cut is safe
 5. **Extrusion check results are cached** in `cache/{dataset}/extrusion_check_results.parquet`
 6. On subsequent runs, only new neurons are checked (previously checked neurons use cached results)
-7. CAVE replacements are cached; local fallback repairs remain in memory and do not
-   overwrite the canonical raw skeleton
+7. CAVE replacement trees are cached in the dedicated `cave_skeletons/` store (never overwriting the
+   healed-bundle mirror in `raw_skeletons/`); bodies recorded `api_repaired` are served from that
+   store on later runs without another network round-trip. Local fallback repairs remain in memory
+   and do not overwrite the canonical raw skeleton
 
 **Performance notes:**
 - First run may take longer due to mesh analysis for extrusion detection
 - Subsequent runs are fast because check results are cached in parquet format
+- CAVE skeletonization is a one-time cost per replaced neuron; the replacement store makes later runs offline for those cached replacements
 - Set `auto_fix_extrusions=False` if you need faster loading and can tolerate artifacts
 
 #### Solution 2: Soma-Aware Simplification (Built-in)
@@ -222,7 +228,7 @@ vs = VisualizeSkeleton(
 vs.plot_neurons()
 ```
 
-**Default cache settings:**
+**Default render settings:**
 - Skeleton simplification: 0.95 (keep 5% of faces)
 - Soma simplification: 0.8 (keep 20% of faces) 
 - Soma region radius: 20,000nm (20µm)
@@ -263,28 +269,30 @@ print(f"Auto-fixed: {result['auto_fixed']}")
 
 #### Solution 4: Manual API Fetching
 
-For more control, you can manually fetch fresh skeletons via CAVE API:
+For more control, you can manually route selected skeletons through the CAVE
+API path. Use `cache_neurons=False` when the request must bypass an existing
+local CAVE replacement; that online-only mode does not write a cache:
 
 ```python
 from coana import VisualizeSkeleton
 
 # Method 1: Fix specific neurons by fetching them via API
-# Run with force_API_fetching=True for the problematic neurons only
+# Route the selected neurons through the CAVE resolution path
 vs = VisualizeSkeleton(
     dataset='flywire_FAFB_v783',
     neuron_layers=[720575940596125868, 720575940597856265],  # Problematic bodyIds
-    force_API_fetching=True,  # Fetch fresh data from CAVE API
+    force_API_fetching=True,  # Use CAVE; cache_neurons=True may reuse a stored replacement
     show_fig=False,  # Just cache the fixed skeletons
     cache_neurons=True,
 )
 vs.plot_neurons()  # This caches the API-fetched skeletons
 
 # Method 2: Once fixed, run your full visualization
-# API-cached skeletons are automatically prioritized over ZIP data
+# Stored CAVE replacements are reused for the corresponding repaired bodies
 vs2 = VisualizeSkeleton(
     dataset='flywire_FAFB_v783',
     neuron_layers=['l-LNv', 's-LNv'],  # Mix of neurons
-    force_API_fetching=False,  # Use local data, but API cache takes priority
+    force_API_fetching=False,  # Use raw/ZIP data; repaired bodies use cave_skeletons
     show_fig=True,
     brain_mesh='template',
 )
@@ -316,19 +324,20 @@ result = VisualizeSkeleton.detect_mesh_extrusions(
 ```
 
 **How Extrusion Fixes Work:**
-1. CAVE replacement meshes are cached in the prepared mesh cache
-   (`FlyWireMeshCache`); the legacy `cache/{dataset}/API_cache/skeletons/`
+1. CAVE replacement skeletons are cached in the dedicated
+   `cache/{dataset}/skeletons/cave_skeletons/` store; legacy API-cache
    pickles are read only as a migration fallback
 2. Extrusion check results are cached per neuron in
    `cache/{dataset}/extrusion_check_results.parquet`
 3. TreeNeuron sources (bundle / raw SWC cache) run the extrusion check every
-   render; flagged neurons are replaced through the CAVE API
+   render; flagged neurons are replaced through the CAVE replacement path
 4. This allows you to selectively fix problematic neurons without re-downloading the entire 13GB ZIP
 5. Fixed neurons persist across sessions via the cache
 
 **Note on force_API_fetching Behavior:**
-- **VisualizeSkeleton**: Prioritizes prepared caches even when
-  `force_API_fetching=False`; `force_API_fetching=True` bypasses them
+- **VisualizeSkeleton**: Uses raw/ZIP sources when
+  `force_API_fetching=False`; repaired bodies use `cave_skeletons` and
+  `force_API_fetching=True` routes all bodies through CAVE resolution
 - **FindNeuronConnection**: Uses API only when `force_API_fetching=True` (for consistency with local data)
 
 **Requirements:**
@@ -346,8 +355,9 @@ result = VisualizeSkeleton.detect_mesh_extrusions(
 - **Skeleton loading follows the canonical FlyWire chain**
   (`morphology.load_flywire_skeletons_batch`): raw `.swc.zst` cache → healed
   bundle (newly served trees are cached into the raw store) → per-run
-  extrusion check with cached results (flagged neurons replaced through
-  CAVE) → token-gated CAVE skeletonization. The prepared mesh cache is
+  extrusion check with cached results (flagged neurons use the dedicated
+  `cave_skeletons` replacement store, then CAVE) → token-gated CAVE
+  skeletonization for anything still missing. The prepared mesh cache is
   never consulted — scoring is TreeNeuron-native.
 - **NBLAST** scores the entire candidate pool from skeletons — the local raw
   store first, healed-bundle fallback — so pool coverage does not depend on
@@ -368,5 +378,5 @@ result = VisualizeSkeleton.detect_mesh_extrusions(
 
 *   **Root IDs**: FAFB root IDs are very large integers. The system handles them as strings internally to avoid precision loss, but you can pass them as integers in your scripts.
 *   **Caching**: The caching system currently produces warnings for FAFB IDs due to their size, but this does not affect the analysis results.
-*   **Skeletons**: Skeleton visualization requires either the `sk_lod1_783_healed.zip` file or CAVE API access (via `force_API_fetching=True`). VisualizeSkeleton always prioritizes API-cached skeletons over ZIP data.
-*   **Extrusion Issues**: The downloaded `sk_lod1_783_healed.zip` may contain neurons with extrusion artifacts (mesh errors appearing as spikes). Use `VisualizeSkeleton.fix_fafb_extrusions([bodyId1, bodyId2, ...])` to fetch fresh meshes for problematic neurons. If CAVE is unavailable during automatic repair, the visualizer prunes a safely localized bad node subtree in memory without overwriting the raw ZIP/cache source.
+*   **Skeletons**: Skeleton visualization requires either the `sk_lod1_783_healed.zip` file, a recognized local skeleton cache, or CAVE API access. Repaired CAVE trees are stored under `cache/{dataset}/skeletons/cave_skeletons/` and are used offline on later runs.
+*   **Extrusion Issues**: The downloaded `sk_lod1_783_healed.zip` may contain neurons with extrusion artifacts (mesh errors appearing as spikes). Use `VisualizeSkeleton.fix_fafb_extrusions([bodyId1, bodyId2, ...])` to fetch and cache replacement skeletons from CAVE. If CAVE is unavailable during automatic repair, the visualizer prunes a safely localized bad node subtree in memory without overwriting the raw ZIP/cache source.

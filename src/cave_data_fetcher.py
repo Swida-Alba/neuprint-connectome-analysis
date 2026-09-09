@@ -2,10 +2,12 @@
 CAVE API Data Fetcher for FAFB datasets.
 
 This module provides functionality to fetch FAFB meshes and synapses from
-the CAVE/CloudVolume API.  CAVE/FAFB production fetches remain
-``MeshNeuron`` objects; they are never converted to SWC trees.  The legacy
-``fetch_skeleton`` methods remain available for compatibility with older
-callers, but the application FAFB path uses ``fetch_fafb_mesh``.
+the CAVE/CloudVolume API.  Production mesh fetches remain ``MeshNeuron``
+objects, while the explicit ``fetch_skeleton`` path wavefront-skeletonizes a
+raw CAVE mesh into a ``TreeNeuron`` replacement stored in
+``cache/{dataset}/skeletons/cave_skeletons/``.  The application uses that
+tree path when a healed-bundle skeleton is missing or fails the extrusion
+check.
 
 BANC is intentionally not served by this adapter. Its public-release SWCs
 and prepared tables are handled by ``banc_public_data`` and the BANC
@@ -287,7 +289,25 @@ class CAVEDataFetcher:
         return self._cave_client
     
     def _get_skeleton_cache_path(self, body_id: int) -> str:
-        """Get the canonical raw compressed-SWC cache path for a skeleton."""
+        """Path in the dedicated ``cave_skeletons`` replacement store.
+
+        CAVE-skeletonized trees replace healed-bundle skeletons that failed
+        the extrusion check, so they are stored separately from the
+        ``raw_skeletons`` healed-bundle mirror and never overwrite it.
+        """
+        cache_dataset = self._cache_dataset_name()
+        return os.path.join(
+            self.project_root, 'cache', cache_dataset, 'skeletons',
+            'cave_skeletons', f'{body_id}.swc.zst'
+        )
+
+    def _get_legacy_raw_store_skeleton_path(self, body_id: int) -> str:
+        """Pre-unification ``raw_skeletons`` location of CAVE-skeletonized trees.
+
+        ``fetch_skeleton`` used to cache into the shared raw store; those
+        entries stay readable (level-0 only — the same directory also holds
+        historical simp90 visualization writes that are not raw inputs).
+        """
         cache_dataset = self._cache_dataset_name()
         return os.path.join(
             self.project_root, 'cache', cache_dataset, 'skeletons',
@@ -322,6 +342,7 @@ class CAVEDataFetcher:
                         obj.units = 'nm'
                         obj._drocat_simplification = \
                             _read_stored_simplification(content)
+                        obj._drocat_source = _read_stored_source(content)
                     except Exception:
                         pass
                     return obj
@@ -572,10 +593,19 @@ class CAVEDataFetcher:
                        simplify_mesh: float = 0.0,
                        denoise_twigs: Optional[float] = None) -> Optional['navis.TreeNeuron']:
         """Fetch a FAFB skeleton for a neuron by skeletonizing its mesh.
-        
-        Since FAFB doesn't have L2 cache for pcg_skel, we fetch the mesh
-        and skeletonize it using navis.
-        
+
+        Since FAFB doesn't have L2 cache for pcg_skel, we fetch the mesh and
+        skeletonize it using navis. The raw mesh is skeletonized without
+        pre-decimation: wavefront on the raw surface reproduces the healed
+        bundle's node density (measured ×1.01–1.14 across l-LNv, 1–8 s per
+        neuron), while any pre-decimation is slower end-to-end and drops
+        thin processes below wavefront's resolution.
+
+        Trees are cached in the dedicated ``cave_skeletons`` store with a
+        ``# DROCAT source: cave_mesh_wavefront`` header — they replace
+        healed-bundle skeletons that failed the extrusion check and must
+        never overwrite the ``raw_skeletons`` mirror.
+
         Parameters
         ----------
         body_id : int
@@ -584,13 +614,14 @@ class CAVEDataFetcher:
             Whether to use cached skeleton if available
         simplify_mesh : float
             Legacy mesh preprocessing factor before skeletonization (0.0-1.0).
-            Raw DROCAT fetches use the default ``0.0``; visualization
-            simplification is applied after the raw skeleton is fetched.
+            Raw DROCAT fetches use the default ``0.0`` (measured optimal);
+            visualization simplification is applied after the raw skeleton
+            is fetched.
         denoise_twigs : float or None
             Optional length threshold (nm) for transient terminal-twig
             pruning after skeletonization. It is never written to the raw
             cache. ``None`` (the default) leaves the fetched skeleton raw.
-            
+
         Returns
         -------
         navis.TreeNeuron or None
@@ -603,16 +634,23 @@ class CAVEDataFetcher:
             )
         body_id = body_id_to_api_int(body_id)
         cache_path = self._get_skeleton_cache_path(body_id)
-        
+
         # ``use_cache`` is a complete read/write policy for this operation:
         # false means online-only and must not inspect or populate the local
         # API skeleton cache, even when the fetcher itself has caching enabled
         # for other calls.
         cache_allowed = bool(use_cache and self.cache_enabled)
 
-        # Try cache first
+        # Try cache first: the dedicated cave_skeletons store, then the
+        # pre-unification raw-store location (level-0 entries only).
         if cache_allowed:
             cached = self._load_from_cache(cache_path)
+            if cached is None:
+                cached = self._load_pre_unification_raw_store_skeleton(
+                    body_id)
+                if cached is not None and self.verbose:
+                    print(f"  ✓ Migrated CAVE skeleton from raw store: "
+                          f"{body_id}")
             if cached is None and str(cache_path).endswith(
                     ('.swc.gz', '.swc.zst')):
                 # Read the former API-cache pickle once for a non-destructive
@@ -626,7 +664,7 @@ class CAVEDataFetcher:
                 if denoise_twigs:
                     cached = self._denoise_skeleton(cached, denoise_twigs)
                 if self.verbose:
-                    print(f"  ✓ Loaded skeleton from API cache: {body_id}")
+                    print(f"  ✓ Loaded skeleton from CAVE cache: {body_id}")
                 return cached
         
         try:
@@ -667,7 +705,7 @@ class CAVEDataFetcher:
             # denoising. This keeps one representation in the cache while
             # allowing callers to request a temporary cleanup.
             if cache_allowed:
-                self._save_to_cache(skeleton, cache_path)
+                self._save_cave_skeleton(skeleton, cache_path)
 
             if denoise_twigs:
                 skeleton = self._denoise_skeleton(skeleton, denoise_twigs)
@@ -683,6 +721,71 @@ class CAVEDataFetcher:
                 print(f"  ✗ Failed to fetch skeleton: {body_id}: {e}")
             return None
     
+    def _save_cave_skeleton(self, skeleton, cache_path: str) -> None:
+        """Persist a CAVE-skeletonized tree with a provenance header.
+
+        The ``# DROCAT source: cave_mesh_wavefront`` line marks the tree as a
+        mesh-derived replacement for an extrusion-flagged healed-bundle
+        skeleton, so readers can tell it apart from bundle-derived entries
+        even outside the dedicated ``cave_skeletons`` store.
+        """
+        try:
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            if not isinstance(skeleton, navis.TreeNeuron):
+                raise TypeError(
+                    "cave_skeletons store accepts TreeNeuron only")
+            cache_path_obj = Path(cache_path)
+            with tempfile.NamedTemporaryFile(
+                    suffix='.swc', dir=str(cache_path_obj.parent),
+                    delete=False) as handle:
+                temp_swc = Path(handle.name)
+            try:
+                navis.write_swc(skeleton, temp_swc, write_meta=True)
+                payload = temp_swc.read_bytes()
+                source_line = (f"# {_SOURCE_HEADER} cave_mesh_wavefront\n"
+                               .encode("ascii"))
+                _write_compressed_swc_zst(
+                    cache_path_obj, source_line + payload, simplification=0)
+            finally:
+                temp_swc.unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning(f"Failed to save cache {cache_path}: {e}")
+
+    def load_cached_skeleton(self, body_id):
+        """Read a cached CAVE-skeletonized tree without any network access.
+
+        Returns the ``TreeNeuron`` from the ``cave_skeletons`` store, or
+        ``None`` on a miss. Unlike :meth:`fetch_skeleton` this never fetches
+        online, so callers can probe the store before deciding to spend a
+        network round-trip.
+        """
+        try:
+            body_id = body_id_to_api_int(body_id)
+        except Exception:
+            return None
+        cached = self._load_from_cache(self._get_skeleton_cache_path(body_id))
+        return cached if isinstance(cached, navis.TreeNeuron) else None
+
+    def _load_pre_unification_raw_store_skeleton(self, body_id: int):
+        """Read a CAVE tree from the pre-unification raw-store location.
+
+        Only entries whose recorded simplification level is 0 are accepted:
+        the shared ``raw_skeletons`` directory also holds historical simp90
+        visualization writes that are not valid raw inputs. Level-0 hits
+        stay readable so a pre-unification CAVE fetch is not re-downloaded.
+        """
+        legacy_path = self._get_legacy_raw_store_skeleton_path(body_id)
+        if not (self.cache_enabled and os.path.exists(legacy_path)):
+            return None
+        if str(legacy_path).endswith(('.swc.gz', '.swc.zst')):
+            try:
+                content = _load_swc_text(legacy_path)
+            except Exception:
+                return None
+            if _read_stored_simplification(content) != 0:
+                return None
+        return self._load_from_cache(legacy_path)
+
     @staticmethod
     def _denoise_skeleton(neuron, threshold_nm: float) -> 'navis.TreeNeuron':
         """Prune terminal twigs shorter than ``threshold_nm`` (recursive).
@@ -1101,7 +1204,7 @@ class CAVEDataFetcher:
             return pd.DataFrame(columns=['bodyId', 'type', 'instance', 'post'])
     
     def clear_cache(self, cache_type: str = 'all'):
-        """Clear the API cache.
+        """Clear API and canonical dataset caches.
         
         Parameters
         ----------
@@ -1111,11 +1214,21 @@ class CAVEDataFetcher:
         import shutil
         
         if cache_type in ['skeletons', 'all']:
-            skel_dir = self.get_cache_path('skeletons')
-            if os.path.exists(skel_dir):
-                shutil.rmtree(skel_dir)
-                os.makedirs(skel_dir)
-                print(f"✓ Cleared skeleton cache: {skel_dir}")
+            skeleton_dirs = [
+                Path(self.get_cache_path('skeletons')),
+                Path(self.project_root) / 'cache' / self._cache_dataset_name()
+                / 'skeletons',
+            ]
+            seen = set()
+            for skeleton_dir in skeleton_dirs:
+                resolved = str(skeleton_dir.resolve())
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                if skeleton_dir.exists():
+                    shutil.rmtree(skeleton_dir)
+                skeleton_dir.mkdir(parents=True, exist_ok=True)
+                print(f"✓ Cleared skeleton cache: {skeleton_dir}")
         
         if cache_type in ['meshes', 'all']:
             mesh_dirs = [
@@ -1141,22 +1254,34 @@ class CAVEDataFetcher:
         dict
             Dictionary with cache statistics
         """
-        skel_dir = Path(self.get_cache_path('skeletons'))
+        skeleton_dirs = (
+            Path(self.get_cache_path('skeletons')),
+            Path(self.project_root) / 'cache' / self._cache_dataset_name()
+            / 'skeletons',
+        )
         api_mesh_dir = Path(self.get_cache_path('meshes'))
         canonical_mesh_dir = (
             Path(self.project_root) / 'cache' / self._cache_dataset_name()
             / 'meshes'
         )
 
-        skel_files = (
-            [path for path in skel_dir.rglob('*')
-             if path.is_file()
-             and (path.name.endswith('.pkl')
-                  or path.name.endswith('.pkl.zst')
-                  or path.name.endswith('.swc.gz')
-                  or path.name.endswith('.swc.zst'))]
-            if skel_dir.exists() else []
-        )
+        skel_files = []
+        seen_skeleton_files = set()
+        for skel_dir in skeleton_dirs:
+            if not skel_dir.exists():
+                continue
+            for path in skel_dir.rglob('*'):
+                if not (path.is_file() and (
+                        path.name.endswith('.pkl')
+                        or path.name.endswith('.pkl.zst')
+                        or path.name.endswith('.swc.gz')
+                        or path.name.endswith('.swc.zst'))):
+                    continue
+                resolved = path.resolve()
+                if resolved in seen_skeleton_files:
+                    continue
+                seen_skeleton_files.add(resolved)
+                skel_files.append(path)
         mesh_files = []
         for mesh_dir in (api_mesh_dir, canonical_mesh_dir):
             if not mesh_dir.exists():
@@ -1187,6 +1312,24 @@ class CAVEDataFetcher:
 # Header line recording the on-disk simplification level of a compressed
 # SWC cache file (percent of nodes removed; absent/legacy files are raw).
 _SIMPLIFICATION_HEADER = "DROCAT simpl:"
+
+# Header line recording the producing pipeline of a compressed-SWC cache
+# file (BANC writes e.g. banc_gcs_full; CAVE skeletonization writes
+# cave_mesh_wavefront). Absent on legacy files.
+_SOURCE_HEADER = "DROCAT source:"
+
+
+def _read_stored_source(text) -> str:
+    """Parse ``# DROCAT source: NAME`` from a compressed-SWC header."""
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", "replace")
+    for line in text.splitlines()[:8]:
+        line = line.strip()
+        if line.startswith("#"):
+            line = line[1:].strip()
+        if line.startswith(_SOURCE_HEADER):
+            return line[len(_SOURCE_HEADER):].strip()
+    return ""
 
 
 def _read_stored_simplification(text) -> int:

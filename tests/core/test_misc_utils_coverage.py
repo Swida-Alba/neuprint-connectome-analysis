@@ -207,6 +207,12 @@ class TestFirstExisting:
         (populated / "a.pkl.zst").write_bytes(b"x")
         assert fwr._first_existing([populated]) == populated
 
+    def test_dir_with_swc_cache_files_counts(self, tmp_path):
+        populated = tmp_path / "cache"
+        populated.mkdir()
+        (populated / "a.swc.zst").write_bytes(b"x")
+        assert fwr._first_existing([populated]) == populated
+
     def test_empty_dir_and_missing_paths_are_skipped(self, tmp_path):
         empty = tmp_path / "empty"
         empty.mkdir()
@@ -241,6 +247,15 @@ class TestLocalFafbSkeletonSourceFallbacks:
         cdir.mkdir(parents=True)
         (cdir / "one.pkl").write_bytes(b"x")
         assert fwr.local_fafb_skeleton_source(folder, tmp_path) == cdir
+
+    def test_cache_skeletons_dir_with_cave_swc_is_found(self, tmp_path):
+        folder = "flywire_FAFB_v783"
+        cdir = tmp_path / "cache" / folder / "skeletons" / "cave_skeletons"
+        cdir.mkdir(parents=True)
+        (cdir / "one.swc.zst").write_bytes(b"x")
+        assert fwr.local_fafb_skeleton_source(folder, tmp_path) == (
+            tmp_path / "cache" / folder / "skeletons"
+        )
 
     def test_glob_fallback_finds_noncanonical_skeleton_zip(self, tmp_path):
         folder = "flywire_FAFB_v783"

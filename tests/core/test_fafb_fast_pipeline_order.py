@@ -2,9 +2,13 @@
 
 Asserts the stage order for each tube pipeline:
 - fast: node reduction strictly before tube conversion and surface
-  decimation; MeshNeuron sources skip the node stage
+  decimation
 - fine: no node stage
 - artistic: never combines with node reduction (vertex clustering only)
+
+Every FAFB source is a TreeNeuron (healed bundle / raw SWC cache /
+CAVE-skeletonized replacement); MeshNeuron inputs no longer exist in the
+resolver and pass through `_process_fafb_layer` untouched.
 """
 
 import sys
@@ -88,13 +92,10 @@ class PipelineRecorder:
             lambda trimesh_obj, target_faces:
                 _dec(record, "vertex_decimate", trimesh_obj, target_faces))
 
-    def run(self, neuron_vols=None, cached_mesh_neurons=None,
-            use_fafb_cache=False, pipeline=None):
+    def run(self, neuron_vols=None, pipeline=None):
         return self.visualizer._process_fafb_layer(
             neuron_vols,
-            cached_mesh_neurons or [],
             pipeline or self.pipeline,
-            use_fafb_cache,
             render_mesh_cache={},
         )
 
@@ -170,39 +171,17 @@ class TestFastPipelineOrder:
         assert done is True
         assert not any("reduce nodes" in msg for msg in recorder.messages)
 
-    def test_mesh_source_fast_skips_node_stage(self, monkeypatch):
+    def test_mesh_sources_no_longer_exist(self, monkeypatch):
+        """MeshNeuron inputs pass through untouched: FAFB sources are
+        tree-only (CAVE replacements arrive pre-skeletonized)."""
         recorder = PipelineRecorder("fast", monkeypatch)
         mesh = make_big_mesh()
 
-        out, done = recorder.run(cached_mesh_neurons=[mesh])
+        out, done = recorder.run(navis.NeuronList([mesh]))
 
         names = [event[0] for event in recorder.events]
-        assert "reduce" not in names
-        assert "tube" not in names
-        assert "decimate" in names
+        assert names == [], names
         assert done is True
         assert isinstance(out[0], navis.MeshNeuron)
-        assert any("mesh source (no node stage)" in msg
-                   for msg in recorder.messages)
-
-    def test_fast_mesh_source_uses_relative_cache_step(self, monkeypatch):
-        """Prepared-level meshes decimate with the relative keep factor,
-        raw CAVE meshes with the absolute render target."""
-        recorder = PipelineRecorder("fast", monkeypatch)
-        mesh = make_big_mesh()
-        n_faces = len(mesh.trimesh.faces)
-
-        # prepared mesh cache eligible: relative step from 0.95 -> 0.98
-        recorder.visualizer.skeleton_mesh_simplification = 0.98
-        recorder.run(cached_mesh_neurons=[mesh], use_fafb_cache=True)
-        cache_simp = recorder.visualizer.FAFB_MESH_CACHE_SIMPLIFICATION
-        keep = (1 - 0.98) / (1 - cache_simp)
-        expected = max(100, int(n_faces * keep))
-        assert recorder.events[-1][1] == expected
-
-        # cache bypassed: absolute target on the raw face count
-        recorder.events.clear()
-        recorder.visualizer.skeleton_mesh_simplification = 0.90
-        recorder.run(cached_mesh_neurons=[mesh], use_fafb_cache=False)
-        expected = max(100, int(n_faces * (1 - 0.90)))
-        assert recorder.events[-1][1] == expected
+        assert out[0] is mesh
+        assert not any("mesh source" in msg for msg in recorder.messages)

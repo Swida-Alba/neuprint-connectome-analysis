@@ -160,6 +160,23 @@ The Edge Budget is a lossy graph floor in `all` mode only. Shortest mode can
 be bounded by the StrongestFirst path budget and report tau, but its Edge
 Budget is ignored and `edge_weight_floor` remains empty.
 
+## Raw threshold-schedule diagnostics and unsupported analyses
+
+- `edge_density_per_threshold.csv`, `threshold_alignment_matrix.csv`, and
+  `threshold_alignment_best_matches.csv` describe the raw execution/cache
+  schedule over the sorted union of `(dataset, threshold)` cells. In
+  combination mode every row carries
+  `threshold_scope=raw_run_schedule_diagnostic`; never present these files as
+  the Custom query comparison axis — join `threshold_combinations.csv`
+  instead.
+- `degree_*.csv`, `top_edges_*.csv`, and `unique_to_*.csv` are Standard-only
+  exports (their scalar APIs would silently choose a union threshold in
+  combination mode). Derive per-query variants from the query-keyed presence
+  matrices if needed.
+- Pathfinding comparisons disable ratio/traversal-probability filtering in
+  both modes, so comparison visualization exports never create `by_ratio/`
+  or `by_probability/` folders.
+
 ## Notes
 
 - `comparison_mode="path"` uses the pathfinding engine (FindAllPath /

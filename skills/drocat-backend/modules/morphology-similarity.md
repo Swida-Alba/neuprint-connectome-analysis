@@ -160,7 +160,9 @@ vecs = cache.vectors_for(body_ids, compute_missing=True)
   raw-skeleton loader: raw cache → FAFB healed bundle or standalone BANC
   public-release SWCs. Only FAFB performs the per-run extrusion check and
   token-gated CAVE repair; BANC never enters those stages. All returned trees
-  are cached as `.swc.zst`; the prepared mesh cache is never consulted.
+  are cached as `.swc.zst` (FAFB CAVE-skeletonized replacements in the
+  dedicated `skeletons/cave_skeletons/` store); the prepared mesh cache is
+  never consulted.
 
 ## Notes
 

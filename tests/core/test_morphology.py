@@ -1801,7 +1801,7 @@ class TestFlywireIsolation:
                 "flywire_FAFB_v783", project_root=str(tmp_path),
                 max_workers=2, verbose=False, simplification=50)
         message = str(excinfo.value)
-        assert "disabled for FlyWire" in message
+        assert "disabled for FAFB" in message
         assert "https://codex.flywire.ai/api/download?dataset=fafb" in message
         assert "sk_lod1_783_healed.zip" in message
         assert "FAFB_file_converter" in message
@@ -2635,7 +2635,7 @@ class TestFafbBundleLocalSources:
                 max_workers=2, verbose=False,
             )
         message = str(excinfo.value)
-        assert "disabled for FlyWire" in message
+        assert "disabled for FAFB" in message
         assert "sk_lod1_783_healed.zip" in message
         assert "https://codex.flywire.ai/api/download?dataset=fafb" in message
         assert "FAFB_file_converter" in message

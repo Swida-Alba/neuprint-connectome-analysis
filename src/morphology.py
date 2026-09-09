@@ -11,7 +11,9 @@ Two comparison backends are provided:
   shared dataset skeleton cache at
   ``cache/{dataset}/skeletons/raw_skeletons/`` as portable ``.swc.zst``
   files (zstd-19, simplification level recorded in the header; legacy
-  ``.swc.gz`` remains readable). The former ``find_similar/raw_skeletons``
+  ``.swc.gz`` remains readable). FAFB CAVE replacement trees live separately
+  in ``cache/{dataset}/skeletons/cave_skeletons/`` and are selected for
+  extrusion-repaired bodies. The former ``find_similar/raw_skeletons``
   directory remains a read-only migration fallback.
 - **NBLAST** (navis implementation of Costa et al. 2016): the canonical
   pairwise morphology score. It uses the same raw skeleton/vector cache for
@@ -1451,15 +1453,26 @@ def _flywire_cave_skeletons(dataset: str, body_ids,
     """FAFB-only CAVE fallback: mesh -> wavefront skeletonize -> cache.
 
     Returns ``{int(body_id): TreeNeuron}`` for the ids that resolved. Only
-    the skeletonized tree is cached (canonical raw ``.swc.zst``); the raw
-    mesh itself is not cached here, so the morphology chain never depends on
-    the prepared mesh cache.
+    the skeletonized tree is cached in the dedicated ``cave_skeletons``
+    replacement store; the raw mesh itself is not cached here, so the
+    morphology chain never depends on the prepared mesh cache or overwrites
+    the healed-bundle mirror in ``raw_skeletons``.
     """
     root = Path(project_root) if project_root else Path(__file__).parent.parent
     say = log or (lambda _message: None)
     ids = sorted({int(b) for b in body_ids})
     if not ids:
         return {}
+
+    # A previously repaired CAVE tree is a complete local source. Probe it
+    # before requiring a token so missing-from-bundle bodies can also be
+    # served offline on later runs.
+    out: Dict[int, object] = _load_cave_cached_skeletons(
+        dataset, ids, str(root), log=say)
+    ids = [bid for bid in ids if bid not in out]
+    if not ids:
+        return out
+
     try:
         from utils.flywire_readiness import flywire_skeleton_readiness
         cave_token = bool(
@@ -1470,13 +1483,12 @@ def _flywire_cave_skeletons(dataset: str, body_ids,
         say(f"FAFB skeletons: {len(ids)} body id(s) unavailable locally "
             "and CAVE_TOKEN is not configured: "
             f"{ids[:5]}{'...' if len(ids) > 5 else ''}")
-        return {}
+        return out
     from cave_data_fetcher import CAVEDataFetcher
     fetcher = CAVEDataFetcher(
         dataset=_dataset_folder(dataset), project_root=str(root),
         verbose=False,
     )
-    out: Dict[int, object] = {}
     for bid in ids:
         try:
             neuron = fetcher.fetch_skeleton(
@@ -1492,6 +1504,54 @@ def _flywire_cave_skeletons(dataset: str, body_ids,
         say(f"FAFB skeletons: {len(unresolved)} body id(s) unavailable "
             f"from cache, bundle, and CAVE: "
             f"{unresolved[:5]}{'...' if len(unresolved) > 5 else ''}")
+    return out
+
+
+def _load_cave_cached_skeletons(
+        dataset: str, body_ids, project_root: Optional[str] = None,
+        log=None) -> Dict[int, object]:
+    """Load CAVE replacement trees without a token or network access.
+
+    CAVE replacements are deliberately kept separate from the raw healed
+    bundle mirror.  This probe is used by morphology workflows before their
+    token-gated fallback so a previously repaired body remains usable offline.
+    """
+    root = Path(project_root) if project_root else Path(__file__).parent.parent
+    say = log or (lambda _message: None)
+    ids = sorted({int(b) for b in body_ids})
+    if not ids:
+        return {}
+
+    try:
+        from cave_data_fetcher import CAVEDataFetcher
+    except ImportError:
+        try:
+            from .cave_data_fetcher import CAVEDataFetcher
+        except ImportError:
+            return {}
+
+    try:
+        # An empty token is intentional: this is a strictly local probe and
+        # must remain usable when the CAVE API is not configured.
+        fetcher = CAVEDataFetcher(
+            dataset=_dataset_folder(dataset), cave_token="",
+            cache_enabled=True, project_root=str(root), verbose=False,
+        )
+    except Exception as exc:
+        say(f"FAFB skeletons: CAVE cache probe unavailable ({exc})")
+        return {}
+
+    out: Dict[int, object] = {}
+    for bid in ids:
+        try:
+            neuron = fetcher.load_cached_skeleton(body_id_to_api_int(bid))
+        except Exception:
+            neuron = None
+        if isinstance(neuron, navis.TreeNeuron):
+            neuron.id = body_id_to_api_int(bid)
+            neuron.name = str(bid)
+            neuron.units = "nm"
+            out[bid] = neuron
     return out
 
 
@@ -1511,11 +1571,12 @@ def load_flywire_skeletons_batch(dataset: str, body_ids,
            (level 0) so later runs are file-served,
         3. the extrusion check on the tree sources — per run, with results
            cached in ``extrusion_check_results.parquet``; flagged neurons
-           are REPLACED through the CAVE API (ids already recorded as
-           ``api_repaired`` keep their cached CAVE-derived tree),
+           are served from the dedicated CAVE replacement store when
+           ``api_repaired`` and present, otherwise REPLACED through the CAVE
+           API,
         4. the token-gated CAVE fallback for everything still missing:
            the CAVE mesh is skeletonized (wavefront) into a TreeNeuron and
-           cached into the raw store.
+           cached into the dedicated ``cave_skeletons`` replacement store.
 
     The prepared mesh cache is never consulted: the morphology comparison
     is TreeNeuron-native (vector_v2 vectorization and NBLAST dotprops),
@@ -1635,10 +1696,22 @@ def load_flywire_skeletons_batch(dataset: str, body_ids,
             flagged = []
             say(f"FlyWire skeletons: extrusion check failed ({exc}); "
                 "serving the local trees unchecked.")
+        api_repaired_ids = sorted(
+            b for b in flagged
+            if b in loaded
+            and repair_status.get(str(b)) == EXTRUSION_REPAIR_API_REPAIRED)
+        cached_repaired = _load_cave_cached_skeletons(
+            dataset, api_repaired_ids, str(root), log=say)
+        if cached_repaired:
+            loaded.update(cached_repaired)
+            say(f"FlyWire skeletons: loaded {len(cached_repaired)} "
+                "CAVE replacement tree(s) from the dedicated cache.")
+
         to_replace = sorted(
             b for b in flagged
             if b in loaded
-            and repair_status.get(str(b)) != EXTRUSION_REPAIR_API_REPAIRED)
+            and (repair_status.get(str(b)) != EXTRUSION_REPAIR_API_REPAIRED
+                 or b not in cached_repaired))
         if to_replace:
             say(f"FlyWire skeletons: replacing {len(to_replace)} "
                 "extrusion-flagged neuron(s) through the CAVE API.")
@@ -8134,10 +8207,11 @@ class MorphologyComparer:
 
         Priority: shared raw ``.swc.zst`` cache -> healed skeleton bundle
         (newly served trees are cached into the raw store) -> per-run
-        extrusion check with cached results (flagged neurons are replaced
-        through the CAVE API) -> token-gated CAVE skeletonization for
-        everything still missing. Every returned neuron is a TreeNeuron;
-        the prepared mesh cache is never consulted.
+        extrusion check with cached results. Flagged bodies use a cached
+        ``cave_skeletons`` replacement when available, then the token-gated
+        CAVE skeletonization path; missing bodies follow the same cache-first
+        CAVE path. Every returned neuron is a TreeNeuron; the prepared mesh
+        cache is never consulted.
 
         Kept as a method so callers and tests can override the seam.
         """

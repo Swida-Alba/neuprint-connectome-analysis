@@ -44,11 +44,11 @@ class TestPrintDownloadInstructions:
         assert "connections_princeton.csv.gz" not in text
         assert "python src/BANC_file_converter.py" not in text
 
-    def test_banc_instructions_use_banc_url_and_converter(self, tmp_path, capsys):
+    def test_banc_instructions_use_public_release_and_converter(self, tmp_path, capsys):
         text = self._capture("banc_v626", tmp_path, capsys)
-        assert "https://codex.flywire.ai/api/download?dataset=banc" in text
-        assert "neurons.csv.gz" in text
-        assert "connections_princeton.csv.gz" in text
+        assert "public BANC" in text
+        assert "banc_public_gcs" in text
+        assert "https://codex.flywire.ai/api/download?dataset=banc" not in text
         assert "python src/BANC_file_converter.py" in text
         assert "python src/FAFB_file_converter.py" not in text
         # required-file hints stay BANC-specific: FAFB files never leak in
@@ -60,7 +60,7 @@ class TestPrintDownloadInstructions:
         """The printed downloads folder carries the exact dataset identifier,
         never a generic path."""
         text = self._capture("banc_v888", tmp_path, capsys)
-        assert str(tmp_path / "datasets" / "banc_v888" / "downloads") in text
+        assert "cache/banc_v888/skeletons/" in text
         assert "flywire_FAFB_v783" not in text
 
     def test_instructions_work_without_explicit_dataset_dir(self, capsys):

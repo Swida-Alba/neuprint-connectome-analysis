@@ -287,7 +287,7 @@ class TestWarningBanners:
         vis.neuprint_skeleton_pipeline = 'fine'
         assert 'raw .swc.gz source' in vis._skeleton_simplification_warning_html()
         vis.dataset = 'flywire_FAFB_v783'
-        assert 'soma-aware mesh cache' in vis._skeleton_simplification_warning_html()
+        assert 'level-0 tree' in vis._skeleton_simplification_warning_html()
         vis.skeleton_mesh_simplification = 0.90
         assert vis._skeleton_simplification_warning_html() == ''
         assert vis._in_page_warning_html() == ''
@@ -938,7 +938,6 @@ class TestPipelineResolvers:
         assert vis._get_neuprint_mesh_cache_key().endswith('_vertexcluster')
         vis.skeleton_radius_style = 'constant'
         assert '_radiusconstant' in vis._get_neuprint_mesh_cache_key()
-        assert make_vis()._get_fafb_mesh_cache_key().startswith('FLYWIRE_simp')
         assert make_vis()._skeleton_cache_is_simplified() is False
         assert make_vis(skeleton_mesh_simplification=0.93)._effective_render_simplification(True) == 0.93
 
@@ -1081,18 +1080,24 @@ class TestCachedNeuronPlumbing:
         assert fake2.persisted is None
         vis._save_cached_neurons(df, None)
 
-    def test_fafb_mesh_cache_short_circuits(self):
-        vis = make_vis(cache_neurons=False, skeleton_mesh_simplification=0.95,
-                       dataset='flywire_FAFB_v783', script_path='/tmp')
-        assert vis._load_cached_fafb_meshes([1]) == ({}, [1])
-        vis.cache_neurons = True
-        vis.skeleton_mesh_simplification = 0.90
-        assert vis._load_cached_fafb_meshes([1]) == ({}, [1])
-        vis.skeleton_mesh_simplification = 0.95
-        vis.dataset = 'hemibrain:v1.2.1'
-        assert vis._load_cached_fafb_meshes([1]) == ({}, [1])
-        vis._save_cached_fafb_meshes({})  # cache_neurons but non-flywire -> no-op
-        make_vis(cache_neurons=False)._save_cached_fafb_meshes({})
+    def test_cave_store_probe_reads_dedicated_store(self, tmp_path):
+        """`_load_cave_cached_skeleton` reads the cave_skeletons store
+        (network-free) and misses cleanly when it is empty."""
+        from cave_data_fetcher import _write_compressed_swc_zst
+
+        vis = make_vis(cache_neurons=True, dataset='flywire_FAFB_v783',
+                       script_path=str(tmp_path))
+        assert vis._load_cave_cached_skeleton(FAFB_ID) is None
+
+        store_dir = (tmp_path / 'cache' / 'flywire_FAFB_v783'
+                     / 'skeletons' / 'cave_skeletons')
+        store_dir.mkdir(parents=True)
+        _write_compressed_swc_zst(
+            store_dir / f'{FAFB_ID_STR}.swc.zst',
+            make_fafb_swc_string().encode('utf-8'), simplification=0)
+        loaded = vis._load_cave_cached_skeleton(FAFB_ID)
+        assert isinstance(loaded, navis.TreeNeuron)
+        assert loaded.name == FAFB_ID_STR
 
     def test_extrusion_cache_delegation(self, monkeypatch):
         import fafb_utils
@@ -4264,38 +4269,32 @@ class TestResolveFafbSources:
         vis.api_calls = []
         vis._preload_fafb_skeletons = lambda body_ids_filter=None: {}
         vis._load_api_cached_skeletons = lambda ids: ({}, list(ids))
-        vis._load_cached_fafb_meshes = lambda ids: ({}, list(ids))
         vis._detect_extrusions_in_skeletons = \
             lambda skeletons, use_cache=False: []
 
-        def fake_api(ids, cache_prepared=False, force_refresh=False):
-            vis.api_calls.append((list(ids), force_refresh))
+        def fake_cave(ids):
+            vis.api_calls.append(list(ids))
             return {}
-        vis._fetch_fafb_skeletons_via_api = fake_api
+        vis._fetch_fafb_skeletons_via_cave = fake_cave
         return vis
 
-    def _mesh(self):
-        mesh = navis.MeshNeuron(make_small_trimesh())
-        mesh.id = FAFB_ID
-        return mesh
+    def _tree(self):
+        return make_chain_neuron(body_id=FAFB_ID_STR)
 
     def test_api_only(self):
         vis = self._vis()
-        vis._fetch_fafb_skeletons_via_api = \
-            lambda ids, cache_prepared=False, force_refresh=False: \
-            {FAFB_ID: self._mesh()}
-        sources, skel, mesh_cache = vis._resolve_fafb_sources(
-            [FAFB_ID], api_only=True)
+        cave_tree = self._tree()
+        vis._fetch_fafb_skeletons_via_cave = lambda ids: {FAFB_ID: cave_tree}
+        sources, skel = vis._resolve_fafb_sources([FAFB_ID], api_only=True)
         assert sources[FAFB_ID_STR] == 'cave'
-        # api_only path keeps the original fetch keys in mesh_cache
-        assert FAFB_ID in mesh_cache
+        assert skel[FAFB_ID_STR] is cave_tree
 
     def test_zip_priority(self):
         vis = self._vis()
         tree = make_chain_neuron(body_id=FAFB_ID_STR)
         vis._preload_fafb_skeletons = \
             lambda body_ids_filter=None: {FAFB_ID: tree}
-        sources, skel, mesh_cache = vis._resolve_fafb_sources([FAFB_ID])
+        sources, skel = vis._resolve_fafb_sources([FAFB_ID])
         assert sources[FAFB_ID_STR] == 'zip'
         assert skel[FAFB_ID_STR] is tree
         assert vis.api_calls == []
@@ -4304,39 +4303,84 @@ class TestResolveFafbSources:
         vis = self._vis(cache_neurons=True)
         tree = make_chain_neuron(body_id=FAFB_ID_STR)
         vis._load_api_cached_skeletons = lambda ids: ({FAFB_ID: tree}, [])
-        sources, skel, _ = vis._resolve_fafb_sources([FAFB_ID])
+        sources, _ = vis._resolve_fafb_sources([FAFB_ID])
         assert sources[FAFB_ID_STR] == 'raw_cache'
-
-    def test_mesh_cache_source(self):
-        vis = self._vis()
-        mesh = self._mesh()
-        vis._load_cached_fafb_meshes = lambda ids: ({FAFB_ID: mesh}, [])
-        sources, _, mesh_cache = vis._resolve_fafb_sources([FAFB_ID])
-        assert sources[FAFB_ID_STR] == 'mesh_cache'
-        assert mesh_cache[FAFB_ID_STR] is mesh
 
     def test_cave_fallback_for_remaining(self):
         vis = self._vis()
-        vis._fetch_fafb_skeletons_via_api = \
-            lambda ids, cache_prepared=False, force_refresh=False: \
-            {FAFB_ID: self._mesh()}
-        sources, _, mesh_cache = vis._resolve_fafb_sources([FAFB_ID])
+        cave_tree = self._tree()
+        vis._fetch_fafb_skeletons_via_cave = lambda ids: {FAFB_ID: cave_tree}
+        sources, skel = vis._resolve_fafb_sources([FAFB_ID])
         assert sources[FAFB_ID_STR] == 'cave'
+        assert skel[FAFB_ID_STR] is cave_tree
 
-    def test_extrusion_repair_via_api(self):
+    def test_extrusion_repair_via_cave(self):
         vis = self._vis(auto_fix_extrusions=True)
         tree = make_chain_neuron(body_id=FAFB_ID_STR)
         vis._preload_fafb_skeletons = \
             lambda body_ids_filter=None: {FAFB_ID: tree}
         vis._detect_extrusions_in_skeletons = \
             lambda skeletons, use_cache=False: [FAFB_ID]
-        vis._fetch_fafb_skeletons_via_api = \
-            lambda ids, cache_prepared=False, force_refresh=False: \
-            {FAFB_ID: self._mesh()}
-        sources, skel, mesh_cache = vis._resolve_fafb_sources([FAFB_ID])
+        cave_tree = self._tree()
+        vis._fetch_fafb_skeletons_via_cave = lambda ids: {FAFB_ID: cave_tree}
+        sources, skel = vis._resolve_fafb_sources([FAFB_ID])
         assert sources[FAFB_ID_STR] == 'cave'
-        assert FAFB_ID_STR not in skel
-        assert FAFB_ID_STR in mesh_cache
+        assert skel[FAFB_ID_STR] is cave_tree
+
+    def test_extrusion_repair_served_from_cave_store(self, monkeypatch):
+        """An api_repaired body with a cached CAVE tree skips the network."""
+        vis = self._vis(auto_fix_extrusions=True, cache_neurons=True)
+        tree = make_chain_neuron(body_id=FAFB_ID_STR)
+        vis._preload_fafb_skeletons = \
+            lambda body_ids_filter=None: {FAFB_ID: tree}
+        vis._detect_extrusions_in_skeletons = \
+            lambda skeletons, use_cache=False: [FAFB_ID]
+        monkeypatch.setattr(
+            fafb_utils, 'load_extrusion_repair_status',
+            lambda root, dataset: {FAFB_ID_STR: 'api_repaired'})
+        cave_tree = self._tree()
+        vis._load_cave_cached_skeleton = lambda bid: cave_tree
+        sources, skel = vis._resolve_fafb_sources([FAFB_ID])
+        assert sources[FAFB_ID_STR] == 'cave'
+        assert skel[FAFB_ID_STR] is cave_tree
+        assert vis.api_calls == []
+
+    def test_extrusion_repair_strict_no_cache_skips_cave_store(self, monkeypatch):
+        """cache_neurons=False never reads a previously repaired CAVE tree."""
+        vis = self._vis(auto_fix_extrusions=True, cache_neurons=False)
+        tree = make_chain_neuron(body_id=FAFB_ID_STR)
+        vis._preload_fafb_skeletons = \
+            lambda body_ids_filter=None: {FAFB_ID: tree}
+        vis._detect_extrusions_in_skeletons = \
+            lambda skeletons, use_cache=False: [FAFB_ID]
+        monkeypatch.setattr(
+            fafb_utils, 'load_extrusion_repair_status',
+            lambda root, dataset: pytest.fail(
+                'strict no-cache mode read repair-status cache'))
+        vis._load_cave_cached_skeleton = lambda bid: pytest.fail(
+            'strict no-cache mode read CAVE skeleton cache')
+        cave_tree = self._tree()
+        vis._fetch_fafb_skeletons_via_cave = lambda ids: {FAFB_ID: cave_tree}
+
+        sources, skel = vis._resolve_fafb_sources([FAFB_ID])
+
+        assert sources[FAFB_ID_STR] == 'cave'
+        assert skel[FAFB_ID_STR] is cave_tree
+
+    def test_cave_fetch_uses_local_store_before_token_gate(self, monkeypatch):
+        """A cached CAVE tree remains usable when the token is absent."""
+        vis = self._vis(auto_fix_extrusions=False, cache_neurons=True)
+        vis._fetch_fafb_skeletons_via_cave = (
+            VisualizeSkeleton._fetch_fafb_skeletons_via_cave.__get__(
+                vis, VisualizeSkeleton)
+        )
+        vis._flywire_skeleton_access = {'cave_token': False}
+        cave_tree = self._tree()
+        vis._load_cave_cached_skeleton = lambda bid: cave_tree
+
+        trees = vis._fetch_fafb_skeletons_via_cave([FAFB_ID])
+
+        assert trees[FAFB_ID_STR] is cave_tree
 
     def test_extrusion_repair_local_fallback(self, monkeypatch):
         vis = self._vis(auto_fix_extrusions=True)
@@ -4349,7 +4393,7 @@ class TestResolveFafbSources:
         monkeypatch.setattr(
             fafb_utils, 'repair_extruded_skeleton',
             lambda n: (repaired, {'repaired': True, 'removed_nodes': 2}))
-        sources, skel, _ = vis._resolve_fafb_sources([FAFB_ID])
+        sources, skel = vis._resolve_fafb_sources([FAFB_ID])
         assert sources[FAFB_ID_STR] == 'local_repaired'
         assert skel[FAFB_ID_STR] is repaired
 
@@ -4363,7 +4407,7 @@ class TestResolveFafbSources:
         monkeypatch.setattr(
             fafb_utils, 'repair_extruded_skeleton',
             lambda n: (n, {'repaired': False, 'removed_nodes': 0}))
-        sources, _, _ = vis._resolve_fafb_sources([FAFB_ID])
+        sources, _ = vis._resolve_fafb_sources([FAFB_ID])
         assert sources[FAFB_ID_STR] == 'zip'  # unchanged, warned
 
     def test_repair_statuses_persisted_when_caching(self, monkeypatch):
@@ -4378,9 +4422,8 @@ class TestResolveFafbSources:
         vis._load_api_cached_skeletons = lambda ids: ({}, list(ids))
         vis._detect_extrusions_in_skeletons = \
             lambda skeletons, use_cache=False: [FAFB_ID]
-        vis._fetch_fafb_skeletons_via_api = \
-            lambda ids, cache_prepared=False, force_refresh=False: \
-            {FAFB_ID: self._mesh()}
+        cave_tree = self._tree()
+        vis._fetch_fafb_skeletons_via_cave = lambda ids: {FAFB_ID: cave_tree}
         vis._resolve_fafb_sources([FAFB_ID])
         assert recorded.get(FAFB_ID_STR) == 'api_repaired'
 
@@ -4471,13 +4514,10 @@ class TestFafbExtrusionChecks:
             def __init__(self, dataset, project_root, verbose):
                 captured['dataset'] = dataset
 
-            def fetch_fafb_meshes(self, ids, use_cache, force_refresh,
-                                  simplify_mesh, soma_simplification,
-                                  soma_radius):
-                captured['ids'] = list(ids)
-                mesh = navis.MeshNeuron(make_small_trimesh())
-                mesh.id = FAFB_ID
-                return [mesh]
+            def fetch_skeleton(self, body_id, use_cache=True):
+                captured['ids'] = captured.get('ids', []) + [body_id]
+                tree = make_chain_neuron(body_id=FAFB_ID_STR)
+                return tree
 
         fake_mod.CAVEDataFetcher = FakeFetcher
         monkeypatch.setitem(sys.modules, 'cave_data_fetcher', fake_mod)
@@ -4486,7 +4526,8 @@ class TestFafbExtrusionChecks:
         result = VisualizeSkeleton.fix_fafb_extrusions(
             [FAFB_ID], dataset='flywire_FAFB_v783', verbose=True)
         assert FAFB_ID_STR in result
-        assert captured['ids'] == [FAFB_ID]
+        from flywire_ids import body_id_to_api_int
+        assert captured['ids'] == [body_id_to_api_int(FAFB_ID)]
 
 # ---------------------------------------------------------------------------
 # Batch 6: plot_individuals, PDF/PPTX summaries, export_individuals_webdriver,

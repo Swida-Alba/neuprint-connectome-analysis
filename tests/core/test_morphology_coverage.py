@@ -1016,14 +1016,20 @@ def test_load_flywire_skeletons_batch_respects_api_repaired(
         fafb_utils, "load_extrusion_repair_status",
         lambda root, folder: {"7": "api_repaired"})
 
+    replacement = make_tree()
+    monkeypatch.setattr(
+        M, "_load_cave_cached_skeletons",
+        lambda *a, **k: {7: replacement},
+    )
+
     def no_cave(*a, **k):
-        raise AssertionError("an api_repaired tree must not be re-replaced")
+        raise AssertionError("a cached api_repaired tree must not be re-fetched")
 
     monkeypatch.setattr(M, "_flywire_cave_skeletons", no_cave)
     out = M.load_flywire_skeletons_batch(
         "flywire_FAFB_v783", [7], project_root=str(tmp_path),
         check_extrusions=True)
-    assert int(out[7].id) == 7          # cached CAVE-derived tree kept
+    assert out[7] is replacement        # dedicated CAVE-derived tree kept
 
 
 def test_load_flywire_skeletons_batch_cave_fallback_for_fafb(tmp_path, monkeypatch):
@@ -1071,6 +1077,24 @@ def test_flywire_cave_skeletons_skeletonizes_via_fetcher(
         "flywire_FAFB_v783", [5], project_root=str(tmp_path),
         denoise_twigs=3000.0)
     assert set(out) == {5} and out[5] is _CaveFetcherStub.skeletons[5]
+
+
+def test_flywire_cave_skeletons_uses_cached_replacement_without_token(
+        tmp_path, monkeypatch):
+    replacement = make_tree()
+    monkeypatch.setattr(
+        M, "_load_cave_cached_skeletons",
+        lambda *a, **k: {5: replacement},
+    )
+    monkeypatch.setattr(
+        "utils.flywire_readiness.flywire_skeleton_readiness",
+        lambda *a, **k: {"cave_token": False},
+    )
+
+    out = M._flywire_cave_skeletons(
+        "flywire_FAFB_v783", [5, 6], project_root=str(tmp_path))
+
+    assert out == {5: replacement}
 
 
 def test_append_vectors_branches(tmp_path, monkeypatch):

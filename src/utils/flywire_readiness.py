@@ -180,14 +180,15 @@ def _cave_token_from_config(project_root: Path) -> Optional[str]:
 def _first_existing(paths: list[Path]) -> Optional[Path]:
     """Return the first existing file or populated directory in *paths*."""
 
+    cache_patterns = ("*.pkl", "*.pkl.zst", "*.swc", "*.swc.gz", "*.swc.zst")
     for path in paths:
         if path.is_file():
             return path
         if path.is_dir():
             try:
-                if (next(path.rglob("*.pkl"), None) is not None
-                        or next(path.rglob("*.pkl.zst"), None) is not None):
-                    return path
+                for pattern in cache_patterns:
+                    if next(path.rglob(pattern), None) is not None:
+                        return path
             except OSError:
                 continue
     return None
@@ -199,9 +200,10 @@ def local_fafb_skeleton_source(
 ) -> Optional[Path]:
     """Locate a usable local FAFB skeleton/geometry source.
 
-    The converter's ZIP/parquet outputs are the preferred sources.  Existing
-    API/skeleton pickle caches also count as local preparation: they allow a
-    repeat run to proceed without making another CAVE request.
+    The converter's ZIP/parquet outputs are the preferred sources. Existing
+    API and canonical skeleton pickle/SWC caches also count as local
+    preparation: they allow a repeat run to proceed without making another
+    CAVE request.
     """
 
     root = Path(project_root) if project_root is not None else Path(__file__).resolve().parents[2]

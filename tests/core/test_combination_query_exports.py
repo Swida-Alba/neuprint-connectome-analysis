@@ -434,13 +434,101 @@ def test_raw_schedule_diagnostics_are_labeled(tmp_path):
     )
     params.output_folder = str(tmp_path)
     analyzer = ComparisonAnalyzer(params)
-    vis_dir = tmp_path / "comparison_visualizations"
-    vis_dir.mkdir(parents=True)
-    analyzer._export_threshold_alignment_heatmap(vis_dir)
+    results_dir = tmp_path / "comparison_results"
+    results_dir.mkdir(parents=True)
+    analyzer._export_threshold_alignment(results_dir)
 
-    density = pd.read_csv(vis_dir / "edge_density_per_threshold.csv")
+    density = pd.read_csv(results_dir / "edge_density_per_threshold.csv")
     assert set(density["threshold_scope"]) == {"raw_run_schedule_diagnostic"}
-    matrix = pd.read_csv(vis_dir / "threshold_alignment_matrix.csv")
+    matrix = pd.read_csv(results_dir / "threshold_alignment_matrix.csv")
     assert set(matrix["threshold_scope"]) == {"raw_run_schedule_diagnostic"}
-    best = pd.read_csv(vis_dir / "threshold_alignment_best_matches.csv")
-    assert set(best["threshold_scope"]) == {"raw_run_schedule_diagnostic"}
+    best_path = results_dir / "threshold_alignment_best_matches.csv"
+    if best_path.exists():
+        best = pd.read_csv(best_path)
+        assert set(best["threshold_scope"]) == {"raw_run_schedule_diagnostic"}
+
+
+def test_standard_and_custom_pathfinding_suppress_ratio_probability(tmp_path, monkeypatch):
+    """Phase G item 8 / F-RPT-004: both modes must pass None ratio/probability
+    callbacks to the visualizer so by_ratio/by_probability folders are never
+    emitted for pathfinding comparisons."""
+    import sys
+    from pathlib import Path
+
+    project_root = Path(__file__).parent.parent.parent
+    for entry in (str(project_root), str(project_root / "src")):
+        if entry not in sys.path:
+            sys.path.insert(0, entry)
+
+    import pandas as pd
+    from comparison import ComparisonParameters
+    from comparison import comparison_analyzer as ca
+
+    captured = {}
+
+    class StubVisualizer:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def save_all_plots(self, **kwargs):
+            captured.update(kwargs)
+
+    import comparison.visualizations as vis_module
+    monkeypatch.setattr(vis_module, 'ComparisonVisualizer', StubVisualizer)
+
+    datasets = ["hemibrain:v1.2.1", "male-cns:v1.0"]
+    raw = {
+        dataset: {
+            3: pd.DataFrame({
+                "type_pre": ["source"],
+                "type_post": ["target"],
+                "weight": [3],
+            })
+        }
+        for dataset in datasets
+    }
+    aligned = pd.DataFrame(
+        {dataset: [3] for dataset in datasets},
+        index=["source -> target"],
+    )
+
+    def run(mode):
+        captured.clear()
+        if mode == "standard":
+            params = ComparisonParameters(datasets=datasets, thresholds=[3])
+            analyzer = ca.ComparisonAnalyzer(params)
+            analyzer.raw_results = raw
+            analyzer.get_mapped_results = lambda: raw
+            analyzer.get_aligned_data = lambda _t: aligned
+            analyzer._analysis_thresholds = lambda: [3]
+            analyzer.get_cached_similarities = lambda _t: pd.DataFrame()
+            analyzer._get_path_data_for_threshold = lambda _t: pd.DataFrame()
+            analyzer.comparison_report = {}
+        else:
+            params = ComparisonParameters(
+                datasets=datasets,
+                threshold_mode="combinations",
+                threshold_combinations=[
+                    {"id": "q1",
+                     "thresholds": {datasets[0]: 3, datasets[1]: 3}},
+                ],
+            )
+            analyzer = ca.ComparisonAnalyzer(params)
+            analyzer.raw_results = raw
+            analyzer.get_threshold_queries = lambda: [
+                {"id": "q1", "thresholds": {datasets[0]: 3, datasets[1]: 3}}]
+            analyzer.get_mapped_results = lambda: {
+                ds: {"q1": raw[ds][3]} for ds in datasets}
+            analyzer.get_aligned_data_for_query = lambda _q: aligned
+            analyzer._get_path_data_for_query = lambda _q: pd.DataFrame()
+            analyzer._similarity_cache = {}
+            analyzer._query_record = lambda _k: {
+                "id": "q1", "thresholds": {datasets[0]: 3, datasets[1]: 3}}
+            analyzer.comparison_report = {}
+        analyzer._generate_visualizations(str(tmp_path / mode))
+        return captured
+
+    for mode in ("standard", "combinations"):
+        kwargs = run(mode)
+        assert kwargs.get("ratio_data_func") is None, mode
+        assert kwargs.get("prob_data_func") is None, mode

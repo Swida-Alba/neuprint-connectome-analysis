@@ -167,14 +167,14 @@ def skeleton_flow(title, desc, footer, steps, H=None):
 # ================= FAFB =================
 fafb = skeleton_flow(
     'FAFB skeleton handling — fetch · cache · simplify · scene',
-    'FAFB neuron skeleton flow: raw cache vs healed bundle and CAVE, fast prep, tube mesh, decimation, cross-template bridging, tilt correction.',
+    'FAFB neuron skeleton flow: raw cache vs healed bundle, CAVE replacement store/API, fast prep, tube mesh, decimation, cross-template bridging, tilt correction.',
     'Tilt correction is data-level (rotates coordinates of mesh + neurons + synapses + ROIs); the FAFB camera has no tilt. Native FAFB skeletons need no MCNS→FAFB transform.',
     [
         ('pill', "FAFB body IDs (layer)"),
         ('D', ['raw skeleton cache hit?', '(raw_skeletons/*.swc.zst)'], 'raw level',
-         ('Cache used', 'skip bundle, extrusion, CAVE')),
+         ('Cache used', 'skip bundle; still check extrusion')),
         ('P', 'Healed bundle → warm raw cache', 'sk_lod1_783_healed.zst (541 MB)', False),
-        ('P', 'Extrusion check → CAVE replace', 'mesh → skeletonize (line only)', False),
+        ('P', 'Extrusion check → CAVE replacement', 'cave_skeletons/ hit or wavefront tree', False),
         ('P', 'Fast prep: nodes → 25% retention', 'topology floor: roots · branch · terminals', True),
         ('P', 'Tube mesh (6 pts)', '', False),
         ('P', 'Face decimation (slider 0.90)', '', False),
@@ -183,7 +183,7 @@ fafb = skeleton_flow(
         ('P', 'Tilt correction (data-level)', '−3° Z / −3° Y · mesh + neurons + synapses + ROIs', False),
         ('pill', "plot (FLYWIRE nm / selected space)"),
         ('note', 'native FAFB: no MCNS→FAFB transform — skeletons are already in FLYWIRE coordinates (skip_transform)'),
-        ('note', 'line mode: 90% node reduction · prepared mesh cache 0.95 (CAVE fetches) · cache_neurons writes raw level'),
+        ('note', 'line mode: 90% node reduction · no render-boundary skeletonization · CAVE replacements are pre-skeletonized trees'),
     ])
 
 # ================= male-cns =================

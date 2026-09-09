@@ -28,16 +28,29 @@ pipeline sections of `docs/visualizations/Skeleton_Data_Pipeline.md`.
 
 Decision flow: [fafb_skeleton_flow.html](../visualizations/fafb_skeleton_flow.html).
 
-Per-body resolution order:
+Every render pipeline (fast/fine/artistic tube and line) consumes
+TreeNeurons. Per-body resolution order:
 
-1. Local healed skeleton bundle `datasets/<ds>/sk_lod1_783_healed.zst`
+1. Shared raw-skeleton cache (`cache/<ds>/skeletons/raw_skeletons/*.swc.zst`).
+2. Local healed skeleton bundle `datasets/<ds>/sk_lod1_783_healed.zst`
    (columnar zstd, ~541 MB; legacy 13.8 GB ZIP fallback) when the member exists.
-2. Shared raw-skeleton cache (`cache/<ds>/skeletons/raw_skeletons/*.swc.zst`).
-3. Prepared CAVE MeshNeuron cache (`.pkl.zst`) at the configured cache policy —
-   used for mesh rendering; CAVE meshes are **never** skeletonized for tube
-   rendering or cache writing.
-4. Token-gated CAVE API fetch for remaining or extrusion-affected bodies
-   (mesh → in-memory wavefront skeletonization for line mode only).
+3. Extrusion check on the tree (parquet-cached in
+   `extrusion_check_results.parquet`). Flagged or missing bodies are replaced
+   by the **CAVE replacement path**: a cached
+   `cache/<ds>/skeletons/cave_skeletons/{bodyId}.swc.zst` tree is used first;
+   on a miss, the raw CAVE mesh is wavefront-skeletonized (no pre-decimation)
+   and the level-0 tree is persisted in that dedicated replacement store.
+   - a body already recorded `api_repaired` is served from that store
+     without another network round-trip;
+   - a CAVE outage or per-body miss falls back to pruning the diagnosed
+     extrusion branch locally (status stays retryable).
+4. Token-gated CAVE API fetch for everything still missing.
+
+Skeletonization calibration (measured on l-LNv, 2026-09): wavefront on the
+raw mesh reproduces the healed bundle's node density within ~11% at 1–8 s
+per neuron; any mesh pre-decimation is slower end-to-end (decimation costs
+more than it saves) and drops thin processes (density collapses to 10–30% of
+reference), so the raw mesh is always the skeletonization input.
 
 If CAVE access is unavailable, the user gets an actionable message naming the
 missing local bundle/cache and the required CAVE configuration — the resolver
@@ -68,10 +81,11 @@ ships both):
 
 ## 2. Raw cache and storage rules
 
-All three sources share one raw store layout:
+Bundle-derived FAFB, NeuPrint, and BANC raw trees share one raw store layout:
 `cache/{dataset}/skeletons/raw_skeletons/{bodyId}.swc.zst`, always at **raw
 level (simplification 0)** and always in the dataset's **native coordinates**
-(FLYWIRE nm / JRCFIB2022Mraw voxels / BANC nm).
+(FLYWIRE nm / JRCFIB2022Mraw voxels / BANC nm). FAFB CAVE replacements use
+the separate `skeletons/cave_skeletons/` store described above.
 
 - Raw SWCs are never modified by render-time simplification.
 - A MeshNeuron is never serialized as an SWC to satisfy a skeleton API.
@@ -80,9 +94,18 @@ level (simplification 0)** and always in the dataset's **native coordinates**
   on every cache load to restore the processing class; malformed downloads are
   parsed before caching and never poison the store. The pcg-µm product is
   persisted **scaled to nm** (R1) so a reload cannot mix unit frames.
-- FAFB CAVE-fetched meshes use the separate prepared mesh cache; a
-  skeletonized CAVE replacement is an in-memory line-mode product and never
-  overwrites the mesh cache.
+- FAFB CAVE skeletonization writes a **separate replacement store**,
+  `cache/{dataset}/skeletons/cave_skeletons/{bodyId}.swc.zst`, with the
+  provenance header `cave_mesh_wavefront`. These trees replace
+  healed-bundle skeletons that failed the extrusion check, so they must
+  never overwrite the healed-bundle mirror in `raw_skeletons`. Level-0
+  entries left in `raw_skeletons` by the pre-unification fetch path remain
+  readable as a legacy fallback; simp90-legacy writes there are rejected.
+
+The former prepared FAFB mesh cache (`cache/{dataset}/meshes/…`, 95%-decimated
+`MeshNeuron` pickles) is no longer read or written by the visualization
+pipeline; non-visualization consumers (`download_all_skeletons`,
+mesh-representation workflows) still own it.
 
 ## 3. Rendering pipelines and simplification scale
 
@@ -126,10 +149,11 @@ why the L2 product is treated as pre-simplified rather than re-derived.
 
 ### 3.4 Line mode
 
-Local TreeNeuron sources: raw SWC → in-memory node simplification → direct line
-plotting. Dataset defaults: FAFB 90% reduction; male-cns 50%; BANC full-res 50%
-(L2/pcg untouched). CAVE MeshNeurons used in line mode are skeletonized only at
-the render boundary, in memory, and never written to any cache.
+Local TreeNeuron sources: raw SWC or a CAVE replacement tree → in-memory node
+simplification → direct line plotting. Dataset defaults: FAFB 90% reduction;
+male-cns 50%; BANC full-res 50% (L2/pcg untouched). FAFB CAVE replacements
+arrive as pre-skeletonized trees from the `cave_skeletons` store, so line mode
+never skeletonizes at the render boundary.
 
 ### 3.5 Simplification scale (all knobs)
 
@@ -141,7 +165,7 @@ the render boundary, in memory, and never written to any cache.
 | `BANC_LINE_FULL_NODE_REDUCTION` | 0.50 | BANC line mode, full-res only |
 | `skeleton_mesh_simplification` | 0.90 fast / 0.95 fine-artistic | face decimation, all families |
 | `NEUPRINT_MESH_CACHE_SIMPLIFICATION` | 0.95 | male-cns mesh-cache level |
-| `FLYWIRE_MESH_CACHE_SIMPLIFICATION` | 0.95 | FAFB prepared-mesh-cache level |
+| `FLYWIRE_MESH_CACHE_SIMPLIFICATION` | 0.95 | prepared-mesh-cache level (non-visualization consumers) |
 | `BANC_FULL_MIN_KEEP_FACES` | 4,000 | BANC full-res decimation floor |
 | `BANC_L2_EQUIVALENT_SIMPLIFICATION` | 0.90 | BANC L2/pcg pre-simplified baseline |
 
@@ -283,7 +307,7 @@ selections never retarget ROIs.
   NeuronBridge Find Neurons sub-visualizations; the dedicated Skeleton tab stays
   independently configurable (tube default), with an explicit caller override.
 - Line mode never triggers tube conversion or surface decimation.
-- `use_cache=True` reads prepared caches first and writes results;
+- `use_cache=True` reads applicable source caches first and writes results;
   `use_cache=False` fetches online and reads/writes no caches.
 
 ## 8. Further reading

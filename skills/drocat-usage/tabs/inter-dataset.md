@@ -132,6 +132,12 @@ python skills/drocat-usage/scripts/run_direct.py \
 - Pathfinding comparisons do not apply ratio or traversal-probability
   filtering; their comparison visualization exports therefore do not create
   `by_ratio/` or `by_probability/` folders.
+- `edge_density_per_threshold.csv`, `threshold_alignment_matrix.csv`, and
+  `threshold_alignment_best_matches.csv` are raw-run schedule diagnostics
+  (`threshold_scope=raw_run_schedule_diagnostic` in combination mode); use
+  `threshold_combinations.csv` for the actual query rows.
+- `degree_*`, `top_edges_*`, and `unique_to_*` exports are Standard-only;
+  Custom combination runs omit them rather than infer a union threshold.
 - Use `auto_type_mapping=True` (and `overall_mapping_json`) when type names differ
   between datasets.
 - Use `parallel=True` with a bounded `max_workers` for many datasets; start with

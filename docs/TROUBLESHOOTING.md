@@ -316,6 +316,32 @@ python -c "from caveclient import CAVEclient; CAVEclient(datastack_name='flywire
 
 Follow the browser prompt to authenticate.
 
+### FAFB Visualization Re-downloads the Same Neurons from CAVE Every Run
+
+**Symptom:** Every FAFB visualization run logs
+`Skeletonizing N FAFB skeleton(s) from CAVE meshes...` for the same bodies
+(usually extrusion-flagged neurons such as l-LNv), adding minutes per run.
+
+**Cause:** CAVE-skeletonized replacement trees are cached in the dedicated
+`cache/{dataset}/skeletons/cave_skeletons/` store. If that directory was
+deleted, or the bodies were previously only "repaired" by the removed
+prepared-mesh cache (versions before the FAFB tree unification), the store is
+empty and the resolver fetches online again.
+
+**Solution:** none needed — the fetch is a one-time ~5-20s cost per neuron
+and the replacement store makes every later run fully offline. To pre-warm
+specific neurons without rendering:
+
+```python
+from coana import VisualizeSkeleton
+VisualizeSkeleton.fix_fafb_extrusions([720575940624086675])
+```
+
+If runs still re-fetch with the store populated, check the repair status
+ledger `cache/{dataset}/extrusion_check_results.parquet`: a body whose
+`repair_status` is `api_failed`/`local_fallback` is deliberately retried
+until a CAVE fetch succeeds.
+
 ---
 
 ## FAFB and BANC Release Preparation Issues

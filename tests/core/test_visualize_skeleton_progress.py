@@ -106,9 +106,10 @@ def test_transform_progress_reuses_outer_bar(monkeypatch, capsys):
     assert output.err == ""
 
 
-def test_fafb_visualizer_api_bypass_fetches_mesh_without_skeletonizing(
+def test_fafb_visualizer_cave_fetch_skeletonizes_and_honours_cache_policy(
         tmp_path, monkeypatch):
-    """The uncached FAFB render path must stay mesh-native."""
+    """The CAVE fetch wavefront-skeletonizes the raw mesh and passes the
+    cache_neurons policy through as the fetch's use_cache policy."""
     import cave_data_fetcher as cave
 
     calls = []
@@ -117,9 +118,9 @@ def test_fafb_visualizer_api_bypass_fetches_mesh_without_skeletonizing(
         def __init__(self, *args, **kwargs):
             assert kwargs["project_root"] == str(tmp_path)
 
-        def fetch_mesh(self, body_id, use_cache=False):
+        def fetch_skeleton(self, body_id, use_cache=True):
             calls.append((body_id, use_cache))
-            return make_mesh(body_id)
+            return make_chain_neuron(body_id=str(body_id))
 
     monkeypatch.setattr(cave, "CAVEDataFetcher", FakeCaveFetcher)
 
@@ -127,51 +128,18 @@ def test_fafb_visualizer_api_bypass_fetches_mesh_without_skeletonizing(
     visualizer.dataset = "flywire_FAFB_v783"
     visualizer.script_path = str(tmp_path)
     visualizer.verbose = False
+    visualizer._flywire_skeleton_access = {"cave_token": "test-token"}
+
     visualizer.cache_neurons = False
-    visualizer._flywire_skeleton_access = {"cave_token": "test-token"}
-
-    result = visualizer._fetch_fafb_skeletons_via_api(
-        [42], cache_prepared=False, soma_positions={"42": [0, 0, 0]})
-
+    result = visualizer._fetch_fafb_skeletons_via_cave([42])
     assert calls == [(42, False)]
-    assert isinstance(result["42"], navis.MeshNeuron)
+    assert isinstance(result["42"], navis.TreeNeuron)
 
-
-def test_fafb_visualizer_extrusion_repair_forces_mesh_refresh(
-        tmp_path, monkeypatch):
-    """Extrusion replacement must refresh even when prepared caching is on."""
-    import cave_data_fetcher as cave
-
-    calls = []
-
-    class FakeCaveFetcher:
-        def __init__(self, *args, **kwargs):
-            assert kwargs["project_root"] == str(tmp_path)
-
-        def fetch_fafb_meshes(self, body_ids, **kwargs):
-            calls.append((list(body_ids), kwargs))
-            return navis.NeuronList([make_mesh(body_ids[0])])
-
-    monkeypatch.setattr(cave, "CAVEDataFetcher", FakeCaveFetcher)
-
-    visualizer = object.__new__(VisualizeSkeleton)
-    visualizer.dataset = "flywire_FAFB_v783"
-    visualizer.script_path = str(tmp_path)
-    visualizer.verbose = False
+    calls.clear()
     visualizer.cache_neurons = True
-    visualizer._flywire_skeleton_access = {"cave_token": "test-token"}
-
-    result = visualizer._fetch_fafb_skeletons_via_api(
-        [42],
-        cache_prepared=True,
-        force_refresh=True,
-        soma_positions={"42": [0, 0, 0]},
-    )
-
-    assert isinstance(result["42"], navis.MeshNeuron)
-    assert calls[0][0] == [42]
-    assert calls[0][1]["use_cache"] is True
-    assert calls[0][1]["force_refresh"] is True
+    result = visualizer._fetch_fafb_skeletons_via_cave([42])
+    assert calls == [(42, True)]
+    assert isinstance(result["42"], navis.TreeNeuron)
 
 
 def _stub_fafb_layer_visualizer(mode):
@@ -195,7 +163,7 @@ def test_fafb_fast_tube_stages_reduce_then_tube_then_decimate():
     neuron = make_chain_neuron(2000)
 
     out, done = visualizer._process_fafb_layer(
-        navis.NeuronList([neuron]), [], "fast", False,
+        navis.NeuronList([neuron]), "fast",
         render_mesh_cache={})
 
     assert done is True
@@ -215,7 +183,7 @@ def test_fafb_line_mode_never_emits_tube_or_mesh_stages():
     neuron = make_chain_neuron(2000)
 
     out, done = visualizer._process_fafb_layer(
-        navis.NeuronList([neuron]), [], "fast", False,
+        navis.NeuronList([neuron]), "fast",
         render_mesh_cache={})
 
     assert done is False
@@ -234,16 +202,14 @@ def test_fafb_progress_callback_reports_stages_and_completion():
 
     visualizer._process_fafb_layer(
         navis.NeuronList([make_chain_neuron(2000)]),
-        [make_mesh(99)],
         "fast",
-        False,
         render_mesh_cache={},
         progress_callback=lambda neuron_id, stage, done: events.append(
             (neuron_id, stage, done)),
     )
 
     completed = [event for event in events if event[2]]
-    assert {event[0] for event in completed} == {"42", 99}
+    assert {event[0] for event in completed} == {"42"}
     assert any(event[0] == "42" and event[1] == "reduce nodes"
                for event in events)
     assert any(event[0] == "42" and event[1] == "tube mesh"

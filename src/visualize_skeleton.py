@@ -69,14 +69,18 @@ For FAFB, the system includes:
 - **Automatic extrusion detection**: Identifies and replaces distorted skeletons
   (auto_fix_extrusions=True by default)
 - **Parquet-based caching**: Efficient storage of extrusion check results
-- **API fallback**: Fetches fresh meshes from CAVE API when needed, with a
-  local branch-pruning fallback when an affected tree cannot be replaced
+- **CAVE skeletonization fallback**: Extruded or missing skeletons are
+  replaced by wavefront-skeletonizing the raw CAVE mesh; the level-0 tree
+  is cached in the dedicated ``cave_skeletons`` store so later runs skip
+  the network. A local branch-pruning fallback applies when CAVE cannot
+  replace an affected tree
 
 Performance Notes
 -----------------
 - First run downloads and caches data (may take several minutes)
 - Subsequent runs use cached data (typically <10 seconds)
 - For FAFB: Auto-extrusion detection adds ~30-60s on first run, cached thereafter
+- CAVE skeletonization is a one-time ~5-20s cost per replaced neuron
 - Use skeleton_mesh_simplification=0.95-0.99 for faster rendering of large scenes
 
 See Also
@@ -177,9 +181,6 @@ try:
         FLYWIRE_MESH_CACHE_SIMPLIFICATION,
         FLYWIRE_MESH_CACHE_SOMA_RADIUS,
         FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION,
-        FlyWireMeshCache,
-        flywire_mesh_cache_key,
-        parse_soma_position,
         simplify_mesh_fine,
         simplify_mesh_with_soma_awareness,
     )
@@ -188,9 +189,6 @@ except ImportError:
         FLYWIRE_MESH_CACHE_SIMPLIFICATION,
         FLYWIRE_MESH_CACHE_SOMA_RADIUS,
         FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION,
-        FlyWireMeshCache,
-        flywire_mesh_cache_key,
-        parse_soma_position,
         simplify_mesh_fine,
         simplify_mesh_with_soma_awareness,
     )
@@ -1803,7 +1801,8 @@ class VisualizeSkeleton:
     - **Soma-aware simplification**: Preserves cell body detail while simplifying branches
     - **Automatic extrusion detection**: Identifies and replaces distorted skeletons
     - **Parquet caching**: Efficient storage of large-scale analysis results
-    - **API fallback**: Fetches fresh meshes from CAVE when ZIP data has artifacts
+    - **CAVE fallback**: Wavefront-skeletonizes raw CAVE meshes when ZIP data
+      has artifacts; repaired trees are kept in the dedicated replacement store
     
     Attributes
     ----------
@@ -2776,25 +2775,29 @@ class VisualizeSkeleton:
 
     force_API_fetching: bool = False
     '''
-    Force fetching skeletons from CAVE API instead of downloaded ZIP files (FAFB only).\n
+    Route FAFB skeleton resolution through the CAVE path instead of the local\n+    healed ZIP bundle (FAFB only).\n
     \n
-    True: Fetch native meshes from CloudVolume API without skeletonizing.\n
-          Avoids extrusion artifacts from pre-generated ZIP data.\n
-          Prepared meshes use the dedicated FlyWire mesh cache.\n
-    False: Use downloaded ZIP skeletons if available (default).\n
+    True: Every FAFB body is resolved from the dedicated CAVE replacement
+          store when ``cache_neurons=True``; a store miss is
+          wavefront-skeletonized from the raw CAVE mesh.\n
+    False: Use the shared raw cache and the healed ZIP skeleton bundle first
+           (default); only missing or extrusion-affected bodies use CAVE.\n
     \n
-    Note: API fetching is slower (~5-10s per neuron) but produces cleaner skeletons.\n
-    Only applies to FAFB datasets. Has no effect on BANC or NeuPrint datasets.\n
+    Set ``cache_neurons=False`` with this flag for an online-only fetch that
+    neither reads nor writes the CAVE replacement store. With caching enabled,
+    an existing CAVE tree may be reused. Only applies to FAFB datasets.\n
     '''
     
     auto_fix_extrusions: bool = True
     '''
     Automatically detect and replace skeletons with extrusion artifacts (FAFB only).\n
     \n
-    True: When loading skeletons from ZIP, automatically check for extrusion artifacts\n
-          (spiky protrusions from aggressive mesh simplification). If detected, fetch\n
-          fresh meshes from CAVE API to replace them. If CAVE is unavailable,\n
-          prune only a safely diagnosed local extrusion branch in memory.\n
+    True: When loading trees from the raw cache or the healed bundle, check for\n
+          extrusion artifacts (spiky protrusions from aggressive mesh\n
+          simplification). If detected, replace the tree with a\n
+          CAVE-skeletonized one (wavefront on the raw mesh, cached in the\n
+          dedicated cave_skeletons store). If CAVE is unavailable, prune only\n
+          a safely diagnosed local extrusion branch in memory.\n
           Results are cached for future use; derived local repairs are not\n
           written as raw data.\n
           This is the default to ensure visual quality.\n
@@ -3299,9 +3302,10 @@ class VisualizeSkeleton:
                 )
         else:
             pipeline_note = (
-                ' FAFB renders start from a soma-aware mesh cache, so the '
-                'same percentage is not directly comparable with NeuPrint '
-                'skeleton-node reduction.'
+                ' FAFB renders build every tube mesh from level-0 tree '
+                'sources (raw cache / healed bundle / CAVE-skeletonized '
+                'replacements), so the same percentage is not directly '
+                'comparable with NeuPrint skeleton-node reduction.'
             )
         return (
             '<strong>Skeleton simplification warning.</strong> '
@@ -6466,14 +6470,15 @@ class VisualizeSkeleton:
             self.client_type = 'flywire'
             self._vprint(f"Auto-detected client_type='flywire' from dataset '{self.dataset}'", level='full')
 
-        # For FAFB: enable the representation-specific mesh cache for
-        # morphology.  Synapse caching remains enabled when requested: the
-        # local master connection table is the dataset's canonical synapse
-        # cache and is also the source for pre/post connector sites.
+        # FAFB caching is skeleton-native: level-0 trees live in the shared
+        # raw SWC store, CAVE-skeletonized extrusion replacements in the
+        # dedicated cave_skeletons store.  Synapse caching remains enabled
+        # when requested: the local master connection table is the
+        # dataset's canonical synapse cache and is also the source for
+        # pre/post connector sites.
         if self.client_type == 'flywire' or is_fafb_dataset(self.dataset):
-            # Raw skeleton pkl caching is disabled (files too large and need transformation anyway)
             if self.cache_neurons:
-                self._vprint("  ℹ️  FAFB: Using mesh cache (simplified) instead of raw skeletons", level='full')
+                self._vprint("  ℹ️  FAFB: Using level-0 SWC caches (raw_skeletons + cave_skeletons) with the healed bundle", level='full')
         
         # Set the default mesh level based on the selected pipeline if it was
         # not specified. Fast/direct renders use 90% removal; fine/artistic
@@ -8066,12 +8071,6 @@ class VisualizeSkeleton:
         except Exception:
             return neuron
     
-    # Cache stores meshes simplified with soma-aware parameters
-    # Skeleton: 0.95 simplification (keep 5% of faces) 
-    # Soma: 0.8 simplification (keep 20% of faces) to prevent extrusion artifacts
-    FAFB_MESH_CACHE_SIMPLIFICATION = FLYWIRE_MESH_CACHE_SIMPLIFICATION
-    FAFB_MESH_CACHE_SOMA_SIMPLIFICATION = FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION
-
     # Compatibility threshold retained as the direct/fast default render
     # target. It is not an on-disk skeleton-cache level. New visualization
     # writes explicitly use level 0 (raw) so the render decimator is applied
@@ -8079,7 +8078,6 @@ class VisualizeSkeleton:
     NEUPRINT_SKELETON_CACHE_LEVEL = 0.9
     NEUPRINT_RENDER_CACHE_SIMPLIFICATION = 0
     NEUPRINT_SKELETON_DOWNSAMPLE = 10  # deprecated helper compatibility
-    FAFB_MESH_CACHE_SOMA_RADIUS = FLYWIRE_MESH_CACHE_SOMA_RADIUS
     
     # Number of radial segments used when converting TreeNeurons to tube
     # meshes. This controls the tube cross-section only; it is deliberately
@@ -8120,106 +8118,6 @@ class VisualizeSkeleton:
     # explicit also avoids relying on a dependency default that may change.
     NEUPRINT_FETCH_BATCH_SIZE = 64
     NEUPRINT_FETCH_MAX_THREADS = 3
-
-    def _get_fafb_mesh_cache_key(self):
-        """Generate a cache key based on coordinate space and simplification settings.
-        
-        Returns a subfolder name like 'FLYWIRE_simp95_soma80_r20' for caching purposes.
-        Cache stores meshes with soma-aware simplification (gentler on cell body).
-        Note: FAFB cache stores UN-TRANSFORMED, UN-ROTATED meshes (native FLYWIRE).
-        """
-        return flywire_mesh_cache_key(
-            self.FAFB_MESH_CACHE_SIMPLIFICATION,
-            self.FAFB_MESH_CACHE_SOMA_SIMPLIFICATION,
-            self.FAFB_MESH_CACHE_SOMA_RADIUS,
-        )
-    
-    def _load_cached_fafb_meshes(self, body_ids):
-        """Load simplified and meshed FAFB neurons from cache.
-        
-        Cache contains meshes with soma-aware simplification:
-        - Skeleton: 0.95 simplification (keep 5% of faces)
-        - Soma region (within 20µm): 0.8 simplification (keep 20% of faces)
-        
-        No coordinate transformation is needed since FAFB uses native FLYWIRE coordinates.
-        Only used when skeleton_mesh_simplification >= 0.95.
-        If simplification > 0.95, additional simplification is applied after loading.
-        
-        Parameters
-        ----------
-        body_ids : list
-            List of bodyIds to load
-            
-        Returns
-        -------
-        tuple: (dict of bodyId -> MeshNeuron, list of missing bodyIds)
-        """
-        if not self.cache_neurons:
-            return {}, body_ids
-        
-        # Only use cache when simplification >= cache level (0.95)
-        if self.skeleton_mesh_simplification < self.FAFB_MESH_CACHE_SIMPLIFICATION:
-            return {}, body_ids
-        
-        # Check for FAFB prepared-mesh dataset
-        if not is_fafb_dataset(self.dataset):
-            return {}, body_ids
-        
-        mesh_cache = FlyWireMeshCache(
-            self.dataset,
-            project_root=self.script_path,
-            simplification=self.FAFB_MESH_CACHE_SIMPLIFICATION,
-            soma_simplification=self.FAFB_MESH_CACHE_SOMA_SIMPLIFICATION,
-            soma_radius=self.FAFB_MESH_CACHE_SOMA_RADIUS,
-        )
-        
-        loaded = {}
-        missing = []
-        
-        for bid in body_ids:
-            bid = normalize_flywire_body_id(bid)
-            mesh_neuron = mesh_cache.load(bid)
-            if mesh_neuron is not None:
-                loaded[bid] = mesh_neuron
-            else:
-                missing.append(bid)
-        
-        if loaded:
-            self._vprint(f'  ✓ Loaded {len(loaded)} neurons from mesh cache (skel={self.FAFB_MESH_CACHE_SIMPLIFICATION}, soma={self.FAFB_MESH_CACHE_SOMA_SIMPLIFICATION})', level='full')
-        
-        return loaded, missing
-    
-    def _save_cached_fafb_meshes(self, mesh_neurons_dict):
-        """Save transformed and meshed FAFB neurons to cache.
-        
-        Parameters
-        ----------
-        mesh_neurons_dict : dict
-            Dictionary of bodyId -> MeshNeuron to save
-        """
-        if not self.cache_neurons:
-            return
-        
-        # Check for FAFB prepared-mesh dataset
-        if not is_fafb_dataset(self.dataset):
-            return
-        
-        mesh_cache = FlyWireMeshCache(
-            self.dataset,
-            project_root=self.script_path,
-            simplification=self.FAFB_MESH_CACHE_SIMPLIFICATION,
-            soma_simplification=self.FAFB_MESH_CACHE_SOMA_SIMPLIFICATION,
-            soma_radius=self.FAFB_MESH_CACHE_SOMA_RADIUS,
-        )
-        normalized = {
-            normalize_flywire_body_id(bid): mesh
-            for bid, mesh in mesh_neurons_dict.items()
-            if isinstance(mesh, navis.MeshNeuron)
-        }
-        saved_count = mesh_cache.save(normalized)
-        
-        if saved_count > 0:
-            self._vprint(f'  💾 Saved {saved_count} new meshes to cache', level='full')
 
     # ---- NeuPrint "FAFB-format" transform helpers ----
 
@@ -9336,101 +9234,51 @@ class VisualizeSkeleton:
         
         return cached, missing
 
-    def _fafb_soma_positions(self, body_ids: list) -> dict:
-        """Read numeric FAFB soma positions from the local neuron table."""
-        requested = set(normalize_flywire_body_ids(body_ids))
-        positions = {}
-        for frame in self.neuron_dfs:
-            if frame is None or 'bodyId' not in frame.columns:
-                continue
-            position_col = next(
-                (name for name in (
-                    'position', 'soma_position', 'soma_pos', 'somaLocation')
-                 if name in frame.columns),
-                None,
-            )
-            if position_col is None:
-                continue
-            for body_id, value in zip(
-                    frame['bodyId'].tolist(), frame[position_col].tolist()):
-                key = normalize_flywire_body_id(body_id)
-                if key not in requested or key in positions:
-                    continue
-                soma_pos = parse_soma_position(value)
-                if soma_pos is not None:
-                    positions[key] = soma_pos
-        return positions
+    def _resolve_fafb_sources(self, body_ids, api_only=False):
+        """Resolve per-body FAFB tree sources for rendering.
 
-    def _resolve_fafb_sources(self, body_ids, allow_mesh_cache=True,
-                              api_only=False):
-        """Resolve per-body FAFB sources for rendering.
+        Every FAFB render pipeline (fast/fine/artistic tube and line)
+        consumes TreeNeurons, resolved per body:
 
-        Priority per body:
+        1. shared raw SWC cache (``raw_skeletons``; skipped when the
+           ``cache_neurons`` policy disables it),
+        2. healed-ZIP SWC (canonical raw bundle),
+        3. extrusion check on those trees (parquet-cached).  Flagged bodies
+           are replaced by CAVE-skeletonized trees:
+           - a body already recorded ``api_repaired`` is served from the
+             dedicated ``cave_skeletons`` store without another network
+             round-trip,
+           - a store miss fetches the raw CAVE mesh online, wavefront-
+             skeletonizes it, and persists the tree in that store.
+        4. a CAVE outage or per-body miss falls back to pruning the
+           diagnosed extrusion branch locally when the cut is safe; the
+           repair status stays retryable.
 
-        Tube mode (``allow_mesh_cache`` — caching enabled at/above the
-        prepared level):
-        1. prepared CAVE mesh cache (``FlyWireMeshCache``) — CAVE-derived,
-           extrusion-free, and already at the render preparation level,
-        2. shared raw SWC cache (+ legacy API-pickle migration),
-        3. healed-ZIP SWC (canonical raw bundle),
-        4. CAVE API (online, no skeletonization, no SWC writes).
-
-        Line mode (mesh cache disabled): the order is SWC-first —
-        1. shared raw SWC cache, 2. healed-ZIP SWC, 3. CAVE API — because
-        mesh sources would have to be skeletonized in memory at the render
-        boundary and would render with different geometry than the trees
-        used in tube mode.
-
-        Bodies are classified as ``zip``, ``raw_cache``, ``mesh_cache``,
-        ``local_repaired`` or ``cave``.  Cache sources (2/3) are skipped when
-        the ``cache_neurons`` policy disables them; the healed ZIP is the
-        canonical raw source and stays eligible.  ``api_only``
-        (``force_API_fetching``) routes every body straight to CAVE.
-
-        Extrusion repair runs on TreeNeuron sources only and honors the
-        same ``use_cache`` policy for the parquet check results.
+        ``api_only`` (``force_API_fetching``) routes every body through CAVE
+        resolution; with caching enabled, an existing CAVE replacement tree
+        may be served without a network request.
 
         Returns
         -------
         tuple
-            (sources, skeleton_cache, mesh_cache):
+            (sources, skeleton_cache):
             sources: canonical bodyId -> one of ``zip``, ``raw_cache``,
-                     ``local_repaired``, ``mesh_cache`` or ``cave``
+                     ``local_repaired`` or ``cave``
             skeleton_cache: canonical bodyId -> TreeNeuron
-            mesh_cache: canonical bodyId -> MeshNeuron (mesh_cache/cave)
         """
         requested = normalize_flywire_body_ids(body_ids)
         sources = {}
         skeleton_cache = {}
-        mesh_cache = {}
 
         if api_only:
-            fetched = self._fetch_fafb_skeletons_via_api(
-                requested, cache_prepared=allow_mesh_cache)
+            fetched = self._fetch_fafb_skeletons_via_cave(requested)
             for key, neuron in fetched.items():
-                sources[normalize_flywire_body_id(key)] = 'cave'
-            mesh_cache.update(fetched)
-            return sources, skeleton_cache, mesh_cache
+                canonical = normalize_flywire_body_id(key)
+                sources[canonical] = 'cave'
+                skeleton_cache[canonical] = neuron
+            return sources, skeleton_cache
 
         remaining = list(requested)
-
-        def _take_bundle():
-            """Healed-ZIP SWC (canonical raw bundle)."""
-            nonlocal remaining
-            if not remaining:
-                return
-            zip_skeletons = self._preload_fafb_skeletons(
-                body_ids_filter=remaining)
-            if zip_skeletons:
-                zip_neurons = {
-                    normalize_flywire_body_id(key): neuron
-                    for key, neuron in zip_skeletons.items()
-                }
-                for canonical in zip_neurons:
-                    sources[canonical] = 'zip'
-                remaining = [b for b in remaining
-                             if b not in zip_neurons]
-                skeleton_cache.update(zip_neurons)
 
         def _take_raw_cache():
             """Shared raw SWC cache (skipped under use_cache=False)."""
@@ -9440,50 +9288,34 @@ class VisualizeSkeleton:
             raw_skeletons, missing = self._load_api_cached_skeletons(
                 remaining)
             if raw_skeletons:
-                raw_neurons = {
-                    normalize_flywire_body_id(key): neuron
-                    for key, neuron in raw_skeletons.items()
-                }
-                for canonical in raw_neurons:
+                for key, neuron in raw_skeletons.items():
+                    canonical = normalize_flywire_body_id(key)
                     sources[canonical] = 'raw_cache'
-                remaining = [b for b in missing
-                             if b not in raw_neurons]
-                skeleton_cache.update(raw_neurons)
+                    skeleton_cache[canonical] = neuron
+                remaining = [
+                    b for b in remaining
+                    if normalize_flywire_body_id(b) not in sources]
 
-        def _take_mesh_cache():
-            """Prepared CAVE mesh cache (tube mode only)."""
+        def _take_bundle():
+            """Healed-ZIP SWC (canonical raw bundle)."""
             nonlocal remaining
             if not remaining:
                 return
-            loaded, missing = self._load_cached_fafb_meshes(remaining)
-            if loaded:
-                mesh_neurons = {
-                    normalize_flywire_body_id(key): neuron
-                    for key, neuron in loaded.items()
-                }
-                for canonical in mesh_neurons:
-                    sources[canonical] = 'mesh_cache'
-                remaining = [b for b in missing
-                             if b not in mesh_neurons]
-                mesh_cache.update(mesh_neurons)
+            zip_skeletons = self._preload_fafb_skeletons(
+                body_ids_filter=remaining)
+            if zip_skeletons:
+                for key, neuron in zip_skeletons.items():
+                    canonical = normalize_flywire_body_id(key)
+                    sources[canonical] = 'zip'
+                    skeleton_cache[canonical] = neuron
+                remaining = [
+                    b for b in remaining
+                    if normalize_flywire_body_id(b) not in sources]
 
-        if allow_mesh_cache:
-            # Tube mode: the prepared mesh cache wins. Its entries are
-            # CAVE-derived (extrusion-free) and already at the render
-            # preparation level, so they skip the extrusion check/repair
-            # cycle that tree sources go through below.
-            _take_mesh_cache()
-            _take_raw_cache()
-            _take_bundle()
-        else:
-            # Line mode: SWC-first (raw cache before the canonical bundle,
-            # matching the pipeline priority); mesh sources would be
-            # skeletonized in memory at the render boundary with different
-            # geometry.
-            _take_raw_cache()
-            _take_bundle()
+        _take_raw_cache()
+        _take_bundle()
 
-        # Extrusion repair on TreeNeuron sources only.
+        # Extrusion check + CAVE repair on the tree sources.
         tree_bodies = [
             body_id for body_id, source in sources.items()
             if source in {'zip', 'raw_cache'}
@@ -9496,132 +9328,235 @@ class VisualizeSkeleton:
             )
             if extrusion_ids:
                 self._vprint(
-                    f'  🔍 Detected {len(extrusion_ids)} meshes with '
-                    f'extrusion artifacts, fetching fresh from API...',
+                    f'  🔍 Detected {len(extrusion_ids)} trees with '
+                    f'extrusion artifacts, replacing through CAVE '
+                    f'skeletonization...',
                     level='simple',
                 )
-                api_fixed = self._fetch_fafb_skeletons_via_api(
-                    extrusion_ids,
-                    cache_prepared=allow_mesh_cache,
-                    force_refresh=True,
-                )
-                fixed_ids = set()
-                repair_statuses = {}
-                if api_fixed:
-                    for key, neuron in api_fixed.items():
-                        canonical = normalize_flywire_body_id(key)
-                        fixed_ids.add(canonical)
-                        sources[canonical] = 'cave'
-                        skeleton_cache.pop(canonical, None)
-                        mesh_cache[canonical] = neuron
-                        if self.cache_neurons:
-                            repair_statuses[canonical] = 'api_repaired'
-                    self._vprint(
-                        f'  ✓ Replaced {len(api_fixed)} extrusion-affected '
-                        f'meshes', level='simple')
+                self._repair_extruded_via_cave(
+                    extrusion_ids, sources, skeleton_cache)
 
-                # A CAVE outage, missing token, or a per-body API miss must
-                # not put the known-bad ZIP tree back into the render
-                # silently.  Keep the source local and prune only the
-                # diagnosed extrusion branch when the cut is safe.
-                failed_ids = []
-                seen_failed = set()
-                for body_id in extrusion_ids:
-                    canonical = normalize_flywire_body_id(body_id)
-                    if canonical not in fixed_ids and canonical not in seen_failed:
-                        failed_ids.append(canonical)
-                        seen_failed.add(canonical)
-                if failed_ids:
-                    from fafb_utils import repair_extruded_skeleton
-
-                    locally_repaired = 0
-                    for canonical in failed_ids:
-                        source_neuron = skeleton_cache.get(canonical)
-                        if source_neuron is None:
-                            if self.cache_neurons:
-                                repair_statuses[canonical] = 'api_failed'
-                            continue
-                        repaired, repair_stats = repair_extruded_skeleton(
-                            source_neuron)
-                        if repair_stats.get('repaired'):
-                            skeleton_cache[canonical] = repaired
-                            sources[canonical] = 'local_repaired'
-                            locally_repaired += 1
-                            if self.cache_neurons:
-                                # Keep the detection flag. A local fallback
-                                # remains retryable when CAVE is available on
-                                # a later run.
-                                repair_statuses[canonical] = 'local_fallback'
-                            self._vprint(
-                                f'  🩹 CAVE fetch failed for {canonical}; '
-                                f'pruned {repair_stats["removed_nodes"]} '
-                                f'extrusion node(s) locally',
-                                level='simple',
-                            )
-                    if locally_repaired:
-                        self._vprint(
-                            f'  🩹 Locally repaired {locally_repaired}/'
-                            f'{len(failed_ids)} extrusion-affected '
-                            f'skeleton(s)', level='simple')
-                    if locally_repaired < len(failed_ids):
-                        self._vprint(
-                            f'  ⚠️  CAVE fetch failed for '
-                            f'{len(failed_ids) - locally_repaired} '
-                            f'extrusion-affected skeleton(s); no safe local '
-                            f'branch cut was available',
-                            level='simple',
-                        )
-                    for canonical in failed_ids:
-                        repair_statuses.setdefault(canonical, 'api_failed')
-
-                if self.cache_neurons and repair_statuses:
-                    try:
-                        from fafb_utils import set_extrusion_repair_status
-
-                        dataset_safe = canonical_dataset_name(self.dataset).replace(':', '_').replace('.', '_')
-                        set_extrusion_repair_status(
-                            self.script_path,
-                            dataset_safe,
-                            repair_statuses,
-                        )
-                    except Exception as exc:
-                        self._vprint(
-                            f'  ⚠️ Failed to save extrusion repair status: '
-                            f'{exc}', level='full')
-
-        # 4. CAVE API for anything still missing.
+        # 4. CAVE for anything still missing.
         if remaining:
-            fetched = self._fetch_fafb_skeletons_via_api(
-                remaining, cache_prepared=allow_mesh_cache)
+            fetched = self._fetch_fafb_skeletons_via_cave(remaining)
             for key, neuron in fetched.items():
-                sources[normalize_flywire_body_id(key)] = 'cave'
-            mesh_cache.update(fetched)
+                canonical = normalize_flywire_body_id(key)
+                sources[canonical] = 'cave'
+                skeleton_cache[canonical] = neuron
 
         counts = {}
         for source in sources.values():
             counts[source] = counts.get(source, 0) + 1
         summary = ', '.join(
             f'{counts[source]} {source}' for source in
-            ('zip', 'raw_cache', 'local_repaired', 'mesh_cache', 'cave')
+            ('zip', 'raw_cache', 'local_repaired', 'cave')
             if source in counts)
         self._vprint(f'  🗂️  FAFB sources resolved: {summary}', level='simple')
-        return sources, skeleton_cache, mesh_cache
+        return sources, skeleton_cache
 
-    def _fetch_fafb_skeletons_via_api(
-            self, body_ids: list, cache_prepared: bool = True,
-            soma_positions: dict | None = None,
-            force_refresh: bool = False) -> dict:
-        """Fetch FAFB meshes through CAVE without skeletonizing.
+    def _load_cave_cached_skeleton(self, body_id):
+        """Load a CAVE-skeletonized tree from the ``cave_skeletons`` store.
 
-        With ``cache_prepared=True`` this uses the shared FlyWire mesh cache
-        and applies the visualization cache policy (95% branch reduction,
-        80% soma reduction within 20 µm).  When that cache is intentionally
-        bypassed, the online path returns raw ``MeshNeuron`` objects for a
-        lower render simplification.  ``force_refresh=True`` bypasses the
-        prepared-mesh cache read for repair requests, fetches a fresh CAVE
-        mesh, and rewrites the prepared mesh cache when caching is enabled.
-        Neither path writes NeuPrint SWC.
+        Network-free: returns ``None`` on a store miss so callers can decide
+        whether an online fetch is worth the round-trip.
         """
+        try:
+            from cave_data_fetcher import CAVEDataFetcher
+        except ImportError:
+            try:
+                from .cave_data_fetcher import CAVEDataFetcher
+            except ImportError:
+                return None
+        try:
+            fetcher = CAVEDataFetcher(
+                dataset=self.dataset, project_root=self.script_path,
+                cache_enabled=bool(self.cache_neurons), verbose=False)
+            neuron = fetcher.load_cached_skeleton(body_id)
+        except Exception:
+            return None
+        if neuron is not None:
+            neuron.name = str(normalize_flywire_body_id(body_id))
+        return neuron
+
+    def _repair_extruded_via_cave(self, extrusion_ids, sources,
+                                  skeleton_cache):
+        """Replace extrusion-flagged trees with CAVE-skeletonized trees.
+
+        Priority per body: the ``api_repaired`` repair status wins first (a
+        previously repaired body is served from the ``cave_skeletons`` store
+        without a network round-trip), then the store itself, then an online
+        wavefront skeletonization of the raw CAVE mesh.  A CAVE outage or a
+        per-body miss keeps the known local tree and prunes only the
+        diagnosed extrusion branch when the cut is safe; statuses
+        (``api_repaired``/``local_fallback``/``api_failed``) are persisted so
+        later runs can honour or retry them.
+        """
+        repair_status = {}
+        if self.cache_neurons:
+            try:
+                from fafb_utils import load_extrusion_repair_status
+
+                dataset_safe = canonical_dataset_name(self.dataset).replace(
+                    ':', '_').replace('.', '_')
+                repair_status = load_extrusion_repair_status(
+                    self.script_path, dataset_safe)
+            except Exception:
+                repair_status = {}
+
+        served_ids = []
+        fetch_ids = []
+        for body_id in extrusion_ids:
+            canonical = normalize_flywire_body_id(body_id)
+            if repair_status.get(str(canonical)) == 'api_repaired':
+                cached = self._load_cave_cached_skeleton(canonical)
+                if cached is not None:
+                    skeleton_cache[canonical] = cached
+                    sources[canonical] = 'cave'
+                    served_ids.append(canonical)
+                    continue
+            fetch_ids.append(canonical)
+        if served_ids:
+            self._vprint(
+                f'  ♻️  Served {len(served_ids)} previously repaired '
+                f'body(ies) from the cave_skeletons store',
+                level='simple')
+
+        api_fixed = {}
+        repair_statuses = {}
+        if fetch_ids:
+            api_fixed = self._fetch_fafb_skeletons_via_cave(fetch_ids)
+        fixed_ids = set()
+        if api_fixed:
+            for key, neuron in api_fixed.items():
+                canonical = normalize_flywire_body_id(key)
+                fixed_ids.add(canonical)
+                sources[canonical] = 'cave'
+                skeleton_cache[canonical] = neuron
+                if self.cache_neurons:
+                    repair_statuses[canonical] = 'api_repaired'
+            self._vprint(
+                f'  ✓ Replaced {len(api_fixed)} extrusion-affected '
+                f'skeletons', level='simple')
+
+        # A CAVE outage, missing token, or a per-body API miss must
+        # not put the known-bad ZIP tree back into the render
+        # silently.  Keep the source local and prune only the
+        # diagnosed extrusion branch when the cut is safe.
+        failed_ids = []
+        seen_failed = set()
+        for body_id in fetch_ids:
+            canonical = normalize_flywire_body_id(body_id)
+            if canonical not in fixed_ids and canonical not in seen_failed:
+                failed_ids.append(canonical)
+                seen_failed.add(canonical)
+        if failed_ids:
+            from fafb_utils import repair_extruded_skeleton
+
+            locally_repaired = 0
+            for canonical in failed_ids:
+                source_neuron = skeleton_cache.get(canonical)
+                if source_neuron is None:
+                    if self.cache_neurons:
+                        repair_statuses[canonical] = 'api_failed'
+                    continue
+                repaired, repair_stats = repair_extruded_skeleton(
+                    source_neuron)
+                if repair_stats.get('repaired'):
+                    skeleton_cache[canonical] = repaired
+                    sources[canonical] = 'local_repaired'
+                    locally_repaired += 1
+                    if self.cache_neurons:
+                        # Keep the detection flag. A local fallback
+                        # remains retryable when CAVE is available on
+                        # a later run.
+                        repair_statuses[canonical] = 'local_fallback'
+                    self._vprint(
+                        f'  🩹 CAVE fetch failed for {canonical}; '
+                        f'pruned {repair_stats["removed_nodes"]} '
+                        f'extrusion node(s) locally',
+                        level='simple',
+                    )
+            if locally_repaired:
+                self._vprint(
+                    f'  🩹 Locally repaired {locally_repaired}/'
+                    f'{len(failed_ids)} extrusion-affected '
+                    f'skeleton(s)', level='simple')
+            if locally_repaired < len(failed_ids):
+                self._vprint(
+                    f'  ⚠️  CAVE fetch failed for '
+                    f'{len(failed_ids) - locally_repaired} '
+                    f'extrusion-affected skeleton(s); no safe local '
+                    f'branch cut was available',
+                    level='simple',
+                )
+            for canonical in failed_ids:
+                repair_statuses.setdefault(canonical, 'api_failed')
+
+        if self.cache_neurons and repair_statuses:
+            try:
+                from fafb_utils import set_extrusion_repair_status
+
+                dataset_safe = canonical_dataset_name(self.dataset).replace(':', '_').replace('.', '_')
+                set_extrusion_repair_status(
+                    self.script_path,
+                    dataset_safe,
+                    repair_statuses,
+                )
+            except Exception as exc:
+                self._vprint(
+                    f'  ⚠️ Failed to save extrusion repair status: '
+                    f'{exc}', level='full')
+
+    def _fetch_fafb_skeletons_via_cave(self, body_ids) -> dict:
+        """Fetch FAFB trees through CAVE by skeletonizing the raw mesh.
+
+        ``CAVEDataFetcher.fetch_skeleton`` wavefront-skeletonizes the raw
+        CAVE mesh — measured at ×1.01–1.14 of the healed bundle's node
+        density in 1–8 s per l-LNv — and persists the level-0 tree in the
+        dedicated ``cave_skeletons`` store when ``cache_neurons`` is
+        enabled, so later runs skip the network entirely.
+        """
+        requested_ids = (
+            normalize_flywire_body_ids(body_ids)
+            if is_fafb_dataset(self.dataset)
+            else list(body_ids)
+        )
+        trees = {}
+        remaining = []
+
+        # A dedicated replacement is a complete local source. Probe it before
+        # checking the token so cache-only reruns work offline. The helper is
+        # itself gated by cache_neurons, preserving the strict no-cache policy.
+        if self.cache_neurons:
+            for bid in requested_ids:
+                cached = self._load_cave_cached_skeleton(bid)
+                if isinstance(cached, navis.TreeNeuron):
+                    key = (
+                        normalize_flywire_body_id(bid)
+                        if is_fafb_dataset(self.dataset)
+                        else bid
+                    )
+                    cached.id = (
+                        body_id_to_api_int(key)
+                        if is_fafb_dataset(self.dataset)
+                        else int(bid)
+                    )
+                    cached.name = str(key)
+                    cached.units = 'nm'
+                    trees[key] = cached
+                else:
+                    remaining.append(bid)
+        else:
+            remaining = list(requested_ids)
+
+        if trees:
+            self._vprint(
+                f'  ♻️  Served {len(trees)} FAFB tree(s) from the '
+                f'cave_skeletons cache.',
+                level='simple', use_tqdm=True)
+        if not remaining:
+            return trees
+
         access = getattr(self, '_flywire_skeleton_access', None)
         if access is not None and not access.get('cave_token'):
             self._vprint(
@@ -9629,7 +9564,7 @@ class VisualizeSkeleton:
                 'and using local skeleton data only.',
                 level='simple',
             )
-            return {}
+            return trees
 
         try:
             from cave_data_fetcher import CAVEDataFetcher
@@ -9638,105 +9573,51 @@ class VisualizeSkeleton:
                 from .cave_data_fetcher import CAVEDataFetcher
             except ImportError:
                 self._vprint("  ⚠️  cave_data_fetcher module not found, falling back to ZIP", use_tqdm=True)
-                return {}
-        
-        requested_ids = (
-            normalize_flywire_body_ids(body_ids)
-            if is_fafb_dataset(self.dataset)
-            else list(body_ids)
-        )
+                return trees
 
-        # Split the progress line so prepared-cache hits are reported
-        # separately from the online CAVE fetches that actually hit the
-        # network.  ``force_refresh`` bypasses prepared-cache reads, so no
-        # hit report is emitted for repair requests.
-        prepared_ids = []
-        online_ids = list(requested_ids)
-        if cache_prepared and self.cache_neurons and not force_refresh:
-            try:
-                mesh_cache = FlyWireMeshCache(
-                    self.dataset,
-                    project_root=self.script_path,
-                    simplification=self.FAFB_MESH_CACHE_SIMPLIFICATION,
-                    soma_simplification=self.FAFB_MESH_CACHE_SOMA_SIMPLIFICATION,
-                    soma_radius=self.FAFB_MESH_CACHE_SOMA_RADIUS,
-                )
-                existing = mesh_cache.existing_ids()
-                prepared_ids = [
-                    bid for bid in online_ids if str(bid) in existing
-                ]
-                online_ids = [
-                    bid for bid in online_ids if str(bid) not in existing
-                ]
-            except Exception:
-                prepared_ids, online_ids = [], list(requested_ids)
-        if prepared_ids:
+        if remaining:
             self._vprint(
-                f'  🗃️  {len(prepared_ids)} prepared mesh-cache hit(s) '
-                f'via CAVE path', use_tqdm=True)
-        if online_ids:
-            self._vprint(
-                f'  🌐 Fetching {len(online_ids)} meshes via CAVE API...',
-                use_tqdm=True)
-        if not prepared_ids and not online_ids:
-            self._vprint(
-                f'  🌐 Fetching {len(requested_ids)} meshes via CAVE API...',
+                f'  🌐 Skeletonizing {len(remaining)} FAFB skeleton(s) '
+                f'from CAVE meshes...',
                 use_tqdm=True)
 
-        # Convert to integers only at the CAVE boundary.
-        int_body_ids = [
-            body_id_to_api_int(bid) if is_fafb_dataset(self.dataset)
-            else int(bid)
-            for bid in requested_ids
-        ]
-        
         fetcher = CAVEDataFetcher(
             dataset=self.dataset,
             project_root=self.script_path,
+            cache_enabled=bool(self.cache_neurons),
             # Keep CAVE's per-mesh tqdm out of the render-wide bar.
             verbose=False,
         )
-        
-        positions = soma_positions or self._fafb_soma_positions(requested_ids)
-        mesh_cache = {}
-        if cache_prepared and self.cache_neurons:
-            neurons = fetcher.fetch_fafb_meshes(
-                int_body_ids,
-                use_cache=True,
-                force_refresh=force_refresh,
-                simplify_mesh=self.FAFB_MESH_CACHE_SIMPLIFICATION,
-                soma_simplification=self.FAFB_MESH_CACHE_SOMA_SIMPLIFICATION,
-                soma_radius=self.FAFB_MESH_CACHE_SOMA_RADIUS,
-                soma_positions=positions,
-            )
-        else:
-            # This is the detail-preserving render path.  It intentionally
-            # fetches online-only raw meshes and never calls fetch_skeleton.
-            neurons = []
-            for body_id in int_body_ids:
-                mesh = fetcher.fetch_mesh(body_id, use_cache=False)
-                if mesh is None:
-                    continue
-                key = normalize_flywire_body_id(body_id)
-                soma_pos = positions.get(key, positions.get(body_id))
-                if soma_pos is not None:
-                    try:
-                        mesh.soma_pos = soma_pos
-                    except Exception:
-                        pass
-                neurons.append(mesh)
-        
-        for n in neurons:
-            if isinstance(n, navis.MeshNeuron) and hasattr(n, 'id'):
-                key = (
-                    normalize_flywire_body_id(n.id)
-                    if is_fafb_dataset(self.dataset)
-                    else n.id
-                )
-                mesh_cache[key] = n
+        use_cache = bool(self.cache_neurons)
 
-        self._vprint(f'  ✓ Fetched {len(mesh_cache)}/{len(requested_ids)} meshes via API', use_tqdm=True)
-        return mesh_cache
+        for bid in remaining:
+            try:
+                neuron = fetcher.fetch_skeleton(
+                    body_id_to_api_int(bid), use_cache=use_cache)
+            except Exception as exc:
+                self._vprint(
+                    f'  ✗ CAVE skeletonization failed for {bid}: {exc}',
+                    level='full', use_tqdm=True)
+                neuron = None
+            if isinstance(neuron, navis.TreeNeuron):
+                key = (
+                    normalize_flywire_body_id(bid)
+                    if is_fafb_dataset(self.dataset)
+                    else bid
+                )
+                neuron.id = (
+                    body_id_to_api_int(key)
+                    if is_fafb_dataset(self.dataset)
+                    else int(bid)
+                )
+                neuron.name = str(key)
+                neuron.units = 'nm'
+                trees[key] = neuron
+
+        self._vprint(
+            f'  ✓ Resolved {len(trees)}/{len(requested_ids)} FAFB trees '
+            f'via CAVE', use_tqdm=True)
+        return trees
 
     @staticmethod
     def detect_mesh_extrusions(mesh, soma_pos=None, soma_radius=20000, 
@@ -9876,14 +9757,15 @@ class VisualizeSkeleton:
         elif severity == 'mild':
             recommendation = (
                 'Mild extrusions detected. Consider using soma-aware simplification '
-                '(soma_mesh_simplification=0.8) or fetch fresh skeleton via CAVE API.'
+                '(soma_mesh_simplification=0.8) or fetch a CAVE replacement '
+                'skeleton via the CAVE API.'
             )
         elif severity == 'moderate':
             if soma_region_issues:
                 recommendation = (
                     'Moderate extrusions near soma region. Strongly recommend using '
-                    'VisualizeSkeleton.fix_fafb_extrusions([bodyId]) to fetch fresh '
-                    'skeleton from CAVE API.'
+                    'VisualizeSkeleton.fix_fafb_extrusions([bodyId]) to fetch a '
+                    'replacement skeleton from CAVE API.'
                 )
             else:
                 recommendation = (
@@ -9893,8 +9775,8 @@ class VisualizeSkeleton:
         else:  # severe
             recommendation = (
                 'Severe extrusions detected! This skeleton should be replaced. Use '
-                'VisualizeSkeleton.fix_fafb_extrusions([bodyId]) to fetch fresh '
-                'skeleton from CAVE API.'
+                'VisualizeSkeleton.fix_fafb_extrusions([bodyId]) to fetch a '
+                'replacement skeleton from CAVE API.'
             )
         
         if verbose:
@@ -9922,20 +9804,20 @@ class VisualizeSkeleton:
         }
 
     @staticmethod
-    def fix_fafb_extrusions(body_ids: list, dataset: str = 'flywire_FAFB_v783', 
+    def fix_fafb_extrusions(body_ids: list, dataset: str = 'flywire_FAFB_v783',
                             verbose: bool = True) -> dict:
-        """Fix FAFB mesh extrusion issues with a fresh CAVE mesh fetch.
-        
-        The downloaded FAFB skeleton ZIP (sk_lod1_783_healed.zip) may contain neurons
-        with extrusion artifacts (mesh errors appearing as spikes/protrusions). This
-        method fetches fresh mesh data from CAVE, applies the visualization
-        95% branch / 80% soma preparation, and caches the resulting
-        ``MeshNeuron`` objects in the dedicated FlyWire mesh cache. It does
-        not skeletonize the CAVE mesh.
-        
-        Once cached, VisualizeSkeleton will automatically prefer the prepared
-        mesh versions over the problematic ZIP versions.
-        
+        """Fix FAFB extrusion issues by caching CAVE-skeletonized trees.
+
+        The downloaded FAFB skeleton ZIP (sk_lod1_783_healed.zip) may contain
+        neurons with extrusion artifacts (mesh errors appearing as spikes/
+        protrusions). This method wavefront-skeletonizes the raw CAVE mesh
+        (which is extrusion-free) and caches the resulting ``TreeNeuron`` in
+        the dedicated ``cave_skeletons`` store. Bodies already present in
+        that store are served from it without a new download.
+
+        Once cached, every render pipeline automatically prefers the
+        CAVE-skeletonized tree over the problematic healed-bundle tree.
+
         Parameters
         ----------
         body_ids : list
@@ -9944,24 +9826,24 @@ class VisualizeSkeleton:
             Dataset name, default 'flywire_FAFB_v783'
         verbose : bool
             Whether to print progress messages
-            
+
         Returns
         -------
         dict
-            Dictionary of fixed meshes {bodyId: MeshNeuron}
-            
+            Dictionary of fixed skeletons {bodyId: TreeNeuron}
+
         Example
         -------
         >>> # Fix specific neurons with extrusion issues
         >>> from coana import VisualizeSkeleton
         >>> fixed = VisualizeSkeleton.fix_fafb_extrusions([720575940596125868, 720575940597856265])
         >>> print(f"Fixed {len(fixed)} neurons")
-        
+
         >>> # Now use them in visualization (automatically uses fixed versions)
         >>> vs = VisualizeSkeleton(
         ...     dataset='flywire_FAFB_v783',
         ...     neuron_layers=['l-LNv'],
-        ...     force_API_fetching=False,  # API cache still takes priority
+        ...     force_API_fetching=False,  # CAVE cache still takes priority
         ... )
         >>> vs.plot_neurons()
         """
@@ -9981,58 +9863,57 @@ class VisualizeSkeleton:
                     "CAVE data fetcher not available. Install with: "
                     "pip install caveclient cloud-volume"
                 )
-        
+
         if verbose:
-            print(f"🔧 Fixing FAFB mesh extrusions for {len(body_ids)} neurons...")
-        
+            print(f"🔧 Fixing FAFB extrusions for {len(body_ids)} neurons...")
+
         requested_ids = (
             normalize_flywire_body_ids(body_ids)
             if is_fafb_dataset(dataset)
             else list(body_ids)
         )
-        api_body_ids = [
-            body_id_to_api_int(bid) if is_fafb_dataset(dataset)
-            else int(bid)
-            for bid in requested_ids
-        ]
-        
+
         fetcher = CAVEDataFetcher(
             dataset=dataset,
             project_root=os.path.dirname(os.path.dirname(__file__)),
             verbose=verbose,
         )
 
-        # FAFB/CAVE is mesh-native.  Repair fetches the prepared mesh at the
-        # same 95% branch / 80% soma policy as visualization and writes only
-        # the dedicated FlyWire mesh cache; it never skeletonizes the mesh.
-        neurons = fetcher.fetch_fafb_meshes(
-            api_body_ids,
-            use_cache=True,
-            force_refresh=True,
-            simplify_mesh=FLYWIRE_MESH_CACHE_SIMPLIFICATION,
-            soma_simplification=FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION,
-            soma_radius=FLYWIRE_MESH_CACHE_SOMA_RADIUS,
-        )
-        
+        # Cache hits are returned as-is: an existing cave_skeletons entry is
+        # the CAVE product itself (never derived from the extruded source),
+        # so re-fetching it would only repeat an identical download.
         result = {}
-        for n in neurons:
-            if hasattr(n, 'id'):
+        for bid in requested_ids:
+            try:
+                neuron = fetcher.fetch_skeleton(
+                    body_id_to_api_int(bid), use_cache=True)
+            except Exception as exc:
+                if verbose:
+                    print(f"  ✗ Failed to fix {bid}: {exc}")
+                continue
+            if isinstance(neuron, navis.TreeNeuron):
                 key = (
-                    normalize_flywire_body_id(n.id)
+                    normalize_flywire_body_id(bid)
                     if is_fafb_dataset(dataset)
-                    else n.id
+                    else bid
                 )
-                result[key] = n
-        
+                neuron.id = (
+                    body_id_to_api_int(key)
+                    if is_fafb_dataset(dataset)
+                    else int(bid)
+                )
+                neuron.name = str(key)
+                neuron.units = 'nm'
+                result[key] = neuron
+
         if verbose:
-            print(f"✓ Fixed and cached {len(neurons)}/{len(body_ids)} FAFB meshes")
+            print(f"✓ Fixed and cached {len(result)}/{len(body_ids)} FAFB skeletons")
             print(
                 "  Cache location: "
                 f"cache/{canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')}"
-                "/meshes/FLYWIRE_simp95_soma80_r20/"
+                "/skeletons/cave_skeletons/"
             )
-            print("  These meshes will automatically be preferred over ZIP data")
-        
+            print("  These skeletons will automatically be preferred over ZIP data")
         return result
 
     @staticmethod
@@ -10293,13 +10174,16 @@ class VisualizeSkeleton:
         # Auto-fix if requested
         if auto_fix and result['has_extrusions']:
             if verbose:
-                print(f"\n  🔧 Auto-fixing: Fetching fresh mesh from CAVE API...")
+                print(f"\n  🔧 Auto-fixing: Fetching CAVE replacement skeleton...")
             try:
                 fixed = VisualizeSkeleton.fix_fafb_extrusions([body_id_int], dataset=dataset, verbose=verbose)
                 if body_id_int in fixed or body_id_str in fixed:
                     result['auto_fixed'] = True
                     result['skeleton'] = fixed.get(body_id_int) or fixed.get(body_id_str)
-                    result['recommendation'] = 'Extrusions fixed! Fresh mesh fetched and cached from CAVE API.'
+                    result['recommendation'] = (
+                        'Extrusions fixed! CAVE replacement skeleton fetched '
+                        'and cached in cave_skeletons.'
+                    )
             except Exception as e:
                 if verbose:
                     print(f"  ⚠️  Auto-fix failed: {e}")
@@ -10318,16 +10202,14 @@ class VisualizeSkeleton:
         unified chain (888 L2 -> 888 full-resolution -> v626-era pcg-skel).
         ``resolution`` is accepted for backward compatibility and ignored.
 
-        Returns the ``(sources, skeleton_cache, mesh_cache)`` triple shape
-        of ``_resolve_fafb_sources``; ``mesh_cache`` is always empty because
-        every BANC source is a TreeNeuron.
+        Returns the ``(sources, skeleton_cache)`` pair shape of
+        ``_resolve_fafb_sources``; every BANC source is a TreeNeuron.
         """
         import banc_public_data
 
         requested = normalize_flywire_body_ids(body_ids)
         sources = {}
         skeleton_cache = {}
-        mesh_cache = {}
         remaining = list(requested)
 
         if use_cache and self.cache_neurons:
@@ -10377,7 +10259,7 @@ class VisualizeSkeleton:
                 self._vprint(
                     f'    fetched {index}/{total} from the public bucket',
                     level='simple')
-        return sources, skeleton_cache, mesh_cache
+        return sources, skeleton_cache
 
     def _process_banc_layer(self, neuron_vols, banc_pipeline,
                             progress_callback=None):
@@ -10637,24 +10519,19 @@ class VisualizeSkeleton:
 
         return neuron_vols, False
 
-    def _process_fafb_layer(self, neuron_vols, cached_mesh_neurons,
-                            fafb_pipeline, use_fafb_cache,
+    def _process_fafb_layer(self, neuron_vols,
+                            fafb_pipeline,
                             render_mesh_cache=None,
                             progress_callback=None):
         """Pipeline-driven FAFB processing for one render layer.
 
-        TreeNeuron sources never write the prepared mesh cache (only CAVE
-        fetches populate it):
-        - fast: TreeNeuron sources run the node-reduction stage (25%
-          retention), then tube meshing + fine surface decimation;
-          MeshNeuron sources (prepared cache / CAVE) skip the node stage
-          and receive surface decimation only.  CAVE meshes are never
-          skeletonized for tube rendering.
-        - fine: soma-aware decimation as before, no node stage.
+        Every source is a TreeNeuron (healed bundle / raw SWC cache /
+        CAVE-skeletonized replacement — see ``_resolve_fafb_sources``):
+        - fast: node-reduction stage (25% retention), then tube meshing +
+          fine surface decimation.
+        - fine: soma-aware decimation, no node stage.
         - artistic: vertex clustering, no node stage.
-        - line: TreeNeuron sources are node-reduced 90%; MeshNeuron
-          sources are skeletonized in memory at the render boundary and
-          never written to any cache.
+        - line: node-reduced 90%; line trees stay trees (no meshing).
 
         Returns ``(processed_neuron_vols, already_simplified)`` so the
         caller can skip the generic tube simplification block.
@@ -10693,63 +10570,8 @@ class VisualizeSkeleton:
             # artistic never combines with it.
             node_stage = (fafb_pipeline == 'fast')
 
-            # --- MeshNeuron sources: surface decimation only.
-            for mesh_n in cached_mesh_neurons:
-                neuron_id = getattr(mesh_n, 'id', None)
-                try:
-                    render_key = normalize_flywire_body_id(neuron_id)
-                except (TypeError, ValueError):
-                    render_key = str(neuron_id)
-                if render_key in render_mesh_cache:
-                    report(neuron_id, 'cached', done=True)
-                    all_mesh_neurons.append(render_mesh_cache[render_key])
-                    continue
-                report(neuron_id, 'mesh source')
-                stage_log(f'  🧱 mesh source (no node stage) {neuron_id}')
-                if getattr(mesh_n, 'trimesh', None) is not None:
-                    n_faces = len(mesh_n.trimesh.faces)
-                    if use_fafb_cache:
-                        # Prepared-level meshes (cache hits and
-                        # prepared CAVE fetches) need only the
-                        # additional relative step to the target.
-                        cache_simp = self.FAFB_MESH_CACHE_SIMPLIFICATION
-                        keep = max(
-                            0.0,
-                            (1 - fafb_target_simp)
-                            / max(1 - cache_simp, 1e-6),
-                        )
-                        target_faces = max(100, int(n_faces * keep))
-                    else:
-                        # Raw CAVE meshes decimate to the absolute
-                        # render target.
-                        target_faces = max(
-                            100, int(n_faces * (1 - fafb_target_simp)))
-                    if target_faces < n_faces:
-                        try:
-                            report(neuron_id, 'decimate')
-                            simplified = decimator(
-                                mesh_n.trimesh, target_faces)
-                            stage_log(f'  ⚡ decimate {neuron_id}')
-                            new_mesh = navis.MeshNeuron(simplified)
-                            new_mesh.id = (
-                                mesh_n.id
-                                if hasattr(mesh_n, 'id') else None)
-                            if hasattr(mesh_n, 'name'):
-                                new_mesh.name = mesh_n.name
-                            render_mesh_cache[render_key] = new_mesh
-                            all_mesh_neurons.append(new_mesh)
-                            report(neuron_id, 'ready', done=True)
-                            continue
-                        except Exception as e:
-                            self._vprint(
-                                f'  ⚠️ decimation failed for '
-                                f'{neuron_id}: {e}', level='full',
-                                use_tqdm=True)
-                render_mesh_cache[render_key] = mesh_n
-                all_mesh_neurons.append(mesh_n)
-                report(neuron_id, 'ready', done=True)
-
-            # --- TreeNeuron sources (healed ZIP / raw SWC cache).
+            # --- TreeNeuron sources (healed bundle / raw SWC cache /
+            #     CAVE-skeletonized replacements).
             if neuron_vols is not None and len(neuron_vols) > 0:
                 neurons_list = (
                     list(neuron_vols)
@@ -10818,9 +10640,6 @@ class VisualizeSkeleton:
                             report(neuron_id, 'ready', done=True)
                             all_mesh_neurons.append(n)
                             continue
-                    elif isinstance(n, navis.MeshNeuron):
-                        report(neuron_id, 'mesh source')
-                        mesh_n = n
                     else:
                         report(neuron_id, 'ready', done=True)
                         all_mesh_neurons.append(n)
@@ -10870,10 +10689,8 @@ class VisualizeSkeleton:
             return neuron_vols, True
 
         if self.skeleton_mode == 'line':
-            # FAFB line mode: no prepared mesh cache, no tube/mesh
-            # stages.  TreeNeuron sources are node-reduced 90%;
-            # MeshNeuron sources are skeletonized in memory at the
-            # render boundary and never written to any cache.
+            # FAFB line mode: no tube/mesh stages.  Every source is a
+            # TreeNeuron; line trees are node-reduced 90% and stay trees.
             prepared_lines = []
             if neuron_vols is not None and len(neuron_vols) > 0:
                 neurons_list = (
@@ -10902,26 +10719,6 @@ class VisualizeSkeleton:
                     else:
                         prepared_lines.append(n)
                         report(neuron_id, 'ready', done=True)
-            for mesh_n in cached_mesh_neurons:
-                neuron_id = getattr(mesh_n, 'id', None)
-                report(neuron_id, 'skeletonize')
-                stage_log(
-                    f'  🦴 skeletonize mesh source {neuron_id} '
-                    f'(line mode, in-memory)')
-                try:
-                    sk = navis.skeletonize(mesh_n)
-                    work, stats = simplify_skeleton_nodes(
-                        sk, FAFB_LINE_NODE_REDUCTION)
-                    stage_log(
-                        f'  🔽 reduce nodes {neuron_id} '
-                        f'{stats["raw_nodes"]}→'
-                        f'{stats["achieved_nodes"]}')
-                    prepared_lines.append(work)
-                except Exception as e:
-                    self._vprint(
-                        f'  ⚠️ skeletonize failed for {neuron_id}: {e}',
-                        level='full', use_tqdm=True)
-                report(neuron_id, 'ready', done=True)
             if prepared_lines:
                 neuron_vols = navis.NeuronList(prepared_lines)
             return neuron_vols, False
@@ -10952,19 +10749,7 @@ class VisualizeSkeleton:
         n_layers = len(self.neuron_layers)
         total_skeletons = sum(len(df) if df is not None else 0 for df in self.neuron_dfs)
         self._vprint(f'\n🔬 Fetching skeletons for {n_layers} layers ({total_skeletons:,} neurons total)...')
-        
-        # For FAFB: Check mesh cache first (transformed + meshed neurons)
-        # Cache stores pre-simplified meshes at FAFB_MESH_CACHE_SIMPLIFICATION
-        # (0.95 = keep 5% of faces).
-        # 
-        # Cache usage decision:
-        # - If user wants simplification >= 0.95 (keep ≤5% faces): use cache, apply additional simplification if needed
-        # - If user wants simplification < 0.95 (keep >5% faces): bypass cache, load from ZIP and apply user's simplification
-        #
-        # Example scenarios:
-        # - simplification=0.98 (keep 2%): load from cache (5%), simplify to 2% → additional_keep = 0.02/0.05 = 40%
-        # - simplification=0.95 (keep 5%): load from cache (5%), no additional simplification needed
-        # - simplification=0.5 (keep 50%): cannot use cache (only has 10%), load from ZIP and apply 0.5 simplification
+
         is_fafb = is_fafb_dataset(self.dataset)
         is_banc = is_banc_dataset(self.dataset)
         is_local_release = is_fafb or is_banc
@@ -10980,28 +10765,16 @@ class VisualizeSkeleton:
         )
         local_pipeline = self._resolved_fafb_pipeline() if is_local_release else None
 
-        # FAFB prepared mesh cache eligibility: caching enabled, tube mode,
-        # and the render target at/above the prepared cache level (0.95).
-        # Line mode disables the prepared mesh cache entirely.
-        use_fafb_cache = (
-            is_fafb
-            and self.skeleton_mode == 'tube' and self.cache_neurons
-            and self.skeleton_mesh_simplification
-            >= self.FAFB_MESH_CACHE_SIMPLIFICATION
-        )
-
         # Check for force_API_fetching - bypasses ZIP loading for FAFB.
         # BANC always fetches from the public bucket, so the CAVE override
         # does not apply.
         use_api_fetching = is_fafb and self.force_API_fetching
 
         # Local-release source resolution: SWC-first for every render mode.
-        # skeleton_cache holds TreeNeuron sources (public release/raw SWC
-        # cache), mesh_cache holds FAFB MeshNeuron sources (prepared cache /
-        # CAVE online).
+        # skeleton_cache holds TreeNeuron sources (raw SWC cache, healed
+        # bundle, CAVE-skeletonized replacements).
         local_sources = {}          # canonical bodyId -> source name
         local_skeleton_cache = {}   # canonical bodyId -> TreeNeuron
-        local_mesh_cache = {}       # canonical bodyId -> MeshNeuron
         # Render-time mesh products are reused when a body appears in more
         # than one layer.  This cache is intentionally in-memory only and is
         # scoped to one visualization run.
@@ -11024,27 +10797,24 @@ class VisualizeSkeleton:
                     '(SWC-first; public bucket; no CAVE token).',
                     level='simple')
             elif use_api_fetching:
-                self._vprint(f'  ℹ️  force_API_fetching=True: Using CAVE API instead of ZIP', level='simple')
-            elif use_fafb_cache:
-                self._vprint(f'  ℹ️  FAFB prepared mesh cache eligible (simplification={self.skeleton_mesh_simplification} >= cache level {self.FAFB_MESH_CACHE_SIMPLIFICATION})', level='full')
+                self._vprint(f'  ℹ️  force_API_fetching=True: skeletonizing every FAFB body through CAVE', level='simple')
             elif is_fafb:
-                self._vprint(f'  ℹ️  FAFB prepared mesh cache bypassed (SWC-first sources only)', level='full')
+                self._vprint(f'  ℹ️  FAFB sources resolved SWC-first (raw cache / healed bundle); missing or extruded bodies are CAVE-skeletonized', level='full')
 
             if is_banc:
                 # BANC resolves through its own public-bucket path; the
                 # FAFB resolver (healed ZIP / CAVE / extrusion repair) is
                 # never touched.
-                local_sources, local_skeleton_cache, local_mesh_cache = (
+                local_sources, local_skeleton_cache = (
                     self._resolve_banc_sources(
                         all_local_body_ids,
                         use_cache=bool(self.cache_neurons),
                     )
                 )
             else:
-                local_sources, local_skeleton_cache, local_mesh_cache = (
+                local_sources, local_skeleton_cache = (
                     self._resolve_fafb_sources(
                         all_local_body_ids,
-                        allow_mesh_cache=use_fafb_cache,
                         api_only=use_api_fetching,
                     )
                 )
@@ -11161,26 +10931,7 @@ class VisualizeSkeleton:
             )
             cached_mesh_neurons = []  # MeshNeurons loaded from cache
             mesh_missing_ids = layer_body_ids  # IDs that need processing
-            
-            if is_fafb and local_mesh_cache and not is_custom_layer:
-                # Separate mesh sources vs TreeNeuron sources with
-                # type-robust matching
-                cached_mesh_neurons = []
-                mesh_missing_ids = []
-                for bid in layer_body_ids:
-                    # Check both int and str versions of the ID
-                    if bid in local_mesh_cache:
-                        cached_mesh_neurons.append(local_mesh_cache[bid])
-                    elif str(bid) in local_mesh_cache:
-                        cached_mesh_neurons.append(local_mesh_cache[str(bid)])
-                    elif isinstance(bid, str) and bid.isdigit() and int(bid) in local_mesh_cache:
-                        cached_mesh_neurons.append(local_mesh_cache[int(bid)])
-                    else:
-                        mesh_missing_ids.append(bid)
-                
-                if cached_mesh_neurons:
-                    self._vprint(f'    ✓ {len(cached_mesh_neurons)}/{len(layer_body_ids)} from mesh cache', level='full', use_tqdm=True)
-            
+
             # NeuPrint tube mode: split cached transformed meshes vs missing
             if use_neuprint_mesh_cache and neuprint_mesh_cache and not is_custom_layer:
                 cached_mesh_neurons = []
@@ -11367,13 +11118,8 @@ class VisualizeSkeleton:
             # Normalize to NeuronList so downstream len()/iteration works for single TreeNeuron
             if neuron_vols is not None and not isinstance(neuron_vols, (list, navis.NeuronList)):
                 neuron_vols = navis.NeuronList([neuron_vols])
-            
-            # For FAFB with all meshes cached, we can skip skeleton processing
-            if is_fafb and cached_mesh_neurons and (neuron_vols is None or len(neuron_vols) == 0):
-                # All neurons loaded from mesh cache - neuron_vols stays None/empty
-                # The combine block below will handle adding cached_mesh_neurons with simplification
-                pass
-            elif neuron_vols is None or len(neuron_vols) == 0:
+
+            if neuron_vols is None or len(neuron_vols) == 0:
                 if cached_mesh_neurons:
                     # Partial cache hit - neuron_vols stays None/empty
                     # The combine block below will handle cached_mesh_neurons
@@ -11411,9 +11157,7 @@ class VisualizeSkeleton:
                 neuron_vols, local_already_simplified = (
                     self._process_fafb_layer(
                         neuron_vols,
-                        cached_mesh_neurons,
                         local_pipeline,
-                        use_fafb_cache,
                         render_mesh_cache=local_render_mesh_cache,
                         progress_callback=report_local_progress,
                     )

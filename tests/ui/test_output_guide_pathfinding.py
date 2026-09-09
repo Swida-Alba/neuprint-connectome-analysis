@@ -129,6 +129,30 @@ def test_glossary_documents_new_keys():
         assert description != og.glossary_entry("__missing__")[0], key
 
 
+def test_dynamic_threshold_columns_use_prefix_glossary(tmp_path):
+    run = tmp_path / "inter_dataset_run"
+    output = run / "similarity_matrices"
+    output.mkdir(parents=True)
+    (output / "similarity_query_q1.csv").write_text(
+        "query_id,query_label,dataset_1,dataset_2,threshold_banc_v888,"
+        "jaccard_similarity\nq1,example,a,b,3,0.5\n",
+        encoding="utf-8",
+    )
+
+    content = og.assemble_run_content(run, "inter_dataset", {})
+    entry = next(
+        item for item in content["entries"]
+        if item["pattern"] == "similarity_matrices/similarity_query_*.csv"
+    )
+    assert "threshold_banc_v888" in entry["columns"]
+    assert "threshold_" not in entry["columns"]
+    metric = next(
+        item for item in content["metrics"]
+        if item["name"] == "threshold_banc_v888"
+    )
+    assert "requested-threshold" in metric["description"]
+
+
 def test_inter_dataset_nested_outputs_point_to_explanation():
     spec = og.TOOL_GUIDE_SPECS["inter_dataset"]
     dataset_entry = next(e for e in spec["files"]

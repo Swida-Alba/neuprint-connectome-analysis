@@ -391,9 +391,8 @@ class TestBancResolver:
         vs._load_api_cached_skeletons = (
             lambda ids: ({}, list(ids)))
 
-        sources, skeleton_cache, mesh_cache = vs._resolve_banc_sources(
+        sources, skeleton_cache = vs._resolve_banc_sources(
             [12345], use_cache=True)
-        assert mesh_cache == {}
         assert sources == {'12345': 'banc_gcs'}
         assert '12345' in skeleton_cache
         assert fetched == [('banc_v888', '12345', 'l2', True)]
@@ -412,7 +411,7 @@ class TestBancResolver:
         vs._load_api_cached_skeletons = (
             lambda ids: ({'12345': cached}, []))
 
-        sources, skeleton_cache, _ = vs._resolve_banc_sources([12345])
+        sources, skeleton_cache = vs._resolve_banc_sources([12345])
         assert sources == {'12345': 'raw_cache'}
         assert skeleton_cache['12345'] is cached
 
@@ -441,7 +440,7 @@ class TestBancResolver:
         vs._load_api_cached_skeletons = lambda ids: (
             {'11': cached_full, '22': cached_l2, '33': cached_legacy}, [])
 
-        _, skeleton_cache, _ = vs._resolve_banc_sources(
+        _, skeleton_cache = vs._resolve_banc_sources(
             [11, 22, 33], use_cache=True)
         assert skeleton_cache['11']._drocat_banc_resolution == 'full'
         assert skeleton_cache['22']._drocat_banc_resolution == 'l2'
@@ -456,7 +455,7 @@ class TestBancResolver:
         vs = _make_visualizer()
         vs.script_path = str(tmp_path)
         vs._load_api_cached_skeletons = lambda ids: ({}, list(ids))
-        sources, skeleton_cache, _ = vs._resolve_banc_sources([999])
+        sources, skeleton_cache = vs._resolve_banc_sources([999])
         assert sources == {} and skeleton_cache == {}
 
 

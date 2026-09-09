@@ -1,7 +1,7 @@
 # Cross-Dataset Comparison Guide
 
-**Version:** 4.0  
-**Last Updated:** November 2025
+**Version:** 4.5
+**Last Updated:** September 2026
 
 ## Overview
 

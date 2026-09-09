@@ -105,6 +105,7 @@ DATASET_TO_TYPE_COL = {
 # (§version control, user 2026-09-06).
 FLYWIRE_MAPPING_KEYS = ('flywire_FAFB_v783', 'banc_v626', 'banc_v888')
 BANC_RELEASE_KEYS = frozenset({'banc_v626', 'banc_v888'})
+_UNTYPED_SENTINELS = frozenset({'unknown', 'nan', 'none'})
 
 # Per FAFB/BANC namespace: which neuron table carries the primary ``type``
 # column and which additional-type column records renamed types.
@@ -863,6 +864,16 @@ class CrossDatasetTypeMapper:
         """
         if not isinstance(value, str):
             return []
+        # Nearly all metadata cells contain one already-trimmed name.  Avoid
+        # allocating the result of ``split(',')`` for that hot path; the
+        # comma-containing fallback below keeps the published multi-name
+        # semantics unchanged.
+        if ',' not in value:
+            if (value and not value[0].isspace()
+                    and not value[-1].isspace()):
+                return [value]
+            name = value.strip()
+            return [name] if name else []
         return [name.strip() for name in value.split(',') if name.strip()]
 
     @staticmethod
@@ -875,6 +886,13 @@ class CrossDatasetTypeMapper:
         # such as ``123.0``, but constructing a Decimal for every ordinary
         # 64-bit ID was a measurable part of cold mapper initialization.
         if isinstance(value, str):
+            # Prepared Parquet indexes expose canonical IDs as strings.  A
+            # direct digit check avoids strip/lowercase work for the common
+            # case while preserving the whitespace/leading-zero behavior of
+            # the normalized fallback below.
+            if (value and value.isdigit()
+                    and (len(value) == 1 or value[0] != '0')):
+                return value
             text = value.strip()
             if not text or text.lower() in {'nan', 'none'}:
                 return ''
@@ -1020,7 +1038,8 @@ class CrossDatasetTypeMapper:
                 # projection at a time below.
                 columns = {'type', source['alt_column'], 'bodyId'}
             cached_path = self._cached_mapper_index_path(
-                path, source['dataset_dir'], {'type', source['alt_column']})
+                path, source['dataset_dir'],
+                {'bodyId', 'type', source['alt_column']})
             if not os.path.exists(path) and cached_path is None:
                 self._log(
                     f"FlyWire neuron table not found for {key} "
@@ -1212,20 +1231,19 @@ class CrossDatasetTypeMapper:
         self._mcns_v09_neuron_df = None
         self._release_alias_diagnostics = {}
         v09_path = getattr(self, '_mcns_v09_neuron_df_path', None)
+        v09_columns = {
+            'bodyId', 'type', 'flywireType', 'hemibrainType', 'mancType'}
         v09_index = (
             self._cached_mapper_index_path(
-                v09_path, Path(v09_path).parent.name, {'bodyId', 'type'})
+                v09_path, Path(v09_path).parent.name, v09_columns)
             if v09_path else None
         )
         if v09_path and (os.path.exists(v09_path) or v09_index is not None):
             try:
                 self._mcns_v09_neuron_df = self._read_mapper_table(
                     v09_path, Path(v09_path).parent.name,
-                    {
-                        'bodyId', 'type', 'flywireType',
-                        'hemibrainType', 'mancType',
-                    },
-                    required_columns={'bodyId', 'type'},
+                    v09_columns,
+                    required_columns=v09_columns,
                     as_pandas=True,
                 )
                 self._release_alias_diagnostics = self._compare_mcns_releases()
@@ -1399,9 +1417,11 @@ class CrossDatasetTypeMapper:
         if self._loaded and not force_reload:
             return True
         
+        cols_needed = [
+            'bodyId', 'type', 'flywireType', 'hemibrainType', 'mancType']
         main_folder = Path(self._neuron_df_path).parent.name
         main_index = self._cached_mapper_index_path(
-            self._neuron_df_path, main_folder, {'bodyId', 'type'})
+            self._neuron_df_path, main_folder, set(cols_needed))
         if not os.path.exists(self._neuron_df_path) and main_index is None:
             self._log(f"Neuron DF file not found: {self._neuron_df_path}", level='warn')
             self._log("Auto type mapping will be disabled. Initialize male-cns dataset first.", level='warn')
@@ -1413,12 +1433,11 @@ class CrossDatasetTypeMapper:
                 f"{' (cached index)' if main_index is not None else ''}...")
             
             # Read only the columns we need for efficiency
-            cols_needed = ['bodyId', 'type', 'flywireType', 'hemibrainType', 'mancType']
             self._neuron_df = self._read_mapper_table(
                 self._neuron_df_path,
                 main_folder,
                 set(cols_needed),
-                required_columns={'bodyId', 'type'},
+                required_columns=set(cols_needed),
                 as_pandas=True,
             )
 
@@ -1442,6 +1461,7 @@ class CrossDatasetTypeMapper:
             # startup kept roughly 380 MB live in the UI process and made a
             # second cold search much more likely to evict the websocket.
             self._banc_label_tables = {}
+            self._banc_label_table_paths = {}
             self._body_id_to_primary = {}
             self._loaded = True
             
@@ -1589,6 +1609,8 @@ class CrossDatasetTypeMapper:
         if self._neuron_df is None:
             return
 
+        import polars as pl
+
         # Drop the alias-candidate lookup caches; they derive from the
         # conflicts rebuilt below.
         self._alias_n_to_1_cache = None
@@ -1603,11 +1625,14 @@ class CrossDatasetTypeMapper:
         self._banc_release_edges = defaultdict(list)
         self._banc_label_votes = {}
         self._banc_release_votes = {}
+        self._banc_label_table_paths = getattr(
+            self, '_banc_label_table_paths', {})
 
         # Keep the authoritative projection available for reverse-crosswalk
         # diagnostics, but avoid making a second pandas frame just to clean
-        # four columns.  ``itertuples`` below is several times cheaper than
-        # ``iterrows`` and does not allocate one Series per neuron.
+        # four columns.  Distinct crosswalk pairs are aggregated in Polars
+        # below, so the graph builder does not allocate one Python row object
+        # per neuron.
         df = self._neuron_df
         
         # Clean up: fill NaN with empty string, strip whitespace
@@ -1642,46 +1667,58 @@ class CrossDatasetTypeMapper:
         hemibrain_to_mcns: Dict[str, Set[str]] = defaultdict(set)
         manc_to_mcns: Dict[str, Set[str]] = defaultdict(set)
 
-        column_positions = {
-            column: df.columns.get_loc(column)
-            for column in ('type', 'flywireType', 'hemibrainType', 'mancType')
-            if column in df.columns
-        }
-        type_position = column_positions.get('type')
-        fw_position = column_positions.get('flywireType')
-        hemibrain_position = column_positions.get('hemibrainType')
-        manc_position = column_positions.get('mancType')
-        for row in df.itertuples(index=False, name=None):
-            mcns_type = row[type_position] if type_position is not None else ''
+        if 'type' in df.columns:
+            male_cns_types = {
+                value for value in df['type'] if value
+            }
+            self._dataset_types['male-cns:v1.0'].update(male_cns_types)
 
-            # Skip empty types
-            if not mcns_type:
-                continue
+        def grouped_crosswalk_values(column: str):
+            """Yield one unique, comma-exploded value list per MCNS type."""
+            if 'type' not in df.columns or column not in df.columns:
+                return ()
+            # The old row loop split the same type/crosswalk cells repeatedly
+            # for every neuron.  Aggregate distinct pairs in Polars first;
+            # the Python graph builder then visits roughly 8k rather than
+            # 176k rows while retaining the same set-based semantics.
+            source = pl.from_pandas(
+                df[['type', column]], include_index=False)
+            grouped = (
+                source
+                .with_columns(
+                    pl.col('type').cast(pl.Utf8, strict=False)
+                    .fill_null('').str.strip_chars(),
+                    pl.col(column).cast(pl.Utf8, strict=False)
+                    .fill_null('').str.split(','),
+                )
+                .explode(column)
+                .with_columns(pl.col(column).str.strip_chars())
+                .filter((pl.col('type') != '') & (pl.col(column) != ''))
+                .unique(subset=['type', column], maintain_order=True)
+                .group_by('type', maintain_order=True)
+                .agg(pl.col(column).alias('__values'))
+            )
+            return grouped.iter_rows()
 
-            male_cns_types.add(mcns_type)
-            self._dataset_types['male-cns:v1.0'].add(mcns_type)
+        # Crosswalk cells may carry several names separated by ','; resolve
+        # them only against the FAFB namespace. In particular, never copy
+        # MCNS flywireType into either BANC release.
+        for mcns_type, fw_names in grouped_crosswalk_values('flywireType'):
+            for fw_type in self._resolve_flywire_names(
+                    list(fw_names), 'flywire_FAFB_v783'):
+                mcns_to_flywire['flywire_FAFB_v783'][mcns_type].add(fw_type)
+                flywire_to_mcns['flywire_FAFB_v783'][fw_type].add(mcns_type)
+                self._dataset_types['flywire_FAFB_v783'].add(fw_type)
 
-            # Crosswalk cells may carry several names separated by ',';
-            # resolve them only against the FAFB namespace.  In particular,
-            # never copy MCNS flywireType into either BANC release.
-            fw_names = self._split_type_cell(
-                row[fw_position] if fw_position is not None else '')
-            for fw_key in ('flywire_FAFB_v783',):
-                for fw_type in self._resolve_flywire_names(fw_names, fw_key):
-                    mcns_to_flywire[fw_key][mcns_type].add(fw_type)
-                    flywire_to_mcns[fw_key][fw_type].add(mcns_type)
-                    self._dataset_types[fw_key].add(fw_type)
-
-            for hemibrain_type in self._split_type_cell(
-                    row[hemibrain_position]
-                    if hemibrain_position is not None else ''):
+        for mcns_type, names in grouped_crosswalk_values('hemibrainType'):
+            for hemibrain_type in names:
                 hemibrain_types.add(hemibrain_type)
                 mcns_to_hemibrain[mcns_type].add(hemibrain_type)
                 hemibrain_to_mcns[hemibrain_type].add(mcns_type)
                 self._dataset_types['hemibrain:v1.2.1'].add(hemibrain_type)
 
-            for manc_name in self._split_type_cell(
-                    row[manc_position] if manc_position is not None else ''):
+        for mcns_type, names in grouped_crosswalk_values('mancType'):
+            for manc_name in names:
                 manc_types.add(manc_name)
                 mcns_to_manc[mcns_type].add(manc_name)
                 manc_to_mcns[manc_name].add(mcns_type)
@@ -2166,28 +2203,38 @@ class CrossDatasetTypeMapper:
                     'alternates': alternates,
                 }
 
-        for banc_key, table in getattr(self, '_banc_label_tables', {}).items():
+        def apply_polars_table(banc_key, table):
+            """Apply all label columns present in one narrow Polars table."""
             if 'type' not in table.columns:
-                continue
+                return
             for column in label_columns:
                 if column not in table.columns:
                     continue
                 target_keys = sorted(self._banc_label_targets(column))
                 if not target_keys:
                     continue
-                if isinstance(table, pl.DataFrame):
-                    for banc_type, votes, verified_votes, conflicts in (
-                            self._banc_label_vote_batches_polars(
-                                banc_key, table, column, target_keys)):
-                        banc_type = str(banc_type or '').strip()
-                        if banc_type and not self._is_untyped_value(banc_type):
-                            record_votes(
-                                banc_key, column, target_keys, banc_type,
-                                votes, verified_votes, conflicts)
-                    continue
+                for banc_type, votes, verified_votes, conflicts in (
+                        self._banc_label_vote_batches_polars(
+                            banc_key, table, column, target_keys)):
+                    banc_type = str(banc_type or '').strip()
+                    if banc_type and not self._is_untyped_value(banc_type):
+                        record_votes(
+                            banc_key, column, target_keys, banc_type,
+                            votes, verified_votes, conflicts)
 
-                # Compatibility fallback for callers/tests that inject a
-                # pandas table directly.  Normal loads use the Polars path.
+        for banc_key, table in getattr(self, '_banc_label_tables', {}).items():
+            if isinstance(table, pl.DataFrame):
+                apply_polars_table(banc_key, table)
+                continue
+
+            # Compatibility fallback for callers/tests that inject a pandas
+            # table directly.  Normal loads use the Polars path.
+            for column in label_columns:
+                if column not in table.columns or 'type' not in table.columns:
+                    continue
+                target_keys = sorted(self._banc_label_targets(column))
+                if not target_keys:
+                    continue
                 match_column = self._banc_label_match_column(column)
                 target_body_indexes = {
                     target: self._body_id_to_primary.get(target, {})
@@ -2224,6 +2271,30 @@ class CrossDatasetTypeMapper:
                         record_votes(
                             banc_key, column, target_keys, banc_type, votes,
                             verified_votes, verification_conflicts)
+
+        # Normal cold loads retain only the path to the BANC table.  Read one
+        # narrow label projection per release (rather than the full metadata
+        # table) and let Polars process each label column from that shared
+        # projection.
+        for banc_key, (path, dataset_folder) in getattr(
+                self, '_banc_label_table_paths', {}).items():
+            read_columns = {'type', *label_columns}
+            read_columns.update({
+                match_column for match_column in (
+                    self._banc_label_match_column(column)
+                    for column in label_columns
+                ) if match_column
+            })
+            try:
+                table = self._read_mapper_table(
+                    path, dataset_folder, read_columns,
+                    required_columns={'type', *label_columns})
+            except Exception as exc:
+                self._log(
+                    f"Could not read BANC label columns for {banc_key}: "
+                    f"{exc}", level='warn')
+                continue
+            apply_polars_table(banc_key, table)
         if added_maps or added_conflicts:
             self._log(
                 f"BANC label overlay: {added_maps} mappings and "
@@ -2457,8 +2528,28 @@ class CrossDatasetTypeMapper:
         Unknown/none sentinel, or a bare number.  Mirrors the analyzer's
         drop_untyped semantics — such labels must never become bridge
         targets or annotation-bridge candidates."""
+        # Polars and the mapper's in-place cleanup already provide trimmed
+        # strings for the hot paths.  Keep the general conversion below for
+        # injected/test values and mixed-case or whitespace-padded sentinels,
+        # but answer common canonical strings without another strip/lower.
+        if isinstance(value, str) and value:
+            if value in _UNTYPED_SENTINELS:
+                return True
+            # Mixed-case sentinels are uncommon; restrict the case-folding
+            # fallback to their possible initial letters.
+            if (value[0] in 'uUnN'
+                    and value.lower() in _UNTYPED_SENTINELS):
+                return True
+            # Most labels start with a letter.  Check the first character
+            # before asking Python to scan the entire string for digits; this
+            # keeps numeric-ID labels correct without paying that cost for
+            # every ordinary neuron type.
+            if value[0].isdigit() and value.isdigit():
+                return True
+            if not value[0].isspace() and not value[-1].isspace():
+                return False
         s = str(value).strip()
-        if not s or s.lower() in {"unknown", "nan", "none"}:
+        if not s or s.lower() in _UNTYPED_SENTINELS:
             return True
         return s.isdigit()
 

@@ -62,6 +62,10 @@ COLUMN_GLOSSARY = {
     "query_id": ("Stable identifier for one cross-dataset threshold query row.", "text"),
     "query_label": ("Human-readable label for one cross-dataset threshold query row.", "text"),
     "threshold_mode": ("Threshold query mode: standard same-threshold rows or explicit combinations.", "text"),
+    "threshold_scope": ("Whether a row is a scalar threshold grid cell, a Custom query comparison cell, or a raw-run schedule diagnostic.", "text"),
+    "path_mode": ("Path enumeration mode for the run: all paths or per-pair shortest.", "text"),
+    "comparison_mode": ("Comparison engine mode: pathfinding or direct edge comparison.", "text"),
+    "threshold_": ("Prefix for one requested-threshold column per dataset (e.g. threshold_banc_v888).", "text"),
     "direction": ("Synaptic direction relative to the query: upstream or downstream.", "text"),
     "partner_type": ("Partner neuron type in a connectivity profile.", "text"),
     "neuron_type": ("Neuron type owning the profile row.", "text"),
@@ -388,8 +392,13 @@ COLUMN_GLOSSARY = {
 
 def glossary_entry(column: str) -> tuple:
     """Return (description, range) for a column, with a safe fallback."""
-    return COLUMN_GLOSSARY.get(
-        column, ("(see docs/OUTPUT_FILES.md)", ""))
+    entry = COLUMN_GLOSSARY.get(column)
+    if entry is None and str(column).startswith("threshold_"):
+        # Comparison exports suffix the shared field name with the dataset
+        # (for example ``threshold_banc_v888``). Keep one glossary rule for
+        # the dynamic family while still documenting the actual column name.
+        entry = COLUMN_GLOSSARY.get("threshold_")
+    return entry or ("(see docs/OUTPUT_FILES.md)", "")
 
 
 # Inline-math markers: descriptions may wrap a formula fragment in ``$...$``
@@ -1292,13 +1301,19 @@ TOOL_GUIDE_SPECS = {
                          "edge_budget_landing", "edge_weight_floor",
                          "strongest_retained_bottleneck", "paths_complete"]},
             {"pattern": "comparison_results/unique_to_*.csv",
-             "description": "Edges unique to one dataset."},
+             "description": "Edges unique to one dataset. Standard mode "
+                            "only: combination runs omit these files instead "
+                            "of inferring a union threshold."},
             {"pattern": "comparison_results/top_edges_comparison.csv",
-             "description": "Top conserved/divergent edges."},
+             "description": "Top conserved/divergent edges. Standard mode "
+                            "only (middle scalar threshold)."},
             {"pattern": "comparison_results/top_edges_overlap.csv",
-             "description": "Overlap of the top edges across datasets."},
+             "description": "Overlap of the top edges across datasets. "
+                            "Standard mode only."},
             {"pattern": "comparison_results/degree_*.csv",
-             "description": "Degree analysis by type (in/out/statistics)."},
+             "description": "Degree analysis by type (in/out/statistics). "
+                            "Standard mode only; combination runs omit "
+                            "these files."},
             {"pattern": "comparison_results/neuron_counts_*.csv",
              "description": "Neuron counts per type and overall."},
             {"pattern": "comparison_results/dataset_metadata_comparison.csv",
@@ -1704,6 +1719,46 @@ def _ordered_unique(values) -> list:
     return out
 
 
+def _resolve_entry_columns(run_folder: Path, file_spec: dict,
+                           matched: list) -> list:
+    """Expand dynamic column families against matched CSV headers.
+
+    The static spec uses ``threshold_`` as a family marker because the actual
+    comparison export names the column per dataset.  Replace that marker with
+    the real headers when a matched CSV is available; an unmatched/empty
+    preview retains the marker and still gets its prefix-aware glossary entry.
+    """
+    columns = list(file_spec.get("columns", []))
+    if "threshold_" not in columns:
+        return columns
+
+    dynamic = []
+    for relative in matched:
+        if Path(relative).suffix.lower() != ".csv":
+            continue
+        try:
+            with (run_folder / relative).open(
+                    "r", encoding="utf-8-sig", newline="") as handle:
+                header = next(csv.reader(handle), [])
+        except (OSError, UnicodeDecodeError, csv.Error):
+            continue
+        dynamic.extend(
+            column for column in header
+            if str(column).startswith("threshold_")
+        )
+    dynamic = _ordered_unique(dynamic)
+    if not dynamic:
+        return columns
+
+    resolved = []
+    for column in columns:
+        if column == "threshold_":
+            resolved.extend(dynamic)
+        else:
+            resolved.append(column)
+    return resolved
+
+
 def _metric_anchor(name) -> str:
     """HTML-safe anchor fragment for a metric/column name."""
     return re.sub(r"[^A-Za-z0-9_-]+", "-", str(name)).strip("-")
@@ -1733,7 +1788,7 @@ def assemble_run_content(run_folder: Path, tool_name: str,
         entries.append({
             "pattern": file_spec["pattern"],
             "description": file_spec["description"],
-            "columns": file_spec.get("columns", []),
+            "columns": _resolve_entry_columns(run_folder, file_spec, matched),
             "matrix": file_spec.get("matrix"),
             "matched": matched,
         })
