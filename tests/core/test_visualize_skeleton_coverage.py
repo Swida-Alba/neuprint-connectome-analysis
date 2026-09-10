@@ -2970,7 +2970,14 @@ class TestPrePostSites:
         # out-of-range layer with no metadata frame
         assert vis._pre_post_size_criteria(5) is None
         # None criteria falls back to a body-id NeuronCriteria; without a
-        # default neuprint Client the fallback degrades gracefully to None
+        # default neuprint Client the fallback degrades gracefully to None.
+        # Clear any process-global default client so this assertion is
+        # deterministic regardless of test ordering.
+        try:
+            import neuprint
+            neuprint.clear_default_client()
+        except Exception:
+            pass
         vis.layer_criteria = [None]
         criteria = vis._pre_post_size_criteria(0)
         assert criteria is None
@@ -4261,9 +4268,18 @@ class TestPreloadFafbSkeletons:
 
 
 class TestResolveFafbSources:
+    @pytest.fixture(autouse=True)
+    def _sandbox_script_path(self, tmp_path):
+        # The resolver consults the real cache/ tree when script_path
+        # points at the repository root (e.g. _take_repaired serving a
+        # previously repaired body).  Sandbox it so these tests stay
+        # hermetic regardless of local cache state.
+        self._script_path = str(tmp_path)
+
     def _vis(self, **over):
         attrs = dict(dataset='flywire_FAFB_v783', cache_neurons=False,
-                     auto_fix_extrusions=False, neuron_dfs=[], verbose=False)
+                     auto_fix_extrusions=False, neuron_dfs=[], verbose=False,
+                     script_path=self._script_path)
         attrs.update(over)
         vis = make_vis(**attrs)
         vis.api_calls = []
@@ -4328,22 +4344,28 @@ class TestResolveFafbSources:
         assert skel[FAFB_ID_STR] is cave_tree
 
     def test_extrusion_repair_served_from_cave_store(self, monkeypatch):
-        """An api_repaired body with a cached CAVE tree skips the network."""
+        """An api_repaired body with a cached CAVE tree skips the network:
+        it is served by the leading repair-cache stage and never loads the
+        zip tree nor runs the online repair."""
         vis = self._vis(auto_fix_extrusions=True, cache_neurons=True)
         tree = make_chain_neuron(body_id=FAFB_ID_STR)
         vis._preload_fafb_skeletons = \
             lambda body_ids_filter=None: {FAFB_ID: tree}
-        vis._detect_extrusions_in_skeletons = \
-            lambda skeletons, use_cache=False: [FAFB_ID]
-        monkeypatch.setattr(
-            fafb_utils, 'load_extrusion_repair_status',
-            lambda root, dataset: {FAFB_ID_STR: 'api_repaired'})
         cave_tree = self._tree()
-        vis._load_cave_cached_skeleton = lambda bid: cave_tree
+        monkeypatch.setattr(
+            'cave_data_fetcher.load_repaired_skeletons',
+            lambda dataset, ids, project_root=None, log=None:
+                {FAFB_ID: cave_tree})
+        detect_calls = []
+        vis._detect_extrusions_in_skeletons = \
+            lambda skeletons, use_cache=False: detect_calls.append(
+                list(skeletons)) or []
         sources, skel = vis._resolve_fafb_sources([FAFB_ID])
         assert sources[FAFB_ID_STR] == 'cave'
         assert skel[FAFB_ID_STR] is cave_tree
         assert vis.api_calls == []
+        # the repaired body is final: no re-check, no repair stage work
+        assert detect_calls == []
 
     def test_extrusion_repair_strict_no_cache_skips_cave_store(self, monkeypatch):
         """cache_neurons=False never reads a previously repaired CAVE tree."""

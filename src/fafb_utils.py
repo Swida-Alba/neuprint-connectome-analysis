@@ -190,21 +190,18 @@ def get_fafb_skeleton_zip(data_dir):
 
 
 def get_fafb_skeleton_bundle(data_dir):
-    """Get a healed-bundle reader for the FAFB skeleton source.
+    """Get a healed-zip reader for the FAFB skeleton source.
 
-    Resolves ``sk_lod1_783_healed.zst`` first, then falls back to the legacy
-    healed ZIP.  The returned :class:`fafb_bundle.FAFBSkeletonBundle`
-    performs lazy per-skeleton conversion on the ZIP fallback path (each
-    loaded skeleton is converted into the .zst container and its ZIP entry
-    is removed logically; physical removal happens by batched compaction).
-    Returns None when neither file exists.
+    Serves the healed ZIP directly (zip-only mode: no ``.zst`` container is
+    created or appended to).  A legacy ``.zst`` container is opened
+    read-only only when no zip exists.  Returns None when neither exists.
     """
     data_path = Path(data_dir)
     if is_banc_dataset(data_path.name):
         return None
     try:
         from fafb_bundle import open_bundle
-        return open_bundle(data_path, lazy_convert=True)
+        return open_bundle(data_path)
     except Exception:
         return None
 
@@ -222,27 +219,32 @@ def get_fafb_skeleton_parquet(data_dir):
 # FAFB skeleton quality pipeline (shared with the visualization pipeline)
 # =============================================================================
 # The visualization pipeline checks FAFB skeletons in this order:
-#   1. local first  - extrusion-fixed skeletons cached under
-#                     ``cache/{dataset}/API_cache/skeletons/``, then the
-#                     healed skeleton bundle (``{bodyId}.swc``),
-#   2. extrusion test - edge-length analysis on the local skeletons, with
-#                     per-neuron results cached in
+#   1. repaired first - trees recorded ``api_repaired`` are served from
+#                     ``cache/{dataset}/skeletons/cave_skeletons/`` and
+#                     trees recorded ``local_fallback`` from there or from
+#                     ``cache/{dataset}/skeletons/extrusion_fixes/``;
+#                     then the shared raw cache and the healed skeleton
+#                     zip (``{bodyId}.swc``),
+#   2. extrusion test - edge-length analysis on the local skeletons,
+#                     one-time per neuron with results cached in
 #                     ``cache/{dataset}/extrusion_check_results.parquet``,
 #   3. online fallback - extrusion-affected or missing neurons are fetched
-#                     through the CAVE API (token-gated),
+#                     through the CAVE API (token-gated) and cached in the
+#                     ``cave_skeletons`` store,
 #   4. local repair   - if CAVE cannot repair an affected tree, remove only a
-#                     safely identified extrusion subtree in memory.
+#                     safely identified extrusion subtree and persist the
+#                     fix to the ``extrusion_fixes`` store.
 # These helpers expose that pipeline so every consumer (e.g. NBLAST
 # dotprops building) follows the same behavior.
 #
 # Enforcement point: both the similarity loader
 # (``MorphologyComparer._load_fafb_skeletons`` via
-# ``morphology.load_flywire_skeletons_batch``) and VisualizeSkeleton's
-# render pipeline run the check by default, per run and scoped to the
-# neurons they actually load/display; ``flag_extrusions`` caches each
-# neuron's result in ``extrusion_check_results.parquet``, so only the first
-# sighting pays the detector cost, and flagged neurons are replaced through
-# the CAVE API (``check_extrusions=False`` opts the loader out).
+# ``morphology.load_local_release_skeletons``) and VisualizeSkeleton's
+# render pipeline run the check by default, scoped to the neurons they
+# actually load/display; ``flag_extrusions`` caches each neuron's result
+# in ``extrusion_check_results.parquet``, so only the first sighting pays
+# the detector cost, and flagged neurons are replaced through the CAVE
+# API (``check_extrusions=False`` opts the loader out).
 
 EXTRUSION_CHECK_FILENAME = "extrusion_check_results.parquet"
 EXTRUSION_CACHE_SCHEMA_VERSION = 2
@@ -567,8 +569,9 @@ def repair_extruded_skeleton(neuron, max_removed_fraction=0.50,
     -------
     tuple
         ``(neuron_or_repaired_copy, stats)``.  The first item is the original
-        object when no safe repair is possible.  Derived repairs are never
-        written to the raw skeleton cache.
+        object when no safe repair is possible.  Accepted repairs are
+        persisted by the caller to the dedicated ``extrusion_fixes`` store
+        (never the raw skeleton cache).
     """
     import navis
 

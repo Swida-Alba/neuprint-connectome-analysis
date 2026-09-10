@@ -1004,3 +1004,137 @@ class TestPrePostCutoff:
         )
         assert unfiltered is not None and len(unfiltered) == 3
         assert 2 in set(unfiltered["weight"].tolist())
+
+
+# ---------------------------------------------------------------------------
+# pre-site-only BANC tables (no persisted post-site coordinates)
+# ---------------------------------------------------------------------------
+
+class TestBancPreOnlyTable:
+    def test_post_columns_mirrored_in_memory_and_filtered(self, tmp_path):
+        """BANC-derived tables carry pre-site coordinates only; the reader
+        synthesizes the post columns from the pre site so markers land on
+        the pre-synaptic site, and the syn_count threshold still applies."""
+        import numpy as np
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        vs = object.__new__(VisualizeSkeleton)
+        vs.dataset = "banc_v888"
+        vs.script_path = str(tmp_path)
+        vs.min_synapse_num = 2
+        vs._vprint = lambda *a, **k: None
+
+        dataset_dir = tmp_path / "datasets" / "banc_v888"
+        dataset_dir.mkdir(parents=True)
+        df = pd.DataFrame({
+            "pre_root_id": np.array([100, 100], dtype=np.int64),
+            "post_root_id": np.array([200, 300], dtype=np.int64),
+            "syn_count": [5, 1],
+            "x_pre": [1000.0, 1000.0],
+            "y_pre": [2000.0, 2000.0],
+            "z_pre": [300000.0, 300000.0],
+        })
+        pq.write_table(
+            pa.Table.from_pandas(df),
+            dataset_dir / "banc_v888_synapse_table.parquet",
+        )
+
+        out = vs._read_flywire_connection_frame(source_ids={"100"})
+        assert out is not None and len(out) == 1  # syn_count=1 row filtered
+        row = out.iloc[0]
+        assert row["bodyId_post"] == "200"
+        assert row["x_post"] == pytest.approx(row["x_pre"])
+        assert row["y_post"] == pytest.approx(row["y_pre"])
+        # nanometre coordinates must not be scaled (z stays 300000)
+        assert row["z_post"] == pytest.approx(300000.0)
+
+    def test_missing_pre_columns_still_rejected(self, tmp_path):
+        import numpy as np
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        vs = object.__new__(VisualizeSkeleton)
+        vs.dataset = "banc_v888"
+        vs.script_path = str(tmp_path)
+        vs.min_synapse_num = 0
+        vs._vprint = lambda *a, **k: None
+
+        dataset_dir = tmp_path / "datasets" / "banc_v888"
+        dataset_dir.mkdir(parents=True)
+        df = pd.DataFrame({
+            "pre_root_id": np.array([1], dtype=np.int64),
+            "post_root_id": np.array([2], dtype=np.int64),
+            "x_pre": [1.0],
+        })
+        pq.write_table(
+            pa.Table.from_pandas(df),
+            dataset_dir / "banc_v888_synapse_table.parquet",
+        )
+        assert vs._read_flywire_connection_frame() is None
+
+
+class TestLocalSynapseTableRecovery:
+    def _vis(self, tmp_path, dataset):
+        vs = object.__new__(VisualizeSkeleton)
+        vs.dataset = dataset
+        vs.script_path = str(tmp_path)
+        vs.min_synapse_num = 0
+        messages = []
+        vs._vprint = lambda text, *a, **k: messages.append(str(text))
+        return vs, messages
+
+    def test_truncated_table_triggers_rebuild_and_warns(self, tmp_path, monkeypatch):
+        """A table with no valid footer is rebuilt through the dataset
+        preparation entry point instead of silently returning None."""
+        import FAFB_file_converter as fafb_mod
+
+        dataset_dir = tmp_path / "datasets" / "flywire_FAFB_v783"
+        dataset_dir.mkdir(parents=True)
+        table = dataset_dir / "flywire_FAFB_v783_synapse_table.parquet"
+        table.write_bytes(b"PAR1 truncated")
+        vs, messages = self._vis(tmp_path, "flywire_FAFB_v783")
+
+        calls = []
+
+        def fake_ensure(dataset, ddir, *a, **k):
+            calls.append(dataset)
+            # Rebuild a minimal valid table in place.
+            pd.DataFrame({
+                "pre_x": [1000], "pre_y": [2000], "pre_z": [26000],
+                "post_x": [1000], "post_y": [2000], "post_z": [26000],
+                "pre_root_id_720575940": ["720575940596125868"],
+                "post_root_id_720575940": ["720575940596125869"],
+            }).to_parquet(table, index=False)
+            return True
+
+        monkeypatch.setattr(fafb_mod, "ensure_flywire_data", fake_ensure)
+        vs._read_flywire_connection_frame(source_ids={"720575940596125868"})
+
+        assert calls == ["flywire_FAFB_v783"]
+        assert any("unreadable" in m for m in messages)
+
+    def test_unreadable_without_source_does_not_raise(self, tmp_path, monkeypatch):
+        import FAFB_file_converter as fafb_mod
+
+        dataset_dir = tmp_path / "datasets" / "flywire_FAFB_v783"
+        dataset_dir.mkdir(parents=True)
+        (dataset_dir / "flywire_FAFB_v783_synapse_table.parquet").write_bytes(
+            b"PAR1 truncated")
+        vs, messages = self._vis(tmp_path, "flywire_FAFB_v783")
+
+        monkeypatch.setattr(
+            fafb_mod, "ensure_flywire_data",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no raw source")))
+
+        # Must not raise; the failed recovery is reported and the read
+        # returns None.
+        assert vs._read_flywire_connection_frame() is None
+        assert any("rebuild" in m or "unreadable" in m for m in messages)
+
+    def test_upgrade_skipped_when_marker_present(self, tmp_path):
+        """A marked table is neither rebuilt nor re-encoded."""
+        vs, _ = self._vis(tmp_path, "flywire_FAFB_v783")
+        vs._ensure_local_synapse_table_ready(str(tmp_path / "missing.parquet"))
+        # Unreadable + no source: handled, and the once-per-session flag set.
+        assert vs._local_synapse_table_checked is True

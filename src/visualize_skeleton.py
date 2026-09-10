@@ -2777,6 +2777,12 @@ class VisualizeSkeleton:
     NeuPrint fetches now persist raw skeletons as compressed SWC in the shared
     raw cache, regardless of this flag. Fast/fine simplification and tube
     meshes are transient render products and are never cached here.
+
+    For FAFB this flag also gates the local skeleton sources: when True, the
+    repaired trees (``cave_skeletons`` / ``extrusion_fixes``) and the shared
+    raw SWC cache are read before the healed zip; when False, those reads are
+    skipped and bodies fall through to the healed zip and (for flagged
+    bodies) a fresh CAVE repair. The UI default is True.
     '''
     
     cache_synapses: bool = False
@@ -2818,7 +2824,7 @@ class VisualizeSkeleton:
     '''
     Automatically detect and replace skeletons with extrusion artifacts (FAFB only).\n
     \n
-    True: When loading trees from the raw cache or the healed bundle, check for\n
+    True: When loading trees from the raw cache or the healed zip, check for\n
           extrusion artifacts (spiky protrusions from aggressive mesh\n
           simplification). If detected, replace the tree with a\n
           CAVE-skeletonized one (wavefront on the raw mesh, cached in the\n
@@ -3352,7 +3358,7 @@ class VisualizeSkeleton:
         else:
             pipeline_note = (
                 ' FAFB renders build every tube mesh from level-0 tree '
-                'sources (raw cache / healed bundle / CAVE-skeletonized '
+                'sources (raw cache / healed zip / CAVE-skeletonized '
                 'replacements), so the same percentage is not directly '
                 'comparable with NeuPrint skeleton-node reduction.'
             )
@@ -6598,15 +6604,16 @@ class VisualizeSkeleton:
             self.client_type = 'flywire'
             self._vprint(f"Auto-detected client_type='flywire' from dataset '{self.dataset}'", level='full')
 
-        # FAFB caching is skeleton-native: level-0 trees live in the shared
-        # raw SWC store, CAVE-skeletonized extrusion replacements in the
-        # dedicated cave_skeletons store.  Synapse caching remains enabled
+        # FAFB caching is skeleton-native: level-0 trees come from the healed
+        # zip and the shared raw SWC store (frozen legacy reads),
+        # CAVE-skeletonized extrusion replacements from the dedicated
+        # cave_skeletons store and local prunes from extrusion_fixes.  Synapse caching remains enabled
         # when requested: the local master connection table is the
         # dataset's canonical synapse cache and is also the source for
         # pre/post connector sites.
         if self.client_type == 'flywire' or is_fafb_dataset(self.dataset):
             if self.cache_neurons:
-                self._vprint("  ℹ️  FAFB: Using level-0 SWC caches (raw_skeletons + cave_skeletons) with the healed bundle", level='full')
+                self._vprint("  ℹ️  FAFB: using the healed zip plus the cave_skeletons / extrusion_fixes repair caches (raw_skeletons is a frozen legacy read)", level='full')
         
         # Set the default mesh level based on the selected pipeline if it was
         # not specified. Fast/direct renders use 90% removal; fine/artistic
@@ -7847,15 +7854,15 @@ class VisualizeSkeleton:
             if data_dir is None:
                 return {}
 
-            # The healed bundle reads .zst first and falls back to the ZIP
-            # with lazy per-skeleton conversion on every ZIP-served id.
+            # The healed zip is served directly (read-only; a legacy .zst
+            # is opened read-only only when no zip exists).
             bundle = fafb_utils.get_fafb_skeleton_bundle(data_dir)
             if bundle is not None:
                 import io
 
                 self._vprint(
                     f'  📦 Loading {len(all_body_ids)} skeletons from '
-                    'the healed bundle...')
+                    'the healed zip...')
                 for bid in all_body_ids:
                     try:
                         content = bundle.get(int(bid))
@@ -7882,7 +7889,7 @@ class VisualizeSkeleton:
                     pass
                 self._vprint(
                     f'  ✓ Loaded {len(skeleton_cache)}/{len(all_body_ids)} '
-                    'skeletons from the healed bundle')
+                    'skeletons from the healed zip')
                 return skeleton_cache
 
             zip_path = fafb_utils.get_fafb_skeleton_zip(data_dir)
@@ -9368,19 +9375,25 @@ class VisualizeSkeleton:
         Every FAFB render pipeline (fast/fine/artistic tube and line)
         consumes TreeNeurons, resolved per body:
 
-        1. shared raw SWC cache (``raw_skeletons``; skipped when the
+        1. previously repaired trees, served network-free from the local
+           repair caches before the zip is ever read: ``api_repaired``
+           from ``cave_skeletons`` (source ``cave``), ``local_fallback``
+           from ``cave_skeletons`` then ``extrusion_fixes``
+           (source ``local_repaired``),
+        2. shared raw SWC cache (``raw_skeletons``; skipped when the
            ``cache_neurons`` policy disables it),
-        2. healed-ZIP SWC (canonical raw bundle),
-        3. extrusion check on those trees (parquet-cached).  Flagged bodies
-           are replaced by CAVE-skeletonized trees:
-           - a body already recorded ``api_repaired`` is served from the
-             dedicated ``cave_skeletons`` store without another network
-             round-trip,
+        3. healed-ZIP SWC (canonical raw bundle),
+        4. extrusion check on those trees (one-time per body, parquet-
+           cached).  Flagged bodies are replaced by CAVE-skeletonized
+           trees:
+           - a store hit serves the previously replaced tree without
+             another network round-trip,
            - a store miss fetches the raw CAVE mesh online, wavefront-
              skeletonizes it, and persists the tree in that store.
-        4. a CAVE outage or per-body miss falls back to pruning the
+        5. a CAVE outage or per-body miss falls back to pruning the
            diagnosed extrusion branch locally when the cut is safe; the
-           repair status stays retryable.
+           pruned fix is persisted to ``extrusion_fixes`` and the repair
+           status stays retryable.
 
         ``api_only`` (``force_API_fetching``) routes every body through CAVE
         resolution; with caching enabled, an existing CAVE replacement tree
@@ -9407,6 +9420,30 @@ class VisualizeSkeleton:
             return sources, skeleton_cache
 
         remaining = list(requested)
+
+        def _take_repaired():
+            """Previously repaired trees from the local repair caches."""
+            nonlocal remaining
+            if not remaining or not self.cache_neurons:
+                return
+            try:
+                from cave_data_fetcher import (
+                    LOCAL_EXTRUSION_FIX_SOURCE, load_repaired_skeletons)
+                repaired = load_repaired_skeletons(
+                    self.dataset, remaining, project_root=self.script_path)
+            except Exception:
+                return
+            for key, neuron in repaired.items():
+                canonical = normalize_flywire_body_id(key)
+                if getattr(neuron, '_drocat_source', '') == \
+                        LOCAL_EXTRUSION_FIX_SOURCE:
+                    sources[canonical] = 'local_repaired'
+                else:
+                    sources[canonical] = 'cave'
+                skeleton_cache[canonical] = neuron
+                remaining = [
+                    b for b in remaining
+                    if normalize_flywire_body_id(b) != canonical]
 
         def _take_raw_cache():
             """Shared raw SWC cache (skipped under use_cache=False)."""
@@ -9440,6 +9477,7 @@ class VisualizeSkeleton:
                     b for b in remaining
                     if normalize_flywire_body_id(b) not in sources]
 
+        _take_repaired()
         _take_raw_cache()
         _take_bundle()
 
@@ -9506,6 +9544,21 @@ class VisualizeSkeleton:
             neuron.name = str(normalize_flywire_body_id(body_id))
         return neuron
 
+    def _save_extrusion_fix(self, body_id, neuron):
+        """Persist a locally pruned tree to the ``extrusion_fixes`` store.
+
+        Best-effort: a failed write only costs a re-prune on the next run.
+        """
+        try:
+            from cave_data_fetcher import CAVEDataFetcher
+            fetcher = CAVEDataFetcher(
+                dataset=self.dataset, cave_token="",
+                project_root=self.script_path, cache_enabled=True,
+                verbose=False)
+            return fetcher.save_extrusion_fix_skeleton(body_id, neuron)
+        except Exception:
+            return False
+
     def _repair_extruded_via_cave(self, extrusion_ids, sources,
                                   skeleton_cache):
         """Replace extrusion-flagged trees with CAVE-skeletonized trees.
@@ -9515,7 +9568,8 @@ class VisualizeSkeleton:
         without a network round-trip), then the store itself, then an online
         wavefront skeletonization of the raw CAVE mesh.  A CAVE outage or a
         per-body miss keeps the known local tree and prunes only the
-        diagnosed extrusion branch when the cut is safe; statuses
+        diagnosed extrusion branch when the cut is safe; the pruned fix is
+        persisted to the ``extrusion_fixes`` store.  Statuses
         (``api_repaired``/``local_fallback``/``api_failed``) are persisted so
         later runs can honour or retry them.
         """
@@ -9594,9 +9648,11 @@ class VisualizeSkeleton:
                     sources[canonical] = 'local_repaired'
                     locally_repaired += 1
                     if self.cache_neurons:
-                        # Keep the detection flag. A local fallback
-                        # remains retryable when CAVE is available on
-                        # a later run.
+                        # Persist the pruned tree so later runs serve the
+                        # fix from the extrusion_fixes store instead of
+                        # redoing the prune. The status stays a local
+                        # fallback, which remains retryable in principle.
+                        self._save_extrusion_fix(canonical, repaired)
                         repair_statuses[canonical] = 'local_fallback'
                     self._vprint(
                         f'  🩹 CAVE fetch failed for {canonical}; '
@@ -9639,7 +9695,7 @@ class VisualizeSkeleton:
         """Fetch FAFB trees through CAVE by skeletonizing the raw mesh.
 
         ``CAVEDataFetcher.fetch_skeleton`` wavefront-skeletonizes the raw
-        CAVE mesh — measured at ×1.01–1.14 of the healed bundle's node
+        CAVE mesh — measured at ×1.01–1.14 of the healed zip's node
         density in 1–8 s per l-LNv — and persists the level-0 tree in the
         dedicated ``cave_skeletons`` store when ``cache_neurons`` is
         enabled, so later runs skip the network entirely.
@@ -9944,7 +10000,7 @@ class VisualizeSkeleton:
         that store are served from it without a new download.
 
         Once cached, every render pipeline automatically prefers the
-        CAVE-skeletonized tree over the problematic healed-bundle tree.
+        CAVE-skeletonized tree over the problematic healed-zip tree.
 
         Parameters
         ----------
@@ -10108,8 +10164,8 @@ class VisualizeSkeleton:
         if verbose:
             print(f"🔍 Checking FAFB skeleton {body_id} for extrusions...")
         
-        # The healed bundle reads .zst first; the ZIP is the fallback
-        # with lazy per-skeleton conversion.
+        # The healed zip is served directly (read-only; a legacy .zst is
+        # opened read-only only when no zip exists).
         dataset_clean = canonical_dataset_name(dataset).replace(':', '_').replace('.', '_')
         skeleton = None
         soma_pos = None
@@ -10352,9 +10408,10 @@ class VisualizeSkeleton:
                 # (node reduction + decimation) instead of rendering at
                 # raw density as misread L2 sources.
                 if not hasattr(neuron, '_drocat_banc_resolution'):
-                    source = getattr(neuron, '_drocat_source', '') or ''
-                    neuron._drocat_banc_resolution = (
-                        'full' if source.endswith('_full') else 'l2')
+                    from skeleton_provenance import (
+                        resolution_from_source, source_of)
+                    neuron._drocat_banc_resolution = resolution_from_source(
+                        source_of(neuron))
                 skeleton_cache[canonical] = neuron
             remaining = missing
 
@@ -10653,8 +10710,8 @@ class VisualizeSkeleton:
                             progress_callback=None):
         """Pipeline-driven FAFB processing for one render layer.
 
-        Every source is a TreeNeuron (healed bundle / raw SWC cache /
-        CAVE-skeletonized replacement — see ``_resolve_fafb_sources``):
+        Every source is a TreeNeuron (healed zip / raw SWC cache /
+        CAVE-skeletonized or locally fixed replacement — see ``_resolve_fafb_sources``):
         - fast: node-reduction stage (25% retention), then tube meshing +
           fine surface decimation.
         - fine: soma-aware decimation, no node stage.
@@ -10698,8 +10755,8 @@ class VisualizeSkeleton:
             # artistic never combines with it.
             node_stage = (fafb_pipeline == 'fast')
 
-            # --- TreeNeuron sources (healed bundle / raw SWC cache /
-            #     CAVE-skeletonized replacements).
+            # --- TreeNeuron sources (healed zip / raw SWC cache /
+            #     CAVE-skeletonized or locally fixed replacements).
             if neuron_vols is not None and len(neuron_vols) > 0:
                 neurons_list = (
                     list(neuron_vols)
@@ -12843,6 +12900,57 @@ class VisualizeSkeleton:
         )
         return distances[np.isfinite(distances) & (distances > 0)]
 
+    def _ensure_local_synapse_table_ready(self, parquet_file):
+        """Make a local FAFB/BANC synapse table usable, at most once.
+
+        Guards the lazy visualization path, where the dataset preparation
+        entry point is not re-run.  An interrupted preparation can leave a
+        truncated table (no valid footer): it is rebuilt through the
+        dataset's preparation entry point when the raw source is available,
+        and otherwise reported loudly instead of silently rendering an
+        empty scene.  A readable table from an older DROCAT generation is
+        upgraded to the lossless layout.  Never raises into the render.
+        """
+        if getattr(self, '_local_synapse_table_checked', False):
+            return
+        self._local_synapse_table_checked = True
+        warn = getattr(self, '_vprint', None) or (lambda *a, **k: None)
+        try:
+            from utils.parquet_utils import (
+                parquet_lossless_marker, parquet_readable,
+                reencode_parquet_lossless)
+            dataset_dir = os.path.dirname(os.path.abspath(parquet_file))
+            if not parquet_readable(parquet_file):
+                warn(f'  ⚠️ Local synapse table is unreadable '
+                     f'({os.path.basename(parquet_file)}); attempting to '
+                     f'rebuild it from the raw download...', level='simple')
+                self._rebuild_local_synapse_table(dataset_dir, warn)
+                return
+            if parquet_lossless_marker(parquet_file):
+                return
+            if is_fafb_dataset(self.dataset):
+                from FAFB_file_converter import FAFB_SYNAPSE_PROFILE
+                reencode_parquet_lossless(parquet_file, FAFB_SYNAPSE_PROFILE)
+            elif is_banc_dataset(self.dataset):
+                import banc_public_data as bpd
+                bpd.compact_synapse_table(parquet_file)
+        except Exception as exc:
+            warn(f'  ⚠️ Local synapse table upgrade skipped: {exc}',
+                 level='full')
+
+    def _rebuild_local_synapse_table(self, dataset_dir, warn):
+        """Re-run the dataset preparation entry point for a broken table."""
+        try:
+            if is_fafb_dataset(self.dataset):
+                from FAFB_file_converter import ensure_flywire_data
+                ensure_flywire_data(self.dataset, dataset_dir)
+            elif is_banc_dataset(self.dataset):
+                import banc_public_data as bpd
+                bpd.ensure_synapse_derived_table(self.dataset, dataset_dir)
+        except Exception as exc:
+            warn(f'  ⚠️ Could not rebuild the local synapse table: {exc}',
+                 level='simple')
+
     def _read_flywire_connection_frame(
             self, source_ids=None, target_ids=None, touching_ids=None,
             min_synapse_num=None):
@@ -12870,6 +12978,8 @@ class VisualizeSkeleton:
             parquet_file = candidate if os.path.exists(candidate) else None
         if parquet_file is None or not os.path.exists(parquet_file):
             return None
+        if is_fafb_dataset(self.dataset) or is_banc_dataset(self.dataset):
+            self._ensure_local_synapse_table_ready(parquet_file)
         import pyarrow.parquet as pq
         try:
             source_set = {str(value) for value in (source_ids or [])}
@@ -12910,8 +13020,15 @@ class VisualizeSkeleton:
                         if alt in schema.names:
                             use[target] = alt
                             break
-            if len(use) != len(coord_cols):
+            if any(target not in use for target in coord_cols[:3]):
                 return None
+            # BANC-derived tables carry pre-site coordinates only; the
+            # missing post columns are mirrored from the pre site after
+            # the read (BANC synapse markers sit on the pre-synaptic
+            # site), so they are optional here.
+            missing_post_cols = [
+                target for target in coord_cols[3:] if target not in use
+            ]
             # Infer voxel-vs-nanometre units from row-group statistics before
             # filtering.  Looking only at the selected rows can misclassify a
             # perfectly valid nanometre subset whose z range happens to be
@@ -12999,6 +13116,11 @@ class VisualizeSkeleton:
                 # and apply the exact string filter below.
                 frame = pd.read_parquet(parquet_file, columns=read_cols)
             frame = frame.rename(columns={value: key for key, value in use.items()})
+            for column in missing_post_cols:
+                # Pre-site-only release (BANC): the marker pair collapses
+                # onto the pre-synaptic site, pre-scaling so the unit
+                # conversion below applies to both columns identically.
+                frame[column] = frame[column.replace('_post', '_pre')]
             if weight_col is not None:
                 frame = frame[frame[weight_col] >= threshold]
             frame[pre_col] = frame[pre_col].astype(str)

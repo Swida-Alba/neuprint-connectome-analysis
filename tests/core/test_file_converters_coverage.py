@@ -123,10 +123,23 @@ def test_banc_neurons_missing_type_column(tmp_path):
 
 def test_banc_neurons_existing_output_short_circuits(tmp_path, capsys):
     save_path = tmp_path / "neuron_df.parquet"
-    save_path.write_bytes(b"already")
+    pd.DataFrame({"bodyId": ["1"]}).to_parquet(save_path, index=False)
     assert banc.process_neurons_to_parquet(str(tmp_path / "missing.csv"),
                                            str(save_path)) is True
     assert "Found existing converted file" in capsys.readouterr().out
+
+
+def test_banc_neurons_truncated_output_is_rebuilt(tmp_path):
+    """An unreadable leftover (interrupted write) must not be trusted:
+    it is discarded and the conversion re-runs."""
+    save_path = tmp_path / "neuron_df.parquet"
+    save_path.write_bytes(b"truncated")
+    read_path = tmp_path / "neurons.csv"
+    read_path.write_text(
+        "bodyId,type,instance\n720575940379280070,Unknown,x\n",
+        encoding="utf-8")
+    assert banc.process_neurons_to_parquet(str(read_path), str(save_path)) is True
+    assert len(pd.read_parquet(save_path)) == 1
 
 
 def test_banc_neurons_missing_input(tmp_path):
@@ -189,7 +202,9 @@ def test_banc_connections_without_roi_column(tmp_path):
 
 def test_banc_connections_existing_output_short_circuits(tmp_path):
     save_path = tmp_path / "connections.parquet"
-    save_path.write_bytes(b"already")
+    pd.DataFrame({"bodyId_pre": ["1"], "bodyId_post": ["2"],
+                  "weight": [1], "roi": ["AL"]}).to_parquet(save_path,
+                                                            index=False)
     assert banc.process_connections_to_parquet(
         str(tmp_path / "missing.csv"), str(save_path)
     ) is True
@@ -606,7 +621,7 @@ def test_fafb_neurons_without_enrichment(tmp_path):
 
 def test_fafb_neurons_existing_output_short_circuits(tmp_path):
     save_path = tmp_path / "neuron_df.parquet"
-    save_path.write_bytes(b"already")
+    pd.DataFrame({"bodyId": ["1"]}).to_parquet(save_path, index=False)
     assert fafb.process_neurons_to_parquet(
         str(tmp_path / "missing.csv.gz"), str(save_path)
     ) is True
@@ -665,7 +680,9 @@ def test_fafb_connections_without_roi(tmp_path):
 
 def test_fafb_connections_existing_and_missing(tmp_path):
     save_path = tmp_path / "connections.parquet"
-    save_path.write_bytes(b"already")
+    pd.DataFrame({"bodyId_pre": ["1"], "bodyId_post": ["2"],
+                  "weight": [1], "roi": ["AL"]}).to_parquet(save_path,
+                                                            index=False)
     assert fafb.process_connections_to_parquet(
         str(tmp_path / "missing.csv.gz"), str(save_path)
     ) is True
@@ -743,13 +760,132 @@ def test_fafb_synapse_table_empty_body(tmp_path):
 
 def test_fafb_synapse_table_existing_and_missing(tmp_path):
     save_path = tmp_path / "synapse.parquet"
-    save_path.write_bytes(b"already")
+    pd.DataFrame({
+        "pre_x": [1], "pre_y": [2], "pre_z": [3],
+        "post_x": [4], "post_y": [5], "post_z": [6],
+        "pre_root_id": ["720575940368841570"],
+        "post_root_id": ["720575940368841571"],
+    }).to_parquet(save_path, index=False)
     assert fafb.process_synapse_table_to_parquet(
         str(tmp_path / "missing.csv.gz"), str(save_path)
     ) is True
     assert fafb.process_synapse_table_to_parquet(
         str(tmp_path / "missing.csv.gz"), str(tmp_path / "other.parquet")
     ) is False
+
+
+def test_fafb_synapse_table_drops_unread_columns(tmp_path):
+    read_path = tmp_path / "synapse.csv.gz"
+    _write_gz(
+        read_path,
+        "\n".join(
+            [
+                "pre_root_id,post_root_id,ctr_x,ctr_y,ctr_z,size,neuropil,"
+                "pre_x,pre_y,pre_z,post_x,post_y,post_z",
+                "720575940368841570,720575940368841571,9,9,9,50,AL,1,2,3,4,5,6",
+            ]
+        ),
+    )
+    save_path = tmp_path / "synapse.parquet"
+    assert fafb.process_synapse_table_to_parquet(
+        str(read_path), str(save_path)
+    ) is True
+    df = pd.read_parquet(save_path)
+    assert not set(fafb.FAFB_UNREAD_SYNAPSE_COLUMNS) & set(df.columns)
+    assert "pre_x" in df.columns and "post_z" in df.columns
+    # The conversion post-pass stamps the lossless marker and the
+    # atomic writes leave no temp siblings behind.  The production temp
+    # naming is the hidden dotted form the stale-cleanup helper matches.
+    import os as _os
+    import pyarrow.parquet as pq
+    from utils.parquet_utils import temp_sibling
+    assert _os.path.basename(
+        temp_sibling(str(save_path), "build")).startswith(".")
+    assert (pq.read_schema(save_path).metadata or {}).get(
+        b"DROCAT.lossless") == b"v1"
+    assert not list(tmp_path.glob(".synapse.parquet.build.*.tmp"))
+    assert not list(tmp_path.glob(".synapse.parquet.compact.*.tmp"))
+
+
+def test_fafb_compact_synapse_table_drops_legacy_columns(tmp_path):
+    save_path = tmp_path / "synapse.parquet"
+    # Coordinates as int64, matching the real converted table.
+    pd.DataFrame(
+        {
+            "pre_x": [1], "pre_y": [2], "pre_z": [3],
+            "post_x": [4], "post_y": [5], "post_z": [6],
+            "ctr_x": [0.0], "ctr_y": [0.0], "ctr_z": [0.0],
+            "size": [50], "neuropil": ["AL"],
+            "pre_root_id_720575940": ["720575940368841570"],
+            "post_root_id_720575940": ["720575940368841571"],
+        }
+    ).astype({"pre_x": "int64", "pre_y": "int64", "pre_z": "int64",
+              "post_x": "int64", "post_y": "int64", "post_z": "int64"}
+             ).to_parquet(save_path, index=False)
+
+    assert fafb.compact_synapse_table(str(save_path)) is True
+    df = pd.read_parquet(save_path)
+    assert not set(fafb.FAFB_UNREAD_SYNAPSE_COLUMNS) & set(df.columns)
+    assert len(df) == 1
+    # Coordinates narrow losslessly (stats prove the int32 fit) while
+    # the id columns stay strings; the marker makes the next call a
+    # no-op, and stale temps from dead runs are cleaned up.
+    assert str(df["pre_x"].dtype) == "int32"
+    assert df["pre_root_id_720575940"].iloc[0] == "720575940368841570"
+    import pyarrow.parquet as pq
+    assert (pq.read_schema(save_path).metadata or {}).get(
+        b"DROCAT.lossless") == b"v1"
+    stale = tmp_path / ".synapse.parquet.compact.999999.tmp"
+    stale.write_bytes(b"junk")
+    assert fafb.compact_synapse_table(str(save_path)) is False
+    assert not stale.exists()
+
+
+def test_fafb_ensure_reconverts_truncated_synapse_table(tmp_path):
+    """A synapse table truncated by an interrupted conversion has no
+    valid footer: ensure_flywire_data must discard it and re-convert
+    from the raw CSV instead of trusting the broken file forever."""
+    dataset_dir = tmp_path / "flywire_FAFB_v999"
+    downloads = dataset_dir / "downloads"
+    downloads.mkdir(parents=True)
+    syn_pq = dataset_dir / "flywire_FAFB_v999_synapse_table.parquet"
+    syn_pq.write_bytes(b"PAR1truncated-no-footer")
+    _write_gz(
+        downloads / "fafb_v783_princeton_synapse_table.csv.gz",
+        "pre_root_id,post_root_id,ctr_x,size,neuropil\n"
+        "720575940368841570,720575940368841571,9,50,AL\n",
+    )
+
+    # Neurons/connections sources are absent, so preparation reports
+    # failure — but the synapse table must still be rebuilt.
+    assert fafb.ensure_flywire_data("flywire_FAFB_v999", str(dataset_dir)) is False
+    df = pd.read_parquet(syn_pq)  # raises if the truncated file survived
+    assert not set(fafb.FAFB_UNREAD_SYNAPSE_COLUMNS) & set(df.columns)
+    assert not list(dataset_dir.glob(
+        ".flywire_FAFB_v999_synapse_table.parquet.build.*.tmp"))
+
+
+def test_fafb_synapse_conversion_failure_leaves_no_output(tmp_path):
+    """A failed conversion write must not leave a truncated table at the
+    output path and must not leave a temp sibling behind."""
+    read_path = tmp_path / "synapse.csv.gz"
+    _write_gz(
+        read_path,
+        "pre_root_id,post_root_id\n720575940368841570,720575940368841571\n",
+    )
+    save_path = tmp_path / "synapse.parquet"
+
+    import polars as pl
+
+    def boom(self, path, *args, **kwargs):
+        raise OSError("disk full")
+
+    import unittest.mock as mock
+    with mock.patch.object(pl.DataFrame, "write_parquet", boom):
+        assert fafb.process_synapse_table_to_parquet(
+            str(read_path), str(save_path)) is False
+    assert not save_path.exists()
+    assert not list(tmp_path.glob(".synapse.parquet.build.*.tmp"))
 
 
 # ===========================================================================

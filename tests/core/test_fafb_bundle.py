@@ -1,7 +1,8 @@
-"""Tests for the appendable FAFB healed skeleton bundle (.zst) and its
-optional recompression workflow: bulk pack, lazy per-skeleton conversion,
-ZIP fallback with logical + verbatim-compaction removal, reader resolution
-(.zst first), and the converter's first-run prompt/config logic."""
+"""Tests for the FAFB healed skeleton sources: zip-only serving (the
+default application path — no ``.zst`` container is created or appended),
+the columnar container tooling (bulk pack, lazy per-skeleton conversion,
+ZIP fallback with logical + verbatim-compaction removal), reader
+resolution (zip first), and the CLI surface."""
 
 import gzip  # noqa: F401  (parity with sibling cache modules)
 import os
@@ -19,7 +20,6 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 import fafb_bundle as fb  # noqa: E402
 import fafb_utils as fau  # noqa: E402
-import FAFB_file_converter as fafb_conv  # noqa: E402
 
 
 def _swc(nid, n=12, frac=True):
@@ -92,21 +92,92 @@ class TestBulkPack:
             reader._ensure_open()
 
 
-class TestLazyConversion:
-    def test_resolution_zst_first_zip_fallback(self, tmp_path):
+class TestZipOnlyResolution:
+    def test_open_bundle_prefers_zip_and_never_creates_zst(self, tmp_path):
         zip_path = make_zip(tmp_path)
-        bundle_path = _bundle_path(tmp_path)
-        # zip-only: the bundle adapter serves from the ZIP
-        bundle = fb.open_bundle(tmp_path, lazy_convert=False)
+        bundle = fb.open_bundle(tmp_path)
         assert bundle is not None
         assert bundle.zip_path == zip_path
-        assert bundle.get(101) is not None
-        bundle.close()
-        # now pack a bundle: resolution prefers .zst
-        fb.pack(zip_path, bundle_path, n_workers=1)
-        bundle = fb.open_bundle(tmp_path, lazy_convert=False)
+        assert bundle.bundle_path is None
+        assert bundle.lazy_convert is False
         try:
-            assert bundle.bundle_path == bundle_path
+            assert bundle.get(101) is not None
+            assert bundle.count() == 10
+            assert bundle.bundle_count() == 0
+        finally:
+            bundle.close()
+        # serving from the zip must not have created a container
+        assert not _bundle_path(tmp_path).exists()
+
+    def test_open_bundle_zst_only_opened_readonly(self, tmp_path):
+        # no zip anywhere: an existing .zst stays readable
+        zip_path = make_zip(tmp_path)
+        bundle_path = _bundle_path(tmp_path)
+        fb.append_entries(zip_path, bundle_path, [101, 102])
+        zip_path.unlink()
+        before = bundle_path.stat().st_size
+        bundle = fb.open_bundle(tmp_path)
+        assert bundle is not None
+        assert bundle.bundle_path == bundle_path
+        assert bundle.zip_path is None
+        try:
+            assert bundle.get(101) is not None
+            assert bundle.get(103) is None
+            assert bundle.count() == 2
+        finally:
+            bundle.close()
+        assert bundle_path.stat().st_size == before
+
+    def test_open_bundle_missing_everything(self, tmp_path):
+        assert fb.open_bundle(tmp_path) is None
+
+    def test_zip_only_get_iter_and_flush_noop(self, tmp_path):
+        make_zip(tmp_path)
+        bundle = fb.open_bundle(tmp_path)
+        try:
+            texts = dict(bundle.iter_texts())
+            assert set(texts) == set(range(101, 111))
+            # flush must be a no-op in zip-only mode
+            bundle.flush()
+            assert not _bundle_path(tmp_path).exists()
+        finally:
+            bundle.close()
+
+    def test_zip_only_compact_is_noop(self, tmp_path):
+        zip_path = make_zip(tmp_path)
+        mtime_before = zip_path.stat().st_mtime_ns
+        bundle = fb.open_bundle(tmp_path)
+        try:
+            assert bundle.compact_zip() == 0
+        finally:
+            bundle.close()
+        assert zip_path.stat().st_mtime_ns == mtime_before
+
+    def test_zip_only_never_touches_legacy_zst(self, tmp_path):
+        zip_path = make_zip(tmp_path)
+        bundle_path = _bundle_path(tmp_path)
+        fb.append_entries(zip_path, bundle_path, [101])
+        before = bundle_path.stat().st_mtime_ns
+        bundle = fb.open_bundle(tmp_path)
+        try:
+            # the zip serves all ids; the legacy container stays untouched
+            assert bundle.get(105) is not None
+        finally:
+            bundle.close()
+        assert bundle_path.stat().st_mtime_ns == before
+
+
+class TestLazyConversion:
+    def test_resolution_zip_first_when_both_exist(self, tmp_path):
+        zip_path = make_zip(tmp_path)
+        bundle_path = _bundle_path(tmp_path)
+        fb.pack(zip_path, bundle_path, n_workers=1)
+        # zip-only: the zip is served directly, the packed .zst is ignored
+        bundle = fb.open_bundle(tmp_path)
+        assert bundle is not None
+        assert bundle.zip_path == zip_path
+        assert bundle.bundle_path is None
+        try:
             assert bundle.get(101) is not None
         finally:
             bundle.close()
@@ -114,7 +185,8 @@ class TestLazyConversion:
     def test_get_converts_lazily_and_dedups(self, tmp_path):
         zip_path = make_zip(tmp_path)
         bundle_path = _bundle_path(tmp_path)
-        bundle = fb.open_bundle(tmp_path, lazy_convert=True)
+        bundle = fb.FAFBSkeletonBundle(bundle_path, zip_path=zip_path,
+                                       lazy_convert=True)
         try:
             text = bundle.get(107)
             assert text is not None and "7000.4" in text
@@ -142,7 +214,8 @@ class TestLazyConversion:
     def test_compact_removes_entries_verbatim(self, tmp_path):
         zip_path = make_zip(tmp_path)
         bundle_path = _bundle_path(tmp_path)
-        bundle = fb.open_bundle(tmp_path, lazy_convert=True)
+        bundle = fb.FAFBSkeletonBundle(bundle_path, zip_path=zip_path,
+                                       lazy_convert=True)
         try:
             for nid in (107, 108, 109):
                 assert bundle.get(nid) is not None
@@ -196,92 +269,32 @@ class TestLazyConversion:
 
 
 class TestFafbUtilsSeam:
-    def test_get_fafb_skeleton_bundle_zst_first(self, tmp_path):
+    def test_get_fafb_skeleton_bundle_zip_preferred(self, tmp_path):
         zip_path = make_zip(tmp_path)
         fb.append_entries(zip_path, _bundle_path(tmp_path), [101])
         bundle = fau.get_fafb_skeleton_bundle(str(tmp_path))
         assert bundle is not None
         try:
+            # zip-only serving: every zip id resolves, no container needed
             assert bundle.get(101) is not None
             assert bundle.count() == 10
+            assert bundle.bundle_path is None
         finally:
             bundle.close()
 
     def test_get_fafb_skeleton_bundle_zip_only(self, tmp_path):
         make_zip(tmp_path)
+        assert not _bundle_path(tmp_path).exists()
         bundle = fau.get_fafb_skeleton_bundle(str(tmp_path))
         assert bundle is not None and bundle.zip_path is not None
         try:
             assert bundle.get(105) is not None
         finally:
             bundle.close()
+        assert not _bundle_path(tmp_path).exists()
 
     def test_get_fafb_skeleton_bundle_missing(self, tmp_path):
         assert fau.get_fafb_skeleton_bundle(str(tmp_path)) is None
-
-
-class TestConverterPrompt:
-    def test_recompress_config_defaults_and_overrides(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("DROCAT_RECOMPRESS", raising=False)
-        assert fafb_conv._recompress_config(tmp_path) == "ask"
-        monkeypatch.setenv("DROCAT_RECOMPRESS", "now")
-        assert fafb_conv._recompress_config(tmp_path) == "now"
-        monkeypatch.setenv("DROCAT_RECOMPRESS", "bogus")
-        assert fafb_conv._recompress_config(tmp_path) == "ask"
-        (tmp_path / "config.json").write_text(
-            '{"recompress_healed_bundle": "lazy"}')
-        monkeypatch.delenv("DROCAT_RECOMPRESS", raising=False)
-        assert fafb_conv._recompress_config(tmp_path) == "lazy"
-
-    def test_maybe_recompress_lazy_mode(self, tmp_path, monkeypatch):
-        zip_path = make_zip(tmp_path)
-        monkeypatch.setenv("DROCAT_RECOMPRESS", "lazy")
-        fafb_conv._maybe_recompress_healed_bundle(tmp_path, moved_zip=True)
-        assert not _bundle_path(tmp_path).exists()
-
-    def test_maybe_recompress_non_tty_ask_defaults_to_lazy(
-            self, tmp_path, monkeypatch):
-        make_zip(tmp_path)
-        monkeypatch.delenv("DROCAT_RECOMPRESS", raising=False)
-        monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
-        fafb_conv._maybe_recompress_healed_bundle(tmp_path, moved_zip=True)
-        assert not _bundle_path(tmp_path).exists()
-
-    def test_maybe_recompress_not_first_run_skips_prompt(
-            self, tmp_path, monkeypatch):
-        make_zip(tmp_path)
-        monkeypatch.delenv("DROCAT_RECOMPRESS", raising=False)
-        # moved_zip=False -> never prompt on re-runs
-        fafb_conv._maybe_recompress_healed_bundle(tmp_path, moved_zip=False)
-        assert not _bundle_path(tmp_path).exists()
-
-    def test_maybe_recompress_now_runs_pack(self, tmp_path, monkeypatch):
-        zip_path = make_zip(tmp_path)
-        monkeypatch.setenv("DROCAT_RECOMPRESS", "now")
-        monkeypatch.setattr(
-            fafb_conv, "_run_recompression_script",
-            lambda dataset_dir, *args: fb.pack(
-                Path(dataset_dir) / "sk_lod1_783_healed.zip",
-                Path(dataset_dir) / "sk_lod1_783_healed.zst", n_workers=1) and 0)
-        fafb_conv._maybe_recompress_healed_bundle(tmp_path, moved_zip=True)
-        assert _bundle_path(tmp_path).exists()
-        assert zip_path.exists()  # no delete without --delete-source
-
-    def test_maybe_recompress_skipped_when_bundle_exists(self, tmp_path,
-                                                         monkeypatch):
-        make_zip(tmp_path)
-        fb.append_entries(zip_path := tmp_path / "sk_lod1_783_healed.zip",
-                          _bundle_path(tmp_path), [101])
-        monkeypatch.setenv("DROCAT_RECOMPRESS", "now")
-        called = []
-
-        def fake_run(dataset_dir, *args):
-            called.append(args)
-            return 0
-
-        monkeypatch.setattr(fafb_conv, "_run_recompression_script", fake_run)
-        fafb_conv._maybe_recompress_healed_bundle(tmp_path, moved_zip=True)
-        assert called == []
 
 
 class TestCli:

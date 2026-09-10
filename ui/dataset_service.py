@@ -40,8 +40,13 @@ except ImportError:  # src not on sys.path; keep the UI importable standalone
         return "banc" in str(dataset or "").strip().lower()
 
     def is_fafb_dataset(dataset):
-        normalized = canonical_dataset_name(dataset).lower()
-        return "fafb" in normalized and not is_banc_dataset(normalized)
+        # Mirror src.flywire_ids.is_fafb_dataset: the ``fafb`` token or the
+        # bare ``flywire``/``fafb`` aliases, never a generic ``flywire_*``
+        # prefix and never BANC.
+        normalized = canonical_dataset_name(dataset).strip().lower()
+        if is_banc_dataset(normalized):
+            return False
+        return normalized in {"flywire", "fafb"} or "fafb" in normalized
 
     def is_local_connectome_dataset(dataset):
         return is_fafb_dataset(dataset) or is_banc_dataset(dataset)
@@ -188,13 +193,26 @@ class DatasetService:
 
     @staticmethod
     def _deserialize_info(name: str, data: dict) -> Optional[DatasetInfo]:
-        """Rebuild one DatasetInfo from a persisted snapshot row."""
+        """Rebuild one DatasetInfo from a persisted snapshot row.
+
+        Snapshot keys were written by whatever spelling the app used at the
+        time, so a pre-rename file can still hold ``flywire_BANC_v888``.
+        Canonicalize the name on load and re-derive the local-release family;
+        otherwise the Settings card renders a stale name and a ``flywire``
+        source for a standalone BANC release.
+        """
         if not isinstance(data, dict):
             return None
         try:
+            canonical_name = canonical_dataset_name(str(data.get("name") or name))
+            source = str(data.get("source") or "unknown")
+            if is_banc_dataset(canonical_name):
+                source = "banc"
+            elif is_fafb_dataset(canonical_name):
+                source = "flywire"
             return DatasetInfo(
-                name=str(data.get("name") or name),
-                source=str(data.get("source") or "unknown"),
+                name=canonical_name,
+                source=source,
                 available=bool(data.get("available", False)),
                 neuron_count=int(data.get("neuron_count", 0) or 0),
                 typed_count=int(data.get("typed_count", 0) or 0),
@@ -223,8 +241,19 @@ class DatasetService:
                 if isinstance(rows, dict):
                     for name, raw in rows.items():
                         info = self._deserialize_info(str(name), raw)
-                        if info is not None:
-                            snapshot[info.name] = info
+                        if info is None:
+                            continue
+                        if is_local_connectome_dataset(info.name):
+                            # A persisted local-release row can predate a
+                            # re-prepare (legacy name, stale counts, wrong
+                            # prepared flag).  Local status is offline and
+                            # cheap to re-derive, so the filesystem stays
+                            # authoritative instead of the frozen snapshot.
+                            try:
+                                info = self.check_dataset_availability(info.name)
+                            except Exception:
+                                pass  # keep the persisted row on failure
+                        snapshot[info.name] = info
         except (OSError, ValueError, TypeError):
             # A corrupt or partially-written snapshot must never prevent the
             # Settings page from loading; the next successful refresh replaces

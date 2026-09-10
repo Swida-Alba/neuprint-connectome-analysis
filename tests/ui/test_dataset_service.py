@@ -16,6 +16,7 @@ from ui.config import (
     NEUPRINT_DATASETS,
 )
 from ui.dataset_service import (
+    DatasetInfo,
     DatasetService,
     dataset_to_folder,
     folder_to_dataset,
@@ -416,3 +417,103 @@ class TestBancFallbackCounts:
             checked += 1
         if not checked:
             pytest.skip("no local prepared BANC tables")
+
+
+class TestSnapshotNameCanonicalization:
+    """A persisted availability snapshot written before the
+    ``flywire_BANC_*`` -> ``banc_*`` rename must not surface a legacy name
+    or a ``flywire`` source for a standalone BANC release."""
+
+    def test_deserialize_canonicalizes_legacy_banc_name(self):
+        info = DatasetService._deserialize_info(
+            "flywire_BANC_v888",
+            {"name": "flywire_BANC_v888", "source": "flywire",
+             "available": True, "neuron_count": 158262},
+        )
+        assert info.name == "banc_v888"
+        assert info.source == "banc"
+        assert info.neuron_count == 158262
+
+    def test_deserialize_keeps_fafb_and_neuprint_sources(self):
+        fafb = DatasetService._deserialize_info(
+            "flywire_FAFB_v783",
+            {"name": "flywire_FAFB_v783", "source": "flywire"})
+        assert fafb.name == "flywire_FAFB_v783"
+        assert fafb.source == "flywire"
+
+        np_info = DatasetService._deserialize_info(
+            "hemibrain:v1.2.1",
+            {"name": "hemibrain:v1.2.1", "source": "neuprint"})
+        assert np_info.name == "hemibrain:v1.2.1"
+        assert np_info.source == "neuprint"
+
+    def test_persisted_snapshot_self_heals_on_load(self, monkeypatch, tmp_path):
+        import json
+
+        snapshot_path = tmp_path / "dataset_availability.json"
+        snapshot_path.write_text(json.dumps({
+            "format": DatasetService.AVAILABILITY_CACHE_FORMAT,
+            "updated_at": "2026-08-18T00:11:08+08:00",
+            "datasets": {
+                "flywire_BANC_v888": {
+                    "name": "flywire_BANC_v888", "source": "flywire",
+                    "available": True, "local_prepared": True,
+                    "neuron_count": 158262,
+                },
+                "hemibrain:v1.2.1": {
+                    "name": "hemibrain:v1.2.1", "source": "neuprint",
+                    "available": True,
+                },
+            },
+        }), encoding="utf-8")
+
+        svc = DatasetService()
+        monkeypatch.setattr(
+            DatasetService, "availability_cache_path",
+            property(lambda self: snapshot_path))
+        # A local release is re-derived from disk, so stub the offline check
+        # to keep the test hermetic and to prove the persisted counts lose.
+        monkeypatch.setattr(
+            DatasetService, "check_dataset_availability",
+            lambda self, ds: DatasetInfo(name="banc_v888", source="banc",
+                                         available=True, local_prepared=True,
+                                         neuron_count=188508, typed_count=118748))
+
+        results, _updated = svc.get_cached_availability()
+        assert "banc_v888" in results
+        assert "flywire_BANC_v888" not in results
+        assert results["banc_v888"].source == "banc"
+        assert results["banc_v888"].neuron_count == 188508
+        assert results["banc_v888"].typed_count == 118748
+        # Non-local rows keep their persisted values.
+        assert results["hemibrain:v1.2.1"].source == "neuprint"
+
+    def test_local_release_row_is_rederived_not_frozen(self, monkeypatch):
+        """A local-release snapshot row must not win over the live local
+        check, or a re-prepared release would show stale counts."""
+        import json
+
+        stale = {
+            "banc_v626": {
+                "name": "banc_v626", "source": "flywire",
+                "available": True, "local_prepared": True,
+                "neuron_count": 115151, "typed_count": 115151,
+            },
+        }
+        captured = {}
+
+        def _fake_check(self, dataset):
+            captured["called_with"] = dataset
+            return DatasetInfo(name=dataset, source="banc", available=True,
+                               local_prepared=True, neuron_count=185165,
+                               typed_count=116906)
+
+        svc = DatasetService()
+        monkeypatch.setattr(DatasetService, "check_dataset_availability", _fake_check)
+        # Drive the same loop _load_persisted_availability runs.
+        info = svc._deserialize_info("banc_v626", stale["banc_v626"])
+        assert is_banc_dataset(info.name)
+        refreshed = svc.check_dataset_availability(info.name)
+        assert captured["called_with"] == "banc_v626"
+        assert refreshed.neuron_count == 185165
+        assert refreshed.typed_count == 116906

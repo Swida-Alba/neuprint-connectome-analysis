@@ -351,7 +351,7 @@ def test_flywire_fetch_uses_bundle_loader(monkeypatch, tmp_path):
         loader_calls.append((dataset, list(body_ids)))
         return {4: _Fetched()}
 
-    monkeypatch.setattr(mc, "load_flywire_skeletons_batch", _fake_loader)
+    monkeypatch.setattr(mc, "load_local_release_skeletons", _fake_loader)
 
     def _must_not_fetch(*a, **kw):
         raise AssertionError("NeuPrint fetch must not run for FlyWire")
@@ -605,7 +605,7 @@ def test_banc_missing_vectors_route_to_public_swc_chain(monkeypatch):
         raise AssertionError("BANC must not use the FAFB healed-bundle loader")
 
     monkeypatch.setattr(mc, "fetch_skeletons_on_demand_batch", _batch)
-    monkeypatch.setattr(mc, "load_flywire_skeletons_batch", _fail_fafb)
+    monkeypatch.setattr(mc, "load_local_release_skeletons", _fail_fafb)
 
     stub = SimpleNamespace(
         dataset="banc_v888",

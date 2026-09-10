@@ -8,13 +8,13 @@ container is *appendable*: lazy conversion appends new blocks and rewrites
 the index + footer at the end of the file, so a bulk ``pack`` and on-demand
 per-skeleton conversion produce the exact same format and can be mixed.
 
-The reader resolves the ``.zst`` bundle first and falls back to the legacy
-healed ZIP.  On the ZIP fallback path, every served skeleton is lazily
-converted into the bundle ("read .zst first, fallback to zip"; "every time
-a skeleton is loaded from the zip bundle, convert it to .zst and remove
-the per-file entry").  ZIP entries are removed logically at once (the
-bundle's neuron index is the converted-ids manifest) and physically by
-batched verbatim compaction (``compact_zip``), never per-entry rewrites.
+The application serves skeletons from the healed ZIP directly (zip-only
+mode): ``open_bundle`` resolves the ZIP and returns a bundle with
+``bundle_path=None`` that never creates, appends to, or requires a
+``.zst`` container.  The columnar format and its tooling
+(``pack|verify|info|compact|append``) remain available for manual
+maintenance; an existing ``.zst`` is opened read-only only when no ZIP
+is present.
 
 Precision policy: coordinates are stored as IEEE float32 — max absolute
 error <= 0.06 nm at the corpus maximum (the source text quantizes to 1-4
@@ -282,9 +282,11 @@ class FAFBSkeletonBundle:
     """
 
     def __init__(self, bundle_path, zip_path: Optional[Path] = None,
-                 lazy_convert: bool = True, level: int = DEFAULT_LEVEL,
+                 lazy_convert: bool = False, level: int = DEFAULT_LEVEL,
                  block_bytes: int = BLOCK_BYTES):
-        self.bundle_path = Path(bundle_path)
+        """``bundle_path=None`` selects zip-only mode: the ZIP is served
+        directly and no container file is created or appended to."""
+        self.bundle_path = Path(bundle_path) if bundle_path else None
         self.zip_path = Path(zip_path) if zip_path else None
         self.lazy_convert = bool(lazy_convert)
         self.level = int(level)
@@ -309,7 +311,7 @@ class FAFBSkeletonBundle:
     # ---------------- open / index ----------------
 
     def _ensure_open(self):
-        if self._handle is not None:
+        if self.bundle_path is None or self._handle is not None:
             return
         if not self.bundle_path.exists():
             self.bundle_path.parent.mkdir(parents=True, exist_ok=True)
@@ -484,7 +486,7 @@ class FAFBSkeletonBundle:
     def flush(self):
         """Append any buffered converted neurons as one block (locked)."""
         with self._write_lock:
-            if not self._pending:
+            if not self._pending or self.bundle_path is None:
                 return
             pending, self._pending = self._pending, []
             self._pending_ids = set()
@@ -939,8 +941,13 @@ def info(bundle_path, zip_path=None) -> Dict[str, object]:
 # Resolution + CLI
 # ---------------------------------------------------------------------------
 
-def open_bundle(data_dir, lazy_convert: bool = True) -> Optional[FAFBSkeletonBundle]:
-    """Resolve the FAFB skeleton source: .zst first, ZIP fallback (lazy)."""
+def open_bundle(data_dir) -> Optional[FAFBSkeletonBundle]:
+    """Resolve the FAFB skeleton source: healed ZIP served directly.
+
+    Zip-only mode: no ``.zst`` container is created or appended to.  An
+    existing ``.zst`` is opened read-only only when no ZIP is available,
+    so .zst-only setups keep working.
+    """
     data_dir = Path(data_dir)
     dataset_name = data_dir.name
     bundle_candidates = (
@@ -952,16 +959,13 @@ def open_bundle(data_dir, lazy_convert: bool = True) -> Optional[FAFBSkeletonBun
         data_dir / f"{dataset_name}_skeletons.zip",
         data_dir / "downloads" / "sk_lod1_783_healed.zip",
     )
+    zip_path = next((p for p in zip_candidates if p.is_file()), None)
+    if zip_path is not None:
+        return FAFBSkeletonBundle(None, zip_path=zip_path, lazy_convert=False)
     for candidate in bundle_candidates:
         if candidate.is_file():
-            zip_path = next((p for p in zip_candidates if p.is_file()), None)
-            return FAFBSkeletonBundle(
-                candidate, zip_path=zip_path, lazy_convert=lazy_convert)
-    for candidate in zip_candidates:
-        if candidate.is_file():
-            return FAFBSkeletonBundle(
-                bundle_candidates[0], zip_path=candidate,
-                lazy_convert=lazy_convert)
+            return FAFBSkeletonBundle(candidate, zip_path=None,
+                                      lazy_convert=False)
     return None
 
 

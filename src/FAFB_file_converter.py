@@ -1,7 +1,5 @@
 import os
 import shutil
-import subprocess
-import sys
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -13,70 +11,61 @@ import concurrent.futures
 import multiprocessing
 
 
-RECOMPRESSION_SCRIPT = (
-    Path(__file__).resolve().parents[1]
-    / "scripts" / "flywire_fafb_v783_skeleton_recompression.py"
-)
+# Columns of the synapse table no DROCAT reader consumes (audited
+# 2026-09: see docs/audits/SYNAPSE_TABLE_COLUMN_AUDIT_2026-09-10.md).
+# They are dropped at conversion time and compacted away in tables
+# converted by older DROCAT versions.
+FAFB_UNREAD_SYNAPSE_COLUMNS = ("ctr_x", "ctr_y", "ctr_z", "size", "neuropil")
+
+# Lossless storage profile for the converted synapse table: the string
+# id columns stay strings (user choice) and take DELTA_LENGTH_BYTE_ARRAY,
+# the coordinate columns narrow to int32 (guarded by footer statistics;
+# observed ranges stay below ~1e6) with BYTE_STREAM_SPLIT.  Measured on
+# the v783 release: 1.01 GB -> 0.91 GB (-10%), values bit-identical.
+# Both id naming generations are listed; absent entries are ignored.
+FAFB_SYNAPSE_PROFILE = {
+    "drop_columns": FAFB_UNREAD_SYNAPSE_COLUMNS,
+    "casts": {column: "int32" for column in
+              ("pre_x", "pre_y", "pre_z", "post_x", "post_y", "post_z")},
+    "column_encoding": {
+        "pre_root_id": "DELTA_LENGTH_BYTE_ARRAY",
+        "post_root_id": "DELTA_LENGTH_BYTE_ARRAY",
+        "pre_root_id_720575940": "DELTA_LENGTH_BYTE_ARRAY",
+        "post_root_id_720575940": "DELTA_LENGTH_BYTE_ARRAY",
+        "pre_x": "BYTE_STREAM_SPLIT",
+        "pre_y": "BYTE_STREAM_SPLIT",
+        "pre_z": "BYTE_STREAM_SPLIT",
+        "post_x": "BYTE_STREAM_SPLIT",
+        "post_y": "BYTE_STREAM_SPLIT",
+        "post_z": "BYTE_STREAM_SPLIT",
+    },
+    "use_dictionary": False,
+    "compression": "zstd",
+    "compression_level": 7,
+}
+
+try:
+    from utils.parquet_utils import (
+        parquet_is_reusable, parquet_readable, reencode_parquet_lossless,
+        write_file_atomic, write_parquet_atomic)
+except ImportError:  # pragma: no cover - src laid bare on sys.path
+    from utils.parquet_utils import (
+        parquet_is_reusable, parquet_readable, reencode_parquet_lossless,
+        write_file_atomic, write_parquet_atomic)
 
 
-def _recompress_config(project_root: Path) -> str:
-    """recompress_healed_bundle = ask | now | lazy.
+def compact_synapse_table(syn_pq, progress_callback=None) -> bool:
+    """Bring a converted FAFB synapse table to the lossless layout.
 
-    The environment variable DROCAT_RECOMPRESS wins; otherwise config.json
-    at the project root; the default is "ask" (interactive first run).
+    One streaming pass drops the unread legacy columns when present,
+    applies the measured encodings and stamps the footer marker; tables
+    already carrying the marker are left untouched.  Values are
+    preserved exactly — the id columns stay strings.
     """
-    value = os.environ.get("DROCAT_RECOMPRESS", "").strip().lower()
-    if value in ("ask", "now", "lazy"):
-        return value
-    try:
-        import json
-        config = json.loads((Path(project_root) / "config.json").read_text())
-        value = str(config.get("recompress_healed_bundle", "ask")).strip().lower()
-    except Exception:
-        value = "ask"
-    return value if value in ("now", "lazy") else "ask"
+    return reencode_parquet_lossless(
+        syn_pq, FAFB_SYNAPSE_PROFILE,
+        progress_callback=progress_callback)
 
-
-def _run_recompression_script(dataset_dir, *extra_args) -> int:
-    """Invoke the standalone recompression executor (pack or prompt)."""
-    cmd = [sys.executable, str(RECOMPRESSION_SCRIPT),
-           "--dataset-dir", str(dataset_dir)] + list(extra_args)
-    return subprocess.call(cmd)
-
-
-def _maybe_recompress_healed_bundle(dataset_dir, moved_zip: bool) -> None:
-    """Optional .zst recompression, AFTER conversion + preparation.
-
-    - config/lazy: log and leave conversion to the lazy reader path.
-    - config/now: run the bulk pack immediately.
-    - config/ask: prompt only on the run that actually moved the ZIP into
-      place (first run), and only on an interactive terminal; non-TTY runs
-      default to lazy conversion with a notice.
-    """
-    dataset_dir = Path(dataset_dir)
-    zip_path = dataset_dir / "sk_lod1_783_healed.zip"
-    bundle_path = dataset_dir / "sk_lod1_783_healed.zst"
-    if not zip_path.exists() or bundle_path.exists():
-        return
-    mode = _recompress_config(dataset_dir)
-    if mode == "now":
-        print("  ⏳ Recompressing the healed skeleton bundle (config "
-              "recompress_healed_bundle=now; ~1 h single-threaded)...")
-        _run_recompression_script(dataset_dir, "pack")
-        return
-    if mode == "lazy" or not moved_zip:
-        print("  ℹ️  Lazy skeleton recompression enabled: every ZIP-loaded "
-              "skeleton converts to .zst on first read (config "
-              "recompress_healed_bundle=" + mode + ").")
-        return
-    if not sys.stdin.isatty():
-        print("  ℹ️  Skipping the recompression prompt (non-interactive); "
-              "lazy per-skeleton conversion is enabled.")
-        return
-    print("  ℹ️  Optional recompression of the healed skeleton bundle "
-          "(~5 GB storage saving, ~1 h extra work) or lazy per-skeleton "
-          "conversion.")
-    _run_recompression_script(dataset_dir, "prompt")
 
 try:
     from .flywire_ids import canonicalize_flywire_id_expr, normalize_flywire_id_columns
@@ -161,7 +150,7 @@ def process_neurons_to_parquet(read_path, save_path, save_csv_path=None, enrichm
     Process classification.csv.gz and optional enrichment files into neuron_df parquet format.
     Enrichment files: names, coordinates, neurons (neurotransmitters), cell_stats.
     """
-    if os.path.exists(save_path):
+    if parquet_is_reusable(save_path):
         print(f"  ✓ Found existing converted file: {save_path}")
         return True
 
@@ -278,11 +267,16 @@ def process_neurons_to_parquet(read_path, save_path, save_csv_path=None, enrichm
         df = df.sort_values('bodyId')
         
         print(f"  Saving to Parquet: {save_path}...")
-        df.to_parquet(save_path, index=False, compression='snappy')
+        write_parquet_atomic(
+            save_path,
+            lambda temp: df.to_parquet(temp, index=False,
+                                       compression='snappy'))
         
         if save_csv_path:
             print(f"  Saving to CSV: {save_csv_path}...")
-            df.to_csv(save_csv_path, index=False)
+            write_file_atomic(
+                save_csv_path,
+                lambda temp: df.to_csv(temp, index=False))
         
         file_size_mb = os.path.getsize(save_path) / (1024 * 1024)
         print(f"  ✓ Conversion complete. Output size: {file_size_mb:.2f} MB")
@@ -301,7 +295,7 @@ def process_connections_to_parquet(read_path, save_path):
     groupby are ~9x / ~26x faster than the pandas pipeline on the multi-GB
     FAFB tables, with identical results.
     """
-    if os.path.exists(save_path):
+    if parquet_is_reusable(save_path):
         print(f"  ✓ Found existing converted file: {save_path}")
         return True
 
@@ -378,7 +372,9 @@ def process_connections_to_parquet(read_path, save_path):
         df = df.sort(['bodyId_pre', 'bodyId_post'])
 
         print(f"  Saving to Parquet: {save_path}...")
-        df.write_parquet(save_path, compression='snappy')
+        write_parquet_atomic(
+            save_path,
+            lambda temp: df.write_parquet(temp, compression='snappy'))
 
         file_size_mb = os.path.getsize(save_path) / (1024 * 1024)
         print(f"  ✓ Conversion complete. Output size: {file_size_mb:.2f} MB")
@@ -397,8 +393,18 @@ def process_synapse_table_to_parquet(read_path, save_path, chunksize=100000):
     of the chunked pandas loop (``chunksize`` is kept for compatibility);
     every row is checked for the 9-digit short form, where the legacy
     chunked code only inspected the first row of each chunk.
+
+    The cleft-centre columns (``ctr_*``), the ``size`` score and the
+    ``neuropil`` label are dropped: no DROCAT reader consumes them
+    (``_read_flywire_connection_frame`` reads pre/post sites, root ids
+    and a weight-threshold column only), and they were ~38% of the
+    converted file.  Re-run the conversion from the CSV if they are ever
+    needed again.
+
+    The output goes to a temporary sibling and is atomically renamed, so
+    an interrupted conversion never leaves a truncated parquet behind.
     """
-    if os.path.exists(save_path):
+    if parquet_is_reusable(save_path):
         print(f"  ✓ Found existing converted file: {save_path}")
         return True
 
@@ -444,11 +450,25 @@ def process_synapse_table_to_parquet(read_path, save_path, chunksize=100000):
         for column in (pre_root_id_col, post_root_id_col):
             df = df.with_columns(_fix_ids(column).alias(column))
 
+        # Drop columns with no consumer anywhere in DROCAT (audited
+        # 2026-09: zero readers of ctr_*/size/neuropil in src, ui,
+        # scripts and tests).
+        unread = [c for c in ("ctr_x", "ctr_y", "ctr_z", "size", "neuropil")
+                  if c in df.columns]
+        if unread:
+            df = df.drop(unread)
+
         print("  Sorting by root IDs...")
         df = df.sort([pre_root_id_col, post_root_id_col])
-        
+
         print(f"  Saving to Parquet: {save_path}...")
-        df.write_parquet(save_path, compression='snappy')
+        write_parquet_atomic(
+            save_path,
+            lambda temp: df.write_parquet(temp, compression='snappy'))
+
+        # Born encoded: apply the lossless layout right away so no later
+        # upgrade pass is ever needed for fresh conversions.
+        reencode_parquet_lossless(save_path, FAFB_SYNAPSE_PROFILE)
 
         file_size_mb = os.path.getsize(save_path) / (1024 * 1024)
         print(f"  ✓ Conversion complete. Output size: {file_size_mb:.2f} MB")
@@ -700,7 +720,7 @@ def ensure_flywire_data(dataset_name, dataset_dir):
     all_critical_present = True
 
     # --- 1. Neurons ---
-    if os.path.exists(neuron_pq):
+    if parquet_is_reusable(neuron_pq):
         print(f"  ✓ Found existing neurons: {os.path.basename(neuron_pq)}")
     else:
         print("  Checking neuron source files...")
@@ -740,7 +760,7 @@ def ensure_flywire_data(dataset_name, dataset_dir):
                 all_critical_present = False
 
     # --- 2. Connections ---
-    if os.path.exists(conn_pq):
+    if parquet_is_reusable(conn_pq):
         print(f"  ✓ Found existing connections: {os.path.basename(conn_pq)}")
     else:
         print("  Checking connection source files...")
@@ -759,23 +779,36 @@ def ensure_flywire_data(dataset_name, dataset_dir):
             all_critical_present = False
 
     # --- 3. Synapses (Optional) ---
-    if os.path.exists(syn_pq):
+    if os.path.exists(syn_pq) and parquet_readable(syn_pq):
         print(f"  ✓ Found existing synapse table: {os.path.basename(syn_pq)}")
+        # Slim tables converted by older DROCAT versions in place; a
+        # no-op for the current column set.
+        compact_synapse_table(syn_pq)
     else:
+        if os.path.exists(syn_pq):
+            # A truncated file has no valid parquet footer: the previous
+            # conversion run was interrupted mid-write.  Discard it and
+            # re-convert from the raw CSV below.
+            print(f"  ⚠️ Existing synapse table is incomplete (the previous "
+                  "run was interrupted); re-converting it from the raw "
+                  "download...")
+            try:
+                os.remove(syn_pq)
+            except OSError:
+                pass
         syn_raw = os.path.join(downloads_dir, "fafb_v783_princeton_synapse_table.csv.gz")
         if not os.path.exists(syn_raw):
             for f in os.listdir(downloads_dir):
                 if 'synapse' in f and f.endswith('.csv.gz'):
                     syn_raw = os.path.join(downloads_dir, f)
                     break
-        
+
         if syn_raw and os.path.exists(syn_raw):
             process_synapse_table_to_parquet(syn_raw, syn_pq)
         else:
             print("  ℹ️  Synapse table source not found (optional).")
 
     # --- 4. Skeletons (Optional) ---
-    moved_zip = False
     if os.path.exists(sk_zip_dst):
         print(f"  ✓ Found existing skeletons: {os.path.basename(sk_zip_dst)}")
     else:
@@ -785,24 +818,15 @@ def ensure_flywire_data(dataset_name, dataset_dir):
                 if f.endswith('.zip') and ('sk' in f or 'skeleton' in f):
                     sk_raw = os.path.join(downloads_dir, f)
                     break
-                
+
         if sk_raw and os.path.exists(sk_raw):
             print(f"  Moving {os.path.basename(sk_raw)} -> {os.path.basename(sk_zip_dst)}...")
             shutil.move(sk_raw, sk_zip_dst)
-            moved_zip = True
         else:
             print("  ℹ️  Skeletons zip not found (optional).")
 
-    # Optional recompression of the healed skeleton bundle, AFTER the
-    # one-time conversion and preparation above: ask the user on first run
-    # (or honor config recompress_healed_bundle = ask|now|lazy).
-    try:
-        _maybe_recompress_healed_bundle(dataset_dir, moved_zip)
-    except Exception as exc:
-        print(f"  ⚠️  Optional skeleton recompression skipped: {exc}")
-
     # --- Post Counts Update ---
-    if os.path.exists(neuron_pq) and os.path.exists(conn_pq):
+    if parquet_is_reusable(neuron_pq) and parquet_is_reusable(conn_pq):
         try:
             # Read just the post column to check if it's all zeros
             df_check = pd.read_parquet(neuron_pq, columns=['post'])

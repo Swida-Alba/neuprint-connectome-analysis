@@ -382,3 +382,85 @@ class TestDenoiseSkeleton:
         assert skel is not None
         assert "/tmp/42.pkl" in saved
         assert saved["/tmp/42.pkl"] >= len(skel.nodes)
+
+
+def test_extrusion_fix_store_roundtrip_with_provenance(tmp_path):
+    """Locally pruned fixes persist to ``extrusion_fixes`` with an explicit
+    ``local_extrusion_fix`` provenance header and reload network-free."""
+    import zstandard as zstd
+
+    fetcher = cdf.CAVEDataFetcher(
+        dataset="flywire_FAFB_v783",
+        cave_token="",
+        cache_enabled=True,
+        project_root=str(tmp_path),
+        verbose=False,
+    )
+    fix = twiggy_neuron()
+    assert fetcher.save_extrusion_fix_skeleton(42, fix) is True
+
+    fix_path = tmp_path / "cache" / "flywire_FAFB_v783" / "skeletons" \
+        / "extrusion_fixes" / "42.swc.zst"
+    assert fix_path.exists()
+    with open(fix_path, "rb") as handle:
+        with zstd.ZstdDecompressor().stream_reader(handle) as reader:
+            head = reader.read(512).decode("utf-8", "replace").splitlines()
+    assert "# DROCAT simpl: 0" in head
+    assert "# DROCAT source: local_extrusion_fix" in head
+
+    loaded = fetcher.load_cached_fix_skeleton("42")
+    assert loaded is not None
+    assert len(loaded.nodes) == len(fix.nodes)
+    assert loaded._drocat_source == "local_extrusion_fix"
+    # the CAVE replacement store stays untouched by the fix store
+    assert fetcher.load_cached_skeleton(42) is None
+    assert not (tmp_path / "cache" / "flywire_FAFB_v783" / "skeletons"
+                / "cave_skeletons").exists()
+
+
+def test_load_repaired_skeletons_prefers_cave_then_fix_store(tmp_path):
+    """``load_repaired_skeletons`` serves ``api_repaired`` bodies from the
+    ``cave_skeletons`` store and ``local_fallback`` bodies from
+    ``cave_skeletons`` first, then ``extrusion_fixes``; unknown and failed
+    statuses stay out so callers run the repair chain for them."""
+    from fafb_utils import (
+        EXTRUSION_REPAIR_API_FAILED,
+        EXTRUSION_REPAIR_API_REPAIRED,
+        EXTRUSION_REPAIR_LOCAL_FALLBACK,
+        set_extrusion_repair_status,
+    )
+
+    fetcher = cdf.CAVEDataFetcher(
+        dataset="flywire_FAFB_v783",
+        cave_token="",
+        cache_enabled=True,
+        project_root=str(tmp_path),
+        verbose=False,
+    )
+    assert fetcher.save_extrusion_fix_skeleton(7, twiggy_neuron())
+
+    set_extrusion_repair_status(str(tmp_path), "flywire_FAFB_v783", {
+        "5": EXTRUSION_REPAIR_API_REPAIRED,     # store miss -> unresolved
+        "6": EXTRUSION_REPAIR_API_FAILED,       # retryable -> unresolved
+        "7": EXTRUSION_REPAIR_LOCAL_FALLBACK,   # fix store hit
+        "8": EXTRUSION_REPAIR_LOCAL_FALLBACK,   # no store entry -> unresolved
+    })
+
+    out = cdf.load_repaired_skeletons(
+        "flywire_FAFB_v783", [5, 6, 7, 8, 9],
+        project_root=str(tmp_path))
+    assert set(out) == {7}
+    assert out[7]._drocat_source == "local_extrusion_fix"
+
+    # a cave_skeletons entry wins over the persisted fix for the same body
+    fetcher._save_cave_skeleton(
+        twiggy_neuron(),
+        fetcher._get_skeleton_cache_path(cdf.body_id_to_api_int(7)))
+    served = cdf.load_repaired_skeletons(
+        "flywire_FAFB_v783", [7], project_root=str(tmp_path))
+    assert set(served) == {7}
+    assert served[7]._drocat_source == "cave_mesh_wavefront"
+
+    # BANC never reaches the repair caches
+    assert cdf.load_repaired_skeletons(
+        "banc_public_v888", [7], project_root=str(tmp_path)) == {}

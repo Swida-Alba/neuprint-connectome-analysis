@@ -274,9 +274,9 @@ def create_morphology_tab():
                         .removesuffix(".pkl")
                         for p in raw_files
                     })
-                    # FAFB v783: the healed bundle is the real skeleton
-                    # source (.zst first; ZIP fallback with lazy conversion;
-                    # the pickle cache holds meshes).
+                    # FAFB v783: the healed zip is the real skeleton source
+                    # (served directly; a legacy .zst is opened read-only
+                    # when no zip exists; the pickle cache holds meshes).
                     dataset_folder_name = dataset.value.replace(":", "_").replace(".", "_")
                     dataset_dir = Path(PROJECT_ROOT) / "datasets" / dataset_folder_name
                     bundle_path = dataset_dir / "sk_lod1_783_healed.zst"
@@ -288,7 +288,8 @@ def create_morphology_tab():
                                 _sys.path.insert(0, str(SRC_DIR))
                             from fafb_bundle import FAFBSkeletonBundle
                             reader = FAFBSkeletonBundle(
-                                bundle_path, zip_path=zip_path if zip_path.exists() else None,
+                                bundle_path if bundle_path.exists() else None,
+                                zip_path=zip_path if zip_path.exists() else None,
                                 lazy_convert=False)
                             try:
                                 n_skel = reader.count()

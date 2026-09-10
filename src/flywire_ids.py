@@ -48,9 +48,12 @@ def is_banc_dataset(dataset: object) -> bool:
 def is_fafb_dataset(dataset: object) -> bool:
     """Return whether *dataset* identifies a FAFB release.
 
-    ``flywire_*`` remains accepted for the FAFB release because that is the
-    historical identifier used by the Codex/FAFB files.  BANC is deliberately
-    excluded even when a legacy ``flywire_BANC_*`` alias is supplied.
+    FAFB is matched by the ``fafb`` token (the real releases are spelled
+    ``flywire_FAFB_v783``), or by the bare aliases ``flywire`` / ``fafb``.
+    A generic ``flywire_*`` prefix is *not* enough: the prefix is historical
+    and standalone BANC once carried it, so it is explicitly excluded even
+    for a legacy ``flywire_BANC_*`` alias.  Callers that need either local
+    release must use :func:`is_local_connectome_dataset`.
     """
 
     normalized = canonical_dataset_name(str(dataset or "").strip()).lower()

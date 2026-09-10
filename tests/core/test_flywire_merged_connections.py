@@ -91,10 +91,26 @@ class TestConvertersWriteOnlyParquet:
         src = tmp_path / "connections_princeton.csv.gz"
         RAW_ROWS.to_csv(src, index=False, compression="gzip")
         out = tmp_path / "ds_merged_connections.parquet"
+        # A complete existing table is reused untouched.
+        pd.DataFrame({"bodyId_pre": ["1"], "bodyId_post": ["2"],
+                      "weight": [1], "roi": ["AL"]}).to_parquet(out,
+                                                                index=False)
+        before = out.read_bytes()
+        assert FAFB_file_converter.process_connections_to_parquet(
+            str(src), str(out))
+        assert out.read_bytes() == before  # untouched
+
+    def test_truncated_parquet_is_rebuilt(self, tmp_path):
+        """An unreadable leftover must not be trusted: it is discarded and
+        converted again from the raw CSV."""
+        src = tmp_path / "connections_princeton.csv.gz"
+        RAW_ROWS.to_csv(src, index=False, compression="gzip")
+        out = tmp_path / "ds_merged_connections.parquet"
         out.write_bytes(b"existing")
         assert FAFB_file_converter.process_connections_to_parquet(
             str(src), str(out))
-        assert out.read_bytes() == b"existing"  # untouched
+        assert out.read_bytes() != b"existing"
+        assert "bodyId_pre" in pd.read_parquet(out).columns
 
 
 class TestLoadFlywireMergedConnections:

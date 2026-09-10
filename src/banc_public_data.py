@@ -39,6 +39,21 @@ try:
 except ImportError:  # pragma: no cover - src laid bare on sys.path
     from utils.naming_utils import canonical_dataset_name, dataset_version
 
+try:
+    from .utils.parquet_utils import (
+        parquet_is_reusable, parquet_readable, reencode_parquet_lossless,
+        write_parquet_atomic)
+except ImportError:  # pragma: no cover - src laid bare on sys.path
+    from utils.parquet_utils import (
+        parquet_is_reusable, parquet_readable, reencode_parquet_lossless,
+        write_parquet_atomic)
+
+# Shared compressed-SWC provenance contract (headers, parser, writer).
+try:
+    from . import skeleton_provenance as _provenance
+except ImportError:  # pragma: no cover - src laid bare on sys.path
+    import skeleton_provenance as _provenance
+
 
 # ---------------------------------------------------------------------------
 # Public bucket locations (verified live; plain HTTPS, no token anywhere)
@@ -117,7 +132,7 @@ _VALID_RESOLUTIONS = ("l2", "full", "full_auto")
 _SKELETON_SUFFIXES = ("_l2.swc", "_skeleton.swc")
 
 # Provenance line written into cached SWC headers (next to the level line).
-_SOURCE_HEADER = "DROCAT source:"
+_SOURCE_HEADER = _provenance.SOURCE_HEADER
 
 # Dataset folders whose crosswalk download failed this process (negative
 # cache: do not re-attempt the 58 MB download per neuron).
@@ -197,9 +212,8 @@ def http_get(url: str, timeout: float = 120, attempts: int = 3,
 # ---------------------------------------------------------------------------
 
 def _skeleton_cache_path(dataset, body_id, project_root) -> Path:
-    return (_project_root(project_root) / "cache"
-            / _dataset_folder(dataset) / "skeletons" / "raw_skeletons"
-            / f"{body_id}.swc.zst")
+    return _provenance.raw_skeleton_cache_path(
+        _project_root(project_root), _dataset_folder(dataset), body_id)
 
 
 def _resolution_from_source_header(content: str) -> str:
@@ -210,12 +224,8 @@ def _resolution_from_source_header(content: str) -> str:
     as the coarse 'l2'.  navis drops comment lines, so the resolution must
     be rebuilt from the raw text on every cache load (R2).
     """
-    prefix = f"# {_SOURCE_HEADER} "
-    for line in content.splitlines()[:8]:
-        if line.startswith(prefix):
-            return ("full" if line[len(prefix):].strip().endswith("_full")
-                    else "l2")
-    return "l2"
+    return _provenance.resolution_from_source(
+        _provenance.read_stored_source(content))
 
 
 def _load_cached_swc(cache_path: Path):
@@ -249,10 +259,9 @@ def _load_cached_swc(cache_path: Path):
 
 def _write_cached_swc(cache_path: Path, swc_text: bytes, source: str) -> None:
     """Persist raw SWC bytes (level 0) with a provenance header line."""
-    from cave_data_fetcher import _write_compressed_swc_zst
-
-    payload = f"# {_SOURCE_HEADER} {source}\n".encode("ascii") + swc_text
-    _write_compressed_swc_zst(str(cache_path), payload, simplification=0)
+    payload = _provenance.make_source_line(source) + swc_text
+    _provenance.write_compressed_swc_zst(str(cache_path), payload,
+                                         simplification=0)
 
 
 def _crosswalk_cache_path(dataset, project_root) -> Path:
@@ -626,11 +635,16 @@ def build_synapse_table(per_synapse_parquet: Path, derived_path: Path,
     The remote table stores one row per detected synapse (pre-site
     coordinates only, nanometres, root-id 0 placeholders included).  The
     derived table carries one row per (pre, post) pair: ``syn_count``
-    (synapses per pair) and the mean pre-site position, which is exactly
-    the schema ``_read_flywire_connection_frame`` consumes.
+    (synapses per pair) and the mean pre-site position.  The release has
+    no post-site coordinates, so no post columns are written — the reader
+    mirrors the pre-site position onto ``x/y/z_post`` after loading,
+    which keeps BANC synapse markers on the pre-synaptic site without
+    persisting three duplicate columns (39.5% of the old file).
 
     Streams row-group by row-group so peak memory stays bounded; partial
-    aggregates are re-folded periodically.
+    aggregates are re-folded periodically.  The output is written to a
+    temporary sibling and atomically renamed, so an interrupted run never
+    leaves a truncated table at ``derived_path``.
     """
     try:
         import polars as pl
@@ -687,22 +701,59 @@ def build_synapse_table(per_synapse_parquet: Path, derived_path: Path,
             (pl.col("sz").sum() / pl.col("syn_count").sum())
                 .cast(pl.Float32).alias("z_pre"),
         )
-        # The release publishes only pre-site coordinates.  Mirror them into
-        # the post columns so the generic connection-frame reader accepts the
-        # table; BANC synapse markers therefore sit on the pre-synaptic site.
-        final = final.with_columns(
-            pl.col("x_pre").alias("x_post"),
-            pl.col("y_pre").alias("y_post"),
-            pl.col("z_pre").alias("z_post"),
-        ).sort(["pre_root_id", "post_root_id"])
+        # The release publishes only pre-site coordinates.  The generic
+        # reader mirrors them onto the post columns in memory, so the
+        # duplicates are not persisted.
+        final = final.sort(["pre_root_id", "post_root_id"])
         Path(derived_path).parent.mkdir(parents=True, exist_ok=True)
-        final.write_parquet(derived_path, compression="zstd")
+        # Atomic output: an interrupted write leaves a temp sibling (never
+        # a truncated table), which the next run cleans up and rebuilds.
+        write_parquet_atomic(
+            str(derived_path),
+            lambda temp: final.write_parquet(temp, compression="zstd"))
         print(f"  ✓ Synapse table written: {derived_path} "
               f"({final.height:,} connections)")
+        # Born encoded: apply the lossless layout right away so no later
+        # upgrade pass is ever needed for fresh derivations.
+        reencode_parquet_lossless(derived_path, BANC_SYNAPSE_PROFILE,
+                                  progress_callback=progress_callback)
         return True
     except Exception as exc:
         print(f"  ⚠️ Failed to build the BANC synapse table: {exc}")
         return False
+
+
+# Lossless storage profile for the derived per-pair synapse table.
+# Encodings decoded transparently on read; measured on the v888 release
+# (1.84 GB -> 1.38 GB, -25%, values bit-identical).  post_root_id is
+# scattered within the pre-sorted table so it takes BYTE_STREAM_SPLIT
+# instead of dictionary; z_pre stays PLAIN (split measured worse there).
+BANC_SYNAPSE_PROFILE = {
+    "drop_columns": ("x_post", "y_post", "z_post"),
+    "column_encoding": {
+        "pre_root_id": "DELTA_BINARY_PACKED",
+        "post_root_id": "BYTE_STREAM_SPLIT",
+        "syn_count": "BYTE_STREAM_SPLIT",
+        "x_pre": "BYTE_STREAM_SPLIT",
+        "y_pre": "BYTE_STREAM_SPLIT",
+    },
+    "use_dictionary": False,
+    "compression": "zstd",
+    "compression_level": 7,
+}
+
+
+def compact_synapse_table(derived_path, progress_callback=None) -> bool:
+    """Bring a derived synapse table to the current lossless layout.
+
+    One streaming pass drops the legacy mirrored post-site columns
+    (pre-v4.5 tables), applies the measured encodings and stamps the
+    footer marker; tables already carrying the marker are left
+    untouched.  Values are preserved exactly.
+    """
+    return reencode_parquet_lossless(
+        derived_path, BANC_SYNAPSE_PROFILE,
+        progress_callback=progress_callback)
 
 
 def ensure_synapse_derived_table(dataset, dataset_dir,
@@ -713,12 +764,27 @@ def ensure_synapse_derived_table(dataset, dataset_dir,
     Downloads the remote per-synapse parquet once (resumable), then
     aggregates it into ``datasets/<dataset>/<dataset>_synapse_table.parquet``
     — the exact fallback name the generic FlyWire synapse reader probes.
+    A table left over from an older DROCAT generation is compacted in
+    place (mirrored post-site columns dropped) before reuse.  A table
+    truncated by an interrupted run is detected via its footer, discarded,
+    and rebuilt — re-fetching the raw download if that was already
+    reclaimed.
     """
     dataset_dir = str(dataset_dir)
     derived = os.path.join(
         dataset_dir, f"{_dataset_folder(dataset)}_synapse_table.parquet")
     if os.path.exists(derived):
-        return True
+        if parquet_readable(derived):
+            # One-time reclaim for tables from before the reader-side
+            # mirroring; a no-op for the current 6-column schema.
+            compact_synapse_table(derived, progress_callback)
+            return True
+        print("  ⚠️ Existing synapse table is incomplete (the previous "
+              "run was interrupted); discarding and rebuilding it...")
+        try:
+            os.remove(derived)
+        except OSError:
+            pass
     local = ensure_synapse_table(dataset, project_root)
     if local is None:
         return False
@@ -857,9 +923,12 @@ def prepare_dataset_tables(dataset_name, dataset_dir,
                            project_root=None) -> bool:
     """Prepare neuron + connection tables from the public bucket products.
 
-    The raw products stay in ``<dataset_dir>/downloads/`` like their Codex
-    counterparts so re-runs skip the network entirely.  Returns True when
-    both parquet tables exist afterwards.
+    The meta feather stays in ``<dataset_dir>/downloads/`` (it is read at
+    runtime by the neuron index and the type mapper) so re-runs skip the
+    network entirely.  The connections product is only fetched when the
+    merged table is missing — it has no consumer after the derivation and
+    is safe to delete once ``{dataset}_merged_connections.parquet``
+    exists.  Returns True when both parquet tables exist afterwards.
     """
     from BANC_file_converter import (
         process_connections_dataframe,
@@ -878,8 +947,7 @@ def prepare_dataset_tables(dataset_name, dataset_dir,
     project_root = str(Path(dataset_dir).parent.parent)
 
     meta_local = download_meta_feather(dataset_name, project_root)
-    conn_local = download_connections_product(dataset_name, project_root)
-    if meta_local is None or conn_local is None:
+    if meta_local is None:
         return False
 
     neuron_pq = os.path.join(dataset_dir,
@@ -890,10 +958,15 @@ def prepare_dataset_tables(dataset_name, dataset_dir,
                            f"{dataset_name}_merged_connections.parquet")
 
     ok = True
-    if not os.path.exists(neuron_pq):
+    if not parquet_is_reusable(neuron_pq):
         neurons = build_neurons_dataframe(meta_local, version)
         ok = process_neurons_dataframe(neurons, neuron_pq,
                                        save_csv_path=neuron_csv) and ok
-    if not os.path.exists(conn_pq):
+    if not parquet_is_reusable(conn_pq):
+        # The connections product has no consumer beyond this derivation;
+        # skip the 76 MB download entirely while the merged table exists.
+        conn_local = download_connections_product(dataset_name, project_root)
+        if conn_local is None:
+            return False
         ok = process_connections_dataframe(conn_local, conn_pq) and ok
     return ok

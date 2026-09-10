@@ -562,8 +562,163 @@ class TestSynapseSliceFetch:
                         & (pl.col("post_root_id") == 9))
         assert ab["syn_count"][0] == 3
         assert ab["x_pre"][0] == 20.0  # mean of 10/20/30
-        # mirrored post columns (markers land on the pre site)
-        assert ab["x_post"][0] == 20.0
+        # post-site coordinates are not persisted: the release has none,
+        # and the reader mirrors the pre site onto the post columns.
+        assert "x_post" not in out.columns
+
+    def test_compact_synapse_table_slims_legacy_mirrors(self, tmp_path):
+        """Legacy tables that mirrored pre-site coords into post columns
+        are rewritten without the duplicates; current tables are no-ops."""
+        import polars as pl
+
+        legacy = pl.DataFrame({
+            "pre_root_id": [1, 2], "post_root_id": [9, 9],
+            "syn_count": [3, 1],
+            "x_pre": [20.0, 50.0], "y_pre": [0.0, 0.0], "z_pre": [4.0, 4.0],
+            "x_post": [20.0, 50.0], "y_post": [0.0, 0.0], "z_post": [4.0, 4.0],
+        })
+        path = tmp_path / "banc_v888_synapse_table.parquet"
+        legacy.write_parquet(path, compression="zstd")
+        before = path.stat().st_size
+
+        assert bpd.compact_synapse_table(path) is True
+        assert path.stat().st_size < before
+        out = pl.read_parquet(path)
+        assert out.columns == ["pre_root_id", "post_root_id", "syn_count",
+                               "x_pre", "y_pre", "z_pre"]
+        assert out["syn_count"].to_list() == [3, 1]
+        assert out["x_pre"].to_list() == [20.0, 50.0]
+        # Idempotent: the compacted schema has nothing left to drop.
+        assert bpd.compact_synapse_table(path) is False
+
+    def test_compact_synapse_table_encodes_and_stamps_marker(self, tmp_path):
+        """A current-schema table without the footer marker gets the
+        lossless layout applied once; the marker makes the next call a
+        no-op while values and columns stay identical."""
+        import polars as pl
+
+        current = pl.DataFrame({
+            "pre_root_id": [1], "post_root_id": [9], "syn_count": [1],
+            "x_pre": [1.0], "y_pre": [2.0], "z_pre": [3.0],
+        })
+        path = tmp_path / "table.parquet"
+        current.write_parquet(path)
+        assert bpd.compact_synapse_table(path) is True
+        import pyarrow.parquet as pq
+        schema = pq.read_schema(path)
+        assert schema.metadata.get(b"DROCAT.lossless") == b"v1"
+        assert pl.read_parquet(path).columns == list(current.columns)
+        assert bpd.compact_synapse_table(path) is False
+
+    def test_compact_cleans_stale_temp_files(self, tmp_path):
+        """Temp siblings left by an interrupted compaction are removed
+        before a new rewrite starts."""
+        import polars as pl
+
+        legacy = pl.DataFrame({
+            "pre_root_id": [1], "post_root_id": [9], "syn_count": [1],
+            "x_pre": [1.0], "y_pre": [2.0], "z_pre": [3.0],
+            "x_post": [1.0], "y_post": [2.0], "z_post": [3.0],
+        })
+        path = tmp_path / "banc_v888_synapse_table.parquet"
+        legacy.write_parquet(path)
+        stale = tmp_path / ".banc_v888_synapse_table.parquet.compact.999999.tmp"
+        stale.write_bytes(b"junk from a dead process")
+
+        assert bpd.compact_synapse_table(path) is True
+        assert not stale.exists()
+
+    def test_build_writes_atomically_and_cleans_stale_temps(self, tmp_path):
+        import os as _os
+        import polars as pl
+        from utils.parquet_utils import temp_sibling
+
+        rows = pl.DataFrame({
+            "pre_root_id": [1], "post_root_id": [9],
+            "pre_x": [5.0], "pre_y": [6.0], "pre_z": [7.0],
+        })
+        src = tmp_path / "per_synapse.parquet"
+        rows.write_parquet(src)
+        derived = tmp_path / "banc_v888_synapse_table.parquet"
+        # The production temp naming must be the hidden dotted form the
+        # stale-cleanup helper matches; a non-dotted name would leak.
+        assert _os.path.basename(
+            temp_sibling(str(derived), "build")).startswith(".")
+        stale = tmp_path / ".banc_v888_synapse_table.parquet.build.999999.tmp"
+        stale.write_bytes(b"junk from a dead process")
+
+        assert bpd.build_synapse_table(src, derived) is True
+        # The atomic rename leaves the final file and no temp siblings,
+        # and the post-pass stamps the lossless marker.
+        assert derived.exists()
+        assert not stale.exists()
+        assert not list(tmp_path.glob(".*.build.*.tmp"))
+        assert not list(tmp_path.glob(".*.compact.*.tmp"))
+        import pyarrow.parquet as pq
+        assert (pq.read_schema(derived).metadata or {}).get(
+            b"DROCAT.lossless") == b"v1"
+
+    def test_ensure_rebuilds_table_truncated_by_interrupted_run(self, tmp_path,
+                                                                monkeypatch):
+        """A derived table without a valid parquet footer (the previous
+        run died mid-write) is discarded and rebuilt — re-fetching the
+        raw download if it was already reclaimed — instead of failing at
+        read time forever."""
+        import polars as pl
+
+        ds_dir = tmp_path / "datasets" / "banc_v888"
+        ds_dir.mkdir(parents=True)
+        derived = ds_dir / "banc_v888_synapse_table.parquet"
+        derived.write_bytes(b"PAR1truncated-no-valid-footer")
+
+        def fake_ensure_synapse_table(dataset, project_root=None,
+                                      force=False, progress_callback=None):
+            raw = tmp_path / "downloads" / "per_synapse.parquet"
+            raw.parent.mkdir(parents=True, exist_ok=True)
+            pl.DataFrame({
+                "pre_root_id": [1], "post_root_id": [9],
+                "pre_x": [5.0], "pre_y": [6.0], "pre_z": [7.0],
+            }).write_parquet(raw)
+            return raw
+
+        monkeypatch.setattr(bpd, "ensure_synapse_table",
+                            fake_ensure_synapse_table)
+
+        assert bpd.ensure_synapse_derived_table(
+            "banc_v888", str(ds_dir), project_root=str(tmp_path)) is True
+        out = pl.read_parquet(derived)
+        assert out.columns == ["pre_root_id", "post_root_id", "syn_count",
+                               "x_pre", "y_pre", "z_pre"]
+        assert out.height == 1
+        assert not list(ds_dir.glob(".*.build.*.tmp"))
+
+    def test_build_failure_preserves_existing_table(self, tmp_path, monkeypatch):
+        """A failed build must not destroy a previously good derived table,
+        and must not leave a temp sibling behind."""
+        import polars as pl
+
+        good = pl.DataFrame({
+            "pre_root_id": [1], "post_root_id": [9], "syn_count": [1],
+            "x_pre": [1.0], "y_pre": [2.0], "z_pre": [3.0],
+        })
+        derived = tmp_path / "banc_v888_synapse_table.parquet"
+        good.write_parquet(derived)
+        before = derived.read_bytes()
+        src = tmp_path / "per_synapse.parquet"
+        good.select(["pre_root_id", "post_root_id", "x_pre", "y_pre", "z_pre"]
+                    ).write_parquet(src)
+
+        original_write = pl.DataFrame.write_parquet
+
+        def boom(self, path, *args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(pl.DataFrame, "write_parquet", boom)
+        assert bpd.build_synapse_table(src, derived) is False
+        monkeypatch.setattr(pl.DataFrame, "write_parquet", original_write)
+
+        assert derived.read_bytes() == before
+        assert not list(tmp_path.glob(".*.build.*.tmp"))
 
 
 class TestReaderIntegration:
@@ -594,7 +749,8 @@ class TestReaderIntegration:
             source_ids={"100"}, target_ids={"200"})
         assert conn is not None and len(conn) == 1
         assert conn.iloc[0]["x_pre"] == 5.0
-        assert conn.iloc[0]["x_post"] == 5.0  # mirrored pre-site marker
+        # the reader mirrors the pre site onto the post columns in memory
+        assert conn.iloc[0]["x_post"] == 5.0
         assert int(conn.iloc[0]["syn_count"]) == 1
         # nanometre coordinates must NOT be scaled (z = 300000 stays)
         assert conn.iloc[0]["z_pre"] == 300_000.0

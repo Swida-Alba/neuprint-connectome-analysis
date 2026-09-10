@@ -908,7 +908,7 @@ def test_cache_coverage_fafb(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# load_flywire_skeletons_batch (raw cache -> healed bundle -> CAVE)
+# load_local_release_skeletons (raw cache -> healed bundle -> CAVE)
 # ---------------------------------------------------------------------------
 
 class _BundleGetStub:
@@ -957,26 +957,26 @@ class _PersistingRawCacheStub(_RawCacheStub):
         return len(neurons)
 
 
-def test_load_flywire_skeletons_batch_cache_then_bundle(tmp_path, monkeypatch):
+def test_load_local_release_skeletons_cache_then_bundle(tmp_path, monkeypatch):
     tree_a = make_tree()
     bundle = _BundleGetStub({2: make_swc_text(nid=2)})
     raw_cache = _PersistingRawCacheStub({1: tree_a})
     monkeypatch.setattr(M, "find_similar_raw_cache", lambda ds, **k: raw_cache)
     monkeypatch.setattr(M, "_fafb_bundle", lambda ds, root: bundle)
     logs = []
-    out = M.load_flywire_skeletons_batch(
+    out = M.load_local_release_skeletons(
         "flywire_FAFB_v783", [1, 2], project_root=str(tmp_path),
         log=logs.append, check_extrusions=False)
     assert set(out) == {1, 2}
     assert out[1] is tree_a
     assert int(out[2].id) == 2          # parsed from the bundle SWC text
     assert bundle.closed                # bundle handle always closed
-    # warm-up: the newly served bundle tree is cached into the raw store
-    assert raw_cache.persisted == {2: None}   # as-stored level
-    assert any("healed bundle resolved 1/1" in m for m in logs)
+    # zip-only serving: no warm-up mirror into the raw store
+    assert raw_cache.persisted == {}
+    assert any("healed zip resolved 1/1" in m for m in logs)
 
 
-def test_load_flywire_skeletons_batch_replaces_flagged_extrusions(
+def test_load_local_release_skeletons_replaces_flagged_extrusions(
         tmp_path, monkeypatch):
     import fafb_utils
 
@@ -995,7 +995,7 @@ def test_load_flywire_skeletons_batch_replaces_flagged_extrusions(
         lambda dataset, body_ids, project_root=None, log=None,
         denoise_twigs=None: (cave_ids.extend(int(b) for b in body_ids),
                              {7: replacement})[1])
-    out = M.load_flywire_skeletons_batch(
+    out = M.load_local_release_skeletons(
         "flywire_FAFB_v783", [7], project_root=str(tmp_path),
         check_extrusions=True)
     assert out[7] is replacement        # flagged tree replaced via CAVE
@@ -1003,36 +1003,38 @@ def test_load_flywire_skeletons_batch_replaces_flagged_extrusions(
     assert statuses == {7: "api_repaired"}
 
 
-def test_load_flywire_skeletons_batch_respects_api_repaired(
+def test_load_local_release_skeletons_respects_api_repaired(
         tmp_path, monkeypatch):
     import fafb_utils
+    import cave_data_fetcher
 
-    bundle = _BundleGetStub({7: make_swc_text(nid=7)})
-    monkeypatch.setattr(M, "find_similar_raw_cache",
-                        lambda ds, **k: _PersistingRawCacheStub({}))
-    monkeypatch.setattr(M, "_fafb_bundle", lambda ds, root: bundle)
-    monkeypatch.setattr(fafb_utils, "flag_extrusions", lambda *a, **k: [7])
-    monkeypatch.setattr(
-        fafb_utils, "load_extrusion_repair_status",
-        lambda root, folder: {"7": "api_repaired"})
-
+    # api_repaired bodies are served by the leading repair-cache stage;
+    # the zip is never read and the CAVE chain never re-fires for them.
     replacement = make_tree()
     monkeypatch.setattr(
-        M, "_load_cave_cached_skeletons",
-        lambda *a, **k: {7: replacement},
-    )
+        cave_data_fetcher, "load_repaired_skeletons",
+        lambda dataset, body_ids, project_root=None, log=None:
+        {int(b): replacement for b in body_ids})
+    monkeypatch.setattr(M, "find_similar_raw_cache",
+                        lambda ds, **k: _PersistingRawCacheStub({}))
+
+    def no_zip(*a, **k):
+        raise AssertionError("a repaired body must not reload the zip")
+
+    monkeypatch.setattr(M, "_fafb_bundle", no_zip)
+    monkeypatch.setattr(fafb_utils, "flag_extrusions", lambda *a, **k: [7])
 
     def no_cave(*a, **k):
         raise AssertionError("a cached api_repaired tree must not be re-fetched")
 
     monkeypatch.setattr(M, "_flywire_cave_skeletons", no_cave)
-    out = M.load_flywire_skeletons_batch(
+    out = M.load_local_release_skeletons(
         "flywire_FAFB_v783", [7], project_root=str(tmp_path),
         check_extrusions=True)
     assert out[7] is replacement        # dedicated CAVE-derived tree kept
 
 
-def test_load_flywire_skeletons_batch_cave_fallback_for_fafb(tmp_path, monkeypatch):
+def test_load_local_release_skeletons_cave_fallback_for_fafb(tmp_path, monkeypatch):
     # No raw cache, no bundle: id 5 can only come from CAVE.
     def no_cache(ds, **k):
         raise FileNotFoundError("no cache")
@@ -1046,7 +1048,7 @@ def test_load_flywire_skeletons_batch_cave_fallback_for_fafb(tmp_path, monkeypat
     monkeypatch.setattr(M, "_flywire_cave_skeletons",
                         lambda dataset, body_ids, project_root=None, log=None,
                         denoise_twigs=None: {5: tree})
-    out = M.load_flywire_skeletons_batch(
+    out = M.load_local_release_skeletons(
         "flywire_FAFB_v783", [5], project_root=str(tmp_path))
     assert set(out) == {5} and out[5] is tree
 

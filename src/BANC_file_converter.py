@@ -4,6 +4,13 @@ from datetime import datetime, timezone
 import pandas as pd
 
 try:
+    from .utils.parquet_utils import (
+        parquet_is_reusable, write_file_atomic, write_parquet_atomic)
+except ImportError:  # pragma: no cover - src laid bare on sys.path
+    from utils.parquet_utils import (
+        parquet_is_reusable, write_file_atomic, write_parquet_atomic)
+
+try:
     from .flywire_ids import (
         canonicalize_flywire_id_expr,
         dataset_folder,
@@ -91,11 +98,16 @@ def process_neurons_dataframe(df, save_path, save_csv_path=None):
         df = df.sort_values('bodyId')
 
         print(f"  Saving to Parquet: {save_path}...")
-        df.to_parquet(save_path, index=False, compression='snappy')
+        write_parquet_atomic(
+            save_path,
+            lambda temp: df.to_parquet(temp, index=False,
+                                       compression='snappy'))
 
         if save_csv_path:
             print(f"  Saving to CSV: {save_csv_path}...")
-            df.to_csv(save_csv_path, index=False)
+            write_file_atomic(
+                save_csv_path,
+                lambda temp: df.to_csv(temp, index=False))
 
         file_size_mb = os.path.getsize(save_path) / (1024 * 1024)
         print(f"  ✓ Conversion complete ({len(df):,} neurons). Output size: {file_size_mb:.2f} MB")
@@ -110,7 +122,7 @@ def process_neurons_to_parquet(read_path, save_path, save_csv_path=None):
     """
     Process neurons.csv.gz into neuron_df parquet format for BANC.
     """
-    if os.path.exists(save_path):
+    if parquet_is_reusable(save_path):
         print(f"  ✓ Found existing converted file: {save_path}")
         return True
 
@@ -255,7 +267,9 @@ def process_connections_dataframe(read_frame, save_path):
         df = df.sort(['bodyId_pre', 'bodyId_post'])
 
         print(f"  Saving to Parquet: {save_path}...")
-        df.write_parquet(save_path, compression='snappy')
+        write_parquet_atomic(
+            save_path,
+            lambda temp: df.write_parquet(temp, compression='snappy'))
 
         file_size_mb = os.path.getsize(save_path) / (1024 * 1024)
         print(f"  ✓ Conversion complete. Output size: {file_size_mb:.2f} MB")
@@ -275,7 +289,7 @@ def process_connections_to_parquet(read_path, save_path):
     groupby are far faster than the pandas pipeline on large tables, with
     identical results.
     """
-    if os.path.exists(save_path):
+    if parquet_is_reusable(save_path):
         print(f"  ✓ Found existing converted file: {save_path}")
         return True
 
@@ -323,13 +337,18 @@ def update_neuron_post_counts(neuron_path, conn_path, save_csv_path=None):
         # Save
         print(f"  Saving updated neurons to {neuron_path}...")
         if neuron_path.endswith('.parquet'):
-            df_neuron.to_parquet(neuron_path, index=False, compression='snappy')
+            write_parquet_atomic(
+                neuron_path,
+                lambda temp: df_neuron.to_parquet(
+                    temp, index=False, compression='snappy'))
         else:
-            df_neuron.to_csv(neuron_path, index=False)
-            
+            write_file_atomic(
+                neuron_path, lambda temp: df_neuron.to_csv(temp, index=False))
+
         if save_csv_path:
             print(f"  Saving updated neurons to {save_csv_path}...")
-            df_neuron.to_csv(save_csv_path, index=False)
+            write_file_atomic(
+                save_csv_path, lambda temp: df_neuron.to_csv(temp, index=False))
             
         print("  ✓ Post counts updated.")
         return True
@@ -367,7 +386,8 @@ def _update_post_counts_if_zero(neuron_pq, conn_pq, save_csv_path=None):
     ``post = 0`` placeholders that only the merged-connections table can
     fill.
     """
-    if not (os.path.exists(neuron_pq) and os.path.exists(conn_pq)):
+    if not (parquet_is_reusable(neuron_pq)
+            and parquet_is_reusable(conn_pq)):
         return
     try:
         # Read just the post column to check if it's all zeros
@@ -522,7 +542,7 @@ def _regenerate_banc_metadata(dataset_name, dataset_dir,
         dataset_dir, f"{dataset_name}_allneurons_neuron_df.parquet")
     conn_pq = os.path.join(
         dataset_dir, f"{dataset_name}_merged_connections.parquet")
-    if not os.path.exists(neuron_pq):
+    if not parquet_is_reusable(neuron_pq):
         return False
 
     neurons = pd.read_parquet(neuron_pq)
@@ -533,7 +553,7 @@ def _regenerate_banc_metadata(dataset_name, dataset_dir,
                  & (type_vals.str.strip() != "Unknown")).sum())
 
     total_synapses = 0
-    if os.path.exists(conn_pq):
+    if parquet_is_reusable(conn_pq):
         conn = pd.read_parquet(conn_pq, columns=["weight"])
         # Every merged row carries ``weight`` synapses; each synapse has one
         # pre- and one post-synaptic site, so both totals equal the sum.
@@ -600,8 +620,8 @@ def ensure_banc_data(dataset_name, dataset_dir):
     conn_raw = os.path.join(downloads_dir, "connections_princeton.csv.gz")
 
     # --- 0. Public bucket preparation (no manual download needed) ---
-    needs_neurons = not os.path.exists(neuron_pq) and not os.path.exists(neurons_raw)
-    needs_connections = not os.path.exists(conn_pq) and not os.path.exists(conn_raw)
+    needs_neurons = not parquet_is_reusable(neuron_pq) and not os.path.exists(neurons_raw)
+    needs_connections = not parquet_is_reusable(conn_pq) and not os.path.exists(conn_raw)
     if needs_neurons or needs_connections:
         print("  🌐 Preparing from the public BANC release bucket "
               "(metadata ~58 MB + connections ~76 MB, one-time, no token)...")
@@ -630,7 +650,7 @@ def ensure_banc_data(dataset_name, dataset_dir):
     all_critical_present = True
 
     # --- 1. Neurons ---
-    if os.path.exists(neuron_pq):
+    if parquet_is_reusable(neuron_pq):
         print(f"  ✓ Found existing neurons: {os.path.basename(neuron_pq)}")
     else:
         print("  Checking neuron source files...")
@@ -644,7 +664,7 @@ def ensure_banc_data(dataset_name, dataset_dir):
                 all_critical_present = False
 
     # --- 2. Connections ---
-    if os.path.exists(conn_pq):
+    if parquet_is_reusable(conn_pq):
         print(f"  ✓ Found existing connections: {os.path.basename(conn_pq)}")
     else:
         print("  Checking connection source files...")
@@ -663,7 +683,7 @@ def ensure_banc_data(dataset_name, dataset_dir):
     # Regenerate the metadata stats from the final tables (table-true
     # neuron/synapse counts, banc coverage note) on every successful prep.
     # The Codex-manual layout records its own provenance (BANC-04).
-    if os.path.exists(neuron_pq) and os.path.exists(conn_pq):
+    if parquet_is_reusable(neuron_pq) and parquet_is_reusable(conn_pq):
         _regenerate_banc_metadata(dataset_name, dataset_dir,
                                   source="banc_codex_manual")
 

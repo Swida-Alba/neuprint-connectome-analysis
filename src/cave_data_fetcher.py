@@ -6,8 +6,9 @@ the CAVE/CloudVolume API.  Production mesh fetches remain ``MeshNeuron``
 objects, while the explicit ``fetch_skeleton`` path wavefront-skeletonizes a
 raw CAVE mesh into a ``TreeNeuron`` replacement stored in
 ``cache/{dataset}/skeletons/cave_skeletons/``.  The application uses that
-tree path when a healed-bundle skeleton is missing or fails the extrusion
-check.
+tree path when a healed-zip skeleton is missing or fails the extrusion
+check; when CAVE is unavailable, a locally pruned fix is persisted to
+``cache/{dataset}/skeletons/extrusion_fixes/`` instead.
 
 BANC is intentionally not served by this adapter. Its public-release SWCs
 and prepared tables are handled by ``banc_public_data`` and the BANC
@@ -84,6 +85,12 @@ except ImportError:
         FlyWireMeshCache,
         prepare_flywire_mesh,
     )
+
+# Shared compressed-SWC provenance contract (headers, parsers, text writer).
+try:
+    from . import skeleton_provenance as _provenance
+except ImportError:  # pragma: no cover - src laid bare on sys.path
+    import skeleton_provenance as _provenance
 
 # Suppress warnings during import
 with warnings.catch_warnings():
@@ -291,9 +298,9 @@ class CAVEDataFetcher:
     def _get_skeleton_cache_path(self, body_id: int) -> str:
         """Path in the dedicated ``cave_skeletons`` replacement store.
 
-        CAVE-skeletonized trees replace healed-bundle skeletons that failed
+        CAVE-skeletonized trees replace healed-zip skeletons that failed
         the extrusion check, so they are stored separately from the
-        ``raw_skeletons`` healed-bundle mirror and never overwrite it.
+        ``raw_skeletons`` legacy store and never overwrite it.
         """
         cache_dataset = self._cache_dataset_name()
         return os.path.join(
@@ -603,8 +610,8 @@ class CAVEDataFetcher:
 
         Trees are cached in the dedicated ``cave_skeletons`` store with a
         ``# DROCAT source: cave_mesh_wavefront`` header — they replace
-        healed-bundle skeletons that failed the extrusion check and must
-        never overwrite the ``raw_skeletons`` mirror.
+        healed-zip skeletons that failed the extrusion check and must
+        never overwrite the ``raw_skeletons`` store.
 
         Parameters
         ----------
@@ -721,13 +728,15 @@ class CAVEDataFetcher:
                 print(f"  ✗ Failed to fetch skeleton: {body_id}: {e}")
             return None
     
-    def _save_cave_skeleton(self, skeleton, cache_path: str) -> None:
-        """Persist a CAVE-skeletonized tree with a provenance header.
+    def _save_cave_skeleton(self, skeleton, cache_path: str,
+                            source: str = "cave_mesh_wavefront") -> None:
+        """Persist a replacement tree with a provenance header.
 
-        The ``# DROCAT source: cave_mesh_wavefront`` line marks the tree as a
-        mesh-derived replacement for an extrusion-flagged healed-bundle
-        skeleton, so readers can tell it apart from bundle-derived entries
-        even outside the dedicated ``cave_skeletons`` store.
+        The ``# DROCAT source:`` line (``cave_mesh_wavefront`` for CAVE
+        mesh-skeletonized replacements, ``local_extrusion_fix`` for locally
+        pruned trees) marks the tree as a replacement for an
+        extrusion-flagged healed skeleton, so readers can tell it apart
+        from bundle-derived entries even outside the dedicated stores.
         """
         try:
             os.makedirs(os.path.dirname(cache_path), exist_ok=True)
@@ -742,7 +751,7 @@ class CAVEDataFetcher:
             try:
                 navis.write_swc(skeleton, temp_swc, write_meta=True)
                 payload = temp_swc.read_bytes()
-                source_line = (f"# {_SOURCE_HEADER} cave_mesh_wavefront\n"
+                source_line = (f"# {_SOURCE_HEADER} {source}\n"
                                .encode("ascii"))
                 _write_compressed_swc_zst(
                     cache_path_obj, source_line + payload, simplification=0)
@@ -764,6 +773,49 @@ class CAVEDataFetcher:
         except Exception:
             return None
         cached = self._load_from_cache(self._get_skeleton_cache_path(body_id))
+        return cached if isinstance(cached, navis.TreeNeuron) else None
+
+    def _get_fix_cache_path(self, body_id: int) -> str:
+        """Path in the dedicated ``extrusion_fixes`` local-repair store.
+
+        Locally pruned trees replace extrusion-flagged healed skeletons
+        when the CAVE replacement is unavailable; like ``cave_skeletons``
+        they live outside ``raw_skeletons`` and never overwrite it.
+        """
+        cache_dataset = self._cache_dataset_name()
+        return os.path.join(
+            self.project_root, 'cache', cache_dataset, 'skeletons',
+            'extrusion_fixes', f'{body_id}.swc.zst'
+        )
+
+    def save_extrusion_fix_skeleton(self, body_id, skeleton) -> bool:
+        """Persist a locally pruned extrusion fix with an explicit header.
+
+        Writes ``# DROCAT source: local_extrusion_fix`` so next runs serve
+        the repaired tree directly instead of re-running the prune or the
+        CAVE fetch. Returns True when the tree was written.
+        """
+        try:
+            body_id = body_id_to_api_int(body_id)
+            self._save_cave_skeleton(
+                skeleton, self._get_fix_cache_path(body_id),
+                source=LOCAL_EXTRUSION_FIX_SOURCE)
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to save extrusion fix for {body_id}: {e}")
+            return False
+
+    def load_cached_fix_skeleton(self, body_id):
+        """Read a locally pruned extrusion fix without any network access.
+
+        Returns the ``TreeNeuron`` from the ``extrusion_fixes`` store, or
+        ``None`` on a miss.
+        """
+        try:
+            body_id = body_id_to_api_int(body_id)
+        except Exception:
+            return None
+        cached = self._load_from_cache(self._get_fix_cache_path(body_id))
         return cached if isinstance(cached, navis.TreeNeuron) else None
 
     def _load_pre_unification_raw_store_skeleton(self, body_id: int):
@@ -1309,43 +1361,28 @@ class CAVEDataFetcher:
         }
 
 
-# Header line recording the on-disk simplification level of a compressed
-# SWC cache file (percent of nodes removed; absent/legacy files are raw).
-_SIMPLIFICATION_HEADER = "DROCAT simpl:"
+# Header lines recording the simplification level and the producing pipeline
+# of a compressed-SWC cache file. The contract lives in
+# :mod:`skeleton_provenance`; these names stay importable here for existing
+# callers/tests.
+_SIMPLIFICATION_HEADER = _provenance.SIMPLIFICATION_HEADER
+_SOURCE_HEADER = _provenance.SOURCE_HEADER
 
-# Header line recording the producing pipeline of a compressed-SWC cache
-# file (BANC writes e.g. banc_gcs_full; CAVE skeletonization writes
-# cave_mesh_wavefront). Absent on legacy files.
-_SOURCE_HEADER = "DROCAT source:"
+# Provenance values written by the two replacement stores. CAVE
+# mesh-skeletonized replacements live in ``cave_skeletons``; locally pruned
+# extrusion fixes live in ``extrusion_fixes``.
+CAVE_SKELETON_SOURCE = _provenance.CAVE_MESH_WAVEFRONT
+LOCAL_EXTRUSION_FIX_SOURCE = _provenance.LOCAL_EXTRUSION_FIX
 
 
 def _read_stored_source(text) -> str:
     """Parse ``# DROCAT source: NAME`` from a compressed-SWC header."""
-    if isinstance(text, bytes):
-        text = text.decode("utf-8", "replace")
-    for line in text.splitlines()[:8]:
-        line = line.strip()
-        if line.startswith("#"):
-            line = line[1:].strip()
-        if line.startswith(_SOURCE_HEADER):
-            return line[len(_SOURCE_HEADER):].strip()
-    return ""
+    return _provenance.read_stored_source(text)
 
 
 def _read_stored_simplification(text) -> int:
     """Parse ``# DROCAT simpl: N`` from a compressed-SWC header (0 = raw)."""
-    if isinstance(text, bytes):
-        text = text.decode("utf-8", "replace")
-    for line in text.splitlines()[:8]:
-        line = line.strip()
-        if line.startswith("#"):
-            line = line[1:].strip()
-        if line.startswith(_SIMPLIFICATION_HEADER):
-            try:
-                return int(line[len(_SIMPLIFICATION_HEADER):].strip())
-            except ValueError:
-                return 0
-    return 0
+    return _provenance.read_stored_simplification(text)
 
 
 def _swc_stem(name: str) -> str:
@@ -1373,24 +1410,68 @@ def _write_compressed_swc_zst(path: str, text: bytes, simplification: int = 0
                               ) -> None:
     """Atomically write compressed SWC as zstd-19 with a recorded level.
 
-    Mirrors the shared simplify + compress pipeline in morphology: the level
+    Thin wrapper over the shared :mod:`skeleton_provenance` writer: the level
     (percent of nodes removed; FlyWire raw skeletons are stored raw, 0) is
     recorded in the first SWC header line so later loads can re-level.
     """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_out = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    try:
-        payload = b"# DROCAT simpl: %d\n" % int(simplification) + text
-        if zstd is None:
-            raise ImportError(
-                "zstandard is required to write .swc.zst caches")
-        blob = zstd.ZstdCompressor(
-            level=19, write_content_size=True).compress(payload)
-        temp_out.write_bytes(blob)
-        os.replace(temp_out, path)
-    finally:
-        temp_out.unlink(missing_ok=True)
+    _provenance.write_compressed_swc_zst(path, text, simplification)
+
+
+def load_repaired_skeletons(dataset, body_ids, project_root=None, log=None):
+    """Serve previously repaired FAFB skeletons from the local repair caches.
+
+    Network-free probe driven by the repair status recorded in
+    ``extrusion_check_results.parquet``:
+
+    1. ``api_repaired`` bodies are served from the ``cave_skeletons`` store.
+    2. ``local_fallback`` bodies probe ``cave_skeletons`` first (a CAVE
+       replacement may have arrived since the local prune), then the
+       ``extrusion_fixes`` store with the persisted local fix.
+
+    Returns the repaired trees keyed by ``int`` body id. Flagged ids that
+    still need the repair chain (pending / api_failed statuses, or a
+    recorded repair whose cache entry has vanished) are simply absent, so
+    callers route them through the normal load + repair stages.
+    """
+    if is_banc_dataset(dataset):
+        return {}
+    from fafb_utils import (
+        EXTRUSION_REPAIR_API_REPAIRED,
+        EXTRUSION_REPAIR_LOCAL_FALLBACK,
+        load_extrusion_repair_status,
+    )
+
+    fetcher = CAVEDataFetcher(
+        dataset=dataset, cave_token="", cache_enabled=True,
+        project_root=project_root, verbose=False)
+    statuses = load_extrusion_repair_status(
+        str(fetcher.project_root), fetcher._cache_dataset_name())
+    served: Dict[int, object] = {}
+    for body_id in body_ids or ():
+        try:
+            key = int(body_id)
+        except (TypeError, ValueError):
+            continue
+        status = statuses.get(str(key))
+        if status not in (EXTRUSION_REPAIR_API_REPAIRED,
+                          EXTRUSION_REPAIR_LOCAL_FALLBACK):
+            continue
+        neuron = fetcher.load_cached_skeleton(key)
+        if neuron is None and status == EXTRUSION_REPAIR_LOCAL_FALLBACK:
+            neuron = fetcher.load_cached_fix_skeleton(key)
+        if neuron is None:
+            continue
+        try:
+            neuron.id = body_id_to_api_int(key)
+            neuron.name = str(key)
+            neuron.units = "nm"
+        except Exception:
+            pass
+        served[key] = neuron
+    if served and log:
+        log(f"FAFB skeletons: served {len(served)} previously repaired "
+            "tree(s) from the local repair caches.")
+    return served
 
 
 def test_fafb_access():

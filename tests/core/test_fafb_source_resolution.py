@@ -2,16 +2,20 @@
 
 Covers the per-body render priority (identical for tube and line):
 
-    raw SWC cache -> healed ZIP -> CAVE skeletonization (tree)
+    repaired caches (cave_skeletons / extrusion_fixes, status-driven)
+    -> raw SWC cache -> healed ZIP -> CAVE skeletonization (tree)
     (`api_only` / force_API_fetching routes straight to CAVE)
 
 and the strict `use_cache=False` policy (cache sources skipped, extrusion
 parquet check cache untouched). CAVE replacements are trees persisted in the
-dedicated ``cave_skeletons`` store; `api_repaired` bodies are served from
-that store without another network round-trip.
+dedicated ``cave_skeletons`` store; locally pruned fixes live in
+``extrusion_fixes`` and are labelled ``local_repaired``.
 """
 
+import shutil
 import sys
+import tempfile
+import weakref
 from pathlib import Path
 
 import numpy as np
@@ -61,6 +65,11 @@ class RecordingResolver:
         self.visualizer.cache_neurons = True
         self.visualizer.auto_fix_extrusions = False
         self.visualizer._vprint = lambda *args, **kwargs: None
+        # Hermetic scratch project: repair caches and the extrusion parquet
+        # are read/written under this root, never the real repo cache.
+        self._tmp = tempfile.mkdtemp(prefix="drocat-resolver-")
+        weakref.finalize(self, shutil.rmtree, self._tmp, True)
+        self.visualizer.script_path = self._tmp
 
         self.zip_hits = dict(zip_hits or {})
         self.raw_hits = dict(raw_hits or {})
@@ -130,6 +139,31 @@ class TestSourcePriority:
         assert set(skeleton_cache) == {"7"}
         assert resolver.calls["raw"] == [["7"]]
         assert resolver.calls["zip"] == []
+        assert resolver.calls["cave"] == []
+
+    def test_repaired_cache_served_before_zip(self):
+        """A body with a persisted local fix is served from the repair
+        caches; the zip is never consulted for it."""
+        resolver = RecordingResolver()
+        scratch_root = resolver.visualizer.script_path
+        from cave_data_fetcher import CAVEDataFetcher
+        from fafb_utils import set_extrusion_repair_status
+
+        fetcher = CAVEDataFetcher(
+            dataset="flywire_FAFB_v783", cave_token="",
+            project_root=scratch_root, cache_enabled=True,
+            verbose=False)
+        assert fetcher.save_extrusion_fix_skeleton("7", make_tree("7"))
+        set_extrusion_repair_status(
+            scratch_root, "flywire_FAFB_v783",
+            {"7": "local_fallback"})
+
+        sources, skeleton_cache = resolver.resolve([7])
+
+        assert sources == {"7": "local_repaired"}
+        assert set(skeleton_cache) == {"7"}
+        assert resolver.calls["zip"] == []
+        assert resolver.calls["raw"] == []
         assert resolver.calls["cave"] == []
 
     def test_every_local_miss_falls_through_to_cave(self):

@@ -57,7 +57,7 @@ try:
         apply_whitening,
         fetch_skeletons_on_demand_batch,
         find_similar_dataset_cache_v2,
-        load_flywire_skeletons_batch,
+        load_local_release_skeletons,
         v2_pairwise_matrix,
     )
 except ImportError:  # direct src/ execution
@@ -73,7 +73,7 @@ except ImportError:  # direct src/ execution
         apply_whitening,
         fetch_skeletons_on_demand_batch,
         find_similar_dataset_cache_v2,
-        load_flywire_skeletons_batch,
+        load_local_release_skeletons,
         v2_pairwise_matrix,
     )
 
@@ -306,7 +306,7 @@ class MorphologyProfileComparer:
 
         NeuPrint datasets go through the shared batch fetch (raw SWC staged
         + persisted into the shared skeleton cache); FAFB goes through
-        ``load_flywire_skeletons_batch`` (raw cache → healed FAFB bundle →
+        ``load_local_release_skeletons`` (raw cache → healed FAFB zip →
         CAVE fallback); BANC goes through the shared batch fetch too — its
         branch resolves each body via the official public-bucket SWC chain
         (``fetch_banc_swc``), never the FAFB CAVE machinery, which has
@@ -317,7 +317,7 @@ class MorphologyProfileComparer:
             f"Vector cache miss: fetching {len(missing_ids)} skeleton(s) "
             "online.")
         if is_fafb_dataset(self.dataset):
-            neurons = load_flywire_skeletons_batch(
+            neurons = load_local_release_skeletons(
                 self.dataset, [int(self._body_id(b)) for b in missing_ids],
                 project_root=str(self.project_root), log=self._log)
         else:

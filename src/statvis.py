@@ -7036,14 +7036,14 @@ def Vis3S(data_df,**kwargs):
                 resolved_dir = resolve_flywire_dataset_dir(project_root, op.dataset)
                 op.data_folder = str(resolved_dir) if resolved_dir is not None else None
 
-            # The healed bundle reads .zst first and falls back to the ZIP
-            # with lazy per-skeleton conversion.
+            # The healed zip is served directly (read-only; a legacy .zst
+            # is opened read-only only when no zip exists).
             bundle = (
                 fafb_utils.get_fafb_skeleton_bundle(op.data_folder)
                 if op.data_folder is not None else None
             )
             if bundle is not None:
-                print("Loading skeletons from the healed bundle...")
+                print("Loading skeletons from the healed zip...")
                 try:
                     for ind in summary_df.index:
                         bodyid = str(summary_df.at[ind, 'bodyId'])
@@ -7060,7 +7060,7 @@ def Vis3S(data_df,**kwargs):
                         except Exception as e:
                             print(f"Error reading SWC for {bodyid}: {e}")
                 except Exception as e:
-                    print(f"Error opening healed bundle: {e}")
+                    print(f"Error opening healed zip: {e}")
                 finally:
                     try:
                         bundle.close()

@@ -2282,6 +2282,101 @@ class TestFlyWireNblast:
         # both bundle skeletons served raw, no extrusion-driven CAVE refetch
         assert 42 in loaded and 43 in loaded
 
+    @staticmethod
+    def _zip_bundle(texts):
+        class _Bundle:
+            def get(self, bid):
+                return texts.get(int(bid))
+
+            def close(self):
+                pass
+        return _Bundle()
+
+    @staticmethod
+    def _line_swc(n=30):
+        lines = ["# SWC skeleton"]
+        for i in range(1, n + 1):
+            parent = -1 if i == 1 else i - 1
+            lines.append(f"{i} 1 {i} 0 0 1.0 {parent}")
+        return "\n".join(lines)
+
+    def test_fafb_pipeline_persists_local_fix_and_serves_next_run(
+            self, tmp_path, monkeypatch):
+        """CAVE unavailable + a safe local prune: the pruned fix is persisted
+        to the ``extrusion_fixes`` store with status ``local_fallback``, and
+        the next run serves it from the repair caches before ever loading
+        the zip tree."""
+        import fafb_utils
+        from cave_data_fetcher import CAVEDataFetcher
+
+        monkeypatch.setattr(
+            morph, "_fafb_bundle",
+            lambda ds, root: self._zip_bundle({42: self._line_swc()}))
+        monkeypatch.setattr(fafb_utils, "flag_extrusions",
+                            lambda *a, **k: [42])
+        monkeypatch.setattr(morph, "_flywire_cave_skeletons",
+                            lambda *a, **k: {})  # CAVE down
+        pruned = line_neuron()
+        monkeypatch.setattr(
+            fafb_utils, "repair_extruded_skeleton",
+            lambda n: (pruned, {"repaired": True, "removed_nodes": 3}))
+
+        first = morph.load_local_release_skeletons(
+            "flywire_FAFB_v783", [42], project_root=str(tmp_path))
+        assert first[42] is pruned
+
+        fix_fetcher = CAVEDataFetcher(
+            dataset="flywire_FAFB_v783", cave_token="",
+            project_root=str(tmp_path), cache_enabled=True, verbose=False)
+        assert fix_fetcher.load_cached_fix_skeleton(42) is not None
+        statuses = fafb_utils.load_extrusion_repair_status(
+            str(tmp_path), "flywire_FAFB_v783")
+        assert statuses.get("42") == "local_fallback"
+
+        # second run: the zip tree must never be read again
+        def no_zip(*a, **k):
+            raise AssertionError("repaired body must not reload the zip")
+
+        monkeypatch.setattr(morph, "_fafb_bundle", no_zip)
+        second = morph.load_local_release_skeletons(
+            "flywire_FAFB_v783", [42], project_root=str(tmp_path))
+        assert second[42]._drocat_source == "local_extrusion_fix"
+
+    def test_fafb_pipeline_api_failed_retries_cave_next_run(
+            self, tmp_path, monkeypatch):
+        """``api_failed`` stays retryable: the next run re-attempts CAVE and
+        records ``api_repaired`` when the replacement arrives."""
+        import fafb_utils
+
+        monkeypatch.setattr(
+            morph, "_fafb_bundle",
+            lambda ds, root: self._zip_bundle({42: self._line_swc()}))
+        monkeypatch.setattr(fafb_utils, "flag_extrusions",
+                            lambda *a, **k: [42])
+        monkeypatch.setattr(
+            fafb_utils, "repair_extruded_skeleton",
+            lambda n: (n, {"repaired": False}))  # no safe local cut
+        monkeypatch.setattr(morph, "_flywire_cave_skeletons",
+                            lambda *a, **k: {})  # CAVE down on run 1
+        first = morph.load_local_release_skeletons(
+            "flywire_FAFB_v783", [42], project_root=str(tmp_path))
+        statuses = fafb_utils.load_extrusion_repair_status(
+            str(tmp_path), "flywire_FAFB_v783")
+        assert statuses.get("42") == "api_failed"
+        assert first[42].nodes is not None  # extruded tree served as-is
+
+        replacement = line_neuron()
+        monkeypatch.setattr(
+            morph, "_flywire_cave_skeletons",
+            lambda dataset, body_ids, project_root=None, log=None,
+            denoise_twigs=None: {int(b): replacement for b in body_ids})
+        second = morph.load_local_release_skeletons(
+            "flywire_FAFB_v783", [42], project_root=str(tmp_path))
+        assert second[42] is replacement
+        statuses = fafb_utils.load_extrusion_repair_status(
+            str(tmp_path), "flywire_FAFB_v783")
+        assert statuses.get("42") == "api_repaired"
+
 
 class TestNblastDotpropsRouting:
     """The NBLAST dotprops fetch dispatch must match the v2 missing-fetch
@@ -2674,6 +2769,157 @@ class TestFafbBundleLocalSources:
         data = cache.load()
         assert set(data["bodyIds"].tolist()) == {"1", "2"}
         assert data["dataset_rep"] == "skeleton"
+
+    def test_v2_build_fetch_missing_uses_loader_not_meshes(
+            self, tmp_path, monkeypatch):
+        """FAFB V2 build(fetch_missing>0) vectorizes skeletons from the local
+        loader; the mesh-returning batch fetcher is never used."""
+        cache = morph.find_similar_dataset_cache_v2(
+            "flywire_FAFB_v783", project_root=str(tmp_path), verbose=False)
+        cache.skeleton_dir.mkdir(parents=True, exist_ok=True)
+        # neuron index drives the missing set
+        write_neuron_index(tmp_path, "flywire_FAFB_v783", [
+            (720575940000000001, "T", "T_1"),
+        ])
+        (tmp_path / "cache" / "flywire_FAFB_v783").mkdir(
+            parents=True, exist_ok=True)
+        (tmp_path / "cache" / "flywire_FAFB_v783"
+         / "connections.parquet").touch()
+
+        loader_calls = []
+
+        def fake_loader(dataset, body_ids, project_root=None, log=None,
+                        check_extrusions=False):
+            loader_calls.append((dataset, list(body_ids), check_extrusions))
+            return {int(b): line_neuron(length=20) for b in body_ids}
+
+        def must_not_batch(*a, **k):
+            raise AssertionError(
+                "FAFB V2 build must not call the mesh batch fetcher")
+
+        monkeypatch.setattr(morph, "_resolve_fafb_skeleton_trees", fake_loader)
+        monkeypatch.setattr(morph, "fetch_skeletons_on_demand_batch",
+                            must_not_batch)
+        stats = cache.build(fetch_missing=5)
+        assert loader_calls and loader_calls[0][0] == "flywire_FAFB_v783"
+        assert loader_calls[0][2] is False   # build stays offline
+        assert stats["rows"] >= 1
+        data = cache.load()
+        assert data is not None and data["dataset_rep"] == "skeleton"
+
+    def test_cache_direct_query_fetch_uses_loader_for_fafb(
+            self, tmp_path, monkeypatch):
+        """A FAFB cache-direct search resolves query skeletons through the
+        local loader, not the mesh batch fetcher."""
+        # A local healed zip satisfies the readiness gate; the query and cache
+        # plumbing are stubbed so the test isolates the fetch routing.
+        self._write_bundle(tmp_path, [720575940000000001])
+        cache = morph.find_similar_dataset_cache_v2(
+            "flywire_FAFB_v783", project_root=str(tmp_path), verbose=False)
+        comparer = morph.MorphologyComparer(
+            query=720575940000000001, dataset="flywire_FAFB_v783",
+            method="vector_v2", project_root=str(tmp_path), verbose=False,
+            candidate_source="cache", expand_top_types=0)
+        monkeypatch.setattr(morph, "find_similar_dataset_cache_v2",
+                            lambda *a, **k: cache)
+        monkeypatch.setattr(cache, "ensure", lambda **k: None)
+        monkeypatch.setattr(cache, "load", lambda: None)
+        monkeypatch.setattr(
+            comparer, "_resolve_query",
+            lambda: pd.DataFrame({"bodyId": ["720575940000000001"],
+                                  "type": [""], "instance": [""]}))
+
+        loader_calls = []
+
+        def fake_loader(dataset, body_ids, project_root=None, log=None,
+                        check_extrusions=False):
+            loader_calls.append(list(body_ids))
+            return {}
+
+        def must_not_batch(*a, **k):
+            raise AssertionError("FAFB query fetch must use the loader")
+
+        monkeypatch.setattr(morph, "_resolve_fafb_skeleton_trees", fake_loader)
+        monkeypatch.setattr(morph, "fetch_skeletons_on_demand_batch",
+                            must_not_batch)
+        try:
+            comparer.find_similar()
+        except Exception:
+            # The empty cache cannot score, but the fetch routing must have
+            # happened before any scoring failure.
+            pass
+        assert loader_calls, "loader was not consulted for the FAFB query"
+        assert "720575940000000001" in [str(b) for b in loader_calls[0]]
+
+
+class TestBatchFetchDispatch:
+    """fetch_skeletons_on_demand_batch delegates to independent per-source
+    fetchers; the shared dispatcher must not carry source-specific logic."""
+
+    def test_banc_routes_to_banc_fetcher_not_others(self, tmp_path,
+                                                     monkeypatch):
+        calls = {}
+
+        def fake_banc(dataset, missing, root, persist, requested, loaded,
+                      progress_callback, cancel_event):
+            calls["banc"] = (dataset, list(missing))
+            return {bid: line_neuron() for bid in missing}
+
+        def must_not(*a, **k):
+            raise AssertionError("wrong source fetcher chosen")
+
+        monkeypatch.setattr(morph, "_fetch_banc_skeleton_batch", fake_banc)
+        monkeypatch.setattr(morph, "_fetch_neuprint_skeleton_batch", must_not)
+        monkeypatch.setattr(morph, "_fetch_fafb_mesh_batch", must_not)
+        # avoid touching the real raw cache
+        monkeypatch.setattr(morph, "find_similar_raw_cache",
+                            lambda *a, **k: None)
+        out = morph.fetch_skeletons_on_demand_batch(
+            "banc_v888", [1001, 1002], project_root=str(tmp_path))
+        assert calls["banc"][0] == "banc_v888"
+        assert [str(b) for b in calls["banc"][1]] == ["1001", "1002"]
+        assert {str(b) for b in out} == {"1001", "1002"}
+
+    def test_fafb_routes_to_mesh_fetcher(self, tmp_path, monkeypatch):
+        calls = {}
+
+        def fake_mesh(dataset, missing, root, persist, soma_positions,
+                      cancel_event):
+            calls["mesh"] = (dataset, list(missing))
+            return {}
+
+        def must_not(*a, **k):
+            raise AssertionError("wrong source fetcher chosen")
+
+        monkeypatch.setattr(morph, "_fetch_fafb_mesh_batch", fake_mesh)
+        monkeypatch.setattr(morph, "_fetch_neuprint_skeleton_batch", must_not)
+        monkeypatch.setattr(morph, "_fetch_banc_skeleton_batch", must_not)
+        morph.fetch_skeletons_on_demand_batch(
+            "flywire_FAFB_v783", [5], project_root=str(tmp_path))
+        assert calls["mesh"][0] == "flywire_FAFB_v783"
+
+    def test_neuprint_routes_to_neuprint_fetcher(self, tmp_path, monkeypatch):
+        calls = {}
+
+        def fake_np(dataset, missing, root, persist, requested, loaded,
+                    raw_cache, client, batch_size, max_threads,
+                    progress_callback, cancel_event, temp_normalized,
+                    simplification):
+            calls["np"] = (dataset, list(missing))
+            return {bid: line_neuron() for bid in missing}
+
+        def must_not(*a, **k):
+            raise AssertionError("wrong source fetcher chosen")
+
+        monkeypatch.setattr(morph, "_fetch_neuprint_skeleton_batch", fake_np)
+        monkeypatch.setattr(morph, "_fetch_banc_skeleton_batch", must_not)
+        monkeypatch.setattr(morph, "_fetch_fafb_mesh_batch", must_not)
+        monkeypatch.setattr(morph, "find_similar_raw_cache",
+                            lambda *a, **k: None)
+        out = morph.fetch_skeletons_on_demand_batch(
+            "np:v1", [7], project_root=str(tmp_path))
+        assert calls["np"] == ("np:v1", [7])
+        assert set(out) == {7}
 
 
 class TestProfileFirst:
