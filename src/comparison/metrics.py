@@ -699,9 +699,19 @@ class ComparisonMetrics:
                 unique_pre = original_pre_series.unique()
                 unique_post = original_post_series.unique()
                 all_unique_types = set(unique_pre) | set(unique_post)
-                
-                # Create mapping dict for this dataset
-                canonical_map = {t: type_mapper.get_canonical_type(t, dataset) for t in all_unique_types}
+
+                # Create mapping dict for this dataset.  Routed through the
+                # shared validity resolver (``canonical_merge_key``): licensed
+                # renames map to their canonical target, while a CONFLICTED
+                # type keeps a dataset-scoped key (``dataset:raw``) so two
+                # datasets' same-named conflicted rows can never merge.
+                from .type_resolver import canonical_merge_key
+                merge_cache: dict = {}
+                canonical_map = {
+                    t: canonical_merge_key(
+                        type_mapper, t, dataset, cache=merge_cache).key
+                    for t in all_unique_types
+                }
                 
                 # Apply mapping vectorized
                 agg_df['canonical_pre'] = original_pre_series.map(canonical_map)

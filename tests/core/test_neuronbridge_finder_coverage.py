@@ -1633,8 +1633,34 @@ def test_top_types_fallback_score_and_color_helpers(finder):
 
 
 class _FakeCrossMapper:
+    """Fake mapper on the shared resolver contract: canonical merge keys
+    come from ``get_mapping_decision`` (not the raw ``get_canonical_type``),
+    so the export must route through ``canonical_merge_key``.  The
+    ``called`` flags pin which API the code under test used."""
+    _loaded = True
+
+    def __init__(self):
+        self.decision_calls = 0
+        self.canonical_calls = 0
+
+    def _get_type_mapping_key(self, dataset):
+        return dataset
+
+    def get_mapping_decision(self, source_type, source_dataset,
+                             target_dataset, include_bridges=False):
+        self.decision_calls += 1
+        target = {"MBON01": "canon_MBON", "LH173": "canon_LH"}.get(
+            source_type, source_type)
+        return {'status': 'mapped', 'source_type': source_type,
+                'target_type': target, 'target_types': [target],
+                'relationship': '1-to-1', 'conflicts': []}
+
     def get_canonical_type(self, type_name, source_dataset=None):
-        return {"MBON01": "canon_MBON", "LH173": "canon_LH"}.get(type_name, type_name)
+        # Kept so a regression back to the raw API is detectable: the
+        # export must NOT take this path.
+        self.canonical_calls += 1
+        return {"MBON01": "canon_MBON", "LH173": "canon_LH"}.get(
+            type_name, type_name)
 
 
 def test_save_dataset_categorized_files_and_type_mapped(finder, tmp_path, monkeypatch):
@@ -1647,7 +1673,8 @@ def test_save_dataset_categorized_files_and_type_mapped(finder, tmp_path, monkey
         "dataset": ["hemibrain:v1.2.1", "hemibrain:v1.2.1", "manc:v1.0", "manc:v1.0"],
     })
     monkeypatch.setattr(nbf_mod, "HAS_TYPE_MAPPER", True)
-    monkeypatch.setattr(nbf_mod, "get_type_mapper", lambda: _FakeCrossMapper())
+    _fake_mapper = _FakeCrossMapper()
+    monkeypatch.setattr(nbf_mod, "get_type_mapper", lambda: _fake_mapper)
 
     out = tmp_path / "cat"
     out.mkdir()
@@ -1660,6 +1687,10 @@ def test_save_dataset_categorized_files_and_type_mapped(finder, tmp_path, monkey
     assert set(mapped["canonical_type"]) == {"canon_MBON", "canon_LH"}
     row = mapped[mapped["canonical_type"] == "canon_MBON"].iloc[0]
     assert row["total_labeled_N"] == 3 and row["best_max_score"] == 40.0
+    # Workstream-I contract: the export resolves through canonical_merge_key
+    # (get_mapping_decision), NOT the status-blind raw get_canonical_type.
+    assert _fake_mapper.decision_calls > 0
+    assert _fake_mapper.canonical_calls == 0
 
     # single dataset -> no type-mapped file
     out2 = tmp_path / "cat2"

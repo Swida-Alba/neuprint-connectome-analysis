@@ -205,6 +205,61 @@ def test_mapping_helpers_without_mapper(analyzer):
     assert display == "A → B"
 
 
+def test_mapping_helpers_conflicted_type_is_dataset_scoped(analyzer):
+    """Canonical merge keys (shared resolver): a conflicted type keeps a
+    dataset-scoped key in path/edge merges — it can never merge with
+    another dataset's same-named rows (plan-unify-mapper-backends)."""
+    class _ConflictedMapper:
+        _loaded = True
+
+        def _get_type_mapping_key(self, dataset):
+            return dataset
+
+        def get_mapping_decision(self, source_type, source_dataset,
+                                 target_dataset, include_bridges=False):
+            if source_type == "CB1011" and source_dataset == "banc_v626":
+                return {'status': 'conflict', 'source_type': source_type,
+                        'target_type': None, 'target_types': [],
+                        'relationship': '1-to-N',
+                        'conflicts': [{'source_dataset': source_dataset}]}
+            if source_type == "MTe07":
+                return {'status': 'mapped', 'source_type': source_type,
+                        'target_type': 'MeVPLo2', 'target_types': ['MeVPLo2'],
+                        'relationship': '1-to-1', 'conflicts': []}
+            return {'status': 'unmapped', 'source_type': source_type,
+                    'target_type': None, 'target_types': [],
+                    'relationship': None, 'conflicts': []}
+
+        def get_display_name(self, canonical, datasets):
+            return canonical
+
+    analyzer.parameters.auto_type_mapping = True
+    analyzer.parameters._auto_type_mapper = _ConflictedMapper()
+
+    # licensed rename merges under the canonical name
+    assert analyzer._get_canonical_type("MTe07", DS1) == "MeVPLo2"
+    # conflicted type is dataset-scoped: distinct from the MCNS raw name
+    scoped = analyzer._get_canonical_type("CB1011", "banc_v626")
+    assert scoped == "banc_v626:CB1011"
+    assert analyzer._get_canonical_type("CB1011", DS1) == "CB1011"
+
+    # path keys carry the scoped node
+    canonical, _display = analyzer._build_path_key_with_mapping(
+        ["A", "CB1011"], "banc_v626")
+    assert canonical == "A → banc_v626:CB1011"
+
+    # resolution counts are on the UNIQUE-resolution basis: MTe07 resolved
+    # once and CB1011(conflict) once, regardless of repeated lookups above
+    assert analyzer._mapping_status_counts.get("mapped") == 1
+    assert analyzer._mapping_status_counts.get("conflict") == 1
+    assert "banc_v626:CB1011" in analyzer._conflicted_merge_types
+
+    # repeated resolutions of the same (dataset, type) do not re-count
+    analyzer._get_canonical_type("MTe07", DS1)
+    analyzer._get_canonical_type("MTe07", DS1)
+    assert analyzer._mapping_status_counts.get("mapped") == 1
+
+
 def test_clear_results_and_set_label_mapper(analyzer):
     analyzer.raw_results[DS1] = {1: _edge_df([("A", "B", 1)])}
     analyzer.aligned_results[1] = pd.DataFrame()
@@ -903,11 +958,38 @@ def test_quick_compare(tmp_path, monkeypatch):
 # ===========================================================================
 
 class _FakeAutoTypeMapper:
-    """Minimal stand-in for CrossDatasetTypeMapper (no repo CSV access)."""
+    """Minimal stand-in for CrossDatasetTypeMapper (no repo CSV access),
+    following the shared resolver contract: canonical merge keys are
+    resolved through ``canonical_merge_key`` (which consumes
+    ``get_mapping_decision`` status dicts)."""
+
+    _loaded = True
 
     def __init__(self):
         self._conflicts = {}
         self.exported = []
+
+    def has_conflicts(self):
+        return bool(self._conflicts)
+
+    def detect_type_source(self, type_name):
+        return self._detect_type_source(type_name)
+
+    def get_type_mapping_key(self, dataset):
+        return dataset
+
+    def get_type_neuron_count(self, type_name, dataset):
+        return 1
+
+    def _get_type_mapping_key(self, dataset):
+        return dataset
+
+    def get_mapping_decision(self, source_type, source_dataset,
+                             target_dataset, include_bridges=False):
+        target = "SrcCanon" if source_type == "Src" else source_type
+        return {'status': 'mapped', 'source_type': source_type,
+                'target_type': target, 'target_types': [target],
+                'relationship': '1-to-1', 'conflicts': []}
 
     def get_canonical_type(self, type_name, dataset):
         return "SrcCanon" if type_name == "Src" else type_name
@@ -1356,13 +1438,42 @@ def test_export_label_map_auto_mapper_resolution(tmp_path):
     a = ComparisonAnalyzer(params, verbose=False)
 
     class _Resolver:
+        """Fake mapper on the shared resolver contract (the analyzer
+        resolves through ``comparison.type_resolver`` now)."""
         _conflicts = {}
+        _loaded = True
+
+        def has_conflicts(self):
+            return bool(self._conflicts)
+
+        def detect_type_source(self, t):
+            return self._detect_type_source(t)
 
         def _detect_type_source(self, t):
             return DS1 if t in ("Src", "Unmapped") else None
 
-        def get_mapped_type(self, t, src_ds, dst_ds):
-            return "SrcMapped" if t == "Src" else None
+        def _get_type_mapping_key(self, ds):
+            return ds
+
+        def get_mapping_decision(self, t, src_ds, dst_ds,
+                                 include_bridges=False):
+            if t == "Src":
+                return {'status': 'mapped', 'source_type': t,
+                        'target_type': "SrcMapped",
+                        'target_types': ["SrcMapped"],
+                        'relationship': '1-to-1', 'conflicts': []}
+            return {'status': 'unmapped', 'source_type': t,
+                    'target_type': None, 'target_types': [],
+                    'relationship': None, 'conflicts': []}
+
+        def get_alias_candidates(self, type_name, datasets,
+                                 source_dataset=None):
+            return {ds: {'outcome': 'no counterpart known',
+                         'candidates': []} for ds in datasets}
+
+        def get_type_bridges(self, type_name, source_ds, target_ds,
+                             max_bridges=8):
+            return []
 
     a.parameters.auto_type_mapping = True
     a.parameters._auto_type_mapper = _Resolver()

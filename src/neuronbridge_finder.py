@@ -292,6 +292,10 @@ def _extract_base_type(prefixed_type: str, merge_mapping=None) -> str:
     """
     if merge_mapping and prefixed_type in merge_mapping:
         return merge_mapping[prefixed_type]
+    # KNOWN LIMITATION (mapper-absent fallback): the naive first-underscore
+    # split mangles type names that CONTAIN underscores (e.g.
+    # '5thsLNv_LNd6' -> 'LNd6').  Only reached when no auto-mapper merge
+    # mapping is available; the mapper-driven path above is authoritative.
     parts = prefixed_type.split('_', 1)
     if len(parts) > 1:
         return parts[1]  # Return everything after first underscore
@@ -6305,8 +6309,18 @@ class NeuronBridgeFinder:
                     if not type_name or pd.isna(type_name):
                         continue
                     
-                    # Get canonical type for merging
-                    canonical = mapper.get_canonical_type(type_name, source_dataset=dataset)
+                    # Canonical merge key via the shared validity resolver:
+                    # licensed renames merge; a CONFLICTED type stays
+                    # dataset-scoped and never groups with another dataset's
+                    # same-named rows in the exported summary.
+                    try:
+                        from comparison.type_resolver import canonical_merge_key
+                    except ImportError:
+                        from src.comparison.type_resolver import (
+                            canonical_merge_key,
+                        )
+                    canonical = canonical_merge_key(
+                        mapper, type_name, dataset).key
                     
                     rows.append({
                         'canonical_type': canonical,

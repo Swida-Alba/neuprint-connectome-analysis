@@ -1832,17 +1832,22 @@ def _generate_neuron_counts_section(analyzer, dataset_names: List[str],
         target_cols = [c for c in type_df.columns if c not in ['type', 'role'] and 'target' in c.lower()]
         all_cols = source_cols + target_cols
         
-        # Helper function to get canonical type name using type mapper
+        # Canonical grouping goes through the shared validity resolver
+        # (``canonical_merge_key``): licensed renames merge under one
+        # canonical key, while a CONFLICTED type stays dataset-scoped and
+        # can never coalesce with another dataset's same-named rows.  The
+        # source namespace is auto-detected from the type name (the rows
+        # are per-dataset observations of that type).
+        from comparison.type_resolver import canonical_merge_key
+        type_counts_merge_cache: dict = {}
+
         def get_canonical_type(type_name: str) -> str:
             if not has_type_mapper or type_mapper is None:
                 return type_name
             try:
-                # Get display name with all equivalent names
-                display_name = type_mapper.get_display_name(type_name, dataset_names)
-                # Extract just the canonical base (before parentheses)
-                if '(' in display_name:
-                    return display_name.split('(')[0].strip()
-                return display_name
+                return canonical_merge_key(
+                    type_mapper, type_name, None,
+                    cache=type_counts_merge_cache).key
             except Exception:
                 return type_name
         
@@ -4782,38 +4787,47 @@ def _generate_type_mapping_section(analyzer, dataset_names: List[str]) -> str:
         return ''
 
     def _canonical_for(type_name, source_dataset):
+        """Canonical row key via the shared resolver's merge keys
+        (licensed renames map; a conflicted type keys per dataset;
+        display unaffected).  ``source_dataset=None`` auto-detects."""
         try:
-            if source_dataset is not None:
-                return mapper.get_canonical_type(
-                    type_name, source_dataset=source_dataset)
-            return mapper.get_canonical_type(type_name)
-        except TypeError:
-            try:
-                return mapper.get_canonical_type(type_name)
-            except Exception:
-                return type_name
+            from comparison.type_resolver import canonical_merge_key
+            return canonical_merge_key(
+                mapper, type_name, source_dataset,
+                cache=canonical_for_cache).key
         except Exception:
             return type_name
 
     def _resolve_for(type_name, source_dataset):
-        try:
-            if source_dataset is not None:
-                return mapper.resolve_type_across_datasets(
-                    type_name, dataset_names,
-                    source_dataset=source_dataset) or {}
-            return mapper.resolve_type_across_datasets(
-                type_name, dataset_names) or {}
-        except TypeError:
+        """Per-dataset valid targets through the shared validity resolver
+        (``comparison.type_resolver``), so the report's labels and statuses
+        agree with the panel and the analysis that produced it.
+
+        Unique renames/bridges yield one name; a valid split yields ALL its
+        branches (the row lists every target rather than an arbitrary
+        one); conflicts, evidence-only relations, unmapped types, and an
+        unavailable mapper yield nothing for that dataset."""
+        from .type_resolver import (
+            STATUS_BRIDGED, STATUS_MAPPED, STATUS_VALID_SPLIT,
+            resolve_valid_targets,
+        )
+        resolved: Dict[str, object] = {}
+        for dataset in dataset_names:
             try:
-                return mapper.resolve_type_across_datasets(
-                    type_name, dataset_names) or {}
+                res = resolve_valid_targets(
+                    mapper, type_name, source_dataset, dataset)
             except Exception:
-                return {}
-        except Exception:
-            return {}
+                continue
+            if (res.status in (STATUS_MAPPED, STATUS_BRIDGED)
+                    and res.equivalence_key):
+                resolved[dataset] = res.equivalence_key
+            elif res.status == STATUS_VALID_SPLIT and res.target_types:
+                resolved[dataset] = tuple(res.target_types)
+        return resolved
 
     # Canonicalize first, then cap.  A raw type can occur in several source
     # namespaces, so each canonical row unions its per-dataset names.
+    canonical_for_cache: dict = {}
     canonical_rows: Dict[str, Dict[str, set]] = {}
     for source_dataset, source_types in result_types_by_dataset.items():
         source_hint = (source_dataset
@@ -4826,7 +4840,13 @@ def _generate_type_mapping_section(analyzer, dataset_names: List[str]) -> str:
             mappings = _resolve_for(raw_type, source_hint)
             for dataset in dataset_names:
                 value = mappings.get(dataset)
-                if value:
+                if not value:
+                    continue
+                if isinstance(value, (tuple, list, set)):
+                    # A valid split: list every licensed branch instead of
+                    # an arbitrary single target.
+                    row[dataset].update(str(v) for v in value)
+                else:
                     row[dataset].add(str(value))
             # A mapper may not return a same-namespace value for a source
             # hint.  Preserve the observed raw name in that dataset rather

@@ -4456,9 +4456,8 @@ def mapped_type_targets(mapper, foreign_type: str, foreign_ds: str,
     ``_compute``) resolve every foreign type through THIS function.
     """
     from comparison.type_resolver import (
-        STATUS_BRIDGED, STATUS_CONFLICT, STATUS_EVIDENCE_ONLY,
-        STATUS_MAPPER_UNAVAILABLE, STATUS_MAPPED, STATUS_UNMAPPED,
-        STATUS_VALID_SPLIT, resolve_valid_targets,
+        STATUS_CONFLICT, STATUS_MAPPER_UNAVAILABLE, STATUS_MAPPED,
+        STATUS_UNMAPPED, resolve_valid_targets,
     )
 
     res = resolve_valid_targets(
@@ -4480,8 +4479,6 @@ def mapped_type_targets(mapper, foreign_type: str, foreign_ds: str,
     result: Dict[str, Any] = {'kind': res.kind, 'targets': list(res.target_types)}
     if res.status != STATUS_MAPPED or res.kind in ('one of N', 'splits into'):
         result['status'] = res.status
-    if res.status == STATUS_CONFLICT:
-        result['conflicts'] = [dict(c) for c in res.conflicts]
     return result
 
 

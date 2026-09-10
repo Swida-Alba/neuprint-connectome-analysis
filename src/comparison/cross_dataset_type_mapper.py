@@ -28,6 +28,14 @@ Key Features:
 - Priority-based resolution: male-cns > FAFB/BANC > manc > hemibrain > optic-lobe
 - Graceful handling of missing mappings
 - Integration with LabelMapper (LabelMapper has higher priority)
+
+Consumers: the shared validity-aware resolver
+(``comparison/type_resolver.py``) wraps this mapper's decisions for the Type
+Mapping panel, the neuron-index viewer, homolog finding, and connectivity
+profile comparison.  ``get_mapped_type()`` and
+``resolve_type_across_datasets()`` are COMPATIBILITY-ONLY single-target
+lookups (no status/provenance; ``None`` on splits/conflicts); new analysis
+code should use ``comparison.type_resolver``.
 """
 
 import os
@@ -790,10 +798,16 @@ class CrossDatasetTypeMapper:
     Example:
         >>> mapper = CrossDatasetTypeMapper(workspace_path='/path/to/project')
         >>> 
-        >>> # Get equivalent type in target dataset
+        >>> # New analysis code: use the shared validity-aware resolver
+        >>> # (comparison.type_resolver) — it preserves mapping status and
+        >>> # provenance, fails closed on conflicts, and expands valid
+        >>> # splits.  The single-target methods below are COMPATIBILITY-ONLY.
+        >>> 
+        >>> # Get equivalent type in target dataset (compatibility-only)
         >>> flywire_type = mapper.get_mapped_type('aMe12', 'male-cns:v1.0', 'flywire_FAFB_v783')
         >>> 
         >>> # Resolve a type name to all equivalent types across datasets
+        >>> # (compatibility-only; loses status, returns None on conflicts)
         >>> type_map = mapper.resolve_type_across_datasets('MeVPLo2', ['male-cns:v1.0', 'flywire_FAFB_v783'])
         >>> 
         >>> # Get canonical display name

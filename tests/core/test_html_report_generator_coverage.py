@@ -725,7 +725,12 @@ def test_type_mapping_report_canonicalizes_by_source_dataset():
     datasets = ["mcns", "fafb", "banc"]
 
     class Mapper:
+        """Fake mapper on the shared resolver contract: the report now
+        resolves through ``comparison.type_resolver`` (which consumes
+        ``get_mapping_decision`` status dicts), not the legacy
+        ``resolve_type_across_datasets`` one-target API."""
         _conflicts = []
+        _loaded = True
 
         def get_canonical_type(self, type_name, source_dataset=None):
             if source_dataset in {"mcns", "fafb", "banc"} \
@@ -733,18 +738,34 @@ def test_type_mapping_report_canonicalizes_by_source_dataset():
                 return "MeVPLo2"
             return type_name
 
-        def resolve_type_across_datasets(self, type_name, dataset_names,
-                                         source_dataset=None):
-            if type_name == "MeVPLo2" and source_dataset == "mcns":
-                return {"mcns": "MeVPLo2", "fafb": "MTe07",
-                        "banc": "MTe07"}
-            if type_name == "MTe07" and source_dataset in {"fafb", "banc"}:
-                return {"mcns": "MeVPLo2", "fafb": "MTe07",
-                        "banc": "MTe07"}
-            if type_name == "CB2399":
-                return {"mcns": None, "fafb": "CB2399",
-                        "banc": "CB2399"}
-            return {dataset: None for dataset in dataset_names}
+        def _get_type_mapping_key(self, dataset):
+            # 'mcns' IS the canonical namespace (same registry key), like
+            # the real mapper's release normalization.
+            return {'mcns': 'male-cns:v1.0'}.get(dataset, dataset)
+
+        def get_mapping_decision(self, source_type, source_dataset,
+                                 target_dataset, include_bridges=False):
+            def _mapped(target):
+                return {'status': 'mapped', 'source_type': source_type,
+                        'target_type': target, 'target_types': [target],
+                        'relationship': '1-to-1', 'conflicts': []}
+
+            def _unmapped():
+                return {'status': 'unmapped', 'source_type': source_type,
+                        'target_type': None, 'target_types': [],
+                        'relationship': None, 'conflicts': []}
+
+            if source_type == 'CB2399':
+                # Present in FAFB and BANC, no MCNS counterpart.
+                if {source_dataset, target_dataset} == {'banc', 'fafb'}:
+                    return _mapped('CB2399')
+                return _unmapped()
+            if source_type in {'MeVPLo2', 'MTe07'}:
+                if self._get_type_mapping_key(target_dataset) == \
+                        'male-cns:v1.0':
+                    return _mapped('MeVPLo2')
+                return _mapped('MTe07')
+            return _unmapped()
 
     class Analyzer:
         parameters = SimpleNamespace(

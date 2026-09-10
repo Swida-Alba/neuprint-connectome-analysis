@@ -1799,3 +1799,29 @@ def test_same_namespace_and_flow_status_policy():
     status_m, fields_m = resolve_flow_status(mapper, 'MeVPLo2', MCNS, FW)
     assert status_m == 'mapped'
     assert fields_m['target_types'] == ['MTe07']
+
+def test_auto_mapping_metadata_basis_fields():
+    """The metadata block self-describes its counting unit and keeps the
+    partner-occurrence metric on a distinct key (P1.5)."""
+    from comparison.profile_comparator import auto_mapping_result_metadata
+
+    meta = auto_mapping_result_metadata(
+        requested=True,
+        type_mapper=get_type_mapper(),
+        resolution_counts={'mapped': 5},
+        partner_resolution_counts={'mapped': 900, 'unmapped': 4},
+        raw_fallback_used=True,
+    )
+    assert meta['mapping_resolution_counts_basis'] == 'unique_type_resolutions'
+    assert meta['mapping_resolution_counts_by_status'] == {'mapped': 5}
+    assert meta['mapping_partner_type_resolutions_by_status'] == {
+        'mapped': 900, 'unmapped': 4}
+    assert meta['raw_fallback_used'] is True
+
+    # disabled branch keeps the same key shape (empty counts), no crash
+    disabled = auto_mapping_result_metadata(
+        requested=False, type_mapper=None)
+    assert disabled['mapping_resolution_counts_basis'] == 'unique_type_resolutions'
+    assert disabled['mapping_resolution_counts_by_status'] == {}
+    assert disabled['mapping_partner_type_resolutions_by_status'] == {}
+

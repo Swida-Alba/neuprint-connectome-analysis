@@ -29,7 +29,14 @@ DS_B = "male-cns:v0.9"  # remains distinct from the v1.0 mapping source
 
 
 class FakeMapper:
-    """Minimal stand-in for CrossDatasetTypeMapper."""
+    """Minimal stand-in for CrossDatasetTypeMapper.
+
+    Implements BOTH the legacy one-target API (used by the batch scoring
+    core via ``standardize_partner_types``/``get_canonical_type``) AND the
+    shared resolver contract consumed by ``comparison.type_resolver``
+    (``get_mapping_decision`` status dicts, alias/bridge stubs, namespace
+    keys).  The old fake shipped only the legacy API, which the query
+    mapping no longer calls (plan Workstream D)."""
 
     _loaded = True
 
@@ -48,6 +55,53 @@ class FakeMapper:
             if name == canon or name in per_ds.values():
                 return canon
         return name
+
+    # --- shared resolver contract (comparison.type_resolver) ---
+
+    def _get_type_mapping_key(self, dataset):
+        return dataset
+
+    def _detect_type_source(self, name):
+        for canon, per_ds in self.mapping.items():
+            if name == canon:
+                for ds in per_ds:
+                    return ds
+        for canon, per_ds in self.mapping.items():
+            if name in per_ds.values():
+                for ds, local in per_ds.items():
+                    if local == name:
+                        return ds
+        return None
+
+    def get_mapping_decision(self, source_type, source_dataset,
+                             target_dataset, include_bridges=False):
+        for canon, per_ds in self.mapping.items():
+            if source_type == canon or source_type in per_ds.values():
+                target = per_ds.get(target_dataset, canon)
+                return {
+                    'status': 'mapped',
+                    'source_type': source_type,
+                    'target_type': target,
+                    'target_types': [target],
+                    'relationship': '1-to-1',
+                    'conflicts': [],
+                }
+        return {
+            'status': 'unmapped',
+            'source_type': source_type,
+            'target_type': None,
+            'target_types': [],
+            'relationship': None,
+            'conflicts': [],
+        }
+
+    def get_alias_candidates(self, type_name, datasets, source_dataset=None):
+        return {ds: {'outcome': 'no counterpart known', 'candidates': []}
+                for ds in datasets}
+
+    def get_type_bridges(self, type_name, source_ds, target_ds,
+                         max_bridges=8):
+        return []
 
     def standardize_partner_types(self, partners, source_dataset):
         out = {}

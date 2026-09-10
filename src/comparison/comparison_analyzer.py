@@ -179,6 +179,13 @@ class ComparisonAnalyzer:
         self._hemisphere_symmetry_cache: Dict[int, Dict[str, Dict]] = {}
         self._network_aligned_cache: Dict[Any, pd.DataFrame] = {}
         self._output_base_printed: bool = False  # Track if base dir was printed
+        # Shared-resolver state for canonical merge keys (auto type
+        # mapping): one snapshot per run, a merge-key cache, and per-status
+        # resolution counts exported with the run's mapping metadata.
+        self._mapper_snapshot = None
+        self._merge_key_cache: Dict = {}
+        self._mapping_status_counts: Dict[str, int] = {}
+        self._conflicted_merge_types: Dict[str, str] = {}
         # Fix A: StrongestFirst effective cutoff (τ) per (dataset, threshold).
         # None = complete enumeration; a number = τ-bounded (budget bit).
         self._path_taus: Dict[tuple, Optional[float]] = {}
@@ -778,20 +785,46 @@ class ComparisonAnalyzer:
     
     def _get_canonical_type(self, type_name: str, dataset: str) -> str:
         """Get canonical (male-cns) type name for a given type.
-        
-        If auto_type_mapping is enabled and a mapping exists, returns the 
-        canonical (male-cns) name. Otherwise returns the original type name.
-        
+
+        Routes through the shared validity resolver
+        (``comparison.type_resolver.canonical_merge_key``) so cross-dataset
+        path/edge merging honors the panel's policy: licensed renames map
+        to their canonical target, while a CONFLICTED type is kept
+        dataset-scoped (``dataset:raw``) and can never merge with another
+        dataset's same-named rows.
+
+        Per-status counts are recorded on ``self`` on a UNIQUE-resolution
+        basis (one per distinct ``(dataset, type)`` — the resolver invokes
+        the callback only when it computes an answer, not on a merge-key
+        cache hit), so a type resolved once per path row is not
+        over-counted.  The conflicted-type record is idempotent.
+
         Args:
             type_name: Original type name
             dataset: Dataset the type comes from
-            
+
         Returns:
-            Canonical type name (male-cns name if mapped, else original)
+            Canonical merge key (canonical name, dataset-scoped name for
+            conflicts, or the raw name when unmapped/unavailable).
         """
         if not self.parameters.auto_type_mapping or not self.parameters._auto_type_mapper:
             return type_name
-        return self.parameters._auto_type_mapper.get_canonical_type(type_name, dataset)
+        from .type_resolver import canonical_merge_key, get_mapper_snapshot
+        if self._mapper_snapshot is None:
+            self._mapper_snapshot = get_mapper_snapshot(
+                self.parameters._auto_type_mapper)
+        merge_key = canonical_merge_key(
+            self.parameters._auto_type_mapper, type_name, dataset,
+            snapshot=self._mapper_snapshot, cache=self._merge_key_cache,
+            on_status=self._note_mapping_status)
+        if merge_key.status == 'conflict':
+            self._conflicted_merge_types[f'{dataset}:{type_name}'] = merge_key.key
+        return merge_key.key
+
+    def _note_mapping_status(self, status: str) -> None:
+        """Count one mapping resolution by status (unique-resolution basis)."""
+        counts = self._mapping_status_counts
+        counts[status] = counts.get(status, 0) + 1
     
     def _get_display_type(self, canonical_name: str) -> str:
         """Get display name for a canonical type showing all dataset variants.
@@ -869,6 +902,16 @@ class ComparisonAnalyzer:
         if summary['mapped_count'] > 0 or summary['n_to_1_count'] > 0 or summary['one_to_n_count'] > 0:
             self._log(f"  → Check auto_type_mapping.csv and auto_type_mapping_conflicts.csv in output folder")
             self._write_user_warning_notes_for_mapping(mapper, str_types, dataset_names)
+
+        # Canonical merge-key policy (shared resolver): conflicted types are
+        # kept dataset-scoped in path/edge merging, never merged under their
+        # raw same-name.
+        if self._conflicted_merge_types:
+            self._log(
+                f"  ⚠️ {len(self._conflicted_merge_types)} conflicted type(s) kept "
+                f"dataset-scoped in path/edge merges (no raw same-name merging): "
+                f"{', '.join(sorted(self._conflicted_merge_types)[:5])}"
+                + (" …" if len(self._conflicted_merge_types) > 5 else ""))
 
     def _write_user_warning_notes_for_mapping(self, mapper, type_names, dataset_names):
         """Write auto-type-mapping caveats to user_warning_notes.txt.
@@ -1445,6 +1488,18 @@ class ComparisonAnalyzer:
         self._log(f"Filtered to {len(conn_df)} edges for {dataset_name}")
         return conn_df
     
+    def _reset_mapping_state(self) -> None:
+        """Reset per-run canonicalization bookkeeping.
+
+        Called at the start of each analysis run so a reused analyzer owns
+        exactly its own merge-key resolutions/caches (no accumulation into
+        the exported metadata and no stale decisions across runs).
+        """
+        self._mapper_snapshot = None
+        self._merge_key_cache = {}
+        self._mapping_status_counts = {}
+        self._conflicted_merge_types = {}
+
     def run_all_analyses(self, skip_existing: bool = True) -> Dict[str, Dict[int, pd.DataFrame]]:
         """
         Run analysis for all datasets and thresholds.
@@ -1459,6 +1514,7 @@ class ComparisonAnalyzer:
         Returns:
             Nested dict {dataset_name: {threshold: DataFrame}}
         """
+        self._reset_mapping_state()
         mode = self.parameters.comparison_mode
         self._log(f"Starting analysis across all datasets and thresholds (mode={mode})")
         
@@ -3523,9 +3579,14 @@ class ComparisonAnalyzer:
         self._log("  Step 1/2: Generating comparison summary...")
 
         dataset_names = self.parameters.get_dataset_names()
-        
+
         # Get type mapper for auto type mapping (if enabled)
         type_mapper = self.parameters._auto_type_mapper if self.parameters.auto_type_mapping else None
+        # One shared-resolver snapshot per run: canonical merge keys for
+        # path/edge merging reuse this run's decision cache and load state.
+        if type_mapper is not None and self._mapper_snapshot is None:
+            from .type_resolver import get_mapper_snapshot
+            self._mapper_snapshot = get_mapper_snapshot(type_mapper)
 
         if self.parameters.threshold_mode == 'combinations':
             queries = self.get_threshold_queries()
@@ -3647,9 +3708,14 @@ class ComparisonAnalyzer:
             return self.aligned_results[threshold]
         
         dataset_names = self.parameters.get_dataset_names()
-        
+
         # Get type mapper for auto type mapping (if enabled)
         type_mapper = self.parameters._auto_type_mapper if self.parameters.auto_type_mapping else None
+        # One shared-resolver snapshot per run: canonical merge keys for
+        # path/edge merging reuse this run's decision cache and load state.
+        if type_mapper is not None and self._mapper_snapshot is None:
+            from .type_resolver import get_mapper_snapshot
+            self._mapper_snapshot = get_mapper_snapshot(type_mapper)
         
         # Pass label_mapper=None because raw_results are already mapped in run_path_analysis/run_edge_analysis
         aligned = self.metrics._align_results_at_threshold(
@@ -4516,9 +4582,32 @@ class ComparisonAnalyzer:
                     only_different=True  # Only export mappings where types differ across datasets
                 )
                 self._log_file(auto_map_path, "Auto type mapping")
-                
+
+                # Standard auto-type-mapping metadata block (plan
+                # unify-mapper-backends Workstream C): requested vs active
+                # mapper, source table, version, load error, and this run's
+                # per-status canonical-merge resolution counts.
+                try:
+                    from .profile_comparator import auto_mapping_result_metadata
+                    mapping_meta = auto_mapping_result_metadata(
+                        requested=self.parameters.auto_type_mapping,
+                        type_mapper=self.parameters._auto_type_mapper,
+                        snapshot=self._mapper_snapshot,
+                        resolution_counts=self._mapping_status_counts,
+                    )
+                    if self._conflicted_merge_types:
+                        mapping_meta['conflicted_merge_types_dataset_scoped'] = (
+                            dict(sorted(self._conflicted_merge_types.items())))
+                    mapping_path = os.path.join(out_dir, "auto_type_mapping.json")
+                    with open(mapping_path, 'w', encoding='utf-8') as mf:
+                        import json as _json
+                        _json.dump(mapping_meta, mf, indent=2, default=str)
+                    self._log_file(mapping_path, "Auto type mapping metadata")
+                except Exception as exc:
+                    self._log(f"Warning: could not write auto type mapping metadata: {exc}")
+
                 # Also export conflicts if any (filtered to result types)
-                if self.parameters._auto_type_mapper._conflicts:
+                if self.parameters._auto_type_mapper.has_conflicts():
                     conflicts_path = os.path.join(out_dir, "auto_type_mapping_conflicts.csv")
                     self.parameters._auto_type_mapper.export_conflicts(
                         conflicts_path,
@@ -4534,7 +4623,7 @@ class ComparisonAnalyzer:
                     seen_pairs = set()
                     for result_type in (result_types or [])[:300]:
                         source_ds = (
-                            mapper._detect_type_source(result_type)
+                            mapper.detect_type_source(result_type)
                             or (dataset_names[0] if dataset_names else "")
                         )
                         if not source_ds:
@@ -4550,11 +4639,8 @@ class ComparisonAnalyzer:
                                 continue
                             seen_pairs.add(pair)
                             final = bridges[0][-1]["value"]
-                            target_key = mapper._get_type_mapping_key(dataset_name)
-                            count = len(
-                                mapper._dataset_types.get(target_key, {}).get(
-                                    bridges[0][-1]["value"], set())
-                            ) or 1
+                            count = mapper.get_type_neuron_count(
+                                final, dataset_name) or 1
                             flows.append({
                                 "source_dataset": source_ds,
                                 "target_dataset": dataset_name,
@@ -4687,10 +4773,14 @@ class ComparisonAnalyzer:
                         resolved.append(neuron)
                         continue
                     
-                    # Try to resolve type using auto mapper
-                    source_ds = auto_mapper._detect_type_source(neuron)
+                    # Try to resolve type using auto mapper (shared validity
+                    # resolver: only an unambiguous one-target case renames;
+                    # splits/conflicts stay unmapped here)
+                    source_ds = auto_mapper.detect_type_source(neuron)
                     if source_ds:
-                        mapped = auto_mapper.get_mapped_type(neuron, source_ds, dataset)
+                        from .type_resolver import resolve_one_target
+                        mapped = resolve_one_target(
+                            auto_mapper, neuron, source_ds, dataset)
                         if mapped:
                             resolved.append(mapped)
                         # If no mapping found, the type doesn't exist in this dataset - skip it

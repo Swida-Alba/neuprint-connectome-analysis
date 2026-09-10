@@ -189,6 +189,22 @@ def test_align_with_label_mapper(metrics):
 
 def test_align_with_type_mapper(metrics):
     class StubTypeMapper:
+        """Fake mapper on the shared resolver contract: metrics canonicalize
+        edge endpoints through ``canonical_merge_key`` (which consumes
+        ``get_mapping_decision``), not the raw ``get_canonical_type``."""
+
+        _loaded = True
+
+        def _get_type_mapping_key(self, dataset):
+            return dataset
+
+        def get_mapping_decision(self, source_type, source_dataset,
+                                 target_dataset, include_bridges=False):
+            mapped = {"MTe46": "MeVPaMe1"}.get(source_type, source_type)
+            return {'status': 'mapped', 'source_type': source_type,
+                    'target_type': mapped, 'target_types': [mapped],
+                    'relationship': '1-to-1', 'conflicts': []}
+
         def get_canonical_type(self, t, dataset):
             return {"MTe46": "MeVPaMe1"}.get(t, t)
 

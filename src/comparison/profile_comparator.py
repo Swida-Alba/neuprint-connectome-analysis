@@ -26,6 +26,7 @@ Example:
 
 from dataclasses import dataclass
 from itertools import combinations
+from collections import Counter
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Union, Any, TYPE_CHECKING
 from datetime import datetime
@@ -132,6 +133,50 @@ def _drop_rank_cols(df: pd.DataFrame) -> pd.DataFrame:
     """
     drop = [c for c in _OUTPUT_DROP_COLS if c in df.columns]
     return df.drop(columns=drop) if drop else df
+
+
+def auto_mapping_result_metadata(
+    requested: bool,
+    type_mapper: Optional[CrossDatasetTypeMapper],
+    snapshot: Optional[object] = None,
+    resolution_counts: Optional[Dict[str, int]] = None,
+    partner_resolution_counts: Optional[Dict[str, int]] = None,
+    raw_fallback_used: bool = False,
+) -> Dict[str, Any]:
+    """The standard auto-type-mapping metadata block for saved results.
+
+    Records requested vs active mapping, the active mapper source/version,
+    any load error, per-status resolution counts, and whether raw-name
+    fallback occurred — so a saved result can always answer whether it was
+    produced under a healthy v1.0 mapper.
+
+    ``resolution_counts`` is the primary metric on the
+    ``'unique_type_resolutions'`` basis.  ``partner_resolution_counts`` is
+    a distinct occurrence-basis metric (contributor-type occurrences inside
+    canonicalized profiles) written under its own key.
+    """
+    from .type_resolver import auto_mapping_metadata, get_mapper_snapshot
+
+    if snapshot is None and (type_mapper is not None or requested):
+        snapshot = get_mapper_snapshot(type_mapper, requested=requested)
+    if snapshot is None:
+        return {
+            'auto_type_mapping_requested': requested,
+            'auto_type_mapping_active': False,
+            'auto_type_mapping_status': 'disabled',
+            'mapping_policy_version': '1',
+            'mapping_resolution_counts_by_status': dict(
+                resolution_counts or {}),
+            'mapping_resolution_counts_basis': 'unique_type_resolutions',
+            'mapping_partner_type_resolutions_by_status': dict(
+                partner_resolution_counts or {}),
+            'raw_fallback_used': bool(raw_fallback_used),
+        }
+    return auto_mapping_metadata(
+        snapshot,
+        resolution_counts=resolution_counts,
+        raw_fallback_used=raw_fallback_used,
+        partner_resolution_counts=partner_resolution_counts)
 
 
 @dataclass
@@ -823,9 +868,88 @@ class ProfileComparator:
         # If no mapper, return as-is
         if type_mapper is None:
             return expanded
-        
+
         # Standardize to canonical names
         return type_mapper.standardize_partner_types(expanded, profile.dataset)
+
+    @staticmethod
+    def _get_expanded_types_resolved(
+        profile: ConnectivityProfile,
+        direction: str,
+        type_mapper: Optional[CrossDatasetTypeMapper] = None,
+        prefix_2hop: bool = True,
+        top_n_for_2hop_check: int = 5,
+        decision_cache: Optional[Dict] = None,
+        allow_evidence_only: bool = False,
+        status_counts_out: Optional[Counter] = None,
+    ) -> Dict[str, float]:
+        """Expanded type profile canonicalized with the panel's VALIDITY
+        policy (shared resolver, ``comparison.type_resolver``).
+
+        Unlike ``_get_expanded_types_standardized`` (which applies raw
+        canonicalization only), this records which mapping status produced
+        each key: conflicts are excluded outright (never compared by raw
+        same-name), valid splits distribute their weight evenly across
+        every licensed target, and unmapped types keep their raw name as
+        the counted long-tail fallback.  Returned dict is
+        ``{canonical_type: weight}``, same contract as the raw variant.
+        Per-type statuses are aggregated into ``status_counts_out`` when
+        given, for the result metadata block.
+        """
+        expanded = ProfileComparator._get_expanded_types(
+            profile, direction, prefix_2hop, top_n_for_2hop_check)
+        if type_mapper is None:
+            return expanded
+        from .type_resolver import expand_profile_types
+        expansion = expand_profile_types(
+            type_mapper, expanded, profile.dataset, None,
+            decision_cache=decision_cache,
+            allow_evidence_only=allow_evidence_only)
+        if status_counts_out is not None:
+            for status, count in expansion.status_counts.items():
+                status_counts_out[status] += count
+            if expansion.fallback_used:
+                status_counts_out['_fallback_profiles'] += 1
+        return expansion.canonical
+
+    @staticmethod
+    def standardize_profile(
+        profile: 'ConnectivityProfile',
+        dataset: str,
+        type_mapper: Optional['CrossDatasetTypeMapper'],
+    ) -> 'ConnectivityProfile':
+        """Return a copy of ``profile`` whose partner dicts are canonical.
+
+        Both directions are standardized with
+        ``standardize_partner_types`` (``{canonical_type: weight}``) and
+        the rank caches rebuilt, so any two standardized profiles from
+        different datasets live in the same comparison namespace.  Used by
+        the type-level pooling path and the mapping-aware vector prefilter.
+        """
+        if type_mapper is None:
+            return profile
+        from .connectivity_profiler import ConnectivityProfile, compute_ranks
+        up = type_mapper.standardize_partner_types(
+            dict(profile.upstream_partners), dataset)
+        down = type_mapper.standardize_partner_types(
+            dict(profile.downstream_partners), dataset)
+        return ConnectivityProfile(
+            neuron_id=profile.neuron_id, dataset=profile.dataset,
+            upstream_partners=up, downstream_partners=down,
+            upstream_ranks=compute_ranks(up),
+            downstream_ranks=compute_ranks(down),
+            upstream_top_k=len(up), downstream_top_k=len(down),
+            total_upstream_weight=profile.total_upstream_weight,
+            total_downstream_weight=profile.total_downstream_weight,
+            untyped_upstream_weight_fraction=(
+                profile.untyped_upstream_weight_fraction),
+            untyped_downstream_weight_fraction=(
+                profile.untyped_downstream_weight_fraction),
+            actual_upstream_count=len(up),
+            actual_downstream_count=len(down),
+            unique_types_upstream=len(up),
+            unique_types_downstream=len(down),
+        )
     
     @staticmethod
     def bodyid_jaccard(
@@ -1271,7 +1395,12 @@ class ProfileComparator:
         results = []
         
         # Pre-compute source expanded types ONCE
-        # Use standardized types if type_mapper is provided
+        # Use standardized types if type_mapper is provided.  The scorer
+        # core intentionally uses raw canonicalization (cheap, per-type
+        # dicts): validity is enforced where candidates and endpoints enter
+        # the pipeline (_expand_partner_types_to_target,
+        # _compute_same_type_candidates, _get_expanded_types_resolved), so
+        # conflicted partner names cannot create matches here.
         if type_mapper is not None:
             source_types = ProfileComparator._get_expanded_types_standardized(
                 source_profile, direction, type_mapper
@@ -2267,80 +2396,6 @@ class ProfileComparator:
                 results['cross_dataset'] = pd.DataFrame(cross_dataset_rows)
         
         return results
-    
-    @staticmethod
-    def find_similar_types_across_datasets(
-        profiles_by_dataset: Dict[str, Dict[str, ConnectivityProfile]],
-        type_name: str,
-        metric: str = 'rank',
-        direction: str = 'both',
-        top_n: int = 10
-    ) -> pd.DataFrame:
-        """
-        Find types in other datasets most similar to a given type.
-        
-        Args:
-            profiles_by_dataset: Dict of {dataset: {type_name: ConnectivityProfile}}
-            type_name: Name of the type to find similar types for
-            metric: Similarity metric ('rank', 'jaccard', 'cosine')
-            direction: 'upstream', 'downstream', or 'both'
-            top_n: Number of top similar types to return per dataset
-        
-        Returns:
-            DataFrame with similar types ranked by similarity
-        """
-        rows = []
-        
-        # Find the profile for the target type in any dataset
-        source_profile = None
-        source_dataset = None
-        for dataset, profiles in profiles_by_dataset.items():
-            if type_name in profiles:
-                source_profile = profiles[type_name]
-                source_dataset = dataset
-                break
-        
-        if source_profile is None:
-            return pd.DataFrame(columns=['dataset', 'type', 'similarity'])
-        
-        # Compare with all other types
-        for dataset, profiles in profiles_by_dataset.items():
-            for other_type, other_profile in profiles.items():
-                # Skip self-comparison
-                if dataset == source_dataset and other_type == type_name:
-                    continue
-                
-                if metric == 'rank':
-                    sim = ProfileComparator.rank_correlation(source_profile, other_profile, direction)
-                elif metric == 'jaccard':
-                    sim = ProfileComparator.jaccard_similarity(source_profile, other_profile, direction)
-                elif metric == 'cosine':
-                    sim = ProfileComparator.weighted_cosine_similarity(source_profile, other_profile, direction)
-                else:
-                    sim = ProfileComparator.rank_correlation(source_profile, other_profile, direction)
-                
-                rows.append({
-                    'source_type': type_name,
-                    'source_dataset': source_dataset,
-                    'target_dataset': dataset,
-                    'target_type': other_type,
-                    'similarity': sim,
-                    'is_same_type': type_name == other_type
-                })
-        
-        if not rows:
-            return pd.DataFrame(columns=['source_type', 'source_dataset', 'target_dataset', 
-                                         'target_type', 'similarity', 'is_same_type'])
-        
-        df = pd.DataFrame(rows)
-        df = df.sort_values('similarity', ascending=False)
-        
-        # Return top_n per target dataset
-        if top_n is not None and top_n > 0:
-            grouped = df.groupby('target_dataset').head(top_n).reset_index(drop=True)
-            return grouped
-        
-        return df
 
 
 # ============================================================================
@@ -2551,11 +2606,15 @@ class HomologFinder:
                 profile cosine; 'adjacency' ranks by the shared partner-type
                 count (legacy behaviour).
             use_auto_type_mapping: Enable automatic type mapping for cross-dataset
-                comparison (default: True). When enabled, partner types are
-                standardized to their canonical (male-cns) names before comparison.
-                This allows proper matching of types that have different names
-                in different datasets (e.g., 'MTe07' in FAFB → 'MeVPLo2' in male-cns).
-                For intra-dataset comparison, original types are always used.
+                comparison (default: True). When enabled, partner types resolve
+                through the shared validity-aware resolver (comparison.type_resolver):
+                licensed renames and valid splits map, conflicts fail closed (never
+                matched by raw same-name), and unmapped types keep their raw name as
+                the counted long-tail fallback. This allows proper matching of types
+                with different names across datasets (e.g., 'MTe07' in FAFB → 'MeVPLo2'
+                in male-cns). For intra-dataset comparison, original types are always
+                used. Each search writes auto_type_mapping.json with the mapper
+                provenance and per-status resolution counts.
             ensure_cache_complete: If True, build/complete the FULL dataset connection
                 cache before searching (fetches connections for every uncached neuron).
                 This can take hours on first use with a new dataset. Default False:
@@ -2631,10 +2690,19 @@ class HomologFinder:
         self.prefilter_rank_metric = metric_norm
 
         # Auto type mapping for cross-dataset comparison
-        # When enabled, partner types are standardized to canonical (male-cns) names
+        # When enabled, partner types resolve via the shared validity-aware
+        # resolver (conflicts fail closed, splits expand, unmapped fall back to raw)
         # This allows proper matching of types like 'MTe07' (FAFB) ↔ 'MeVPLo2' (male-cns)
         self.use_auto_type_mapping = use_auto_type_mapping
         self._type_mapper: Optional[CrossDatasetTypeMapper] = None
+        # Per-run mapping-resolution statuses (candidate expansion), exported
+        # with auto_type_mapping.json and consumed between saves: each saved
+        # run snapshots and clears the counter, so its counts are its own.
+        self._mapping_status_counts: Dict[str, int] = {}
+        # One run-scoped mapper snapshot (lazy; reset per search) and a
+        # unique-resolution dedupe set for candidate-expansion counting.
+        self._mapper_snapshot = None
+        self._counted_expansion_resolutions: set = set()
         
         # Similarity metric for sorting.  Escalation can still pass a dict for
         # backward compatibility, but it no longer selects a 'combined' score;
@@ -2799,7 +2867,7 @@ class HomologFinder:
             self._type_mapper = get_type_mapper()
             if self._type_mapper._loaded:
                 self._log(f"Using auto type mapping for cross-dataset comparison")
-                self._log(f"  Partner types will be standardized to canonical (male-cns) names")
+                self._log(f"  Partner types resolve via the shared validity-aware resolver (conflicts fail closed, splits expand, unmapped fall back to raw)")
         
         return self._type_mapper if self._type_mapper._loaded else None
 
@@ -2809,6 +2877,7 @@ class HomologFinder:
         target_type_lookup: Dict[int, str],
         type_mapper: Optional[CrossDatasetTypeMapper],
         target_dataset: str,
+        source_dataset: Optional[str] = None,
     ) -> set:
         """Target bodyIds whose (canonical) type matches the query type name(s).
 
@@ -2818,6 +2887,15 @@ class HomologFinder:
         score counts shared partner TYPES).  Those same-name homologs are the
         primary answer to a named-type search, so they are re-added to the
         candidate pool and exempted from prefilter pruning.
+
+        ``standardize_partner_types`` returns ``{canonical_type: weight}``;
+        a canonical-keyed dict cannot recover which raw target types
+        produced each key, so each raw target type is canonicalized
+        individually here.  A type counts as "same" when its canonical
+        form equals a query name (or the query's own canonical form, so
+        target->source queries resolve too).  When ``source_dataset`` is
+        given, conflicted target types fail closed: they must not re-enter
+        the pool through their raw same-name (the BANC CB1011 class).
         """
         names = {str(n).strip() for n in query_type_names if n and str(n).strip()}
         names.discard('')
@@ -2830,21 +2908,105 @@ class HomologFinder:
         })
         matched_types: set = {t for t in raw_types if t in names}
         if type_mapper is not None:
-            # Standardize exactly like batch_compare_cross_dataset does so a
-            # target type counts as "same" whenever the scoring would treat
-            # it as the canonical query name.
-            standardized = type_mapper.standardize_partner_types(
-                {t: 1.0 for t in raw_types}, target_dataset
-            )
+            def _canon(name: str, ds: Optional[str] = None) -> str:
+                try:
+                    canonical = type_mapper.get_canonical_type(name, ds)
+                except Exception:
+                    canonical = None
+                return canonical or name
+
+            canon_queries = {_canon(q) for q in names} | names
             matched_types.update(
-                raw for raw, canon in standardized.items() if canon in names
-            )
+                t for t in raw_types
+                if _canon(t, target_dataset) in canon_queries)
+
+            # Fail closed on conflicts (raw same-name or mapped canon both
+            # count above; only the explicit conflict verdict removes).
+            if matched_types and source_dataset is not None:
+                matched_types = {
+                    t for t in matched_types
+                    if not self._is_conflicted_target_type(
+                        type_mapper, t, target_dataset, source_dataset)
+                }
 
         if not matched_types:
             return set()
         return {
             int(bid) for bid, t in target_type_lookup.items() if t in matched_types
         }
+
+    @staticmethod
+    def _is_conflicted_target_type(
+        type_mapper: 'CrossDatasetTypeMapper',
+        target_type: str,
+        target_dataset: str,
+        source_dataset: str,
+    ) -> bool:
+        """True when ``target_type`` carries a conflict verdict toward the
+        query namespace (scoped decision; failure stays permissive)."""
+        try:
+            decision = type_mapper.get_mapping_decision(
+                target_type, target_dataset, source_dataset,
+                include_bridges=False)
+        except Exception:
+            return False
+        return decision is not None and decision.get('status') == 'conflict'
+
+    def _expand_partner_types_to_target(
+        self,
+        source_types,
+        source_dataset: str,
+        target_dataset: str,
+        type_mapper: Optional['CrossDatasetTypeMapper'],
+        cache: Optional[Dict[str, Tuple[str, ...]]] = None,
+        status_counts_out: Optional[Dict[str, int]] = None,
+    ) -> Dict[str, Tuple[str, ...]]:
+        """Map source-local partner types to target-local expansion names.
+
+        Uses the shared validity resolver (``comparison.type_resolver``):
+        unique renames and bridge-derived targets, EVERY branch of a valid
+        split, nothing for conflicts (fail closed), and the raw name
+        itself for unmapped types (the counted long-tail fallback).
+        Without a mapper every type expands to itself.
+
+        One run-scoped ``self._mapper_snapshot`` is reused across calls (it
+        is created lazily and reset per search), so repeated expansions
+        share the base mapper load state and decision cache.
+
+        Each UNIQUE ``(source_dataset, target_dataset, type)`` resolution
+        is counted once into ``status_counts_out`` when given (deduped
+        across calls via ``self._counted_expansion_resolutions``), feeding
+        the run's ``auto_type_mapping.json`` metadata and its
+        ``raw_fallback_used`` flag.
+        """
+        if type_mapper is None:
+            return {t: (t,) for t in source_types}
+        from .type_resolver import (
+            expansion_targets, get_mapper_snapshot, resolve_valid_targets,
+        )
+        if self._mapper_snapshot is None:
+            self._mapper_snapshot = get_mapper_snapshot(type_mapper)
+        snapshot = self._mapper_snapshot
+        expansion: Dict[str, Tuple[str, ...]] = {}
+        for t in source_types:
+            hit = cache.get(t) if cache is not None else None
+            if hit is None:
+                res = resolve_valid_targets(
+                    type_mapper, t, source_dataset, target_dataset,
+                    snapshot=snapshot)
+                hit = expansion_targets(res)
+                if status_counts_out is not None:
+                    resolution_key = (
+                        str(source_dataset), str(target_dataset), str(t))
+                    if resolution_key not in self._counted_expansion_resolutions:
+                        self._counted_expansion_resolutions.add(resolution_key)
+                        status = res.status
+                        status_counts_out[status] = (
+                            status_counts_out.get(status, 0) + 1)
+                if cache is not None:
+                    cache[t] = hit
+            expansion[t] = hit
+        return expansion
 
     def _compute_type_level_results(
         self,
@@ -2918,44 +3080,31 @@ class HomologFinder:
         # standardizing per pair, but avoids re-standardizing every target
         # profile for every source (O(sources x targets) Python-loop calls).
         if type_mapper is not None:
-            def _std(profile, ds):
-                up = type_mapper.standardize_partner_types(
-                    dict(profile.upstream_partners), ds)
-                down = type_mapper.standardize_partner_types(
-                    dict(profile.downstream_partners), ds)
-                from .connectivity_profiler import ConnectivityProfile, compute_ranks
-                return ConnectivityProfile(
-                    neuron_id=profile.neuron_id, dataset=profile.dataset,
-                    upstream_partners=up, downstream_partners=down,
-                    upstream_ranks=compute_ranks(up),
-                    downstream_ranks=compute_ranks(down),
-                    upstream_top_k=len(up), downstream_top_k=len(down),
-                    total_upstream_weight=profile.total_upstream_weight,
-                    total_downstream_weight=profile.total_downstream_weight,
-                    untyped_upstream_weight_fraction=(
-                        profile.untyped_upstream_weight_fraction),
-                    untyped_downstream_weight_fraction=(
-                        profile.untyped_downstream_weight_fraction),
-                    actual_upstream_count=len(up),
-                    actual_downstream_count=len(down),
-                    unique_types_upstream=len(up),
-                    unique_types_downstream=len(down),
-                )
-            source_pooled = {k: _std(v, self.source_dataset)
-                             for k, v in source_pooled.items()}
-            target_pooled = {k: _std(v, target_dataset)
-                             for k, v in target_pooled.items()}
+            source_pooled = {k: ProfileComparator.standardize_profile(
+                v, self.source_dataset, type_mapper)
+                for k, v in source_pooled.items()}
+            target_pooled = {k: ProfileComparator.standardize_profile(
+                v, target_dataset, type_mapper)
+                for k, v in target_pooled.items()}
             type_mapper = None
 
         target_names = sorted(target_pooled.keys())
         target_profiles = {i: target_pooled[name] for i, name in enumerate(target_names)}
         candidate_map = {i: 0 for i in range(len(target_names))}
 
+        # Same-type marking via the shared resolver's merge keys: licensed
+        # renames match (MTe07 == MeVPLo2), while a CONFLICTED type's
+        # dataset-scoped key can never equal the query's key, so a
+        # raw-same-name conflict is never marked as the same type.
+        merge_key_cache: dict = {}
+
         def canonical(name: str, ds: str) -> str:
             if mapper_for_same is None:
                 return name
             try:
-                return mapper_for_same.get_canonical_type(name, ds) or name
+                from .type_resolver import canonical_merge_key
+                return canonical_merge_key(
+                    mapper_for_same, name, ds, cache=merge_key_cache).key
             except Exception:
                 return name
 
@@ -3309,6 +3458,10 @@ class HomologFinder:
                 'score_weights': self.score_weights,
                 'timestamp': timestamp
             }
+            params.update(auto_mapping_result_metadata(
+                requested=getattr(self, 'use_auto_type_mapping', True),
+                type_mapper=getattr(self, '_type_mapper', None),
+            ))
             json_filename = f'direct_comparison_{safe_neurons}_{timestamp}_params.json'
             json_filepath = os.path.join(out_dir, json_filename)
             with open(json_filepath, 'w') as f:
@@ -4086,6 +4239,14 @@ class HomologFinder:
                 - shuffle_z_score: Z-score from shuffle test
                 - shuffle_significant: True if p < 0.05
         """
+        # Per-search mapper state: a fresh snapshot (never a stale load
+        # state on a long-lived finder) and a fresh resolution-count basis,
+        # so this search's auto_type_mapping.json owns exactly its own
+        # candidate-expansion resolutions.
+        self._mapper_snapshot = None
+        self._counted_expansion_resolutions = set()
+        self._mapping_status_counts = {}
+
         # Use module-level defaults where not provided
         query = source if source is not None else self.source
         source_dataset = source_dataset if source_dataset is not None else self.source_dataset
@@ -4995,6 +5156,11 @@ class HomologFinder:
         all_results = []
         skipped_sources: Dict[str, List[int]] = {'none': []}
         warned_sources: Dict[str, List[int]] = {'rare_or_uni': []}
+        # Per-run standardized profile caches for the mapping-aware vector
+        # prefilter: one canonical conversion per profile per run, not one
+        # per source x target pair.
+        std_source_cache: Dict[int, 'ConnectivityProfile'] = {}
+        std_target_cache: Dict[int, 'ConnectivityProfile'] = {}
 
         if vector_prefiltering and self.verbose:
             prune_label = (
@@ -5039,13 +5205,35 @@ class HomologFinder:
             if vector_prefiltering and source_candidates:
                 total_candidates = len(source_candidates)
 
+                # Prefilter on the SAME standardized vectors the scorer uses
+                # (batch_compare_cross_dataset standardizes both sides into
+                # the canonical namespace): a candidate whose partner types
+                # are renamed across datasets shows a raw-name cosine near
+                # zero and would be dropped before the mapping-aware scorer
+                # ever saw it.
+                pre_source = source_profile
+                if is_cross_dataset and type_mapper is not None:
+                    pre_source = std_source_cache.get(source_bid)
+                    if pre_source is None:
+                        pre_source = ProfileComparator.standardize_profile(
+                            source_profile, source_profile.dataset, type_mapper)
+                        std_source_cache[source_bid] = pre_source
+
                 # First filter by cosine > 0 (quick rejection of dissimilar vectors)
                 cos_filtered: Dict[int, Tuple[int, float]] = {}
                 for target_bid, shared_count in source_candidates.items():
                     target_profile = target_profiles_cache.get(target_bid)
                     if target_profile is None:
                         continue
-                    cos_val = ProfileComparator.weighted_cosine_similarity(source_profile, target_profile, 'both')
+                    pre_target = target_profile
+                    if is_cross_dataset and type_mapper is not None:
+                        pre_target = std_target_cache.get(target_bid)
+                        if pre_target is None:
+                            pre_target = ProfileComparator.standardize_profile(
+                                target_profile, target_dataset, type_mapper)
+                            std_target_cache[target_bid] = pre_target
+                    cos_val = ProfileComparator.weighted_cosine_similarity(
+                        pre_source, pre_target, 'both')
                     if cos_val > 0:
                         cos_filtered[target_bid] = (shared_count, cos_val)
 
@@ -5600,6 +5788,14 @@ class HomologFinder:
             - Uses adjacency expansion to find candidates with shared partners
             - For comprehensive search without candidate filtering, use find_homologs()
         """
+        # Per-search mapper state: a fresh snapshot (never a stale load
+        # state on a long-lived finder) and a fresh resolution-count basis,
+        # so this search's auto_type_mapping.json owns exactly its own
+        # candidate-expansion resolutions.
+        self._mapper_snapshot = None
+        self._counted_expansion_resolutions = set()
+        self._mapping_status_counts = {}
+
         # Use module-level defaults where not provided
         query = source if source is not None else self.source
         source_dataset = source_dataset if source_dataset is not None else self.source_dataset
@@ -5989,18 +6185,48 @@ class HomologFinder:
                 all_target_bodyids = set(target_bodyid_up.keys()) | set(target_bodyid_down.keys())
                 self._log(f"Target dataset: {len(all_target_bodyids)} total bodyIds")
                 
+                # Mapping-aware partner-type expansion: each source partner
+                # type is resolved to the target-local names the shared
+                # validity resolver licenses — unique renames and
+                # bridge-derived targets, and EVERY branch of a valid split.
+                # A conflict expands to nothing (fail closed: a conflicted
+                # partner type must not match its raw same-name in the
+                # target); an unmapped type keeps its raw name as the
+                # explicitly-counted long-tail fallback.  The adjacency
+                # scoring below reuses the SAME expanded sets, so
+                # partner-type overlap is computed in one namespace instead
+                # of comparing raw source names against raw target names.
+                fast_mapper = self._get_type_mapper_for_comparison(True)
+                fast_expansion_cache: Dict[str, Tuple[str, ...]] = {}
+                expansion_up = self._expand_partner_types_to_target(
+                    all_upstream_types, source_dataset, target_dataset,
+                    fast_mapper, cache=fast_expansion_cache,
+                    status_counts_out=self._mapping_status_counts)
+                expansion_down = self._expand_partner_types_to_target(
+                    all_downstream_types, source_dataset, target_dataset,
+                    fast_mapper, cache=fast_expansion_cache,
+                    status_counts_out=self._mapping_status_counts)
+                expanded_upstream_names: set = {
+                    name for names in expansion_up.values() for name in names}
+                expanded_downstream_names: set = {
+                    name for names in expansion_down.values() for name in names}
+
                 # Set A': Target bodyIds with types matching source's upstream partners
                 self._log("Computing Set A' (type-matched upstream)...")
                 set_a_prime: set = set()
-                for up_type in all_upstream_types:
-                    set_a_prime.update(target_type_to_bodyids.get(up_type, set()))
-                
+                for expanded in expansion_up.values():
+                    for target_name in expanded:
+                        set_a_prime.update(
+                            target_type_to_bodyids.get(target_name, set()))
+
                 # Set B': Target bodyIds with types matching source's downstream partners
                 self._log("Computing Set B' (type-matched downstream)...")
                 set_b_prime: set = set()
-                for down_type in all_downstream_types:
-                    set_b_prime.update(target_type_to_bodyids.get(down_type, set()))
-                
+                for expanded in expansion_down.values():
+                    for target_name in expanded:
+                        set_b_prime.update(
+                            target_type_to_bodyids.get(target_name, set()))
+
                 self._log(f"Type-matched targets: A'={len(set_a_prime)}, B'={len(set_b_prime)}")
                 
                 # Precompute partner type sets per bodyId for fast union
@@ -6051,6 +6277,7 @@ class HomologFinder:
                         target_type_lookup,
                         self._get_type_mapper_for_comparison(is_cross_dataset),
                         target_dataset,
+                        source_dataset=source_dataset,
                     )
                     if same_type_bids:
                         newly_added = len(same_type_bids - all_candidate_bodyids)
@@ -6066,12 +6293,13 @@ class HomologFinder:
 
                 # For cross-dataset, all source neurons compare against same candidate pool
                 # Compute adjacency_score as the count of partner-type overlaps per candidate
-                # (shared upstream/downstream partner types relative to the source partner sets)
+                # (shared upstream/downstream partner types relative to the
+                # source partner sets, expanded into the target namespace)
                 for source_bid in source_bodyids:
                     candidate_scores: Dict[int, int] = {}
                     for bid in all_candidate_bodyids:
-                        shared_downstream = len(downstream_sets_by_bodyid.get(bid, set()) & all_upstream_types)
-                        shared_upstream = len(upstream_sets_by_bodyid.get(bid, set()) & all_downstream_types)
+                        shared_downstream = len(downstream_sets_by_bodyid.get(bid, set()) & expanded_upstream_names)
+                        shared_upstream = len(upstream_sets_by_bodyid.get(bid, set()) & expanded_downstream_names)
                         score = shared_downstream + shared_upstream
                         candidate_scores[bid] = score
                     candidate_map[source_bid] = candidate_scores
@@ -6332,17 +6560,37 @@ class HomologFinder:
             all_target_bodyids = set(target_bodyid_up.keys()) | set(target_bodyid_down.keys())
             self._log(f"Target dataset: {len(all_target_bodyids)} total bodyIds")
 
+            # Mapping-aware partner-type expansion (same policy as the
+            # type-query branch): renames/bridges resolve to their target
+            # names, valid splits expand to every branch, conflicts fail
+            # closed, unmapped types keep their raw name.
+            bid_mapper = self._get_type_mapper_for_comparison(True)
+            expansion_up = self._expand_partner_types_to_target(
+                all_upstream_types, source_dataset, target_dataset, bid_mapper,
+                status_counts_out=self._mapping_status_counts)
+            expansion_down = self._expand_partner_types_to_target(
+                all_downstream_types, source_dataset, target_dataset,
+                bid_mapper, status_counts_out=self._mapping_status_counts)
+            expanded_upstream_names: set = {
+                name for names in expansion_up.values() for name in names}
+            expanded_downstream_names: set = {
+                name for names in expansion_down.values() for name in names}
+
             # Set A': Target bodyIds with types matching source's upstream partners
             self._log("Computing Set A' (type-matched upstream)...")
             set_a_prime: set = set()
-            for up_type in all_upstream_types:
-                set_a_prime.update(target_type_to_bodyids.get(up_type, set()))
+            for expanded in expansion_up.values():
+                for target_name in expanded:
+                    set_a_prime.update(
+                        target_type_to_bodyids.get(target_name, set()))
 
             # Set B': Target bodyIds with types matching source's downstream partners
             self._log("Computing Set B' (type-matched downstream)...")
             set_b_prime: set = set()
-            for down_type in all_downstream_types:
-                set_b_prime.update(target_type_to_bodyids.get(down_type, set()))
+            for expanded in expansion_down.values():
+                for target_name in expanded:
+                    set_b_prime.update(
+                        target_type_to_bodyids.get(target_name, set()))
 
             # Precompute partner type sets per bodyId for fast union
             downstream_sets_by_bodyid = {bid: set(partners.keys()) for bid, partners in target_bodyid_down.items()}
@@ -6382,8 +6630,8 @@ class HomologFinder:
 
             candidate_scores: Dict[int, int] = {}
             for bid in all_candidate_bodyids:
-                shared_downstream = len(downstream_sets_by_bodyid.get(bid, set()) & all_upstream_types)
-                shared_upstream = len(upstream_sets_by_bodyid.get(bid, set()) & all_downstream_types)
+                shared_downstream = len(downstream_sets_by_bodyid.get(bid, set()) & expanded_upstream_names)
+                shared_upstream = len(upstream_sets_by_bodyid.get(bid, set()) & expanded_downstream_names)
                 candidate_scores[bid] = shared_downstream + shared_upstream
             candidate_map[source_bid] = candidate_scores
 
@@ -6396,13 +6644,14 @@ class HomologFinder:
                     target_type_lookup,
                     self._get_type_mapper_for_comparison(is_cross_dataset),
                     target_dataset,
+                    source_dataset=source_dataset,
                 )
                 if self_guaranteed:
                     newly_added = len(self_guaranteed - all_candidate_bodyids)
                     all_candidate_bodyids |= self_guaranteed
                     for bid in self_guaranteed - candidate_scores.keys():
-                        shared_downstream = len(downstream_sets_by_bodyid.get(bid, set()) & all_upstream_types)
-                        shared_upstream = len(upstream_sets_by_bodyid.get(bid, set()) & all_downstream_types)
+                        shared_downstream = len(downstream_sets_by_bodyid.get(bid, set()) & expanded_upstream_names)
+                        shared_upstream = len(upstream_sets_by_bodyid.get(bid, set()) & expanded_downstream_names)
                         candidate_scores[bid] = shared_downstream + shared_upstream
                     self._log(
                         f"Guaranteed inclusion of {len(self_guaranteed)} "
@@ -7012,6 +7261,26 @@ class HomologFinder:
             f.write("    ├── type_level_results.csv  Pooled all-adjacency type-level ranking\n")
             f.write("    └── homolog_results.csv Legacy format sorted by metric\n")
             f.write("  by_type/<query_type>/     Full per-type output (results, visualization)\n")
+        # 5) Auto-type-mapping provenance for the COMBINED folder (the
+        # per-type sub-runs each write their own auto_type_mapping.json
+        # under by_type/<query_type>/; this root-level file records the
+        # run-level mapper state so the combined output is self-describing).
+        try:
+            mapping_meta = auto_mapping_result_metadata(
+                requested=self.use_auto_type_mapping,
+                type_mapper=self._type_mapper,
+            )
+            mapping_meta.update({
+                'queries': list(queries),
+                'source_dataset': source_dataset,
+                'target_dataset': target_dataset,
+                'per_type_metadata': 'by_type/<query_type>/auto_type_mapping.json',
+            })
+            (combined_path / 'auto_type_mapping.json').write_text(
+                json.dumps(mapping_meta, indent=2, default=str))
+        except Exception as exc:
+            self._log(f"Warning: could not write combined mapping metadata: {exc}")
+
         self._log(f"Saved combined multi-query results to {combined_path}")
 
     def find_homologs_intra_dataset(
@@ -7166,7 +7435,33 @@ class HomologFinder:
             dir_path.mkdir(parents=True, exist_ok=True)
         
         files_saved = []
-        
+
+        # Auto-type-mapping provenance (plan Workstream E): requested vs
+        # active mapper, source table, version, load error — so a saved
+        # run states whether it was produced under a healthy v1.0 mapper.
+        try:
+            # Per-run semantics: this saved run owns the resolutions counted
+            # since the last save; `raw_fallback_used` is MEASURED (counted
+            # unmapped candidate-expansion resolutions), not a constant.
+            status_snapshot = dict(getattr(self, '_mapping_status_counts', {}) or {})
+            self._mapping_status_counts = {}
+            mapping_meta = auto_mapping_result_metadata(
+                requested=self.use_auto_type_mapping,
+                type_mapper=self._type_mapper,
+                resolution_counts=status_snapshot,
+                raw_fallback_used=bool(status_snapshot.get('unmapped')),
+            )
+            mapping_meta.update({
+                'query': query,
+                'source_dataset': source_dataset,
+                'target_dataset': target_dataset,
+            })
+            mapping_path = output_path / 'auto_type_mapping.json'
+            mapping_path.write_text(json.dumps(mapping_meta, indent=2, default=str))
+            files_saved.append(str(mapping_path))
+        except Exception:
+            pass
+
         self._log(f"Saving homolog results to {output_path}")
         
         # 1. Save README.txt with parameters, summary, and shuffle test results
@@ -8446,8 +8741,8 @@ class HomologFinder:
                            if int(b) in resolved
                            and resolved[int(b)] is not None]
             elif is_fafb_dataset(source_dataset):
-                from morphology import load_flywire_skeletons_batch
-                resolved = load_flywire_skeletons_batch(
+                from morphology import load_local_release_skeletons
+                resolved = load_local_release_skeletons(
                     source_dataset, query_bodyids,
                     project_root=project_root, log=self._log)
                 fetched = [resolved[int(b)] for b in query_bodyids
@@ -9532,11 +9827,13 @@ class ConnectivityProfileComparer:
                 multi-dataset profiling can compute bodyId-level intra-dataset
                 matrices for each dataset.
             use_auto_type_mapping: Enable automatic type name mapping for cross-dataset
-                comparison (default: True). When enabled, partner types are standardized
-                to their canonical (male-cns) names before comparison. This allows
-                proper matching of types that have different names in different datasets
-                (e.g., 'MTe07' in FAFB → 'MeVPLo2' in male-cns).
-                Has no effect for intra-dataset comparison.
+                comparison (default: True). When enabled, partner types resolve through
+                the shared validity-aware resolver (comparison.type_resolver):
+                licensed renames and valid splits map to canonical (male-cns)
+                names, conflicts fail closed, and unmapped types keep their raw
+                name as the counted long-tail fallback. This allows proper matching
+                of types with different names across datasets (e.g., 'MTe07' in FAFB
+                → 'MeVPLo2' in male-cns). Has no effect for intra-dataset comparison.
             ensure_cache_complete: If True, build/complete the FULL dataset connection
                 cache before profiling (fetches connections for every uncached neuron).
                 This can take hours on first use with a new dataset. Default False:
@@ -9545,7 +9842,23 @@ class ConnectivityProfileComparer:
         self.group_map_csv = group_map_csv
         self.use_auto_type_mapping = use_auto_type_mapping
         self._type_mapper: Optional[CrossDatasetTypeMapper] = None
-        
+        # One mapper snapshot + per-run resolution bookkeeping for the whole
+        # comparison (Workstreams D/E/F): every query mapping and profile
+        # expansion records its status so results can distinguish a real
+        # zero similarity from an unmapped, conflicted, or unavailable run.
+        self._mapper_snapshot = None
+        self.mapping_resolution_record: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self.mapping_resolution_counts: Dict[str, int] = {}
+        self.mapping_raw_fallback_used = False
+        # Unique-resolution dedupe for query mapping: one count per distinct
+        # (dataset, item), so repeated/overlapping resolution paths do not
+        # double-count.
+        self._counted_query_resolutions: set = set()
+        self._expansion_decision_cache: Dict = {}
+        self._expansion_status_counts: Counter = Counter()
+        # Canonical merge-key cache for anchor keys (_canonical_label).
+        self._merge_key_cache: Dict = {}
+
         # Detect cross-dataset mode (dict query format)
         self.is_cross_dataset = isinstance(query, dict)
         
@@ -10130,26 +10443,69 @@ class ConnectivityProfileComparer:
         """Map one query item (type / bodyId / pattern) into a dataset's naming.
 
         bodyIds and patterns pass through unchanged (patterns are expanded per
-        dataset); type names are mapped through the cross-dataset type mapper
-        when it is loaded (auto type mapping).
+        dataset); type names resolve through the shared validity resolver
+        (``comparison.type_resolver``) when the auto mapper is loaded.  Only
+        an unambiguous one-target case renames the item here; valid splits
+        are expanded (and conflicts dropped) by ``_mapped_query_for`` via
+        ``_map_query_item_multi``.
         """
         if isinstance(item, int) or (isinstance(item, str) and item.isdigit()):
             return item
         item_str = str(item)
         if self._looks_like_pattern(item_str):
             return item_str
-        if self._type_mapper is not None:
-            mapped = self._type_mapper.resolve_type_across_datasets(
-                item_str, [dataset], source_dataset=None
-            ).get(dataset)
-            if mapped and str(mapped) != item_str:
-                return str(mapped)
+        targets, _status = self._map_query_item_multi(item_str, dataset)
+        if len(targets) == 1 and targets[0] != item_str:
+            return targets[0]
         return item_str
+
+    def _map_query_item_multi(self, item_str: str, dataset: str
+                              ) -> Tuple[List[str], str]:
+        """Resolve one type item to its licensed target names and status.
+
+        Unique renames/bridges yield one target; valid splits yield EVERY
+        licensed branch; conflicts and an unavailable mapper yield ``[]``
+        (fail closed — no raw same-name comparison); unmapped types keep
+        the raw name as the counted long-tail fallback.  Every resolution
+        is recorded on ``mapping_resolution_record``, and
+        ``mapping_resolution_counts`` counts on a UNIQUE-resolution basis
+        (one per distinct ``(dataset, item)`` — a repeated ``(dataset, item)``
+        is not re-counted), so results can distinguish a real zero
+        similarity from an unmapped or conflicted item without
+        double-counting items resolved by more than one code path.
+        """
+        from .type_resolver import (
+            STATUS_UNMAPPED, get_mapper_snapshot, expansion_targets,
+            resolve_valid_targets,
+        )
+        if self._mapper_snapshot is None:
+            self._mapper_snapshot = get_mapper_snapshot(self._type_mapper)
+        res = resolve_valid_targets(
+            self._type_mapper, item_str, None, dataset,
+            snapshot=self._mapper_snapshot)
+        targets = list(expansion_targets(res))
+        self.mapping_resolution_record.setdefault(dataset, {})[item_str] = {
+            'status': res.status, 'targets': targets,
+            'reason': res.reason,
+        }
+        resolution_key = (str(dataset), str(item_str))
+        if resolution_key not in self._counted_query_resolutions:
+            self._counted_query_resolutions.add(resolution_key)
+            self.mapping_resolution_counts[res.status] = (
+                self.mapping_resolution_counts.get(res.status, 0) + 1)
+        if res.status == STATUS_UNMAPPED and targets:
+            self.mapping_raw_fallback_used = True
+        return targets, res.status
 
     def _mapped_query_for(self, dataset: str) -> List:
         """Query items (or custom-group members) mapped into a dataset's
         naming. Only meaningful in multi-dataset mode with a loaded mapper;
-        otherwise the original query is returned unchanged."""
+        otherwise the original query is returned unchanged.
+
+        Valid splits EXPAND one-to-many into every licensed target;
+        conflicted items are dropped for that dataset (fail closed, kept in
+        ``mapping_resolution_record``); unmapped items keep their raw name.
+        """
         if not self.is_multi_dataset or self._type_mapper is None:
             return self.query
         if self._custom_group_names:
@@ -10158,18 +10514,66 @@ class ConnectivityProfileComparer:
             members = getattr(self, '_mapping_ds_members', {}).get(dataset)
             if members is not None:
                 return [list(m) for m in members]
-            return [[self._map_query_item(m, dataset) for m in members]
-                    for members in self.query]
-        return [self._map_query_item(i, dataset) for i in self.query]
+            expanded_groups: List[list] = []
+            for group in self.query:
+                mapped_members: list = []
+                for m in group:
+                    for mapped in self._map_query_item_multi(str(m), dataset)[0]:
+                        mapped_members.append(mapped)
+                expanded_groups.append(mapped_members)
+            return expanded_groups
+        expanded_query: list = []
+        for item in self.query:
+            item_str = str(item)
+            if (isinstance(item, int) or item_str.isdigit()
+                    or self._looks_like_pattern(item_str)):
+                expanded_query.append(item)
+                continue
+            expanded_query.extend(
+                self._map_query_item_multi(item_str, dataset)[0])
+        return expanded_query
 
     def _canonical_label(self, label: str, dataset: str) -> str:
-        """Canonical (male-cns v1.0) name for a type label via the mapper;
-        unchanged when the mapper is off or does not know the label."""
+        """Canonical merge key for a type label (shared resolver).
+
+        Licensed renames key under the canonical target; a CONFLICTED type
+        keys dataset-scoped (``dataset:raw``) so it cannot merge with
+        another dataset's same-named anchor; unmapped/unavailable keep the
+        raw name.  Falls back to the raw name when the mapper is off.
+        """
         if self._type_mapper is not None:
-            canon = self._type_mapper.get_canonical_type(label, dataset)
-            if canon and canon != label:
-                return canon
+            try:
+                from .type_resolver import canonical_merge_key, get_mapper_snapshot
+                if self._mapper_snapshot is None:
+                    self._mapper_snapshot = get_mapper_snapshot(self._type_mapper)
+                return canonical_merge_key(
+                    self._type_mapper, label, dataset,
+                    snapshot=self._mapper_snapshot,
+                    cache=self._merge_key_cache).key
+            except Exception:
+                return label
         return label
+
+    def _licensed_anchor_label(self, item_str: str, dataset: str) -> Optional[str]:
+        """The single licensed label for a queried item in one dataset.
+
+        Returns one label for a unique rename/bridge, an unmapped raw-name
+        pass-through, or a same-namespace native name.  Returns ``None`` so
+        the item CANNOT form an anchor when the resolver reports a CONFLICT
+        (fail closed — never a raw same-name across datasets), an
+        unavailable mapper, or a multi-target split (no arbitrary branch is
+        chosen for an anchor).
+
+        With auto type mapping DISABLED (no mapper), the raw name passes
+        through unchanged — names are compared as-is, matching the
+        documented ``use_auto_type_mapping=False`` behavior.
+        """
+        if self._type_mapper is None:
+            return item_str
+        targets, _status = self._map_query_item_multi(item_str, dataset)
+        if len(targets) == 1:
+            return targets[0]
+        return None
 
     def _get_neurons_to_compare(
         self,
@@ -10496,18 +10900,24 @@ class ConnectivityProfileComparer:
         self, profiles_by_dataset: Dict[str, Dict[str, ConnectivityProfile]]
     ) -> Dict[str, Dict[str, Tuple[str, ConnectivityProfile]]]:
         """Map queried neurons/groups to their per-dataset profiles.
-    
+
         Anchors are the QUERIED items (the "same neuron" concept across
         datasets):
         - custom groups: each group name is an anchor (members were mapped
           per dataset during extraction)
-        - type names: anchor key is the canonical (male-cns v1.0) name; the
-          per-dataset profile is the profile of the mapped name in that
-          dataset
+        - type names: anchor key is the canonical merge key (shared
+          resolver); the per-dataset profile is the profile of the mapped
+          name in that dataset
         - bodyIds: anchor is the bodyId; per-dataset profiles are the mapped
           type's profiles (the bodyId's type in the source dataset)
         - patterns: anchors are the matched types of the FIRST dataset
-    
+
+        Per-dataset labels come from ``_licensed_anchor_label``: a
+        CONFLICTED type contributes no label in the dataset it conflicts
+        toward (fail closed — it can never form an anchor by raw same-name),
+        and a multi-target split contributes no label (no arbitrary branch),
+        so an anchor only spans datasets with a genuine licensed match.
+
         Returns:
             Dict[anchor -> {dataset: (label_in_dataset, profile)}]; only
             anchors present in >= 2 datasets are kept.
@@ -10534,7 +10944,8 @@ class ConnectivityProfileComparer:
                     ntype = (self.profiler.get_types_for_bodyids([bid], ds) or {}).get(bid)
                     if not ntype:
                         continue
-                    candidate_labels = [self._map_query_item(ntype, ds)]
+                    licensed = self._licensed_anchor_label(ntype, ds)
+                    candidate_labels = [licensed] if licensed is not None else []
                     if self.aggregation_level == 'bodyid':
                         candidate_labels.insert(0, f"{bid}_{ntype}")
                     for label in candidate_labels:
@@ -10549,8 +10960,8 @@ class ConnectivityProfileComparer:
                 for tname in matched:
                     per_ds = {}
                     for ds, profiles in profiles_by_dataset.items():
-                        label = self._map_query_item(tname, ds)
-                        if label in profiles:
+                        label = self._licensed_anchor_label(tname, ds)
+                        if label is not None and label in profiles:
                             per_ds[ds] = (label, profiles[label])
                     if len(per_ds) >= 2:
                         key = self._canonical_label(tname, self.datasets[0])
@@ -10559,8 +10970,8 @@ class ConnectivityProfileComparer:
                 # exact type name
                 per_ds = {}
                 for ds, profiles in profiles_by_dataset.items():
-                    label = self._map_query_item(item_str, ds)
-                    if label in profiles:
+                    label = self._licensed_anchor_label(item_str, ds)
+                    if label is not None and label in profiles:
                         per_ds[ds] = (label, profiles[label])
                 if len(per_ds) >= 2:
                     key = self._canonical_label(item_str, self.datasets[0])
@@ -10574,7 +10985,9 @@ class ConnectivityProfileComparer:
         """
         Compute per-anchor datasets × datasets similarity matrices using the
         homolog-finding backend algorithm (2-hop expanded partner types,
-        standardized to canonical names, combined = 0.5·jaccard + 0.5·rank).
+        resolved to canonical names through the shared validity-aware
+        resolver — conflicts excluded, splits expanded — combined =
+        0.5·jaccard + 0.5·rank).
     
         Returns:
             Dict[anchor -> {direction: {metric: DataFrame}}]
@@ -10598,11 +11011,18 @@ class ConnectivityProfileComparer:
                             continue  # intra-dataset pair, not part of inter comparison
                         p2 = per_ds[d2][1]
                         if mapper is not None:
-                            types_a = ProfileComparator._get_expanded_types_standardized(
-                                p1, direction, mapper
+                            # Validity-aware canonicalization (shared
+                            # resolver): conflicts excluded, splits expanded,
+                            # statuses counted per run.
+                            types_a = ProfileComparator._get_expanded_types_resolved(
+                                p1, direction, mapper,
+                                decision_cache=self._expansion_decision_cache,
+                                status_counts_out=self._expansion_status_counts,
                             )
-                            types_b = ProfileComparator._get_expanded_types_standardized(
-                                p2, direction, mapper
+                            types_b = ProfileComparator._get_expanded_types_resolved(
+                                p2, direction, mapper,
+                                decision_cache=self._expansion_decision_cache,
+                                status_counts_out=self._expansion_status_counts,
                             )
                             scores = self._compute_similarity_from_types(types_a, types_b)
                         else:
@@ -10853,7 +11273,7 @@ class ConnectivityProfileComparer:
             type_mapper = get_type_mapper()
             if type_mapper._loaded:
                 self._log(f"Using auto type mapping for cross-dataset comparison")
-                self._log(f"  Partner types will be standardized to canonical (male-cns) names")
+                self._log(f"  Partner types resolve via the shared validity-aware resolver (conflicts fail closed, splits expand, unmapped fall back to raw)")
             else:
                 self._log(f"Warning: Auto type mapping requested but mapper not loaded")
                 type_mapper = None
@@ -10881,12 +11301,17 @@ class ConnectivityProfileComparer:
                         
                         # Use cross-dataset comparison with type standardization
                         if type_mapper is not None:
-                            # Get standardized expanded types
-                            types_a = ProfileComparator._get_expanded_types_standardized(
-                                profile_a, direction, type_mapper
+                            # Validity-aware canonicalization (shared
+                            # resolver): conflicts excluded, splits expanded.
+                            types_a = ProfileComparator._get_expanded_types_resolved(
+                                profile_a, direction, type_mapper,
+                                decision_cache=self._expansion_decision_cache,
+                                status_counts_out=self._expansion_status_counts,
                             )
-                            types_b = ProfileComparator._get_expanded_types_standardized(
-                                profile_b, direction, type_mapper
+                            types_b = ProfileComparator._get_expanded_types_resolved(
+                                profile_b, direction, type_mapper,
+                                decision_cache=self._expansion_decision_cache,
+                                status_counts_out=self._expansion_status_counts,
                             )
                             
                             # Compute metrics manually with standardized types
@@ -11470,7 +11895,11 @@ class ConnectivityProfileComparer:
             'type_labels': sorted(type_profiles.keys()),
             'timestamp': datetime.now().isoformat(),
         }
-        
+        params.update(auto_mapping_result_metadata(
+            requested=self.use_auto_type_mapping,
+            type_mapper=self._type_mapper,
+        ))
+
         with open(output_path / 'parameters.json', 'w') as f:
             json.dump(params, f, indent=2, default=str)
         
@@ -12437,6 +12866,18 @@ a:hover { text-decoration: underline; }
             - bodyid_level_skipped: Boolean indicating if bodyId computation was skipped
             - is_cross_dataset: Boolean indicating if this was cross-dataset comparison
         """
+        # Per-run mapping bookkeeping reset (all branches): a reused
+        # comparer must not accumulate resolutions or reuse stale caches
+        # across run() calls.
+        self.mapping_resolution_record = {}
+        self.mapping_resolution_counts = {}
+        self.mapping_raw_fallback_used = False
+        self._counted_query_resolutions = set()
+        self._expansion_decision_cache = {}
+        self._expansion_status_counts = Counter()
+        self._merge_key_cache = {}
+        self._mapper_snapshot = None
+
         # Branch for cross-dataset comparison
         if self.is_cross_dataset:
             return self._run_cross_dataset()
@@ -12711,6 +13152,14 @@ a:hover { text-decoration: underline; }
             'inter_anchors': list(anchor_profiles.keys()),
             'timestamp': datetime.now().isoformat(),
         }
+        params.update(auto_mapping_result_metadata(
+            requested=self.use_auto_type_mapping,
+            type_mapper=self._type_mapper,
+            snapshot=self._mapper_snapshot,
+            resolution_counts=self.mapping_resolution_counts,
+            partner_resolution_counts=dict(self._expansion_status_counts),
+            raw_fallback_used=self.mapping_raw_fallback_used,
+        ))
         with open(output_path / 'parameters.json', 'w') as f:
             json.dump(params, f, indent=2, default=str)
         
@@ -13022,17 +13471,35 @@ a:hover { text-decoration: underline; }
         
         # Auto type mapping: resolve each query name per dataset
         self._type_mapper = None
+        self._mapper_snapshot = None
+        # Fresh per-run mapping bookkeeping: a second run() on one comparer
+        # must own exactly its own resolutions (no accumulation into the
+        # saved metadata and no stale decision caches).
+        self.mapping_resolution_record = {}
+        self.mapping_resolution_counts = {}
+        self.mapping_raw_fallback_used = False
+        self._counted_query_resolutions = set()
+        self._expansion_decision_cache = {}
+        self._expansion_status_counts = Counter()
+        self._merge_key_cache = {}
         if self.use_auto_type_mapping:
             try:
-                self._type_mapper = get_type_mapper()
-                if self._type_mapper is None or not self._type_mapper._loaded:
-                    self._type_mapper = None
+                candidate_mapper = get_type_mapper()
+                if candidate_mapper is not None and candidate_mapper._loaded:
+                    self._type_mapper = candidate_mapper
+                elif candidate_mapper is not None:
+                    self._log(
+                        "Warning: type mapper failed to load: "
+                        f"{getattr(candidate_mapper, 'last_load_error', None)!r} "
+                        "(analysis will run on raw names)")
             except Exception as e:
                 self._log(f"Warning: could not load the type mapper: {e}")
-                self._type_mapper = None
         if self._type_mapper is not None:
+            from .type_resolver import get_mapper_snapshot
+            self._mapper_snapshot = get_mapper_snapshot(self._type_mapper)
             self._log("Auto type mapping: ENABLED (names mapped per dataset via the "
-                      "male-cns v1.0 neuron info)")
+                      f"male-cns v1.0 neuron info; source="
+                      f"{self._mapper_snapshot.metadata()['source']})")
         else:
             self._log("Auto type mapping: DISABLED — names are used as-is per dataset")
         
@@ -13174,7 +13641,7 @@ a:hover { text-decoration: underline; }
         self._log(f"Dataset A (rows): {ds_list[0]} with {len(self._cross_dataset_query[ds_list[0]])} types")
         self._log(f"Dataset B (cols): {ds_list[1]} with {len(self._cross_dataset_query[ds_list[1]])} types")
         if self.use_auto_type_mapping:
-            self._log("Auto type mapping: ENABLED (partner types standardized to canonical names)")
+            self._log("Auto type mapping: ENABLED (partner types resolved via the shared validity-aware resolver)")
         else:
             self._log("Auto type mapping: DISABLED")
         self._log("BodyId-level comparison: SKIPPED (not applicable for cross-dataset)")
@@ -13344,6 +13811,17 @@ a:hover { text-decoration: underline; }
             'matrices_saved': [os.path.basename(p) for p in matrices_saved],
             'heatmaps_generated': [os.path.basename(p) for p in heatmaps_generated],
         }
+        # Standard auto-type-mapping metadata block (provenance; this
+        # cross-dataset dict-query path standardizes through the shared
+        # resolver per matrix cell and does not track per-status counts).
+        try:
+            metadata.update(auto_mapping_result_metadata(
+                requested=self.use_auto_type_mapping,
+                type_mapper=(get_type_mapper()
+                             if self.use_auto_type_mapping else None),
+            ))
+        except Exception as exc:
+            self._log(f"Warning: could not build mapping metadata: {exc}")
         
         metadata_path = os.path.join(base_dir, "metadata.json")
         with open(metadata_path, 'w') as f:

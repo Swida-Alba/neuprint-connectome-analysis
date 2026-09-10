@@ -50,7 +50,7 @@ import os
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from .cross_dataset_type_mapper import CrossDatasetTypeMapper, get_type_mapper
 
@@ -245,26 +245,6 @@ class TypeResolution:
     def expansion_key(self) -> Optional[str]:
         """Alias of :attr:`equivalence_key` for expansion contexts."""
         return self.equivalence_key
-
-    def to_dict(self) -> Dict[str, Any]:
-        d = {
-            'status': self.status,
-            'kind': self.kind,
-            'source_type': self.source_type,
-            'source_dataset': self.source_dataset,
-            'target_dataset': self.target_dataset,
-            'target_types': list(self.target_types),
-            'equivalence_key': self.equivalence_key,
-            'direction': self.direction,
-            'evidence': [list(chain) for chain in self.evidence],
-            'conflicts': list(self.conflicts),
-            'mapper_source': self.mapper_source,
-            'mapper_version': self.mapper_version,
-            'mapper_loaded': self.mapper_loaded,
-            'fallback_used': self.fallback_used,
-            'reason': self.reason,
-        }
-        return d
 
 
 def equivalence_key(resolution: TypeResolution) -> Optional[str]:
@@ -629,6 +609,7 @@ def canonical_merge_key(
     *,
     snapshot: Optional[MapperSnapshot] = None,
     cache: Optional[Dict] = None,
+    on_status: Optional[Callable[[str], None]] = None,
 ) -> MergeKey:
     """Canonical key for merging one type across datasets, with status.
 
@@ -643,6 +624,14 @@ def canonical_merge_key(
       a name the panel refuses to map (the BANC CB1011 ↔ MCNS CB1011 class);
     * valid splits / evidence-only / unmapped / unavailable mapper → the
       raw name, with the status recorded so callers can count fallbacks.
+
+    ``on_status`` (optional) is invoked with the resolved status exactly
+    ONCE per unique resolution — i.e. only when the answer is computed, not
+    on a ``cache`` hit — so callers can count resolutions on a
+    unique-``(source_dataset, type_name, target)`` basis without
+    over-counting repeated lookups of the same type (path rows, edges,
+    shared query items).  Pass a ``cache`` for the dedupe to hold across
+    calls; without one every call is a fresh resolution.
     """
     raw = str(type_name or '').strip()
     target_ds = str(target_dataset) if target_dataset else CANONICAL_NAMESPACE
@@ -654,6 +643,8 @@ def canonical_merge_key(
         result = MergeKey(key=key, status=status)
         if cache is not None:
             cache[cache_key] = result
+        if on_status is not None:
+            on_status(status)
         return result
 
     snap = snapshot if snapshot is not None else MapperSnapshot(mapper)
@@ -716,20 +707,6 @@ class ProfileExpansion:
     split_policy: str
     mapper_source: Optional[str] = None
     mapper_version: Optional[str] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            'canonical': dict(self.canonical),
-            'key_status': dict(self.key_status),
-            'excluded': dict(self.excluded),
-            'status_counts': dict(self.status_counts),
-            'source_dataset': self.source_dataset,
-            'target_dataset': self.target_dataset,
-            'fallback_used': self.fallback_used,
-            'split_policy': self.split_policy,
-            'mapper_source': self.mapper_source,
-            'mapper_version': self.mapper_version,
-        }
 
 
 def expand_profile_types(
@@ -882,8 +859,19 @@ def auto_mapping_metadata(
     snapshot: MapperSnapshot,
     resolution_counts: Optional[Dict[str, int]] = None,
     raw_fallback_used: bool = False,
+    partner_resolution_counts: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
-    """The standard auto-type-mapping metadata block for saved results."""
+    """The standard auto-type-mapping metadata block for saved results.
+
+    ``resolution_counts`` is the primary metric, on a
+    ``mapping_resolution_counts_basis`` of ``'unique_type_resolutions'`` —
+    one count per distinct ``(source_dataset, type[, target])`` resolver
+    input, deduped so repeated lookups of one type are not over-counted.
+    ``partner_resolution_counts`` (when supplied) is a SECOND, distinctly
+    labeled metric on an occurrence basis — one count per contributor-type
+    occurrence inside a canonicalized profile — and is never conflated with
+    the primary counts.
+    """
     meta = snapshot.metadata()
     meta.update({
         'auto_type_mapping_requested': snapshot.requested,
@@ -896,6 +884,9 @@ def auto_mapping_metadata(
         'auto_type_mapping_load_error': meta.get('load_error'),
         'mapping_policy_version': MAPPING_POLICY_VERSION,
         'mapping_resolution_counts_by_status': dict(resolution_counts or {}),
+        'mapping_resolution_counts_basis': 'unique_type_resolutions',
+        'mapping_partner_type_resolutions_by_status': dict(
+            partner_resolution_counts or {}),
         'raw_fallback_used': bool(raw_fallback_used),
     })
     return meta

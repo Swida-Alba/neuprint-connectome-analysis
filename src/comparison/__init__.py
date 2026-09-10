@@ -75,10 +75,6 @@ from .profile_comparator import (
     HomologFinder,
     ConnectivityProfileComparer,
 )
-from .cross_dataset_verifier import (
-    CrossDatasetVerifier,
-    VerificationResult,
-)
 from .profile_visualizations import ProfileVisualizer
 from .cross_dataset_type_mapper import (
     CrossDatasetTypeMapper,
@@ -126,7 +122,5 @@ __all__ = [
     'DEFAULT_SCORE_WEIGHTS',
     'HomologFinder',
     'ConnectivityProfileComparer',
-    'CrossDatasetVerifier',
-    'VerificationResult',
     'ProfileVisualizer',
 ]

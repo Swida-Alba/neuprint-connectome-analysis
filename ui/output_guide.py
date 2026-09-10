@@ -977,6 +977,12 @@ _HOMOLOG_FILES = [
          "source_type", "target_type", "target_type_members", "is_same_type",
          "target_dataset", "jaccard", "weighted_jaccard", "cosine",
          "rank_union", "rank"]},
+    {"pattern": "auto_type_mapping.json",
+     "description": "Auto-type-mapping provenance for this search: which "
+                    "mapper was requested vs active, source table and version, "
+                    "any load error, per-status candidate-expansion resolution "
+                    "counts (basis unique_type_resolutions), and whether "
+                    "raw-name fallback occurred."},
     {"pattern": "results/source_status_summary.json",
      "description": "Per-source-neuron status (resolved bodyIds, candidate "
                     "counts)."},
@@ -1257,6 +1263,13 @@ TOOL_GUIDE_SPECS = {
                             "(N-to-1 / 1-to-N, never guessed). The origin "
                             "column distinguishes crosswalk conflicts from "
                             "annotation-bridge ones."},
+            {"pattern": "auto_type_mapping.json",
+             "description": "Auto-type-mapping provenance for this run: "
+                            "which mapper was requested vs active, its source "
+                            "table and version, any load error, per-status "
+                            "resolution counts (basis unique_type_resolutions) "
+                            "plus the partner-occurrence metric, and whether "
+                            "raw-name fallback occurred."},
             {"pattern": "comparison_report_used_data/*.csv",
              "description": "Aggregated metrics backing the report. Standard "
                             "files use threshold keys; Custom combination files "

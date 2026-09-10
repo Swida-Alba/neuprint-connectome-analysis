@@ -579,8 +579,8 @@ def test_profile_row_roundtrip(profiler):
 
 def test_ensure_data_available_local_missing(profiler):
     with pytest.raises(DataNotAvailableError):
-        profiler.ensure_data_available('flywire_missing_dataset_v9', raise_on_missing=True)
-    assert profiler.ensure_data_available('flywire_missing_dataset_v9',
+        profiler.ensure_data_available('flywire_FAFB_missing_v9', raise_on_missing=True)
+    assert profiler.ensure_data_available('flywire_FAFB_missing_v9',
                                           raise_on_missing=False) is False
 
 
@@ -605,8 +605,8 @@ def test_ensure_data_available_neuprint_paths(profiler, monkeypatch):
 
 
 def test_get_data_status(profiler, monkeypatch):
-    status = profiler.get_data_status(['flywire_missing_dataset_v9'])
-    entry = status['flywire_missing_dataset_v9']
+    status = profiler.get_data_status(['flywire_FAFB_missing_v9'])
+    entry = status['flywire_FAFB_missing_v9']
     assert entry['available'] is False
     assert entry['type'] == 'local'
     assert entry['error']
@@ -1131,12 +1131,12 @@ def test_build_profile_from_cache_direct_type_query(profiler, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_get_bodyids_for_type_local(profiler, fake_repo):
-    ds = 'flywire_fake_v1'
+    ds = 'flywire_FAFB_fake_v1'
     _write_neurons_csv(fake_repo, ds,
                        {'bodyId': [1, 2, 3], 'type': ['Mi1', 'Mi1', 'T4']})
     assert profiler.get_bodyids_for_type('Mi1', ds) == [1, 2]
     assert profiler.get_bodyids_for_type('Nope', ds) == []
-    assert profiler.get_bodyids_for_type('Mi1', 'flywire_absent_v9') == []
+    assert profiler.get_bodyids_for_type('Mi1', 'flywire_FAFB_absent_v9') == []
 
 
 def test_get_bodyids_for_type_neuprint(profiler, monkeypatch):
@@ -1153,7 +1153,7 @@ def test_get_bodyids_for_type_prioritized_columns(profiler, fake_repo):
     """Same prioritized column search as the connection tabs: the ``type``
     column wins, but names living only in ``cell_type`` (FAFB's
     circadian_clock) still resolve."""
-    ds = 'flywire_fake_v1'
+    ds = 'flywire_FAFB_fake_v1'
     _write_neurons_csv(fake_repo, ds, {
         'bodyId': [1, 2, 3, 4],
         'type': ['Mi1', 'Mi1', '', ''],
@@ -1196,7 +1196,7 @@ def test_progress_bars_disabled(monkeypatch):
 
 
 def test_list_types_and_load_all(profiler, fake_repo, monkeypatch):
-    ds = 'flywire_fake_v1'
+    ds = 'flywire_FAFB_fake_v1'
     _write_neurons_csv(fake_repo, ds,
                        {'bodyId': [1, 2, 3], 'type': ['Mi1', 'T4', None]})
     assert profiler.list_types(dataset=ds) == ['Mi1', 'T4']
@@ -1204,7 +1204,7 @@ def test_list_types_and_load_all(profiler, fake_repo, monkeypatch):
     # invalid regex treated as literal -> no match
     assert profiler.list_types('(', dataset=ds) == []
     # missing dataset folder -> []
-    assert profiler.list_types(dataset='flywire_absent_v9') == []
+    assert profiler.list_types(dataset='flywire_FAFB_absent_v9') == []
 
     # neuprint path
     class C:
@@ -1221,12 +1221,12 @@ def test_list_types_and_load_all(profiler, fake_repo, monkeypatch):
 
 
 def test_get_type_for_bodyid(profiler, fake_repo, monkeypatch):
-    ds = 'flywire_fake_v1'
+    ds = 'flywire_FAFB_fake_v1'
     _write_neurons_csv(fake_repo, ds,
                        {'bodyId': [1, 2], 'type': ['Mi1', 'T4']})
     assert profiler.get_type_for_bodyid(2, ds) == 'T4'
     assert profiler.get_type_for_bodyid(99, ds) is None
-    assert profiler.get_type_for_bodyid(1, 'flywire_absent_v9') is None
+    assert profiler.get_type_for_bodyid(1, 'flywire_FAFB_absent_v9') is None
 
     class C:
         def fetch_custom(self, q):
@@ -1246,12 +1246,12 @@ def test_get_type_for_bodyid(profiler, fake_repo, monkeypatch):
 
 def test_get_types_for_bodyids(profiler, fake_repo, monkeypatch):
     assert profiler.get_types_for_bodyids([], DS) == {}
-    ds = 'flywire_fake_v1'
+    ds = 'flywire_FAFB_fake_v1'
     _write_neurons_csv(fake_repo, ds,
                        {'bodyId': [1, 2], 'type': ['Mi1', 'T4']})
     res = profiler.get_types_for_bodyids([1, 2, 3], ds)
     assert res == {1: 'Mi1', 2: 'T4', 3: None}
-    assert profiler.get_types_for_bodyids([1], 'flywire_absent_v9') == {1: None}
+    assert profiler.get_types_for_bodyids([1], 'flywire_FAFB_absent_v9') == {1: None}
 
     class C:
         def fetch_custom(self, q):
@@ -1271,7 +1271,7 @@ def test_get_types_for_bodyids(profiler, fake_repo, monkeypatch):
 
 
 def test_get_types_for_label(profiler, fake_repo):
-    ds = 'flywire_fake_v1'
+    ds = 'flywire_FAFB_fake_v1'
     _write_neurons_csv(fake_repo, ds, {
         'bodyId': [1, 2, 3],
         'type': ['Mi1', 'Mi1', 'T4'],
@@ -1283,7 +1283,7 @@ def test_get_types_for_label(profiler, fake_repo):
     # non-local dataset -> {}
     assert profiler.get_types_for_label('Vis', 'hemibrain:v1.2.1') == {}
     # missing local table -> {}
-    assert profiler.get_types_for_label('Vis', 'flywire_absent_v9') == {}
+    assert profiler.get_types_for_label('Vis', 'flywire_FAFB_absent_v9') == {}
 
 
 def test_get_type_profile_from_bodyids(profiler, monkeypatch):
@@ -1362,13 +1362,13 @@ def test_clear_cache_all(profiler, tmp_path):
 
 
 def test_get_available_types(profiler, fake_repo, monkeypatch):
-    ds = 'flywire_fake_v1'
+    ds = 'flywire_FAFB_fake_v1'
     ds_dir = fake_repo / 'datasets' / ds
     ds_dir.mkdir(parents=True, exist_ok=True)
     pd.DataFrame({'bodyId': [1, 2], 'type': ['Mi1', 'T4']}).to_csv(
         ds_dir / f'{ds}_neuron_df.csv', index=False)
     assert profiler.get_available_types(ds) == ['Mi1', 'T4']
-    assert profiler.get_available_types('flywire_absent_v9') is None
+    assert profiler.get_available_types('flywire_FAFB_absent_v9') is None
     monkeypatch.setattr(profiler, '_get_client_for_dataset', lambda d: None)
     assert profiler.get_available_types('hemibrain:v1.2.1') is None
 

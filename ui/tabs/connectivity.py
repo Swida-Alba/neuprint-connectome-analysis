@@ -151,8 +151,9 @@ def create_connectivity_tab():
                     )
                     use_auto_type_mapping = checkbox_input(
                         "Auto Type Mapping", get_user_default("auto_type_mapping"),
-                        hint="Standardize partner type names to canonical (male-cns) names "
-                             "before cross-dataset comparison.",
+                        hint="Resolve partner type names across datasets via the shared "
+                             "resolver (licensed renames map, conflicts fail closed, "
+                             "unmapped fall back to raw).",
                     )
                 with ui.row().classes("w-full items-center gap-4"):
                     visualize = checkbox_input(

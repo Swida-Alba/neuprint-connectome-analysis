@@ -478,18 +478,21 @@ def test_auto_mapping_workspace_missing(monkeypatch):
 
 
 def test_auto_mapping_with_fake_mapper(monkeypatch):
+    """The CD-tab backend uses the SHARED mapper singleton
+    (``get_type_mapper``), so the test injects at the singleton accessor:
+    a loaded mapper becomes ``_auto_type_mapper``, an unloadable one is
+    reported as None (the previous new-instance contract)."""
     import comparison.cross_dataset_type_mapper as cdtm
 
-    class _FakeCTM:
-        load_result = True
+    class _FakeSingletonMapper:
+        loaded_result = True
 
-        def __init__(self, workspace_path=None, verbose=False):
-            self.workspace_path = workspace_path
+        def __init__(self):
+            self._loaded = _FakeSingletonMapper.loaded_result
 
-        def load(self):
-            return _FakeCTM.load_result
-
-    monkeypatch.setattr(cdtm, 'CrossDatasetTypeMapper', _FakeCTM)
+    fake = _FakeSingletonMapper()
+    monkeypatch.setattr(cdtm, 'get_type_mapper',
+                        lambda workspace_path=None, force_reload=False: fake)
 
     real_exists = os.path.exists
 
@@ -500,16 +503,25 @@ def test_auto_mapping_with_fake_mapper(monkeypatch):
 
     monkeypatch.setattr(os.path, 'exists', fake_exists)
 
-    _FakeCTM.load_result = True
+    _FakeSingletonMapper.loaded_result = True
+    fake._loaded = True
     p = _basic(auto_type_mapping=True)
-    assert isinstance(p._auto_type_mapper, _FakeCTM)
+    assert p._auto_type_mapper is fake
 
-    _FakeCTM.load_result = False
+    _FakeSingletonMapper.loaded_result = False
+    fake._loaded = False
     p2 = _basic(auto_type_mapping=True)
     assert p2._auto_type_mapper is None
 
 
 class _FakeTypeMapper:
+    """Fake mapper on the shared resolver contract: the parameters layer
+    resolves through ``comparison.type_resolver`` (which consumes
+    ``get_mapping_decision`` status dicts), not the legacy
+    ``get_mapped_type`` one-target API."""
+
+    _loaded = True
+
     def __init__(self):
         self.exported_paths = []
         self.mapping_calls = []
@@ -517,9 +529,29 @@ class _FakeTypeMapper:
     def _detect_type_source(self, t):
         return DS1 if t in ('Src', 'NoMap') else None
 
-    def get_mapped_type(self, t, src_ds, dst_ds):
+    def detect_type_source(self, t):
+        return self._detect_type_source(t)
+
+    def _get_type_mapping_key(self, ds):
+        return ds
+
+    def get_mapping_decision(self, t, src_ds, dst_ds, include_bridges=False):
         self.mapping_calls.append((t, src_ds, dst_ds))
-        return 'SrcMapped' if t == 'Src' else None
+        if t == 'Src':
+            return {'status': 'mapped', 'source_type': t,
+                    'target_type': 'SrcMapped', 'target_types': ['SrcMapped'],
+                    'relationship': '1-to-1', 'conflicts': []}
+        return {'status': 'unmapped', 'source_type': t,
+                'target_type': None, 'target_types': [],
+                'relationship': None, 'conflicts': []}
+
+    def get_alias_candidates(self, type_name, datasets, source_dataset=None):
+        return {ds: {'outcome': 'no counterpart known', 'candidates': []}
+                for ds in datasets}
+
+    def get_type_bridges(self, type_name, source_ds, target_ds,
+                         max_bridges=8):
+        return []
 
     def export_mapping(self, path, **kwargs):
         self.exported_paths.append(path)
@@ -548,9 +580,14 @@ def test_explicit_source_release_wins_over_auto_detection():
     mapper = _FakeTypeMapper()
     p._auto_type_mapper = mapper
 
-    assert p._resolve_neurons_with_auto_mapping(['Src'], DS2) == ['SrcMapped']
+    # The EXPLICIT source release — not the mapper's auto-detection (which
+    # answers DS1 for 'Src') — is what the shared resolver receives.  The
+    # target is DS1 here because the resolver's same-namespace rule (like
+    # production get_mapped_type) resolves v0.9->v0.9 natively without
+    # consulting the mapping tables.
+    assert p._resolve_neurons_with_auto_mapping(['Src'], DS1) == ['SrcMapped']
     assert mapper.mapping_calls == [
-        ('Src', 'male-cns:v0.9', DS2),
+        ('Src', 'male-cns:v0.9', DS1),
     ]
 
 

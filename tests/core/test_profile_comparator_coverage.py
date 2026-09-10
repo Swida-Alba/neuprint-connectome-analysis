@@ -606,32 +606,6 @@ def test_compute_inter_type_rank_correlation_matrix():
         assert not o['cross_dataset'].empty
 
 
-def test_find_similar_types_across_datasets():
-    profiles_by_dataset = {
-        DS_A: {'T1': _rich_profile('T1'), 'Other': _profile('O', upstream={'Z': 1.0})},
-        DS_B: {'T1': _rich_profile('T1'), 'Alt': _profile('Alt', upstream={'Q': 1.0})},
-    }
-    df = ProfileComparator.find_similar_types_across_datasets(
-        profiles_by_dataset, 'T1', metric='rank', top_n=1)
-    assert not df.empty
-    # best match in DS_B is the identical T1
-    ds_b_rows = df[df['target_dataset'] == DS_B]
-    assert ds_b_rows.iloc[0]['target_type'] == 'T1'
-    assert ds_b_rows.iloc[0]['similarity'] == pytest.approx(1.0)
-    # top_n=1 per dataset
-    assert len(ds_b_rows) == 1
-
-    # unknown type -> empty result frame
-    df_none = ProfileComparator.find_similar_types_across_datasets(
-        profiles_by_dataset, 'NoSuch')
-    assert df_none.empty
-
-    # top_n=None keeps all rows
-    df_all = ProfileComparator.find_similar_types_across_datasets(
-        profiles_by_dataset, 'T1', top_n=None)
-    assert len(df_all) == 3  # everything except self-comparison
-
-
 # ---------------------------------------------------------------------------
 # HomologFinder (hermetic: profiler replaced by a stub)
 # ---------------------------------------------------------------------------
@@ -842,7 +816,9 @@ def test_homolog_finder_skips_neuprint_client_for_flywire(tmp_path, capsys):
     out = capsys.readouterr().out
     assert finder.clients == {}
     assert finder.client is None
-    assert 'is a FlyWire dataset' in out
+    # Local releases skip the client with an explicit reason (message from
+    # commit 8dbcd8d9; the historical 'is a FlyWire dataset' text is gone).
+    assert 'no NeuPrint client needed' in out
     # No misleading neuprint error for FlyWire identifiers
     assert 'does not exist' not in out
     assert 'Could not initialize client' not in out
@@ -1819,15 +1795,136 @@ def test_compare_candidates_core_prefilter_rank_metric(finder):
                       prefilter_rank_metric='cosnie')
 
 
+def test_expand_partner_types_snapshot_reuse_and_dedupe(finder):
+    """P2/P1.4: one snapshot per run reused across expansion calls, and
+    unique-resolution counting deduped across calls."""
+    import comparison.type_resolver as tr_mod
+
+    class _Mapper:
+        _loaded = True
+
+        def _get_type_mapping_key(self, ds):
+            return ds
+
+        def get_mapping_decision(self, t, src, dst, include_bridges=False):
+            return {'status': 'mapped', 'source_type': t,
+                    'target_type': f'{t}_mapped',
+                    'target_types': [f'{t}_mapped'],
+                    'relationship': '1-to-1', 'conflicts': []}
+
+        def get_alias_candidates(self, type_name, datasets,
+                                 source_dataset=None):
+            return {ds: {'outcome': 'no counterpart known',
+                         'candidates': []} for ds in datasets}
+
+        def get_type_bridges(self, *a, **k):
+            return []
+
+    calls = {'n': 0}
+    real = tr_mod.get_mapper_snapshot
+
+    def _counting_snapshot(type_mapper, **kwargs):
+        calls['n'] += 1
+        return real(type_mapper, **kwargs)
+
+    tr_mod.get_mapper_snapshot = _counting_snapshot
+    try:
+        finder._mapper_snapshot = None
+        finder._counted_expansion_resolutions = set()
+        counts: dict = {}
+        finder._expand_partner_types_to_target(
+            ['A', 'B'], DS_A, DS_B, _Mapper(), cache={},
+            status_counts_out=counts)
+        finder._expand_partner_types_to_target(
+            ['A', 'C'], DS_A, DS_B, _Mapper(), cache={},
+            status_counts_out=counts)
+    finally:
+        tr_mod.get_mapper_snapshot = real
+
+    # one snapshot built for the run despite two expansion calls
+    assert calls['n'] == 1
+    # A resolved twice across calls counts once; B and C fold in once each
+    assert counts == {'mapped': 3}
+
+
+def test_expand_partner_types_counts_statuses(finder):
+    """Per-run mapping-resolution counting (Workstream E closure): each
+    UNIQUE partner type's resolver status is counted once during candidate
+    expansion; unmapped fallback drives the now-MEASURED raw_fallback_used
+    flag in the saved homolog metadata."""
+    from comparison.type_resolver import STATUS_BRIDGED
+
+    class _Mapper:
+        _loaded = True
+
+        def _get_type_mapping_key(self, ds):
+            return ds
+
+        def get_mapping_decision(self, t, src, dst, include_bridges=False):
+            if t == 'RenamedLocal':
+                return {'status': 'mapped', 'source_type': t,
+                        'target_type': 'CanonName', 'target_types':
+                        ['CanonName'], 'relationship': '1-to-1',
+                        'conflicts': []}
+            if t == 'Conflicty':
+                return {'status': 'conflict', 'source_type': t,
+                        'target_type': None, 'target_types': [],
+                        'relationship': '1-to-N', 'conflicts': [{}]}
+            return {'status': 'unmapped', 'source_type': t,
+                    'target_type': None, 'target_types': [],
+                    'relationship': None, 'conflicts': []}
+
+        def get_alias_candidates(self, type_name, datasets,
+                                 source_dataset=None):
+            return {ds: {'outcome': 'no counterpart known',
+                         'candidates': []} for ds in datasets}
+
+        def get_type_bridges(self, type_name, source_ds, target_ds,
+                             max_bridges=8):
+            return []
+
+    counts: dict = {}
+    out = finder._expand_partner_types_to_target(
+        ['RenamedLocal', 'Conflicty', 'UnknownPartner', 'UnknownPartner'],
+        DS_A, DS_B, _Mapper(), cache={},
+        status_counts_out=counts)
+
+    # policy unchanged: renamed expands, conflict excluded, unmapped raw
+    assert out['RenamedLocal'] == ('CanonName',)
+    assert out['Conflicty'] == ()
+    assert out['UnknownPartner'] == ('UnknownPartner',)
+    # counting: once per UNIQUE type (the duplicated UnknownPartner counts 1)
+    assert counts == {'mapped': 1, 'conflict': 1, 'unmapped': 1}
+    # the derivation the save path uses for raw_fallback_used
+    assert bool(counts.get('unmapped')) is True
+
+
 def test_compute_same_type_candidates(finder):
-    """The helper matches raw names plus mapper-standardized canon names."""
+    """The helper matches raw names plus mapper-standardized canon names.
+
+    The stub follows the PRODUCTION mapper contract: ``get_canonical_type``
+    maps raw -> canonical and ``standardize_partner_types`` returns
+    ``{canonical_type: weight}``.  The historical stub returned
+    raw->canonical dict items — the inverse contract — which masked the
+    backwards unpacking that made the real mapper return an empty set for
+    valid renames (see test_type_mapper_real_datasets.py)."""
 
     class _StubMapper:
+        def get_canonical_type(self, type_name, source_dataset=None):
+            return 'MeVPLo2' if type_name == 'MTe07' else type_name
+
         def standardize_partner_types(self, partner_types, source_dataset):
-            return {
-                t: ('MeVPLo2' if t == 'MTe07' else t)
-                for t in partner_types
-            }
+            canonical: dict = {}
+            for t, w in partner_types.items():
+                key = 'MeVPLo2' if t == 'MTe07' else t
+                canonical[key] = canonical.get(key, 0.0) + w
+            return canonical
+
+        def get_mapping_decision(self, source_type, source_dataset,
+                                 target_dataset, include_bridges=False):
+            return {'status': 'unmapped', 'target_type': None,
+                    'target_types': [], 'conflicts': [],
+                    'relationship': None}
 
     lookup = {
         1: 'l-LNv',          # verbatim match
@@ -2816,12 +2913,38 @@ def test_comparer_compare_intra_inter_type(tmp_path):
 # ---------------------------------------------------------------------------
 
 class _FakeTypeMapper:
-    """Stand-in for CrossDatasetTypeMapper (name resolution only)."""
+    """Stand-in for CrossDatasetTypeMapper following the shared resolver
+    contract: ``get_mapping_decision`` returns the status dict that
+    ``comparison.type_resolver`` consumes (the legacy
+    ``resolve_type_across_datasets`` one-target API is compatibility-only
+    now)."""
 
     _loaded = True
 
-    def resolve_type_across_datasets(self, name, datasets, source_dataset=None):
-        return {ds: f'{name}_mapped' for ds in datasets}
+    def _detect_type_source(self, name):
+        return 'detected_source_ns'
+
+    def _get_type_mapping_key(self, dataset):
+        return dataset
+
+    def get_mapping_decision(self, source_type, source_dataset,
+                             target_dataset, include_bridges=False):
+        return {
+            'status': 'mapped',
+            'source_type': source_type,
+            'target_type': f'{source_type}_mapped',
+            'target_types': [f'{source_type}_mapped'],
+            'relationship': '1-to-1',
+            'conflicts': [],
+        }
+
+    def get_alias_candidates(self, type_name, datasets, source_dataset=None):
+        return {ds: {'outcome': 'no counterpart known', 'candidates': []}
+                for ds in datasets}
+
+    def get_type_bridges(self, type_name, source_ds, target_ds,
+                         max_bridges=8):
+        return []
 
     def get_canonical_type(self, label, dataset):
         return f'{label}_canon'
@@ -2933,7 +3056,9 @@ def test_comparer_type_mapper_branches(tmp_path):
     assert comp._map_query_item('Mi1', DS_A) == 'Mi1_mapped'
     assert comp._map_query_item(5, DS_A) == 5
     assert comp._map_query_item('Mi.*', DS_A) == 'Mi.*'
-    assert comp._canonical_label('Mi1', DS_A) == 'Mi1_canon'
+    # anchor merge key via the shared resolver: a licensed rename keys
+    # under its canonical target (not the legacy raw get_canonical_type)
+    assert comp._canonical_label('Mi1', DS_A) == 'Mi1_mapped'
 
     # multi-dataset mapped query (flat and custom-group forms)
     comp_m = ConnectivityProfileComparer(
@@ -2975,6 +3100,75 @@ def test_comparer_multi_run_bodyid_and_pattern_anchors(tmp_path, pc_fake_repo):
     assert res['is_multi_dataset'] is True
     # bodyId anchor '1' (via its type) + pattern anchor 'aMe1'
     assert sorted(res['inter_anchors']) == ['1', 'aMe1']
+
+
+def test_comparer_anchor_fails_closed_on_conflict():
+    """A conflicted type contributes NO anchor across datasets (fail closed):
+    the anchor path must not form a raw same-name merge the resolver
+    refuses."""
+    comp = ConnectivityProfileComparer.__new__(ConnectivityProfileComparer)
+    comp.query = ['CB1011']
+    comp._custom_group_names = None
+    comp.aggregation_level = 'type'
+    comp.datasets = [DS_A, DS_B]
+
+    class _ConflictMapper:
+        _loaded = True
+
+        def _get_type_mapping_key(self, ds):
+            return ds
+
+        def _detect_type_source(self, name):
+            # the item lives in a third namespace; toward the queried
+            # datasets its verdict is a conflict
+            return 'banc_v626'
+
+        def get_mapping_decision(self, source_type, source_dataset,
+                                 target_dataset, include_bridges=False):
+            return {'status': 'conflict', 'source_type': source_type,
+                    'target_type': None, 'target_types': [],
+                    'relationship': '1-to-N', 'conflicts': [{}]}
+
+        def get_alias_candidates(self, type_name, datasets,
+                                 source_dataset=None):
+            return {ds: {'outcome': 'no counterpart known',
+                         'candidates': []} for ds in datasets}
+
+        def get_type_bridges(self, *a, **k):
+            return []
+
+    comp._type_mapper = _ConflictMapper()
+    comp._mapper_snapshot = None
+    comp._merge_key_cache = {}
+    comp.mapping_resolution_record = {}
+    comp.mapping_resolution_counts = {}
+    comp.mapping_raw_fallback_used = False
+    comp._counted_query_resolutions = set()
+
+    profiles = {
+        DS_A: {'CB1011': _rich_profile('a', DS_A)},
+        DS_B: {'CB1011': _rich_profile('b', DS_B)},
+    }
+    anchors = comp._build_anchor_profiles(profiles)
+    assert anchors == {}  # no raw same-name anchor for a conflicted type
+
+
+def test_comparer_anchor_no_mapper_passthrough():
+    """With auto mapping disabled the anchor uses raw names as-is."""
+    comp = ConnectivityProfileComparer.__new__(ConnectivityProfileComparer)
+    comp.query = ['T1']
+    comp._custom_group_names = None
+    comp.aggregation_level = 'type'
+    comp.datasets = [DS_A, DS_B]
+    comp._type_mapper = None
+    comp._merge_key_cache = {}
+
+    profiles = {
+        DS_A: {'T1': _rich_profile('a', DS_A)},
+        DS_B: {'T1': _rich_profile('b', DS_B)},
+    }
+    anchors = comp._build_anchor_profiles(profiles)
+    assert list(anchors.keys()) == ['T1']
 
 
 def test_comparer_multi_run_custom_group_anchors(tmp_path, pc_fake_repo):

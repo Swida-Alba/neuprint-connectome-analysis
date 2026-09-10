@@ -1114,8 +1114,10 @@ class ComparisonParameters:
         'mcns': 'M',
         'fafb': 'F',
         'flywire_fafb': 'F',
+        'flywire-fafb': 'F',
         'banc': 'B',
         'flywire_banc': 'B',
+        'flywire-banc': 'B',
         'hemibrain': 'H',
         'hemi': 'H',
         'optic-lobe': 'O',
@@ -1951,13 +1953,25 @@ class ComparisonParameters:
     def _initialize_auto_type_mapping(self) -> None:
         """
         Initialize auto type mapping from male-cns neuron_df.
-        
-        Loads CrossDatasetTypeMapper. Mapping warnings will be shown during
-        the initialization summary print.
+
+        Uses the process-wide CrossDatasetTypeMapper singleton
+        (``get_type_mapper``) — the SAME mapper instance the Type Mapping
+        panel, homolog finding, and the neuron-index viewer use — so every
+        surface shares one load state and one set of mapper indexes.
+        Mapping warnings will be shown during the initialization summary
+        print.
+
+        Nuances of the shared instance: an already-built singleton ignores
+        ``workspace_path`` (one repository = one workspace), and the
+        singleton is constructed quiet — this class's own summary print
+        reports the mapping state.  A mapper whose load fails keeps
+        ``_auto_type_mapper`` None (identical to the previous
+        new-instance contract); the failure reason stays visible via
+        ``mapper.last_load_error`` / ``get_type_mapper_state()``.
         """
-        from .cross_dataset_type_mapper import CrossDatasetTypeMapper
+        from .cross_dataset_type_mapper import get_type_mapper
         import os
-        
+
         # Determine workspace path
         # Candidates are derived from the file location and the current
         # working directory only, so the lookup stays portable across machines.
@@ -1965,34 +1979,33 @@ class ComparisonParameters:
             os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),  # From this file
             os.getcwd(),
         ]
-        
+
         workspace_path = None
         for candidate in workspace_candidates:
             # the auto mapping source is the male-cns v1.0 neuron info
             neuron_df_path = os.path.join(
-                candidate, 'datasets', 'male-cns_v1_0', 
+                candidate, 'datasets', 'male-cns_v1_0',
                 'male-cns_v1_0_allneurons_neuron_df.csv'
             )
             if os.path.exists(neuron_df_path):
                 workspace_path = candidate
                 break
-        
+
         if workspace_path is None:
             if self.verbose:
                 print("\n⚠️ Auto type mapping: Could not find male-cns neuron_df file.")
                 print("   Initialize male-cns dataset first, or disable auto_type_mapping.")
             self._auto_type_mapper = None
             return
-        
-        # Initialize type mapper
-        self._auto_type_mapper = CrossDatasetTypeMapper(
-            workspace_path=workspace_path,
-            verbose=self.verbose,
-        )
-        
-        if not self._auto_type_mapper.load():
+
+        # Shared singleton: same mapper instance as the panel / homolog /
+        # viewer surfaces.  get_type_mapper() triggers load(); an
+        # unhealthy mapper is reported as disabled here.
+        mapper = get_type_mapper(workspace_path=workspace_path)
+        if mapper is None or not mapper._loaded:
             self._auto_type_mapper = None
             return
+        self._auto_type_mapper = mapper
     
     def _resolve_neurons_with_auto_mapping(
         self, 
@@ -2033,13 +2046,17 @@ class ComparisonParameters:
                 resolved.append(neuron)
                 continue
             
-            # Try to find mapping
+            # Try to find mapping (shared validity resolver: only an
+            # unambiguous one-target case renames; splits/conflicts behave
+            # like the legacy None return)
             source_ds = (
                 self.source_dataset
-                or self._auto_type_mapper._detect_type_source(neuron)
+                or self._auto_type_mapper.detect_type_source(neuron)
             )
             if source_ds:
-                mapped = self._auto_type_mapper.get_mapped_type(neuron, source_ds, dataset)
+                from .type_resolver import resolve_one_target
+                mapped = resolve_one_target(
+                    self._auto_type_mapper, neuron, source_ds, dataset)
                 if mapped:
                     resolved.append(mapped)
                 elif not remove_unmapped:
