@@ -62,9 +62,12 @@ For multiple source queries, the UI loops `source` and gives each query its own
 
 ## Notes
 
-- `use_auto_type_mapping=True` relies on the cross-dataset type mapper; set it
-  explicitly when names differ between datasets (irrelevant when Target =
-  Source).
+- `use_auto_type_mapping=True` resolves cross-dataset names through the shared
+  validity-aware resolver (`comparison/type_resolver.py`): licensed renames map,
+  valid splits expand, conflicts fail closed (never matched by raw same-name),
+  unmapped names fall back to raw. Set it explicitly when names differ between
+  datasets (irrelevant when Target = Source). The run writes
+  `auto_type_mapping.json` with the mapper provenance and per-status counts.
 - `visualize_skeleton=True` requires a valid `visualization_settings` dict.
 - Start with `use_fast=True` (adjacency expansion); escalate to the slower
   comprehensive search only when it is insufficient.

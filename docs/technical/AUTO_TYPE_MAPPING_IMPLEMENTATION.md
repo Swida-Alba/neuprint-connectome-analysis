@@ -22,7 +22,7 @@ CrossDatasetTypeMapper                      src/comparison/cross_dataset_type_ma
   ├─ get_type_bridges()            derivation chains (the evidence algebra, §3)
   ├─ get_alias_candidates()        per-dataset alias candidates (rename / same name / one-of-N)
   ├─ get_mapping_decision()        source/target-scoped accepted, split, evidence, or conflict state
-  └─ get_mapped_type()             stored-mapping lookup (production resolution)
+  └─ get_mapped_type()             stored-mapping lookup (compatibility-only; see §4.1)
         ▼
 mapped_type_targets()                       ui/neuron_index.py — THE shared backend (§5)
   ├─ 'See available neurons' viewer mapped view   (enrich_native_type_matches)
@@ -50,7 +50,7 @@ release's tables:
 | BANC v888 | `banc_v888` | `banc_v888_allneurons_neuron_df.csv` |
 
 Both BANC releases sit in `DATASET_PRIORITY` (v888 immediately after
-v626), so `_detect_type_source` auto-detects a v888-only type name as
+v626), so `detect_type_source` auto-detects a v888-only type name as
 `banc_v888` instead of falling through to "unknown" — pinned in
 `tests/core/test_dataset_identity_collisions.py`.
 
@@ -244,6 +244,17 @@ analysis consumer imports a UI module, and the UI
   standard `auto_type_mapping_*` metadata block saved with results:
   requested vs active, source, version, load error, per-status resolution
   counts, raw-fallback flag, and the mapping-policy version.
+
+**Counting unit:** exported per-status counts report
+`mapping_resolution_counts_by_status` on a
+`mapping_resolution_counts_basis` of `unique_type_resolutions` — one count
+per distinct `(source_dataset, type[, target])` resolver input, deduped
+across repeated lookups (path rows, edges, shared query items). A second,
+distinctly keyed metric `mapping_partner_type_resolutions_by_status`
+reports contributor-type *occurrences* inside canonicalized profiles and is
+never conflated with the primary counts. Each surface holds ONE mapper
+snapshot per run (reset per search) so load state and decision caches are
+shared across expansions.
 
 Consumers: homolog finding (candidate expansion, same-type rescue, the
 mapping-aware vector prefilter, type-level same-type marking),

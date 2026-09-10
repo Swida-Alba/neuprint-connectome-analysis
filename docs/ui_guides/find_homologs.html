@@ -68,10 +68,19 @@
     <tr><td><code>union_type_count</code></td><td>|A ∪ B|</td><td>integer</td></tr>
     <tr><td><code>adjacency_score</code></td><td>shared-partner count used for adjacency expansion</td><td>integer</td></tr>
   </table>
-  <p>When <b>Auto Type Mapping</b> is on, partner type names are standardized
-    to canonical (male-cns v1.0) names before scoring, so that equivalent
-    types resolve across datasets. Rank metrics return <code>NaN</code> for
-    pairs with fewer than 3 comparable partners.</p>
+  <p>When <b>Auto Type Mapping</b> is on, partner type names are resolved
+    through the shared validity-aware resolver
+    (<code>comparison/type_resolver.py</code>): unique renames and
+    bridge-derived targets, and every branch of a valid split, are
+    standardized to canonical (male-cns v1.0) names before scoring, so
+    equivalent types resolve across datasets. A <b>conflicted</b> type is
+    excluded from automatic matching (fail closed — it is never matched by
+    raw same-name). Unmapped types keep their raw name as the counted
+    long-tail fallback. Rank metrics return <code>NaN</code> for pairs with
+    fewer than 3 comparable partners. Each saved run writes an
+    <code>auto_type_mapping.json</code> recording the mapper source/version,
+    per-status resolution counts (basis <code>unique_type_resolutions</code>),
+    and whether raw-name fallback occurred.</p>
 
   <h2>Options</h2>
   <ul>
@@ -96,8 +105,10 @@
       speed. For high-quality morphology, use <b>Visualization → Skeleton</b>,
       or select <b>tube</b> with the <b>fine</b> method and 95% simplification
       in the advanced visualization settings.</li>
-    <li><b>Auto Type Mapping</b>: canonicalize partner type names across
-      datasets (recommended for cross-dataset searches).</li>
+    <li><b>Auto Type Mapping</b>: resolve partner type names across datasets
+      through the shared validity-aware resolver — licensed renames and valid
+      splits resolve; conflicts fail closed (recommended for cross-dataset
+      searches).</li>
     <li><b>Pre-build Full Dataset Cache</b>: leave OFF; the search fetches
       what it needs.</li>
   </ul>

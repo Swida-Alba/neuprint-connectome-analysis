@@ -55,3 +55,20 @@ python skills/drocat-usage/scripts/run_direct.py \
 - `ensure_cache_complete=True` forces a full cache; use it deliberately.
 - The profiling resolver resolves the query before comparing; a completed run
   means the queried chips resolved in the dataset.
+- **Auto type mapping is ON by default** (`use_auto_type_mapping=True`):
+  with 2+ datasets, query names resolve per dataset through the shared
+  validity-aware resolver (`comparison/type_resolver.py`). A unique rename
+  (MeVPLo2 ↔ MTe07) maps automatically; a valid split (MCNS `VS` → FAFB
+  `VS1`…`VS8`) expands to every branch; a conflicted type is dropped for
+  the dataset it conflicts toward (fail closed, recorded in the run's
+  mapping-resolution metadata); unmapped names are used as-is and counted
+  as raw fallback. Pass `use_auto_type_mapping=False` to disable and
+  compare raw names.
+- Explicit dataset-keyed query dicts (`{'dataset_a': [...], ...}`) keep
+  their dataset-local literal semantics — they are not second-guessed by
+  the mapper.
+- Every saved run's `parameters.json` carries an `auto_type_mapping_*`
+  metadata block (requested vs active mapper, v1.0 source table, version,
+  load error, per-status resolution counts on the `unique_type_resolutions`
+  basis, the separate occurrence-basis partner metric, and the raw-fallback
+  flag).

@@ -448,9 +448,9 @@ exported to `auto_type_mapping.csv` (and conflicts to
 
 When comparing profiles from different datasets:
 
-1. **Query type standardization**: Input type names are mapped to canonical names for profile retrieval
-2. **Partner type standardization**: When computing similarity, the partner types in each profile are standardized to canonical names
-3. **Similarity computation**: Jaccard, cosine, and rank correlation are computed on standardized partner type sets
+1. **Query type standardization**: Input type names resolve to canonical names for profile retrieval
+2. **Partner type standardization**: When computing similarity, each partner type resolves through the shared validity-aware resolver (`comparison/type_resolver.py`) — licensed renames and valid splits map to canonical names, conflicts are excluded (fail closed), and unmapped types keep their raw name as the counted fallback
+3. **Similarity computation**: Jaccard, cosine, and rank correlation are computed on the resolved partner type sets
 
 ## Usage
 
@@ -492,6 +492,15 @@ results = comparer.run()
 ```
 
 ## API Reference
+
+> **New analysis code should use the shared validity-aware resolver
+> (`comparison.type_resolver`)**, not the raw mapper methods below. The
+> resolver exposes `resolve_valid_targets`, `resolve_one_target`,
+> `canonical_merge_key`, `expand_profile_types`, and `resolve_flow_status`,
+> and is what the panel, viewer, homolog finding, and profile comparison
+> all use. `CrossDatasetTypeMapper.get_mapped_type()` and
+> `resolve_type_across_datasets()` are **COMPATIBILITY-ONLY**: they carry no
+> mapping status/provenance and return `None` for splits and conflicts.
 
 ### CrossDatasetTypeMapper
 
@@ -610,7 +619,8 @@ Now the Jaccard and cosine similarities correctly identify these as highly simil
 ### Supported Datasets
 
 Type mappings are available for:
-- `male-cns:v0.9` (canonical reference)
+- `male-cns:v1.0` (active default mapping source)
+- `male-cns:v0.9` (retained for compatibility / native release queries)
 - `flywire_FAFB_v783`
 - `banc_v626`
 - `banc_v888`
@@ -640,8 +650,10 @@ When running `ComparisonAnalyzer.export_results()` with `auto_type_mapping=True`
 
 - **Unresolved 1-to-N mappings**: One source type has several target
   candidates. The candidates and licensed bridge chains remain available as
-  explicitly labeled evidence, but `get_mapped_type()` returns no single
-  canonical target and automatic mapped-neuron totals do not choose a branch.
+  explicitly labeled evidence, but no single canonical target is selected and
+  automatic mapped-neuron totals do not choose a branch. The resolver reports
+  this as `valid_split_evidence` and expands to every licensed branch; the
+  compatibility-only `get_mapped_type()` returns `None` for the same case.
   For example, MCNS `SMP227` → FAFB `s-CPDN3B`, `s-CPDN3C`, and
   `s-CPDN3D` is valid split evidence, not a single accepted mapping.
 - **N-to-1 mappings**: Multiple source types share one target name. These
@@ -679,9 +691,11 @@ on `last_load_error` (also reported by
 `comparison.cross_dataset_type_mapper.get_type_mapper_state()`), and any
 subsequent mapper call retries the load. Profile-comparison results carry
 an `auto_type_mapping_*` metadata block in `parameters.json` (requested
-vs active, source, version, load error, per-status resolution counts,
-raw fallback flag) so a run that fell back to raw names can never be
-mistaken for a valid-mapper run.
+vs active, source, version, load error, per-status resolution counts and
+their `mapping_resolution_counts_basis` of `unique_type_resolutions`, the
+separate occurrence-basis `mapping_partner_type_resolutions_by_status`
+metric, and the raw-fallback flag) so a run that fell back to raw names can
+never be mistaken for a valid-mapper run.
 
 ### Type not found in mapping
 

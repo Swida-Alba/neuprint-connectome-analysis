@@ -84,9 +84,6 @@ result: ComparisonResult = ProfileComparator.compare_profiles(...)
 # or ProfileComparator.compare_profiles_simple(...)
 ```
 
-`find_similar_types_across_datasets(...)` is a ready-made cross-dataset
-type-similarity helper on `ProfileComparator`.
-
 ## Notes
 
 - Morphology enrichment of homolog results (the former

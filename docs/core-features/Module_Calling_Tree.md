@@ -16,8 +16,8 @@ This document illustrates the mutual calls and dependencies between all core mod
 ┌────────────────────────────────────────────────────────────────────────────────┐
 │                            CORE MODULES LAYER                                   │
 ├─────────────────────┬─────────────────────────┬─────────────────────────────────┤
-│ ConnectivityProfiler│   ProfileComparator     │      CrossDatasetVerifier       │
-│ (connectivity_      │   (profile_comparator)  │      (cross_dataset_verifier)   │
+│ ConnectivityProfiler│   ProfileComparator     │                                 │
+│ (connectivity_      │   (profile_comparator)  │                                 │
 │  profiler.py)       │                         │                                 │
 └─────────┬───────────┴───────────┬─────────────┴────────────────┬───────────────┘
           │                       │                              │
@@ -74,7 +74,6 @@ src/
 ├── comparison/                 # Cross-dataset comparison module
 │   ├── connectivity_profiler.py     # 1-hop/2-hop hybrid profiler (CORE)
 │   ├── profile_comparator.py        # Profile comparison + HomologFinder
-│   ├── cross_dataset_verifier.py    # Cross-dataset verification
 │   ├── comparison_analyzer.py       # Main comparison orchestrator
 │   ├── data_loader.py               # Data loading utilities
 │   ├── dataset_config.py            # Dataset configuration
@@ -275,7 +274,7 @@ User Query: "Compare connectivity across datasets"
           ▼                 ▼
     ┌──────────────┐  ┌──────────────────────────┐
     │ DataLoader   │  │ ConnectivityProfiler     │
-    │              │  │ CrossDatasetVerifier     │
+    │              │  │                          │
     └──────┬───────┘  └────────────┬─────────────┘
            │                       │
            │         ┌─────────────┴─────────────┐
@@ -360,9 +359,9 @@ User Query: "Compare connectivity across datasets"
 │  │                          ┌────────┴────────┐                            │ │
 │  │                          ▼                 ▼                            │ │
 │  │  ┌───────────────────────────┐  ┌───────────────────────────┐           │ │
-│  │  │ profile_comparator.py     │  │ cross_dataset_verifier.py │           │ │
-│  │  │   - ProfileComparator     │  │   - CrossDatasetVerifier  │           │ │
-│  │  │   - HomologFinder         │  │   - VerificationResult    │           │ │
+│  │  │ profile_comparator.py     │  │                            │          │ │
+│  │  │   - ProfileComparator     │  │                            │          │ │
+│  │  │   - HomologFinder         │  │                            │          │ │
 │  │  │   - ComparisonResult      │  └───────────────────────────┘           │ │
 │  │  └────────────────────┬──────┘                                          │ │
 │  │                       │                                                 │ │
@@ -466,7 +465,7 @@ Disk Cache (./cache/)
 | Query connections | `FindNeuronConnection` (coana) | Neuprint API, Cache |
 | Build connectivity profile | `ConnectivityProfiler` | 1-hop/2-hop hybrid |
 | Find homologs | `HomologFinder` | ConnectivityProfiler, VisualizeSkeleton |
-| Verify cross-dataset types | `CrossDatasetVerifier` | ConnectivityProfiler, ProfileComparator |
+
 | Compare datasets | `ComparisonAnalyzer` | DataLoader, ConnectivityProfiler |
 | Visualize network | `VisualizePath` | (receives data) |
 | Visualize 3D skeleton | `VisualizeSkeleton` (coana) | Skeleton mesh data |

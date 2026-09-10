@@ -24,6 +24,20 @@ pipeline sections of `docs/visualizations/Skeleton_Data_Pipeline.md`.
 
 ## 1. Sources, fetching, and fallback chains
 
+The three dataset families (NeuPrint, BANC, FAFB) **deliberately keep
+independent fetch pipelines** — their sources, storage, representations, and
+formats differ. Sharing is limited to the representation-level layers that
+are genuinely common: the compressed-SWC provenance contract
+(`skeleton_provenance.py`: `# DROCAT simpl:` / `# DROCAT source:` headers,
+parsers, the raw-store path layout), the feature/vector computation, and the
+vector-cache machinery. The fetch entry point
+(`morphology.fetch_skeletons_on_demand_batch`) is a thin dispatcher that
+delegates to one per-source fetcher (`_fetch_neuprint_skeleton_batch`,
+`_fetch_banc_skeleton_batch`, `_fetch_fafb_mesh_batch`), and only owns the
+dataset-agnostic cache transaction around them. Do not merge the fetch
+layers into a single strategy: the differences (auth, batching, staging,
+representation) are real.
+
 ### 1.1 FAFB / flywire (`flywire_FAFB_v783`)
 
 Decision flow: [fafb_skeleton_flow.html](../visualizations/fafb_skeleton_flow.html).
@@ -31,20 +45,41 @@ Decision flow: [fafb_skeleton_flow.html](../visualizations/fafb_skeleton_flow.ht
 Every render pipeline (fast/fine/artistic tube and line) consumes
 TreeNeurons. Per-body resolution order:
 
-1. Shared raw-skeleton cache (`cache/<ds>/skeletons/raw_skeletons/*.swc.zst`).
-2. Local healed skeleton bundle `datasets/<ds>/sk_lod1_783_healed.zst`
-   (columnar zstd, ~541 MB; legacy 13.8 GB ZIP fallback) when the member exists.
-3. Extrusion check on the tree (parquet-cached in
-   `extrusion_check_results.parquet`). Flagged or missing bodies are replaced
-   by the **CAVE replacement path**: a cached
+0. Stages 1–2 below are gated by the visualizer's `cache_neurons` flag
+   (UI default `True`, class default `False`): with `cache_neurons=False`
+   the repair caches and shared raw cache are skipped and bodies resolve
+   from the healed zip (and a fresh CAVE repair for flagged bodies).
+1. Previously repaired trees, served network-free from the local repair
+   caches before the zip is ever read (status-driven, via
+   `extrusion_check_results.parquet`): `api_repaired` bodies from
+   `cache/<ds>/skeletons/cave_skeletons/`; `local_fallback` bodies from
+   `cave_skeletons/` first, then `cache/<ds>/skeletons/extrusion_fixes/`.
+2. Shared raw-skeleton cache (`cache/<ds>/skeletons/raw_skeletons/*.swc.zst`;
+   legacy frozen reads — the pipeline no longer writes new entries there).
+3. Local healed skeleton zip `datasets/<ds>/sk_lod1_783_healed.zip`
+   (~13.8 GB, the only skeleton source; served directly, read-only).
+4. Extrusion check on the tree (one-time per body; parquet-cached in
+   `extrusion_check_results.parquet` — only ids without a recorded row pay
+   the detector cost). Flagged or missing bodies are replaced by the
+   **CAVE replacement path**: a cached
    `cache/<ds>/skeletons/cave_skeletons/{bodyId}.swc.zst` tree is used first;
    on a miss, the raw CAVE mesh is wavefront-skeletonized (no pre-decimation)
-   and the level-0 tree is persisted in that dedicated replacement store.
-   - a body already recorded `api_repaired` is served from that store
-     without another network round-trip;
+   and the level-0 tree is persisted in that dedicated replacement store
+   (status `api_repaired`).
    - a CAVE outage or per-body miss falls back to pruning the diagnosed
-     extrusion branch locally (status stays retryable).
-4. Token-gated CAVE API fetch for everything still missing.
+     extrusion branch locally (status `local_fallback`); the pruned fix is
+     persisted to `cache/<ds>/skeletons/extrusion_fixes/{bodyId}.swc.zst`
+     with the `# DROCAT source: local_extrusion_fix` header so later runs
+     serve it directly. When no safe cut exists the extruded tree is kept
+     and the status stays `api_failed` (retryable on the next run).
+5. Token-gated CAVE API fetch for everything still missing.
+
+The former columnar `.zst` bundle pipeline (`sk_lod1_783_healed.zst`,
+lazy per-skeleton conversion, bulk `pack`) is **retired**: the application
+never creates or appends a `.zst` container. An existing `.zst` is opened
+read-only only when no zip is present; the container tooling
+(`python -m src.fafb_bundle pack|verify|info|compact|append`) remains
+available for manual maintenance only.
 
 Skeletonization calibration (measured on l-LNv, 2026-09): wavefront on the
 raw mesh reproduces the healed bundle's node density within ~11% at 1–8 s
@@ -84,11 +119,12 @@ ships both):
 
 ## 2. Raw cache and storage rules
 
-Bundle-derived FAFB, NeuPrint, and BANC raw trees share one raw store layout:
-`cache/{dataset}/skeletons/raw_skeletons/{bodyId}.swc.zst`, always at **raw
-level (simplification 0)** and always in the dataset's **native coordinates**
-(FLYWIRE nm / JRCFIB2022Mraw voxels / BANC nm). FAFB CAVE replacements use
-the separate `skeletons/cave_skeletons/` store described above.
+FAFB raw reads come from the healed zip directly; the shared raw store layout
+`cache/{dataset}/skeletons/raw_skeletons/{bodyId}.swc.zst` (raw level,
+simplification 0, native coordinates) is kept for legacy frozen reads and for
+NeuPrint/BANC fetch caching. FAFB CAVE replacements use the separate
+`skeletons/cave_skeletons/` store and locally pruned fixes the
+`skeletons/extrusion_fixes/` store described above.
 
 - Raw SWCs are never modified by render-time simplification.
 - A MeshNeuron is never serialized as an SWC to satisfy a skeleton API.
@@ -99,11 +135,15 @@ the separate `skeletons/cave_skeletons/` store described above.
   persisted **scaled to nm** (R1) so a reload cannot mix unit frames.
 - FAFB CAVE skeletonization writes a **separate replacement store**,
   `cache/{dataset}/skeletons/cave_skeletons/{bodyId}.swc.zst`, with the
-  provenance header `cave_mesh_wavefront`. These trees replace
-  healed-bundle skeletons that failed the extrusion check, so they must
-  never overwrite the healed-bundle mirror in `raw_skeletons`. Level-0
-  entries left in `raw_skeletons` by the pre-unification fetch path remain
-  readable as a legacy fallback; simp90-legacy writes there are rejected.
+  provenance header `cave_mesh_wavefront`. These trees replace healed-zip
+  skeletons that failed the extrusion check, so they must never overwrite
+  the legacy mirror in `raw_skeletons`. Level-0 entries left in
+  `raw_skeletons` by the pre-unification fetch path remain readable as a
+  legacy fallback; simp90-legacy writes there are rejected.
+- Locally pruned extrusion fixes write a second replacement store,
+  `cache/{dataset}/skeletons/extrusion_fixes/{bodyId}.swc.zst`, with the
+  provenance header `local_extrusion_fix`. A recorded `local_fallback`
+  status serves from `cave_skeletons` first, then this store.
 
 The former prepared FAFB mesh cache (`cache/{dataset}/meshes/…`, 95%-decimated
 `MeshNeuron` pickles) is no longer read or written by the visualization

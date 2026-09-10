@@ -376,11 +376,12 @@ Example: `cross-dataset_aMe12_to_PPL101_MFB_v626B_v888_20260815_142812/` (male-c
 #### Main Reports
 *   **`comparison_report.html`**: Comprehensive interactive HTML report. Standard and Custom combination runs use the same report sections; Custom runs repeat them for every query row and retain query-keyed provenance, networks, matrices, conservation, overlap, and statistics.
 *   **`comparison_report.txt`**: Plain text summary
-*   **`parameters.json`**: JSON dump of all `ComparisonParameters` (metadata, datasets, resolved source/target groups, thresholds, algorithm and feature flags), plus the pathfinding provenance field list and definitions of `tau` and `applied_threshold`
+*   **`parameters.json`**: JSON dump of all `ComparisonParameters` (metadata, datasets, resolved source/target groups, thresholds, algorithm and feature flags), plus the pathfinding provenance field list, definitions of `tau` and `applied_threshold`, and the `auto_type_mapping_*` block (mapper requested/active, source, version, load error, per-status resolution counts on the `unique_type_resolutions` basis, the partner-occurrence metric, and `raw_fallback_used`)
 *   **`effective_thresholds.json`**: Run-root notice consumed by the UI and exported UserGuide. Standard mode contains same-threshold query rows; combination mode also contains a `queries`/`combinations` block whose rows preserve `query_id`, the requested threshold map, and one applied-threshold provenance row per dataset. The provenance includes canonical `applied_threshold`, source, StrongestFirst budget/tau, Edge Budget `w0`/`w1`, path bottlenecks `w2`/`W*`, and `paths_complete`.
 *   **`label_map.json`**: Label mappings for source/target neurons across datasets (includes `metadata.auto_type_mapping`)
 *   **`dataset_metadata_comparison.csv`**: Per-dataset metadata comparison (also present under `comparison_results/`). Columns: `dataset`, `total_neurons`, `typed_neurons`, `untyped_neurons`, `type_coverage_pct`, `total_presynaptic`, `total_postsynaptic`, `total_synapses`, `roi_count`, `coverage_notes`
-*   **`auto_type_mapping.csv`** / **`auto_type_mapping_conflicts.csv`**: Cross-dataset type mapping tables (see [AUTO_TYPE_MAPPING](AUTO_TYPE_MAPPING.md))
+*   **`auto_type_mapping.csv`** / **`auto_type_mapping_conflicts.csv`**: Cross-dataset type mapping tables and their conflicts (see [AUTO_TYPE_MAPPING](AUTO_TYPE_MAPPING.md))
+*   **`auto_type_mapping.json`**: Auto-type-mapping provenance for the run (mapper requested/active, source table and version, load error, per-status resolution counts and basis, raw-fallback flag); also written for homolog runs (run root) and cross-dataset profile comparisons
 
 #### Report Data (`comparison_report_used_data/`)
 *   **`avg_prob_data.csv`**, **`avg_ratio_data.csv`**, **`edge_count_data.csv`**, **`total_weight_data.csv`**: Aggregated metrics per dataset (Standard; Custom uses the `*_by_query.csv` variants below)

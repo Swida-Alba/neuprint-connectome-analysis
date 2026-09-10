@@ -32,9 +32,24 @@ connectivity input is missing.
 
 **Storage Summary:**
 *   **Minimal Analysis:** ~300 MB download → ~200 MB final size
-*   **With Synapses:** +2.5 GB download → +1.7 GB final size
+*   **With Synapses:** +2.5 GB download → +0.9 GB final size
 *   **With Skeletons:** +13 GB download → +13 GB final size
 *   **Full Dataset:** ~16 GB total storage required
+
+The converted synapse table keeps only what the visualization reader
+consumes: pre/post site coordinates and root ids. The cleft-centre
+columns (`ctr_*`), `size` and `neuropil` are dropped at conversion and
+are absent from tables converted by recent DROCAT versions; tables
+converted earlier are slimmed **and** losslessly re-encoded in place
+automatically the next time the synapse visualization or converter
+touches them (~0.1 GB reclaimed on top of the dropped columns). The
+stored layout is measured-lossless: coordinates narrow to int32
+(guarded by footer statistics) and take `BYTE_STREAM_SPLIT`, the string
+id columns take `DELTA_LENGTH_BYTE_ARRAY`, and a `DROCAT.lossless`
+footer marker makes the upgrade a one-time pass — values read back are
+bit-identical. The source CSV (`fafb_v783_princeton_synapse_table.csv.gz`)
+retains the dropped columns if they are ever needed again (see
+`docs/audits/SYNAPSE_TABLE_COLUMN_AUDIT_2026-09-10.md`).
 
 ### 2. Run the Converter
 
@@ -155,8 +170,8 @@ vs.plot_neurons()
 ```
 
 **Key Features:**
-- **Source priority (every render mode)**: shared raw SWC cache (`.swc.zst`) → healed skeleton bundle → extrusion check. Missing or extrusion-affected bodies use the dedicated CAVE replacement store when available, then CAVE skeletonization. Every FAFB source is a TreeNeuron, so all pipelines render from the same geometry.
-- **CAVE skeletonization**: missing or extrusion-flagged bodies are replaced by wavefront-skeletonizing the raw CAVE mesh (no pre-decimation — measured to match the healed bundle's node density within ~11%). The level-0 tree is cached in the dedicated `cache/{dataset}/skeletons/cave_skeletons/` store with a `# DROCAT source: cave_mesh_wavefront` header, so the replacement never overwrites the healed-bundle mirror. Later runs can skip the network for bodies present in that store.
+- **Source priority (every render mode)**: previously repaired bodies served from the local repair caches (`cave_skeletons` / `extrusion_fixes`, status-driven) → shared raw SWC cache (`.swc.zst`, legacy frozen reads) → healed skeleton zip → one-time extrusion check. Missing or extrusion-affected bodies use the dedicated CAVE replacement store when available, then CAVE skeletonization. Every FAFB source is a TreeNeuron, so all pipelines render from the same geometry.
+- **CAVE skeletonization**: missing or extrusion-flagged bodies are replaced by wavefront-skeletonizing the raw CAVE mesh (no pre-decimation — measured to match the healed zip's node density within ~11%). The level-0 tree is cached in the dedicated `cache/{dataset}/skeletons/cave_skeletons/` store with a `# DROCAT source: cave_mesh_wavefront` header, so the replacement never overwrites the raw store. Later runs can skip the network for bodies present in that store.
 - **force_API_fetching=True**: routes every body through CAVE resolution. With `cache_neurons=True`, an existing CAVE replacement may be reused; with `cache_neurons=False`, the fetch is online-only.
 - **Automatic Fallback**: bodies missing from every local source fall through to CAVE skeletonization automatically.
 - **Updated Data**: Use `force_API_fetching=True, cache_neurons=False` when you need to bypass the local CAVE replacement store and request current data from the API.
@@ -191,17 +206,19 @@ vs.plot_neurons()
 ```
 
 **How auto_fix_extrusions works:**
-1. When loading skeletons from the raw cache or healed bundle, each is converted to a simplified mesh
+1. When loading skeletons from the raw cache or healed zip, each is converted to a simplified mesh
 2. Edge length analysis detects abnormal "spiky" geometry (edge ratio > 10x median)
 3. Problematic neurons are replaced by wavefront-skeletonizing their raw CAVE mesh (one-time ~5-20s per neuron, then cached)
 4. If a CAVE fetch fails, the long parent→child edge is mapped back to the local
-   tree and only that child subtree is pruned when the cut is safe
+   tree and only that child subtree is pruned when the cut is safe; the pruned
+   fix is persisted to `cache/{dataset}/skeletons/extrusion_fixes/` with a
+   `# DROCAT source: local_extrusion_fix` header
 5. **Extrusion check results are cached** in `cache/{dataset}/extrusion_check_results.parquet`
 6. On subsequent runs, only new neurons are checked (previously checked neurons use cached results)
 7. CAVE replacement trees are cached in the dedicated `cave_skeletons/` store (never overwriting the
-   healed-bundle mirror in `raw_skeletons/`); bodies recorded `api_repaired` are served from that
-   store on later runs without another network round-trip. Local fallback repairs remain in memory
-   and do not overwrite the canonical raw skeleton
+   raw store); bodies recorded `api_repaired` are served from that store, and bodies recorded
+   `local_fallback` from `cave_skeletons/` then `extrusion_fixes/`, on later runs without another
+   network round-trip. Statuses recorded `api_failed` retry CAVE on the next run.
 
 **Performance notes:**
 - First run may take longer due to mesh analysis for extrusion detection
@@ -349,18 +366,20 @@ result = VisualizeSkeleton.detect_mesh_extrusions(
 
 ## Find Similar (Morphology) on FAFB
 
-- **vector_v2** uses the skeleton-vector cache built from the healed bundle
+- **vector_v2** uses the skeleton-vector cache built from the healed zip
   (`find_similar/morphology/skeleton__vectors_v2.parquet`). The prepared-mesh
   cache is the V1 counterpart and is not used by vector_v2 scoring.
 - **Skeleton loading follows the canonical FlyWire chain**
-  (`morphology.load_flywire_skeletons_batch`): raw `.swc.zst` cache → healed
-  bundle (newly served trees are cached into the raw store) → per-run
-  extrusion check with cached results (flagged neurons use the dedicated
-  `cave_skeletons` replacement store, then CAVE) → token-gated CAVE
+  (`morphology.load_local_release_skeletons`): previously repaired bodies
+  from the local repair caches (`cave_skeletons` / `extrusion_fixes`,
+  status-driven) → raw `.swc.zst` cache (legacy frozen reads) → healed zip →
+  one-time extrusion check with cached results (flagged neurons are replaced
+  through the `cave_skeletons` store, then CAVE; a CAVE failure persists a
+  locally pruned fix to `extrusion_fixes`) → token-gated CAVE
   skeletonization for anything still missing. The prepared mesh cache is
   never consulted — scoring is TreeNeuron-native.
 - **NBLAST** scores the entire candidate pool from skeletons — the local raw
-  store first, healed-bundle fallback — so pool coverage does not depend on
+  store first, healed-zip fallback — so pool coverage does not depend on
   vector-cache rows.
 - **NBLAST is not mirror-invariant**: contralateral same-type pairs score at
   chance. Type-level means therefore aggregate ipsilateral pairs only,

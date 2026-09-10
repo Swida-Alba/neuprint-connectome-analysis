@@ -180,9 +180,14 @@ scenes as a `query_transformed_*` overlay. In interactive HTML with
   the number of unique neuron items. Static exports retain the ordinary Plotly
   legend.
 
-Auto Type Mapping still standardizes connectivity partner types for candidate
-finding and comparison. It does not rewrite the source neuron's native label
-in the transformed visualization overlay.
+Auto Type Mapping still resolves connectivity partner types for candidate
+finding and comparison through the shared validity-aware resolver
+(`comparison/type_resolver.py`): licensed renames and valid splits resolve,
+conflicts fail closed (never matched by raw same-name), and unmapped names
+fall back to raw. It does not rewrite the source neuron's native label in the
+transformed visualization overlay. The run writes `auto_type_mapping.json`
+with the mapper provenance and per-status resolution counts (basis
+`unique_type_resolutions`).
 
 ## Finding Methods
 

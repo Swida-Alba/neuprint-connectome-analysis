@@ -267,7 +267,7 @@ query_batch(neurons)  # 1 query
 
 Some internal operations use ThreadPoolExecutor for parallel processing:
 
-**Profile Building** (HomologFinder, CrossDatasetVerifier):
+**Profile Building** (HomologFinder):
 - ThreadPoolExecutor for building connectivity profiles
 - Automatic worker count: `min(32, cpu_count + 4)`
 - Deferred cache writes for reduced I/O contention

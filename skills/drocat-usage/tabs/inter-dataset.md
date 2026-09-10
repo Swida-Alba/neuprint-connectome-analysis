@@ -139,6 +139,9 @@ python skills/drocat-usage/scripts/run_direct.py \
 - `degree_*`, `top_edges_*`, and `unique_to_*` exports are Standard-only;
   Custom combination runs omit them rather than infer a union threshold.
 - Use `auto_type_mapping=True` (and `overall_mapping_json`) when type names differ
-  between datasets.
+  between datasets. Path/edge merging resolves through the shared validity-aware
+  resolver: licensed renames merge under the canonical key, valid splits expand,
+  and conflicts stay dataset-scoped (never merged by raw same-name). The run's
+  `auto_type_mapping.json` records per-status counts and `raw_fallback_used`.
 - Use `parallel=True` with a bounded `max_workers` for many datasets; start with
   `skip_bodyId=True` and `max_interlayer=2`.

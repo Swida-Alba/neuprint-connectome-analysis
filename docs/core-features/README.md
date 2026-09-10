@@ -288,10 +288,10 @@ results = analyzer.run_comparison()
 
 ---
 
-## ✨ Connectivity Profile Verification (NEW)
+## ✨ Connectivity Profiling (NEW)
 
-### [Connectivity Profile Verification Guide](./ConnectivityProfileVerification_Guide.md)
-Complete guide to verifying neuron type assignments using connectivity fingerprints.
+### [ConnectivityProfiler Guide](./ConnectivityProfiler_Guide.md)
+Complete guide to building connectivity profiles with the 1-hop/2-hop hybrid approach.
 
 **Key Topics**:
 - Extracting connectivity profiles (upstream/downstream partners)
@@ -302,7 +302,7 @@ Complete guide to verifying neuron type assignments using connectivity fingerpri
 
 **Quick Start**:
 ```python
-from comparison import ConnectivityProfiler, CrossDatasetVerifier, ProfilerConfig
+from comparison import ConnectivityProfiler, ProfilerConfig
 
 # Configure profiler
 config = ProfilerConfig(
@@ -311,19 +311,18 @@ config = ProfilerConfig(
     min_synapse_threshold=3 # Filter weak connections
 )
 
-# Create profiler and verifier
+# Create profiler
 profiler = ConnectivityProfiler(
     datasets=['hemibrain:v1.2.1', 'male-cns:v0.9'],
     config=config
 )
-verifier = CrossDatasetVerifier(profiler)
 
-# Verify a neuron type across datasets
-results = verifier.verify_type_assignment(
-    'aMe12', 
+# Build profiles for a neuron type across datasets
+profiles = profiler.get_type_profiles(
+    'aMe12',
     datasets=['hemibrain:v1.2.1', 'male-cns:v0.9']
 )
-print(results.summary())
+print(profiles)
 ```
 
 **Confidence Thresholds**:
@@ -437,7 +436,7 @@ The toolkit uses Polars for high-performance data operations:
 
 Some internal operations use ThreadPoolExecutor for parallel processing:
 
-**Profile Building** (in HomologFinder, CrossDatasetVerifier):
+**Profile Building** (in HomologFinder):
 - Automatic worker count optimization
 - Deferred cache writes for reduced I/O
 - Memory-safe batch processing

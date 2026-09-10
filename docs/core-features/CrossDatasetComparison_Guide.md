@@ -277,6 +277,33 @@ results = analyzer.run_comparison()
 
 See the [LabelMapper Guide](./LabelMapper_Guide.md) for more details on mapping configuration.
 
+### Automatic type mapping vs explicit LabelMapper
+
+When no explicit `LabelMapper` is supplied, cross-dataset runs apply
+**automatic type mapping** by default (`use_auto_type_mapping=True`):
+type names resolve through the male-cns v1.0 mapping tables via the
+shared validity-aware resolver (`comparison/type_resolver.py`), and the
+same decision backs the Type Mapping panel, homolog finding, and
+connectivity-profile comparison. The policy per case:
+
+- **Unique rename** (e.g. MCNS `MeVPLo2` ↔ FAFB `MTe07`): both names are
+  treated as the same type everywhere — candidates, profiles, and reports.
+- **Valid split** (e.g. MCNS `VS` → FAFB `VS1`…`VS8`): every licensed
+  target is kept; profile weights distribute evenly across the branches
+  instead of picking an arbitrary one.
+- **Bridge-derived targets**: single bridge-derived targets are used and
+  keep their derivation provenance in diagnostics.
+- **Conflict** (e.g. BANC `CB1011` → MCNS): fail closed — no automatic
+  target, never compared by raw same-name.
+- **Unmapped types**: keep their raw name as an explicitly counted
+  long-tail fallback.
+
+Saved profile-comparison runs record an `auto_type_mapping_*` block in
+`parameters.json` (requested vs active mapper, source table, version,
+load error, per-status counts on the `unique_type_resolutions` basis, the
+separate occurrence-basis partner metric, and the raw-fallback flag). To bypass automatic
+mapping entirely and compare raw names, pass `use_auto_type_mapping=False`.
+
 > **UI:** the web UI manages the same mappings as reusable presets —
 > **Settings tab → Custom Type Mappings** (table-grid editor, saved in
 > `cache/user_mappings.json`) and **Cross-Dataset tab → Custom Type Mapping**

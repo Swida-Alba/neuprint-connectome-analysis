@@ -89,7 +89,6 @@ defines this completion contract.
 - **✨ NEW: [Connectivity Profiler Guide](./core-features/ConnectivityProfiler_Guide.md)** - 1-hop/2-hop hybrid profile building approach
 - **✨ [Homolog Finding Guide](./core-features/HomologFinding_Guide.md)** - Find homologous neurons across datasets using connectivity profiles
 - **✨ [Cross-Dataset Comparison Guide](./core-features/CrossDatasetComparison_Guide.md)** - Compare connectivity across hemibrain, male-cns, FlyWire, and more
-- **✨ [Connectivity Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)** - Verify neuron types using connectivity fingerprints
 - **[BANC Integration](./BANC_INTEGRATION.md)** - Standalone BANC public-release support (no FlyWire/CAVE dependency).
 - **[Visualization Guides](visualizations/README.md)** - Visualization docs and update summaries.
 - **[VisualizePath Updates Nov 2025](./visualizations/VisualizePath_Updates_Nov2025.md)** - Detailed guide on connection matrix support and new features.
@@ -154,7 +153,7 @@ Advanced technical documentation:
 - **[Homolog Finding](./core-features/HomologFinding_Guide.md)** - Find homologs across datasets
 - **[Cross-Dataset Comparison](./core-features/CrossDatasetComparison_Guide.md)** - Compare connectivity patterns
 - **[Graph Similarity Metrics](./core-features/GraphSimilarityMetrics_Documentation.md)** - Understanding similarity metrics
-- **[Connectivity Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)** - Verify neuron types
+- **[Connectivity Profiler Guide](./core-features/ConnectivityProfiler_Guide.md)** - Build connectivity profiles (1-hop/2-hop hybrid)
 - [Heatmap Guide](./visualizations/Heatmap_Guide.md) - Quantitative analysis
 - [Network Guide](./visualizations/Network_Guide.md) - Topology exploration
 - [Path Finding](./core-features/README.md#path-finding) - Multi-hop connections
@@ -187,7 +186,7 @@ Advanced technical documentation:
 - **✨ [Connectivity Profiler Guide](./core-features/ConnectivityProfiler_Guide.md)**: 1-hop/2-hop hybrid profile building
 - **✨ [Homolog Finding](./core-features/HomologFinding_Guide.md)**: Find homologs across datasets
 - **✨ [Cross-Dataset Comparison](./core-features/CrossDatasetComparison_Guide.md)**: Multi-dataset analysis
-- **✨ [Connectivity Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)**: Verify neuron types across datasets
+- **✨ [Connectivity Profiler Guide](./core-features/ConnectivityProfiler_Guide.md)**: Build cross-dataset connectivity profiles
 - **✨ [Connectivity Profiling](./CONNECTIVITY_PROFILING.md)**: Intra-dataset profile comparison with heatmaps (NEW)
 - **[Cache System Guide](./core-features/CacheSystem_Guide.md)**: Caching for fast repeat queries
 - **[Path Finding](./core-features/FindAllPath_Documentation.md)**: Multi-hop path discovery
@@ -203,7 +202,7 @@ Advanced technical documentation:
 | Direct connections          | [Main README](./core-features/BasicUsage_Guide.md)                                             |
 | Multi-hop paths             | [FindAllPath](./core-features/FindAllPath_Documentation.md)                          |
 | **Compare across datasets** | **[Cross-Dataset Comparison](./core-features/CrossDatasetComparison_Guide.md)**      |
-| **Verify neuron types**     | **[Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)** |
+| **Build profiles**          | **[Connectivity Profiler Guide](./core-features/ConnectivityProfiler_Guide.md)**     |
 | **Find homologs**           | **[Homolog Finding](./core-features/HomologFinding_Guide.md)**                       |
 | **Intra-dataset profiling** | **[Connectivity Profiling](./CONNECTIVITY_PROFILING.md)**                            |
 | Custom neuron groups        | [Custom Groups](./core-features/CustomGroups_Feature.md)                             |

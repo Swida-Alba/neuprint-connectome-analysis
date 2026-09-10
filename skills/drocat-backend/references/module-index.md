@@ -38,7 +38,7 @@ All paths are relative to the repo root unless noted.
 - `ConnectivityProfileComparer(query, dataset, top_k, top_m, min_synapse_threshold, direction, output_dir, generate_heatmaps, show_figures, skip_bodyId_level, verbose, use_cache, aggregation_level, ensure_cache_complete, custom_mapping_file)` → `run()`
 - `HomologFinder(source, source_dataset, target_dataset, output_dir, top_n, top_k, top_m, min_shared_partners, vector_prune_fraction, similarity_metric, vector_prefiltering, include_untyped_partners, min_synapse_threshold, use_cache, saveas, ensure_cache_complete, output_folder_prefix, visualize_skeleton, visualize_top_n, visualization_settings, use_auto_type_mapping, verbose)`
   - `find_homologs_fast()`, `find_homologs()`, `find_novel_homologs()`, `find_homologs_intra_dataset(...)`, `run_random_control_test(...)`
-- `ProfileComparator` (static helpers, no constructor args) → `compare_profiles(...)`, `compare_profiles_simple(...)`, `find_similar_types_across_datasets(...)`
+- `ProfileComparator` (static helpers, no constructor args) → `compare_profiles(...)`, `compare_profiles_simple(...)`
 - `ComparisonResult`, `DEFAULT_SCORE_WEIGHTS`
 
 ## neuronbridge_finder (`src/neuronbridge_finder.py`)

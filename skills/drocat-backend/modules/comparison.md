@@ -80,14 +80,22 @@ results = quick_compare(
 ## Type mapping across datasets
 
 ```python
-from comparison import CrossDatasetTypeMapper, LabelMapper
+from comparison.type_resolver import resolve_valid_targets, canonical_merge_key
+from comparison import LabelMapper
 
-mapper = CrossDatasetTypeMapper()      # auto-map type names across datasets
-labeler = LabelMapper()                # standardize labels if names differ
+# Preferred: the shared validity-aware resolver (what the panel, viewer,
+# homolog finding, and profile comparison all use) — preserves status,
+# fails closed on conflicts, expands valid splits.
+res = resolve_valid_targets(mapper, 'MeVPLo2', 'male-cns:v1.0', 'flywire_FAFB_v783')
+
+labeler = LabelMapper()                # explicit per-dataset override (wins)
 ```
 
 `ComparisonParameters.auto_type_mapping=True` (plus `overall_mapping_json`) is the
 usual way to resolve differing type names; `LabelMapper` is the manual override.
+`CrossDatasetTypeMapper.get_mapped_type()` / `resolve_type_across_datasets()`
+are **compatibility-only** (no status/provenance; `None` on splits/conflicts) —
+new code should use `comparison.type_resolver`.
 
 ## Untyped-neuron drop (drop_untyped)
 

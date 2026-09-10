@@ -96,7 +96,7 @@ skipped entirely the run logs a loud warning and records
 aggregate IPSILATERAL pairs only; contralateral rows stay in results.csv,
 and types with exclusively contralateral evidence are omitted from the
 type ranking. The vector method lateral-normalizes and uses both sides.
-NBLAST on FAFB scores the whole candidate pool from the healed bundle
+NBLAST on FAFB scores the whole candidate pool from the healed zip
 skeletons. Both methods run against
 the V2 skeleton-vector cache (never the mesh cache). **BANC is excluded
 from both methods**: morphological similarity on its public-release SWCs
@@ -159,13 +159,15 @@ vecs = cache.vectors_for(body_ids, compute_missing=True)
 - `find_similar_raw_cache(dataset, ...)` — the raw skeleton cache helper.
 - `find_similar_dataset_cache(dataset, ...)` — dataset-level cache helper.
 - `find_similar_flywire_mesh_cache(...)` — FlyWire mesh cache helper.
-- `load_flywire_skeletons_batch(dataset, body_ids, ...)` — canonical local
-  raw-skeleton loader: raw cache → FAFB healed bundle or standalone BANC
-  public-release SWCs. Only FAFB performs the per-run extrusion check and
-  token-gated CAVE repair; BANC never enters those stages. All returned trees
-  are cached as `.swc.zst` (FAFB CAVE-skeletonized replacements in the
-  dedicated `skeletons/cave_skeletons/` store); the prepared mesh cache is
-  never consulted.
+- `load_local_release_skeletons(dataset, body_ids, ...)` — canonical local
+  raw-skeleton loader: locally repaired caches (`cave_skeletons` /
+  `extrusion_fixes`, status-driven) → raw cache (legacy frozen reads) →
+  FAFB healed zip or standalone BANC public-release SWCs. Only FAFB performs
+  the one-time extrusion check and the CAVE/local-prune repair; BANC never
+  enters those stages. FAFB CAVE-skeletonized replacements live in the
+  dedicated `skeletons/cave_skeletons/` store, locally pruned fixes in
+  `skeletons/extrusion_fixes/`; the loader never writes new raw-store
+  entries and the prepared mesh cache is never consulted.
 
 ## Notes
 

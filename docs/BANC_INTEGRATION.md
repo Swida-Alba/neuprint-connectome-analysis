@@ -36,7 +36,10 @@ automatically from the public bucket (`~134 MB`, one time):
   into the product — matching what the Codex download provided).
 
 The raw products stay in `datasets/<dataset>/downloads/` so re-runs are
-offline. The sidecar is written as `<dataset>_metadata.json` (e.g.
+offline — with one exception: the connections product is only fetched
+while the merged connections table is missing, so it can be deleted once
+that table exists (see *Local files and disk usage* below). The sidecar
+is written as `<dataset>_metadata.json` (e.g.
 `datasets/banc_v626/banc_v626_metadata.json`,
 `datasets/banc_v888/banc_v888_metadata.json`) and records
 `source: banc_public_gcs`.
@@ -183,6 +186,37 @@ positions — the release publishes only pre-site coordinates, so the
 paired cone/sphere markers used for FAFB/NeuPrint are not available. The
 UI shows an explicit warning when synapses are enabled for a BANC
 dataset. The `pre-post sites` mode is not supported for BANC.
+
+The downloaded raw table is aggregated once into the derived per-pair
+table `datasets/<dataset>/<dataset>_synapse_table.parquet` (~1.4 GB,
+columns `pre_root_id, post_root_id, syn_count, x_pre, y_pre, z_pre` in
+nanometres) and the raw download is then deleted. Because the release has
+no post-site coordinates, the reader mirrors the pre-site position onto
+`x/y/z_post` in memory after loading; the mirrored duplicates are **not**
+persisted. The derived table is stored with a measured **lossless**
+layout (`DELTA_BINARY_PACKED` on `pre_root_id`, `BYTE_STREAM_SPLIT` on
+`post_root_id`/`syn_count`/`x_pre`/`y_pre`, zstd-7, no dictionary) and
+stamped with a `DROCAT.lossless` footer marker — values read back are
+bit-identical, only the storage representation changes. Tables produced
+by older DROCAT versions still carry the three duplicated post columns
+(~40% of the file) and the plain layout; they are re-encoded in place
+automatically the next time the table is used (one streaming pass,
+~30 s on the v888 release).
+
+## Local files and disk usage
+
+| path | required? | notes |
+|---|---|---|
+| `datasets/<ds>/downloads/banc_888_meta.feather` | **keep** | read at runtime (neuron index, cross-dataset type mapper) and needed to rebuild the neuron tables |
+| `datasets/<ds>/<ds>_allneurons_neuron_df.csv` | **keep** | read directly by ROI screening and the neuron index builder (the `.parquet` twin is preferred elsewhere) |
+| `datasets/<ds>/<ds>_allneurons_neuron_df.parquet` | keep | canonical neuron table |
+| `datasets/<ds>/<ds>_merged_connections.parquet` | keep | source for the connection cache; used by profiling and comparison |
+| `datasets/<ds>/<ds>_synapse_table.parquet` | keep (lossless-encoded) | derived per-pair synapse table; legacy tables self-upgrade on first reuse |
+| `datasets/<ds>/downloads/connections_<version>.parquet` | droppable | only consumed to build the merged table; re-downloaded automatically if the merged table is ever missing. **Deletable once `<ds>_merged_connections.parquet` exists** (76 MB) |
+| `cache/<ds>/connections.parquet` + `.src` | droppable | derived from the merged table; rebuilt automatically whenever missing or stale (~109 MB) |
+| `cache/<ds>/neuron_index_state.parquet` | droppable | rebuilt together with the connection cache (~15 MB) |
+| `cache/<ds>/incoming_connections.parquet` + `incoming_complete.json` | droppable | pathfinding caches, recomputed on demand (~52 MB) |
+| `cache/<ds>/skeletons/`, `meshes/`, `meshes_transformed/` | droppable | render caches; re-fetched at the cost of network time |
 
 ## Pathfinding & connectivity
 

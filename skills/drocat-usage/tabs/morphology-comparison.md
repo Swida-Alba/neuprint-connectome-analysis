@@ -63,8 +63,8 @@ python skills/drocat-usage/scripts/run_direct.py \
   dotprops pipeline); it excludes contralateral pairs from type means.
 - `vector_v2` uses the per-dataset `SkeletonVectorCacheV2`; missing members
   are fetched online by default (`fetch_online=True`) through the same
-  skeleton pipeline as Find Similar (NeuPrint raw SWC; FAFB healed bundle
-  → CAVE fallback) and persist into the shared cache. Set
+  skeleton pipeline as Find Similar (NeuPrint raw SWC; FAFB healed zip
+  → CAVE/local-fix fallback) and persist into the shared cache. Set
   `fetch_online=False` for a strictly offline comparison.
 - Each row is one TYPE: bodyId queries resolve to their type; patterns
   (`aMe.*`) expand against the dataset's type names (exact names always

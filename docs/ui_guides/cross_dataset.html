@@ -183,7 +183,23 @@
   <h2>The Type Mapping panel</h2>
   <p>The <b>Type Mapping</b> button (enabled when &ge; 2 selected datasets
     have cached neuron indexes) previews the auto type mapping the run
-    will use — informational only, please double check.</p>
+    will use — informational only, please double check. The same
+    validity-aware decision (shared resolver,
+    <code>comparison/type_resolver.py</code>) backs the panel, the viewer's
+    <i>See available neurons</i> mapping, homolog finding, and the
+    connectivity-profile comparison.</p>
+  <ul>
+    <li><b>Unique rename</b> (e.g. MCNS <code>MeVPLo2</code> &harr; FAFB
+      <code>MTe07</code>): one canonical target everywhere.</li>
+    <li><b>Valid split</b> (e.g. MCNS <code>VS</code> &rarr; FAFB
+      <code>VS1</code>…<code>VS8</code>): every licensed branch is listed;
+      no arbitrary single target is chosen.</li>
+    <li><b>Conflict</b> (e.g. BANC <code>CB1011</code>): fails closed — no
+      automatic target, and the type is never merged by raw same-name in
+      path/edge tables or comparison anchors.</li>
+    <li><b>Unmapped</b>: keeps its raw name as the counted long-tail
+      fallback (surfaced in the saved metadata's <code>raw_fallback_used</code>).</li>
+  </ul>
   <ul>
     <li><b>Search</b>: one query per chip (exact / starts with / contains /
       ends with / regex), with dataset-aware type suggestions. A chip that
@@ -301,7 +317,7 @@
                                                    # Standard and Custom queries
   label_map.json, parameters.json
   dataset_metadata_comparison.csv
-  auto_type_mapping.csv, auto_type_mapping_conflicts.csv
+  auto_type_mapping.json, auto_type_mapping.csv, auto_type_mapping_conflicts.csv
   comparison_report_used_data/            # CSVs backing the report
   comparison_results/
     edge_presence_matrix.csv, edge_presence_matrix_minsyn_{N}.csv
