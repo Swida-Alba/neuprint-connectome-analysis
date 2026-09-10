@@ -172,15 +172,14 @@ DROCAT ships one versioned branch per release (`v4.5.0`, `v4.4.5`, …), each mi
 
 | Release | Date | Highlights |
 | --- | --- | --- |
-| **v4.5.0** — current | August 2026 | Script-first agent analysis, local FAFB + standalone BANC support, Similarity tab reorganization, NT grouping, palette editor, 3D skeleton reorganization (see [What's New](#whats-new-in-v450)) |
-| v4.4.5 — latest published | 2026-08-04 | Agent-assisted direct runs |
-| v4.4.0 | 2026-01-10 | Local FAFB + standalone BANC datasets, priority-based neuron search, NT visualization |
-| v4.3.0 | 2025-12-23 | NeuronBridge integration with region filtering, FlyLight |
-| v4.2.0 | 2025-12-14 | FAFB download guidance and fixes |
-| v4.1.0 | 2025-12-01 | Simplified connectivity verification (Jaccard + rank) |
-| v4.0.0 | 2025-11-24 | Modular v4 rearchitecture |
+| **[v4.5.0](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/tree/v4.5.0)** — current | August 2026 | Script-first agent analysis, local FAFB + standalone BANC support, Similarity tab reorganization, NT grouping, palette editor, 3D skeleton reorganization (see [What's New](#whats-new-in-v450)) |
+| [v4.4.5](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/releases/tag/v4.4.5) — latest published | 2026-08-04 | Agent-assisted direct runs |
+| [v4.4.0](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/releases/tag/v4.4.0) | 2026-01-10 | Local FAFB + standalone BANC datasets, priority-based neuron search, NT visualization |
+| [v4.3.0](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/releases/tag/v4.3.0) | 2025-12-23 | NeuronBridge integration with region filtering, FlyLight |
+| [v4.2.0](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/releases/tag/v4.2.0) | 2025-12-14 | FAFB download guidance and fixes |
+| [v4.0.0](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/releases/tag/v4.0.0) | 2025-11-24 | Modular v4 rearchitecture |
 
-Older releases (v3.x and the v2.1 beta) remain available as tags.
+Earlier releases (v4.4.1–v4.4.3, v4.3.1–v4.3.3, v4.2.1, [v3.2.1](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/releases/tag/v3.2.1), [v3.2](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/releases/tag/v3.2), [v3.0](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/releases/tag/v3.0), [V3.1](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/releases/tag/V3.1), and the [v2.1 beta](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/releases/tag/v2.1-beta)) are on the [Releases page](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/releases); every version is also available as a [Git tag](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/tags).
 
 **Get a specific release:**
 
