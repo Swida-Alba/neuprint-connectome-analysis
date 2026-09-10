@@ -53,22 +53,20 @@ def test_status_card_prefers_cached_icon_when_server_is_also_available(
 ):
     import ui.dataset_service as dataset_service_module
     from ui.components.common import dataset_status_card
-    from ui.dataset_service import DatasetInfo, DatasetService
+    from ui.dataset_service import DatasetService, dataset_to_folder
 
     service = DatasetService()
     service._datasets_dir = tmp_path / "datasets"
     service._cache_dir = tmp_path / "cache"
-    service._availability_loaded = True
+    service._availability_loaded = True  # skip disk load; keep _server_rows
     dataset = "manc:v1.2.3"
-    service._availability_snapshot = {
-        dataset: DatasetInfo(
-            name=dataset,
-            source="neuprint",
-            available=True,
-            local_cache=True,
-            display_name=dataset,
-        )
+    service._server_rows = {
+        dataset: {"state": "available", "checked_at": None, "metadata": {}},
     }
+    # A local connection cache exists but no metadata table.
+    cache_dir = service._cache_dir / dataset_to_folder(dataset)
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "connections.parquet").touch()
     monkeypatch.setattr(dataset_service_module, "_dataset_service", service)
 
     client = Client(page("/dataset-status-card-priority"))
@@ -89,21 +87,16 @@ def test_settings_watcher_updates_selector_and_card_on_create_and_remove(
 ):
     import ui.dataset_service as dataset_service_module
     from ui.components.common import dataset_selector, dataset_status_card
-    from ui.dataset_service import DatasetInfo, DatasetService
+    from ui.dataset_service import DatasetService, dataset_to_folder
 
     service = DatasetService()
     service._datasets_dir = tmp_path / "datasets"
     service._cache_dir = tmp_path / "cache"
     service._availability_loaded = True
     dataset = "manc:v1.2.3"
-    info = DatasetInfo(
-        name=dataset,
-        source="neuprint",
-        available=True,
-        display_name=dataset,
-    )
-    service._availability_snapshot = {dataset: info}
-    service._cache[dataset] = info
+    service._server_rows = {
+        dataset: {"state": "available", "checked_at": None, "metadata": {}},
+    }
     monkeypatch.setattr(dataset_service_module, "_dataset_service", service)
 
     client = Client(page("/dataset-status-auto-watcher"))
@@ -116,7 +109,7 @@ def test_settings_watcher_updates_selector_and_card_on_create_and_remove(
         for element in client.elements.values()
         if isinstance(element, Timer)
     )
-    cache_file = service._cache_dir / "manc_v1_2_3" / "connections.parquet"
+    cache_file = service._cache_dir / dataset_to_folder(dataset) / "connections.parquet"
     cache_file.parent.mkdir(parents=True)
     cache_file.touch()
 

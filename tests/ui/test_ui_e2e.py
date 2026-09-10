@@ -2288,39 +2288,77 @@ class TestDatasetService:
         assert callable(get_dataset_service)
 
     def test_availability_snapshot_persists_and_refresh_overwrites(self, tmp_path):
-        """A refresh replaces the saved snapshot used by the next session."""
-        from ui.dataset_service import DatasetInfo, DatasetService
+        """A refresh persists the server dimension used by the next session."""
+        from ui.dataset_service import (
+            SERVER_AVAILABLE,
+            SERVER_UNREACHABLE,
+            DatasetService,
+        )
 
         service = DatasetService()
         service._cache_dir = tmp_path / "cache"
-        state = {"available": False}
+        state = {"server": SERVER_UNREACHABLE}
 
-        def fake_check(dataset):
-            return DatasetInfo(
-                name=dataset,
-                source="neuprint",
-                available=state["available"],
-                display_name=dataset,
-            )
-
-        service.check_dataset_availability = fake_check
+        service._probe_server = lambda dataset: {
+            "state": state["server"],
+            "checked_at": "2026-09-10T00:00:00+08:00",
+            "metadata": {},
+        }
         service.refresh_availability(["demo:v1.0"])
         first, first_updated = service.get_cached_availability()
+        assert first["demo:v1.0"].server_state == SERVER_UNREACHABLE
         assert first["demo:v1.0"].available is False
         assert first_updated
-        assert service.availability_cache_path.exists()
 
-        state["available"] = True
+        state["server"] = SERVER_AVAILABLE
         service.refresh_availability(["demo:v1.0"])
         second, second_updated = service.get_cached_availability()
+        assert second["demo:v1.0"].server_state == SERVER_AVAILABLE
         assert second["demo:v1.0"].available is True
         assert second_updated
+
+        # The persisted file holds only the server dimension.
+        import json
+        payload = json.loads(service.availability_cache_path.read_text())
+        assert payload["format"] == service.AVAILABILITY_CACHE_FORMAT
+        assert payload["servers"]["demo:v1.0"]["state"] == SERVER_AVAILABLE
+        assert "datasets" not in payload
 
         next_session = DatasetService()
         next_session._cache_dir = service._cache_dir
         persisted, persisted_updated = next_session.get_cached_availability()
+        assert persisted["demo:v1.0"].server_state == SERVER_AVAILABLE
         assert persisted["demo:v1.0"].available is True
         assert persisted_updated == second_updated
+
+    def test_targeted_refresh_merges_and_full_refresh_replaces(self, tmp_path):
+        """A targeted refresh updates only the probed rows; a full refresh
+        (``None``) is authoritative and replaces the server dimension."""
+        from ui.dataset_service import DatasetService
+
+        service = DatasetService()
+        service._cache_dir = tmp_path / "cache"
+        service._datasets_dir = tmp_path / "datasets"
+        service._index_dir = tmp_path / "neuron_indexes"
+        service._probe_server = lambda ds: {
+            "state": "available", "checked_at": "t", "metadata": {}}
+
+        service.refresh_availability(["hemibrain:v1.2.1", "male-cns:v1.0"])
+        assert set(service._server_rows) == {"hemibrain:v1.2.1", "male-cns:v1.0"}
+
+        # Targeted refresh of one row preserves the other.
+        service._probe_server = lambda ds: {
+            "state": "timeout", "checked_at": "t2", "metadata": {}}
+        service.refresh_availability(["male-cns:v1.0"])
+        assert service._server_rows["male-cns:v1.0"]["state"] == "timeout"
+        assert service._server_rows["hemibrain:v1.2.1"]["state"] == "available"
+
+        # A full refresh replaces the whole server dimension.
+        service._probe_server = lambda ds: {
+            "state": "unreachable", "checked_at": "t3", "metadata": {}}
+        service.refresh_availability()
+        assert service._server_rows["hemibrain:v1.2.1"]["state"] == "unreachable"
+        assert service._server_rows["male-cns:v1.0"]["state"] == "unreachable"
 
     def test_folder_to_dataset_conversion(self):
         from ui.dataset_service import folder_to_dataset
@@ -2723,12 +2761,13 @@ class TestDatasetService:
 
         service = DatasetService()
         service._cache_dir = tmp_path / "cache"
-        service.check_dataset_availability = lambda dataset: DatasetInfo(
-            name=dataset,
-            source="neuprint",
-            available=True,
-            display_name=dataset,
-        )
+        # demo:v1.0 is not a real dataset family; stub the server probe so
+        # refresh persists a server row for it.
+        service._probe_server = lambda dataset: {
+            "state": "available",
+            "checked_at": "2026-09-10T00:00:00+08:00",
+            "metadata": {"server": "test"},
+        }
         service.refresh_availability(["demo:v1.0"])
         monkeypatch.setattr(dataset_service_module, "get_dataset_service", lambda: service)
         monkeypatch.setattr(settings_module, "get_dataset_service", lambda: service)

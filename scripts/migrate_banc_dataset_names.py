@@ -12,7 +12,9 @@ Handled locations (all regenerable except ``datasets/``):
 - ``neuron_indexes/flywire_BANC_v*/``    -> renamed dirs + manifest.json entries
 - ``cache/flywire_BANC_v*/``             -> renamed dirs (warm caches)
 - ``cache/neuronbridge/**/id_to_lines/`` -> renamed per-neuron parquet files
-- ``cache/dataset_availability.json``    -> re-keyed entries
+
+(``cache/dataset_availability.json`` now stores only the server dimension
+with canonical keys, so it needs no re-keying.)
 
 Frozen user outputs (``homolog_param_benchmark/`` etc.) are intentionally not
 touched.  Idempotent: already-renamed targets are skipped.  Run with
@@ -55,30 +57,6 @@ def rename_path(path: Path, dry_run: bool) -> bool:
         return True
     path.rename(dest)
     print(f"  renamed: {path.name} -> {target}")
-    return True
-
-
-def patch_json_keys(path: Path, dry_run: bool) -> bool:
-    """Re-key a JSON object whose top-level keys embed legacy BANC names."""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
-        return False
-    if not isinstance(data, dict):
-        return False
-    changed = False
-    for key in list(data):
-        target = new_name(key)
-        if target and target != key and target not in data:
-            data[target] = data.pop(key)
-            changed = True
-    if not changed:
-        return False
-    if dry_run:
-        print(f"  -> would re-key: {path}")
-        return True
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-    print(f"  re-keyed: {path}")
     return True
 
 
@@ -166,7 +144,9 @@ def main() -> int:
 
     avail = PROJECT_ROOT / "cache" / "dataset_availability.json"
     if avail.exists():
-        patch_json_keys(avail, dry_run)
+        # The availability file now stores only the server dimension (canonical
+        # NeuPrint/bucket keys), so it holds no BANC namespaces to migrate.
+        print("[cache/dataset_availability.json] server-only; nothing to rename")
 
     print(f"\n{'would rename' if dry_run else 'renamed'} {moved} path(s).")
     if not dry_run:

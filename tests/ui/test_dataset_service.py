@@ -420,39 +420,18 @@ class TestBancFallbackCounts:
 
 
 class TestSnapshotNameCanonicalization:
-    """A persisted availability snapshot written before the
-    ``flywire_BANC_*`` -> ``banc_*`` rename must not surface a legacy name
-    or a ``flywire`` source for a standalone BANC release."""
+    """A persisted availability file written before the ``flywire_BANC_*``
+    -> ``banc_*`` rename must not surface a legacy name or a ``flywire``
+    source for a standalone BANC release."""
 
-    def test_deserialize_canonicalizes_legacy_banc_name(self):
-        info = DatasetService._deserialize_info(
-            "flywire_BANC_v888",
-            {"name": "flywire_BANC_v888", "source": "flywire",
-             "available": True, "neuron_count": 158262},
-        )
-        assert info.name == "banc_v888"
-        assert info.source == "banc"
-        assert info.neuron_count == 158262
-
-    def test_deserialize_keeps_fafb_and_neuprint_sources(self):
-        fafb = DatasetService._deserialize_info(
-            "flywire_FAFB_v783",
-            {"name": "flywire_FAFB_v783", "source": "flywire"})
-        assert fafb.name == "flywire_FAFB_v783"
-        assert fafb.source == "flywire"
-
-        np_info = DatasetService._deserialize_info(
-            "hemibrain:v1.2.1",
-            {"name": "hemibrain:v1.2.1", "source": "neuprint"})
-        assert np_info.name == "hemibrain:v1.2.1"
-        assert np_info.source == "neuprint"
-
-    def test_persisted_snapshot_self_heals_on_load(self, monkeypatch, tmp_path):
+    def test_legacy_v1_local_rows_are_dropped_and_rederived(self, monkeypatch, tmp_path):
+        """A v1 file's local rows must not surface; only server rows survive,
+        and local state is re-derived from disk."""
         import json
 
         snapshot_path = tmp_path / "dataset_availability.json"
         snapshot_path.write_text(json.dumps({
-            "format": DatasetService.AVAILABILITY_CACHE_FORMAT,
+            "format": "drocat_dataset_availability/v1",
             "updated_at": "2026-08-18T00:11:08+08:00",
             "datasets": {
                 "flywire_BANC_v888": {
@@ -471,22 +450,14 @@ class TestSnapshotNameCanonicalization:
         monkeypatch.setattr(
             DatasetService, "availability_cache_path",
             property(lambda self: snapshot_path))
-        # A local release is re-derived from disk, so stub the offline check
-        # to keep the test hermetic and to prove the persisted counts lose.
-        monkeypatch.setattr(
-            DatasetService, "check_dataset_availability",
-            lambda self, ds: DatasetInfo(name="banc_v888", source="banc",
-                                         available=True, local_prepared=True,
-                                         neuron_count=188508, typed_count=118748))
+        # Hermetic: keep the legacy row out of the row set entirely; the
+        # catalog still exposes the canonical local release.
+        monkeypatch.setattr(DatasetService, "get_local_datasets", lambda self: [])
+        svc._load_persisted_availability()
 
-        results, _updated = svc.get_cached_availability()
-        assert "banc_v888" in results
-        assert "flywire_BANC_v888" not in results
-        assert results["banc_v888"].source == "banc"
-        assert results["banc_v888"].neuron_count == 188508
-        assert results["banc_v888"].typed_count == 118748
-        # Non-local rows keep their persisted values.
-        assert results["hemibrain:v1.2.1"].source == "neuprint"
+        # The legacy local row is dropped; the server row survives.
+        assert "flywire_BANC_v888" not in svc._server_rows
+        assert svc._server_rows["hemibrain:v1.2.1"]["state"] == "available"
 
     def test_local_release_row_is_rederived_not_frozen(self, monkeypatch):
         """A local-release snapshot row must not win over the live local
@@ -500,20 +471,265 @@ class TestSnapshotNameCanonicalization:
                 "neuron_count": 115151, "typed_count": 115151,
             },
         }
-        captured = {}
+        # A v1 local row is discarded outright by the server-row reader.
+        rows = DatasetService._read_server_rows({"datasets": stale})
+        assert "banc_v626" not in rows
 
-        def _fake_check(self, dataset):
-            captured["called_with"] = dataset
-            return DatasetInfo(name=dataset, source="banc", available=True,
-                               local_prepared=True, neuron_count=185165,
-                               typed_count=116906)
-
+        # And the composed row derives current counts from disk.
         svc = DatasetService()
-        monkeypatch.setattr(DatasetService, "check_dataset_availability", _fake_check)
-        # Drive the same loop _load_persisted_availability runs.
-        info = svc._deserialize_info("banc_v626", stale["banc_v626"])
-        assert is_banc_dataset(info.name)
-        refreshed = svc.check_dataset_availability(info.name)
-        assert captured["called_with"] == "banc_v626"
-        assert refreshed.neuron_count == 185165
-        assert refreshed.typed_count == 116906
+        info = svc._compose("banc_v626")
+        assert info.family == "banc"
+        assert info.source == "banc"
+        # The stale 115151/115151 must never come from a persisted local row.
+        assert info.neuron_count != 115151 or info.typed_count != 115151
+
+
+class TestSourceVocabulary:
+    """``DatasetInfo.source`` keeps its established values ('neuprint' /
+    'flywire' / 'banc'); ``family`` carries the precise 'fafb' spelling."""
+
+    def test_source_of(self):
+        assert DatasetService.source_of("hemibrain:v1.2.1") == "neuprint"
+        assert DatasetService.source_of("flywire_FAFB_v783") == "flywire"
+        assert DatasetService.source_of("banc_v888") == "banc"
+
+    def test_composed_sources(self, tmp_path):
+        svc = DatasetService()
+        svc._datasets_dir = tmp_path / "datasets"
+        svc._cache_dir = tmp_path / "cache"
+        svc._index_dir = tmp_path / "neuron_indexes"
+        svc._availability_loaded = True
+        assert svc._compose("flywire_FAFB_v783").source == "flywire"
+        assert svc._compose("flywire_FAFB_v783").family == "fafb"
+        assert svc._compose("banc_v888").source == "banc"
+        assert svc._compose("hemibrain:v1.2.1").source == "neuprint"
+
+
+class TestCatalogComposition:
+    """The composed catalog must list every known dataset on a fresh machine
+    (no file, no token, empty ``datasets/``), not just the local releases."""
+
+    def test_fresh_machine_lists_neuprint_candidates_and_locals(self, tmp_path):
+        svc = DatasetService()
+        svc._cache_dir = tmp_path / "cache"      # no availability file
+        svc._datasets_dir = tmp_path / "datasets"  # does not exist
+        svc._index_dir = tmp_path / "neuron_indexes"
+        results, _updated = svc.get_cached_availability()
+
+        # Every NeuPrint candidate is listed, even though none is checked.
+        for cand in svc.NEUPRINT_CANDIDATES:
+            assert cand in results, f"{cand} missing from fresh-machine catalog"
+        # Local releases are listed too.
+        assert "flywire_FAFB_v783" in results
+        assert "banc_v888" in results
+
+        # No network was attempted, so every server state is 'unknown' and
+        # nothing is falsely reported available.
+        from ui.dataset_service import SERVER_UNKNOWN
+        for info in results.values():
+            assert info.server_state == SERVER_UNKNOWN
+            assert info.available is False
+        # A download-required release is not analyzable without local tables.
+        assert results["banc_v888"].access_mode == "download_required"
+        assert results["hemibrain:v1.2.1"].access_mode == "streaming"
+
+
+class TestDimensionStatus:
+    """The four-dimensional status model: server / metadata / connectivity /
+    visualization, plus access mode."""
+
+    def _svc(self, tmp_path):
+        svc = DatasetService()
+        svc._datasets_dir = tmp_path / "datasets"
+        svc._cache_dir = tmp_path / "cache"
+        svc._index_dir = tmp_path / "neuron_indexes"
+        return svc
+
+    def test_families_and_access_modes(self):
+        from ui.dataset_service import ACCESS_DOWNLOAD_REQUIRED, ACCESS_STREAMING
+        assert DatasetService.family_of("hemibrain:v1.2.1") == "neuprint"
+        assert DatasetService.family_of("flywire_FAFB_v783") == "fafb"
+        assert DatasetService.family_of("banc_v888") == "banc"
+        assert DatasetService.access_mode_of("hemibrain:v1.2.1") == ACCESS_STREAMING
+        assert DatasetService.access_mode_of("banc_v888") == ACCESS_DOWNLOAD_REQUIRED
+        assert DatasetService.access_mode_of("flywire_FAFB_v783") == \
+            ACCESS_DOWNLOAD_REQUIRED
+
+    def test_banc_not_available_until_local_tables_exist(self, tmp_path):
+        """BANC is download-required: server reachability alone is not ready."""
+        from ui.dataset_service import CAP_MISSING, CAP_READY, SERVER_AVAILABLE
+        svc = self._svc(tmp_path)
+        svc._server_rows = {"banc_v888": {
+            "state": SERVER_AVAILABLE, "checked_at": None, "metadata": {}}}
+        svc._availability_loaded = True
+
+        info = svc.check_dataset_availability("banc_v888")
+        assert info.access_mode == "download_required"
+        assert info.server_state == SERVER_AVAILABLE
+        assert info.connectivity_state == CAP_MISSING
+        assert info.available is False  # reachable but not analyzable
+
+        # Now create the local tables.
+        ds_dir = tmp_path / "datasets" / "banc_v888"
+        ds_dir.mkdir(parents=True)
+        (ds_dir / "banc_v888_allneurons_neuron_df.parquet").write_bytes(b"x")
+        (ds_dir / "banc_v888_merged_connections.parquet").write_bytes(b"x")
+        info2 = svc.check_dataset_availability("banc_v888")
+        assert info2.connectivity_state == CAP_READY
+        assert info2.metadata_state == CAP_READY
+        assert info2.available is True
+
+    def test_banc_available_requires_both_tables(self, tmp_path):
+        """One table alone must not make a release analyzable."""
+        from ui.dataset_service import CAP_MISSING, CAP_READY
+        svc = self._svc(tmp_path)
+        svc._availability_loaded = True
+        ds_dir = tmp_path / "datasets" / "banc_v888"
+        ds_dir.mkdir(parents=True)
+
+        # Connections only -> not available (the neuron table is missing).
+        (ds_dir / "banc_v888_merged_connections.parquet").write_bytes(b"x")
+        info = svc.check_dataset_availability("banc_v888")
+        assert info.connectivity_state == CAP_READY
+        assert info.metadata_state == CAP_MISSING
+        assert info.available is False
+        assert info.error
+
+        # Neuron table only -> not available either.
+        (ds_dir / "banc_v888_merged_connections.parquet").unlink()
+        (ds_dir / "banc_v888_allneurons_neuron_df.parquet").write_bytes(b"x")
+        info = svc.check_dataset_availability("banc_v888")
+        assert info.metadata_state == CAP_READY
+        assert info.connectivity_state == CAP_MISSING
+        assert info.available is False
+
+        # Both -> available.
+        (ds_dir / "banc_v888_merged_connections.parquet").write_bytes(b"x")
+        assert svc.check_dataset_availability("banc_v888").available is True
+
+    def test_neuprint_metadata_requires_table_roi_and_index(self, tmp_path):
+        """Metadata readiness = neuron table + ROI table + neuron index."""
+        from ui.dataset_service import CAP_MISSING, CAP_PARTIAL, CAP_READY
+        svc = self._svc(tmp_path)
+        ds_dir = tmp_path / "datasets" / "hemibrain_v1_2_1"
+        ds_dir.mkdir(parents=True)
+        (ds_dir / "hemibrain_v1_2_1_allneurons_neuron_df.parquet").write_bytes(b"x")
+        assert svc.probe_metadata("hemibrain:v1.2.1") == CAP_PARTIAL
+
+        (ds_dir / "hemibrain_v1_2_1_allneurons_roi_count_df.parquet").write_bytes(b"x")
+        assert svc.probe_metadata("hemibrain:v1.2.1") == CAP_PARTIAL
+
+        idx = tmp_path / "neuron_indexes" / "hemibrain_v1_2_1"
+        idx.mkdir(parents=True)
+        (idx / "neuron_index.parquet").write_bytes(b"x")
+        assert svc.probe_metadata("hemibrain:v1.2.1") == CAP_READY
+
+    def test_neuprint_connectivity_streams_without_cache(self, tmp_path):
+        from ui.dataset_service import CAP_ON_DEMAND, CAP_READY
+        svc = self._svc(tmp_path)
+        assert svc.probe_connectivity("hemibrain:v1.2.1") == CAP_ON_DEMAND
+        cache_conn = tmp_path / "cache" / "hemibrain_v1_2_1" / "connections.parquet"
+        cache_conn.parent.mkdir(parents=True)
+        cache_conn.touch()
+        assert svc.probe_connectivity("hemibrain:v1.2.1") == CAP_READY
+
+    def test_fafb_visualization_local_zip_vs_cave(self, tmp_path, monkeypatch):
+        from ui.dataset_service import CAP_MISSING, CAP_ON_DEMAND, CAP_READY
+        svc = self._svc(tmp_path)
+        monkeypatch.setattr(DatasetService, "get_cave_token", lambda self: None)
+        assert svc.probe_visualization("flywire_FAFB_v783")[0] == CAP_MISSING
+
+        monkeypatch.setattr(DatasetService, "get_cave_token", lambda self: "cav")
+        state, source = svc.probe_visualization("flywire_FAFB_v783")
+        assert (state, source) == (CAP_ON_DEMAND, "cave")
+
+        ds_dir = tmp_path / "datasets" / "flywire_FAFB_v783"
+        ds_dir.mkdir(parents=True)
+        (ds_dir / "sk_lod1_783_healed.zip").write_bytes(b"x")
+        state, source = svc.probe_visualization("flywire_FAFB_v783")
+        assert (state, source) == (CAP_READY, "local")
+
+    def test_banc_visualization_on_demand_from_bucket(self, tmp_path):
+        from ui.dataset_service import CAP_ON_DEMAND, CAP_READY
+        svc = self._svc(tmp_path)
+        assert svc.probe_visualization("banc_v888") == (CAP_ON_DEMAND, "bucket")
+        skel = (tmp_path / "cache" / "banc_v888" / "skeletons" / "raw_skeletons")
+        skel.mkdir(parents=True)
+        (skel / "1.swc.zst").write_bytes(b"x")
+        assert svc.probe_visualization("banc_v888") == (CAP_READY, "local")
+
+
+class TestServerStates:
+    """Server failures are classified, not collapsed to one bool."""
+
+    def _svc(self, tmp_path):
+        svc = DatasetService()
+        svc._datasets_dir = tmp_path / "datasets"
+        svc._cache_dir = tmp_path / "cache"
+        svc._index_dir = tmp_path / "neuron_indexes"
+        return svc
+
+    def test_neuprint_no_token(self, tmp_path, monkeypatch):
+        from ui.dataset_service import SERVER_NO_TOKEN
+        svc = self._svc(tmp_path)
+        # Force the no-token branch (a developer config may carry a token).
+        monkeypatch.setattr(DatasetService, "get_token", lambda self: None)
+        assert svc._probe_neuprint_server("hemibrain:v1.2.1")["state"] == SERVER_NO_TOKEN
+
+    def test_neuprint_hidden(self, tmp_path, monkeypatch):
+        from ui.dataset_service import SERVER_HIDDEN
+        svc = self._svc(tmp_path)
+        monkeypatch.setattr(DatasetService, "get_token", lambda self: "tok")
+        svc._server_datasets = {"banc:v888": {"hidden": "true"}}
+        assert svc._probe_neuprint_server("banc:v888")["state"] == SERVER_HIDDEN
+
+    def test_neuprint_unreachable_vs_timeout(self, tmp_path, monkeypatch):
+        from ui.dataset_service import SERVER_TIMEOUT, SERVER_UNREACHABLE
+        svc = self._svc(tmp_path)
+        monkeypatch.setattr(DatasetService, "get_token", lambda self: "tok")
+        svc._server_datasets = {}
+
+        def _raise(exc):
+            def _inner(dataset, with_state=False):
+                return (0, 0, exc) if with_state else (0, 0)
+            return _inner
+
+        monkeypatch.setattr(svc, "_fetch_neuprint_counts",
+                            _raise(SERVER_TIMEOUT))
+        assert svc._probe_neuprint_server("fib19:v1.0")["state"] == SERVER_TIMEOUT
+
+        monkeypatch.setattr(svc, "_fetch_neuprint_counts",
+                            _raise(SERVER_UNREACHABLE))
+        assert svc._probe_neuprint_server("fib19:v1.0")["state"] == SERVER_UNREACHABLE
+
+    def test_fafb_server_state_tracks_cave_token(self, tmp_path, monkeypatch):
+        from ui.dataset_service import SERVER_AVAILABLE, SERVER_NO_TOKEN
+        svc = self._svc(tmp_path)
+        monkeypatch.setattr(DatasetService, "get_cave_token", lambda self: None)
+        assert svc._probe_server("flywire_FAFB_v783")["state"] == SERVER_NO_TOKEN
+        monkeypatch.setattr(DatasetService, "get_cave_token", lambda self: "cav")
+        assert svc._probe_server("flywire_FAFB_v783")["state"] == SERVER_AVAILABLE
+
+    def test_banc_bucket_probe_states(self, tmp_path, monkeypatch):
+        from ui.dataset_service import SERVER_AVAILABLE, SERVER_UNREACHABLE
+        import banc_public_data
+        svc = self._svc(tmp_path)
+
+        monkeypatch.setattr(banc_public_data, "_remote_size", lambda url: 123)
+        assert svc._probe_banc_bucket()["state"] == SERVER_AVAILABLE
+
+        svc._banc_bucket_probe_cache = None
+        monkeypatch.setattr(banc_public_data, "_remote_size", lambda url: None)
+        assert svc._probe_banc_bucket()["state"] == SERVER_UNREACHABLE
+
+    def test_banc_bucket_probe_timeout(self, tmp_path, monkeypatch):
+        """A socket timeout is classified as timeout, not unreachable."""
+        from ui.dataset_service import SERVER_TIMEOUT
+        import banc_public_data
+        svc = self._svc(tmp_path)
+
+        def _boom(url):
+            raise TimeoutError("timed out")
+
+        monkeypatch.setattr(banc_public_data, "_remote_size", _boom)
+        assert svc._probe_banc_bucket()["state"] == SERVER_TIMEOUT

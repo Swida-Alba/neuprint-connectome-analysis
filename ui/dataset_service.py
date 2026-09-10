@@ -152,10 +152,9 @@ class DatasetService:
     """Service for fetching and managing dataset availability."""
 
     AVAILABILITY_CACHE_FORMAT = "drocat_dataset_availability/v2"
-    # v1 stored every row (incl. local ones, which then went stale in the
-    # file). v2 stores only the server dimension; local readiness is derived
-    # from disk on every read.
-    _AVAILABILITY_CACHE_FORMAT_V1 = "drocat_dataset_availability/v1"
+    # v2 stores only the server dimension; local readiness is derived from
+    # disk on every read (v1 also persisted local rows, which then went
+    # stale in the file).
     AVAILABILITY_CACHE_FILENAME = "dataset_availability.json"
 
     # Known NeuPrint dataset candidates (fallback if /api/dbmeta/datasets fails)
@@ -213,7 +212,6 @@ class DatasetService:
         self._available_neuprint: Optional[List[str]] = None
         self._server_datasets: Dict[str, dict] = {}  # Full server response from /api/dbmeta/datasets
         self._last_fetch_time: float = 0
-        self._availability_snapshot: Dict[str, DatasetInfo] = {}
         self._availability_updated_at: Optional[str] = None
         self._availability_loaded = False
         # Persisted server dimension: canonical name -> {state, checked_at,
@@ -226,47 +224,6 @@ class DatasetService:
     def availability_cache_path(self) -> Path:
         """Persistent file containing the last complete availability refresh."""
         return self._cache_dir / self.AVAILABILITY_CACHE_FILENAME
-
-    @staticmethod
-    def _serialize_server_row(info: DatasetInfo) -> dict:
-        """The persisted representation: server dimension only."""
-        return {
-            "state": info.server_state or SERVER_UNKNOWN,
-            "checked_at": info.server_checked_at,
-            "metadata": info.metadata or {},
-        }
-
-    @staticmethod
-    def _deserialize_info(name: str, data: dict) -> Optional[DatasetInfo]:
-        """Rebuild one DatasetInfo from a legacy (v1) snapshot row.
-
-        Retained for the v1 reader and compatibility: canonicalizes the
-        stored name and re-derives the local-release family so a pre-rename
-        row can never surface as ``flywire`` for a standalone BANC release.
-        """
-        if not isinstance(data, dict):
-            return None
-        try:
-            canonical_name = canonical_dataset_name(str(data.get("name") or name))
-            source = str(data.get("source") or "unknown")
-            if is_banc_dataset(canonical_name):
-                source = "banc"
-            elif is_fafb_dataset(canonical_name):
-                source = "flywire"
-            return DatasetInfo(
-                name=canonical_name,
-                source=source,
-                available=bool(data.get("available", False)),
-                neuron_count=int(data.get("neuron_count", 0) or 0),
-                typed_count=int(data.get("typed_count", 0) or 0),
-                local_cache=bool(data.get("local_cache", False)),
-                local_prepared=bool(data.get("local_prepared", False)),
-                display_name=str(data.get("display_name") or ""),
-                metadata=data.get("metadata") if isinstance(data.get("metadata"), dict) else {},
-                error=data.get("error"),
-            )
-        except (TypeError, ValueError):
-            return None
 
     @classmethod
     def _read_server_rows(cls, payload: dict) -> Dict[str, dict]:
@@ -302,12 +259,25 @@ class DatasetService:
                     # Local releases are derived from disk; never trust a
                     # frozen local row.
                     continue
+                metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) \
+                    else {}
+                # v1 stored the count as a top-level field; fold it into the
+                # metadata the composer reads so a server-only dataset keeps
+                # its count until the next refresh.
+                if raw.get("neuron_count"):
+                    metadata = {**metadata,
+                                "neuron_count": raw.get("neuron_count"),
+                                "typed_count": raw.get("typed_count")}
                 rows[key] = {
+                    # v1 did not record *why* a row was unavailable (no token
+                    # vs. empty server response vs. network error), so map a
+                    # positive to 'available' and leave an unrecorded negative
+                    # as 'unknown' rather than asserting a failure mode we
+                    # never captured.  The next refresh resolves it.
                     "state": SERVER_AVAILABLE if raw.get("available")
-                    else SERVER_UNREACHABLE,
+                    else SERVER_UNKNOWN,
                     "checked_at": raw.get("checked_at"),
-                    "metadata": raw.get("metadata")
-                    if isinstance(raw.get("metadata"), dict) else {},
+                    "metadata": metadata,
                 }
         return rows
 
@@ -346,7 +316,7 @@ class DatasetService:
         server = self._server_rows.get(key) or self._empty_server_status()
         info = DatasetInfo(
             name=key,
-            source=self.family_of(key),
+            source=self.source_of(key),
             metadata=dict(server.get("metadata") or {}),
             server_state=str(server.get("state") or SERVER_UNKNOWN),
             server_checked_at=server.get("checked_at"),
@@ -354,10 +324,14 @@ class DatasetService:
         return self._derive_local_fields(info)
 
     def _catalog_names(self) -> List[str]:
-        """Every dataset worth reporting on a fresh machine.
+        """Every dataset worth reporting, including ones never touched.
 
-        Persisted server rows + the local-release catalogs + anything found
-        under ``datasets/``.  No network.
+        Persisted server rows + the local-release catalogs + the known
+        NeuPrint candidates + anything found under ``datasets/``.  The
+        NeuPrint candidates matter on a fresh machine / without a token:
+        without them the availability card would silently omit every
+        NeuPrint dataset instead of listing it as ``server: unknown``.  No
+        network.
         """
         names: List[str] = []
         seen = set()
@@ -369,6 +343,8 @@ class DatasetService:
                 names.append(key)
 
         for name in self._server_rows:
+            _add(name)
+        for name in self.NEUPRINT_CANDIDATES:
             _add(name)
         for name in self.FLYWIRE_DATASETS:
             _add(name)
@@ -387,9 +363,7 @@ class DatasetService:
         self._load_persisted_availability()
         results = {name: self.check_dataset_availability(name)
                    for name in self._catalog_names()}
-        with self._lock:
-            self._availability_snapshot = dict(results)
-            return dict(results), self._availability_updated_at
+        return results, self._availability_updated_at
 
     def get_availability_updated_at(self) -> Optional[str]:
         """Return the timestamp of the last successful server refresh."""
@@ -431,7 +405,6 @@ class DatasetService:
                 self._server_rows_mtime = None
             self._cache.clear()
         return updated_at
-
 
     def _load_tokens(self):
         """Load tokens from config.json (primary) then config_local.json."""
@@ -620,9 +593,11 @@ class DatasetService:
             size = banc_public_data._remote_size(url)
             state = SERVER_AVAILABLE if size else SERVER_UNREACHABLE
         except Exception as exc:
-            name = type(exc).__name__
-            if "timeout" in str(exc).lower() or "timed out" in str(exc).lower() \
-                    or name == "timeout":
+            # Mirror _fetch_neuprint_counts: classify TimeoutError alike
+            # regardless of the exception's exact class name.
+            name = type(exc).__name__.lower()
+            if "timeout" in name or "timeout" in str(exc).lower() \
+                    or "timed out" in str(exc).lower():
                 state = SERVER_TIMEOUT
             else:
                 state = SERVER_UNREACHABLE
@@ -669,15 +644,21 @@ class DatasetService:
             if str(server_info.get("hidden", "")).lower() == "true":
                 return {"state": SERVER_HIDDEN, "checked_at": checked_at,
                         "metadata": {}}
-            return {
-                "state": SERVER_AVAILABLE, "checked_at": checked_at,
-                "metadata": {
-                    "server": self.NEUPRINT_SERVER,
-                    "last_mod": server_info.get("last-mod", ""),
-                    "uuid": server_info.get("uuid", ""),
-                    "rois": server_info.get("ROIs", []),
-                },
+            metadata = {
+                "server": self.NEUPRINT_SERVER,
+                "last_mod": server_info.get("last-mod", ""),
+                "uuid": server_info.get("uuid", ""),
+                "rois": server_info.get("ROIs", []),
             }
+            # The server list carries no counts; record them once here (the
+            # read path is network-free) when no local table can supply them.
+            if not self._neuron_table_present(dataset):
+                total, typed = self._fetch_neuprint_counts(dataset)
+                if total:
+                    metadata["neuron_count"] = total
+                    metadata["typed_count"] = typed
+            return {"state": SERVER_AVAILABLE, "checked_at": checked_at,
+                    "metadata": metadata}
 
         total, typed, state = self._fetch_neuprint_counts(dataset, with_state=True)
         metadata = {"server": self.NEUPRINT_SERVER, "checked_at": checked_at}
@@ -715,7 +696,6 @@ class DatasetService:
             if "timeout" in name or "timeout" in text or "timed out" in text:
                 state = SERVER_TIMEOUT
             return (0, 0, state) if with_state else (0, 0)
-
 
     def fetch_codex_datasets(self) -> Dict[str, dict]:
         """
@@ -763,78 +743,6 @@ class DatasetService:
         except Exception:
             pass
         return self.CODEX_DATASETS
-
-    def _probe_neuprint_dataset(self, dataset: str) -> DatasetInfo:
-        """Check NeuPrint dataset availability.
-        Uses server metadata from /api/dbmeta/datasets if available (fast).
-        Falls back to individual query for neuron counts (slow).
-        """
-        info = DatasetInfo(name=dataset, source="neuprint")
-
-        if not self.get_token():
-            info.error = "No NeuPrint token configured"
-            return info
-
-        # Fast path: use server metadata if we have it
-        if self._server_datasets and dataset in self._server_datasets:
-            server_info = self._server_datasets[dataset]
-            # Hidden datasets (e.g. banc:v888) are listed by the server but
-            # not queryable through the API, so they stay unavailable here.
-            if isinstance(server_info, dict) and str(
-                    server_info.get("hidden", "")).lower() == "true":
-                info.error = (
-                    "Hidden on the NeuPrint server (not queryable through the API)"
-                )
-                return info
-            info.available = True
-            info.metadata = {
-                "server": self.NEUPRINT_SERVER,
-                "last_mod": server_info.get("last-mod", ""),
-                "uuid": server_info.get("uuid", ""),
-                "rois": server_info.get("ROIs", []),
-            }
-            # Set display name from server info
-            info.display_name = dataset
-            return info
-
-        # Slow path: individual query (only for datasets not in server list)
-        total, typed = self._fetch_neuprint_counts(dataset)
-        if total:
-            info.available = True
-            info.neuron_count = total
-            info.typed_count = typed
-            info.metadata = {
-                "server": self.NEUPRINT_SERVER,
-                "checked_at": datetime.now().isoformat(),
-            }
-        else:
-            info.error = "Empty response from server"
-
-        return info
-
-    def _fetch_neuprint_counts(self, dataset: str) -> tuple:
-        """Query the NeuPrint server for a dataset's total/typed neuron count.
-
-        Returns (0, 0) when the dataset cannot be queried (no token, network
-        failure, or an empty response).  Used both by the slow availability
-        probe and as a last resort for server datasets without local files.
-        """
-        token = self.get_token()
-        if not token:
-            return 0, 0
-        try:
-            from neuprint import Client
-
-            client = Client(self.NEUPRINT_SERVER, dataset, token)
-            result = client.fetch_custom(
-                "MATCH (n:Neuron) RETURN count(n) as total, "
-                "sum(CASE WHEN n.type IS NOT NULL AND n.type <> '' THEN 1 ELSE 0 END) as typed"
-            )
-            if not result.empty:
-                return int(result["total"].iloc[0]), int(result["typed"].iloc[0])
-        except Exception:
-            pass
-        return 0, 0
 
     def _probe_neuprint_dataset(self, dataset: str) -> DatasetInfo:
         """Compatibility shim: probe one NeuPrint dataset (network).
@@ -948,6 +856,16 @@ class DatasetService:
         return "neuprint"
 
     @staticmethod
+    def source_of(dataset: str) -> str:
+        """Return the ``DatasetInfo.source`` value for *dataset*.
+
+        Keeps the established vocabulary ('neuprint' | 'flywire' | 'banc')
+        for compatibility; ``family`` carries the precise 'fafb' spelling.
+        """
+        family = DatasetService.family_of(dataset)
+        return "flywire" if family == "fafb" else family
+
+    @staticmethod
     def access_mode_of(dataset: str) -> str:
         """NeuPrint streams on demand; standalone BANC is never streamable."""
         return ACCESS_STREAMING if DatasetService.family_of(dataset) == "neuprint" \
@@ -964,6 +882,12 @@ class DatasetService:
         return self._has_any(self._get_dataset_path(dataset), (
             "*_allneurons_neuron_df.parquet", "*_allneurons_neuron_df.csv",
             "*_neuron_df.parquet", "*_neuron_df.csv",
+        ))
+
+    def _allneurons_table_present(self, dataset: str) -> bool:
+        """The strict converter output used by FAFB/BANC preparation."""
+        return self._has_any(self._get_dataset_path(dataset), (
+            "*_allneurons_neuron_df.parquet", "*_allneurons_neuron_df.csv",
         ))
 
     def _roi_table_present(self, dataset: str) -> bool:
@@ -1000,7 +924,9 @@ class DatasetService:
             if any(parts):
                 return CAP_PARTIAL
             return CAP_MISSING
-        return CAP_READY if self._neuron_table_present(dataset) else CAP_MISSING
+        # FAFB/BANC: the converter's ``*_allneurons_neuron_df`` output (the
+        # strict spelling ``_check_local_prepared`` requires) is the metadata.
+        return CAP_READY if self._allneurons_table_present(dataset) else CAP_MISSING
 
     def probe_connectivity(self, dataset: str) -> str:
         """Connectivity readiness.  FAFB/BANC are local-only (CAVE is too
@@ -1049,26 +975,32 @@ class DatasetService:
         info.visualization_state, info.visualization_source = \
             self.probe_visualization(dataset)
 
-        info.local_prepared = (
-            info.metadata_state == CAP_READY
-            and (info.connectivity_state == CAP_READY
-                 or info.access_mode == ACCESS_STREAMING))
+        # Reuse the established local-data probes so the card and the dataset
+        # selectors (`_dataset_label_parts`) never disagree about "local".
+        # The dimension chips above carry the finer-grained truth.
+        info.local_prepared = self._check_local_prepared(dataset)
         info.local_cache = self._check_local_cache(dataset)
 
         if info.neuron_count == 0:
             total, typed = self._load_local_neuron_counts(dataset)
             info.neuron_count = total
             info.typed_count = typed
+        if info.neuron_count == 0 and info.metadata:
+            # Server-recorded counts (written during refresh for datasets
+            # with no local table).
+            info.neuron_count = int(info.metadata.get("neuron_count") or 0)
+            info.typed_count = int(info.metadata.get("typed_count") or 0)
         if info.neuron_count == 0 and info.family in ("fafb", "banc"):
             codex = self.CODEX_DATASETS.get(dataset) or {}
             if codex.get("neurons"):
                 info.neuron_count = int(codex["neurons"])
 
         if info.family in ("fafb", "banc"):
-            # A download-required release is analyzable only once its
-            # connectivity tables exist; server reachability alone is not
-            # enough.
-            info.available = info.connectivity_state == CAP_READY
+            # A download-required release is analyzable only once BOTH its
+            # neuron table and its connection table exist; server
+            # reachability alone is not enough, and neither is one table on
+            # its own.  ``local_prepared`` encodes that conjunction.
+            info.available = info.local_prepared
             if not info.available:
                 source_name = "BANC" if info.family == "banc" else "FAFB"
                 info.error = info.error or (
@@ -1087,7 +1019,6 @@ class DatasetService:
 
     def _empty_server_status(self) -> dict:
         return {"state": SERVER_UNKNOWN, "checked_at": None, "metadata": {}}
-
 
     # neuron-count memoization: (dataset, mtime_ns) -> (total, typed).
     # Counting a large neuron CSV on every page load is wasteful; the count is
@@ -1227,7 +1158,11 @@ class DatasetService:
         return total, typed
 
     def get_local_datasets(self) -> List[DatasetInfo]:
-        """Get information about locally available datasets."""
+        """Get information about locally present datasets.
+
+        Network-free: each row carries the disk-derived dimensions, so the
+        catalog is correct on a fresh machine before any server refresh.
+        """
         datasets = []
 
         if not self._datasets_dir.exists():
@@ -1236,68 +1171,58 @@ class DatasetService:
         for folder in self._datasets_dir.iterdir():
             if folder.is_dir() and not folder.name.startswith("."):
                 name = folder_to_dataset(folder.name)
-
-                info = DatasetInfo(
-                    name=name,
-                    source=(
-                        "banc" if is_banc_dataset(name)
-                        else "flywire" if is_fafb_dataset(name)
-                        else "neuprint"
-                    ),
-                    local_cache=True,
-                )
-
-                # Keep the local listing consistent with
-                # check_dataset_availability().  In particular, a local
-                # directory containing only the neuron table is not ready for
-                # pathfinding until its merged connection table is present.
-                info.local_prepared = self._check_local_prepared(name)
-                info.available = info.local_prepared
-
-                # Counts: metadata file first, local neuron table fallback
-                # (datasets pulled without a metadata file still show counts).
-                total, typed = self._load_local_neuron_counts(name)
-                info.neuron_count = total
-                info.typed_count = typed
+                info = self._derive_local_fields(
+                    DatasetInfo(name=name, source=self.source_of(name)))
                 metadata_file = self._find_metadata_file(name)
                 if metadata_file and metadata_file.exists():
                     try:
                         with open(metadata_file, "r") as f:
-                            info.metadata = json.load(f)
+                            local_meta = json.load(f)
+                        # A server row's metadata wins when present; otherwise
+                        # surface the local sidecar.
+                        info.metadata = info.metadata or local_meta
                     except Exception:
                         pass
-
                 datasets.append(info)
 
         return datasets
 
     def refresh_availability(self, datasets: Optional[List[str]] = None) -> Dict[str, DatasetInfo]:
+        """Refresh the **server** dimension and return composed rows.
+
+        Fetches release names from Codex, probes each dataset's server state,
+        and persists only that server dimension.  Local readiness is always
+        derived from disk, so it is never written.  A full refresh (``None``)
+        is authoritative and replaces the server rows; a targeted list
+        updates only those rows and preserves the rest.
         """
-        Refresh availability for all or specific datasets.
-        Also fetches release names from Codex. A completed refresh is
-        written to the persistent availability snapshot so the next Settings
-        page load starts from this result instead of an older in-memory value.
-        """
-        refresh_all = datasets is None
+        full_refresh = datasets is None
         with self._lock:
             self._cache.clear()
 
-        if datasets is None:
+        if full_refresh:
             # Fetch release names from Codex (FAFB and BANC remain separate).
             self.fetch_codex_datasets()
             # Fetch NeuPrint datasets from server
             neuprint_available = self.fetch_neuprint_datasets()
-            datasets = neuprint_available + self.FLYWIRE_DATASETS + self.BANC_DATASETS
+            datasets = (neuprint_available + self.FLYWIRE_DATASETS
+                        + self.BANC_DATASETS)
 
-        results = {}
+        self._banc_bucket_probe_cache = None  # re-probe once per refresh
+        self._load_persisted_availability()
+        server_rows: Dict[str, dict] = (
+            {} if full_refresh else dict(self._server_rows))
+
         for dataset in datasets:
-            results[dataset] = self.check_dataset_availability(dataset)
+            key = canonical_dataset_name(str(dataset or "").strip())
+            if not key:
+                continue
+            server_rows[key] = self._probe_server(key)
 
-        # A full refresh is authoritative and replaces the prior snapshot.
-        # A targeted refresh updates only the requested rows and preserves the
-        # rest of the last complete snapshot.
-        self._persist_availability(results, replace=refresh_all)
-        return results
+        self._persist_availability(server_rows)
+
+        return {name: self.check_dataset_availability(name)
+                for name in self._catalog_names()}
 
     def is_cache_fresh(self, max_age_seconds: int = 300) -> bool:
         """Check if the cached availability data is still fresh."""

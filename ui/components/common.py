@@ -23,6 +23,18 @@ import weakref
 
 from src.utils.dataset_release_registry import get_release_recommendation
 from src.flywire_ids import is_banc_dataset, is_fafb_dataset
+from ..dataset_service import (
+    CAP_MISSING,
+    CAP_ON_DEMAND,
+    CAP_PARTIAL,
+    CAP_READY,
+    SERVER_AVAILABLE,
+    SERVER_HIDDEN,
+    SERVER_NO_TOKEN,
+    SERVER_TIMEOUT,
+    SERVER_UNKNOWN,
+    SERVER_UNREACHABLE,
+)
 
 from .. import group_history
 from ..config import (
@@ -389,26 +401,30 @@ def _dataset_label_parts(ds: str, service) -> List[str]:
 
 
 def _refresh_local_dataset_flags(results, service) -> bool:
-    """Sync local file flags in an availability result mapping.
+    """Re-derive local readiness for the availability rows (no network).
 
-    This deliberately does no network work.  It is used by the Settings
-    timer so creating or removing a local cache is reflected while the page
-    remains open.
+    All local dimensions (metadata/connectivity/visualization, counts) come
+    from disk, so the Settings timer can refresh them while the page stays
+    open.  Only the persisted server dimension is left untouched.
     """
     changed = False
-    for info in (results or {}).values():
-        local_prepared = service._check_local_prepared(info.name)
-        local_cache = service._check_local_cache(info.name)
-        if info.local_prepared != local_prepared:
-            info.local_prepared = local_prepared
+    for name, info in (results or {}).items():
+        fresh = service.check_dataset_availability(name)
+        signature = (
+            info.metadata_state, info.connectivity_state,
+            info.visualization_state, info.visualization_source,
+            info.local_prepared, info.local_cache, info.neuron_count,
+            info.typed_count, info.available,
+        )
+        new_signature = (
+            fresh.metadata_state, fresh.connectivity_state,
+            fresh.visualization_state, fresh.visualization_source,
+            fresh.local_prepared, fresh.local_cache, fresh.neuron_count,
+            fresh.typed_count, fresh.available,
+        )
+        if signature != new_signature:
             changed = True
-        if info.local_cache != local_cache:
-            info.local_cache = local_cache
-            changed = True
-        if info.source in {"flywire", "banc"} and info.available != local_prepared:
-            info.available = local_prepared
-            changed = True
-        service._cache[info.name] = info
+        results[name] = fresh
     return changed
 
 
@@ -2826,66 +2842,74 @@ def dataset_status_card() -> ui.card:
                     text = f"{info.neuron_count:,}" if info.neuron_count else "n/a"
                     ui.badge(text, color=color).props("outline")
 
+                def name_icon(info):
+                    if info.local_prepared:
+                        return "check_circle", "green"
+                    if info.local_cache:
+                        return "cached", "orange"
+                    if info.server_state == SERVER_AVAILABLE:
+                        return "cloud_done", "blue"
+                    return "cloud_off", "grey"
+
+                def chip(label, state, color_map, tooltip):
+                    text, color = color_map.get(state, (str(state), "grey"))
+                    ui.badge(f"{label}: {text}", color=color).props("outline") \
+                        .tooltip(tooltip)
+
+                SERVER_TEXT = {
+                    SERVER_AVAILABLE: ("available", "green"),
+                    SERVER_NO_TOKEN: ("no token", "grey"),
+                    SERVER_TIMEOUT: ("timeout", "red"),
+                    SERVER_UNREACHABLE: ("unreachable", "red"),
+                    SERVER_HIDDEN: ("hidden", "grey"),
+                    SERVER_UNKNOWN: ("unknown", "grey"),
+                }
+                CAP_TEXT = {
+                    CAP_READY: ("ready", "green"),
+                    CAP_ON_DEMAND: ("on-demand", "orange"),
+                    CAP_PARTIAL: ("partial", "orange"),
+                    CAP_MISSING: ("missing", "grey"),
+                }
+
                 for name, info in results.items():
                     # Trust the resolved source field.  BANC is a standalone
                     # public release; it must never be rendered as FlyWire.
-                    source = str(getattr(info, "source", "") or "").lower()
-                    is_banc = source == "banc" or is_banc_dataset(name)
-                    is_fafb = source == "flywire" or is_fafb_dataset(name)
-                    if is_banc:
-                        src_badge_text = "BANC"
-                        src_badge_color = "orange"
-                    elif is_fafb:
-                        src_badge_text = "FAFB"
-                        src_badge_color = "purple"
+                    family = getattr(info, "family", "") or str(
+                        getattr(info, "source", "") or "").lower()
+                    if family == "banc":
+                        src_badge_text, src_badge_color = "BANC", "orange"
+                    elif family == "fafb":
+                        src_badge_text, src_badge_color = "FAFB", "purple"
                     else:
-                        src_badge_text = "NeuPrint"
-                        src_badge_color = "blue"
+                        src_badge_text, src_badge_color = "NeuPrint", "blue"
 
+                    icon_name, icon_color = name_icon(info)
                     with ui.row().classes("items-center gap-2 w-full drocat-status-row"):
-                        if info.local_prepared:
-                            ui.icon("check_circle", color="green")
-                            ui.label(info.display_name or name).classes("font-medium flex-grow")
-                            ui.badge(src_badge_text, color=src_badge_color).props("outline")
-                            ui.badge("local", color="green").props("outline")
-                            count_badge(info, "green")
-                        elif info.local_cache:
-                            ui.icon("cached", color="orange")
-                            ui.label(info.display_name or name).classes("font-medium flex-grow")
-                            ui.badge(src_badge_text, color=src_badge_color).props("outline")
-                            ui.badge("cached", color="orange").props("outline")
-                            count_badge(info, "orange")
-                        elif info.available:
-                            ui.icon("cloud_done", color="blue")
-                            ui.label(info.display_name or name).classes("font-medium flex-grow")
-                            ui.badge(src_badge_text, color=src_badge_color).props("outline")
-                            ui.badge("server", color="blue").props("outline")
-                            count_badge(info, "blue")
-                        else:
-                            ui.icon("cloud_off", color="grey")
-                            ui.label(info.display_name or name).classes("font-medium flex-grow drocat-muted")
-                            ui.badge(src_badge_text, color=src_badge_color).props("outline")
-                            ui.badge("not ready", color="grey").props("outline")
-                            count_badge(info, "grey")
+                        ui.icon(icon_name, color=icon_color)
+                        ui.label(info.display_name or name).classes(
+                            "font-medium flex-grow").tooltip(
+                            f"family: {family} | access: "
+                            f"{getattr(info, 'access_mode', '') or 'n/a'}")
+                        ui.badge(src_badge_text, color=src_badge_color).props("outline")
+                        chip("server", info.server_state, SERVER_TEXT,
+                             "NeuPrint/bucket/CAVE reachability (checked on Refresh)")
+                        chip("metadata", info.metadata_state, CAP_TEXT,
+                             "Analysis basics: neuron table + ROI table + index")
+                        chip("connectivity", info.connectivity_state, CAP_TEXT,
+                             "Connection tables (local) or server-streamed")
+                        viz_state = info.visualization_state
+                        viz_src = getattr(info, "visualization_source", None)
+                        chip("viz", viz_state, CAP_TEXT,
+                             f"Skeletons/meshes (source: {viz_src or 'n/a'})")
+                        count_badge(info, icon_color)
 
-        # Local status is useful even when the user has not configured a
-        # NeuPrint token or is working offline.  Avoid any network call here.
-        if cached_results:
-            render_results(cached_results, cached_updated_at)
-            refresh_dataset_selector_statuses(service)
-        else:
-            # Local status is useful even when the user has not configured a
-            # NeuPrint token or is working offline. Avoid any network call on
-            # page load when there is no persisted refresh yet.
-            local_results = {
-                info.name: info
-                for info in service.get_local_datasets()
-                if info.local_prepared or info.local_cache
-            }
-            if local_results:
-                state["results"] = local_results
-                render_results(local_results)
-                refresh_dataset_selector_statuses(service)
+        # The composed read is network-free: it returns persisted server
+        # state (if any) plus disk-derived local readiness, so it is safe on
+        # page load with no token and no prior refresh.
+        initial_results = cached_results or service.get_cached_availability()[0]
+        state["results"] = initial_results
+        render_results(initial_results, cached_updated_at)
+        refresh_dataset_selector_statuses(service)
 
         def render_error(msg):
             status_container.clear()
