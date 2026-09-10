@@ -2,6 +2,8 @@
 
 Welcome to the Drosophila Connectome Analysis Toolkit (DROCAT) documentation!
 
+<a id="v450-changelog"></a>
+
 ## 🆕 Recent Updates (August 2026) - V4.5.0
 
 ### 🤖 Direct agent analysis without the UI
@@ -271,7 +273,7 @@ Advanced technical documentation:
 
 ---
 
-## Recent Updates
+## Visualizer Changelog
 
 ### Latest Features
 - ✨ Multiple clustering algorithms for heatmaps (Ward, Average, Complete, Single)

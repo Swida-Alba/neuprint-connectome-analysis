@@ -1,7 +1,7 @@
 # *Drosophila* Connectome Analysis Toolkit (DROCAT) v4.5.0
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB.svg)](https://www.python.org/downloads/)
+[![Python 3.10–3.11](https://img.shields.io/badge/Python-3.10--3.11-3776AB.svg)](https://www.python.org/downloads/)
 
 DROCAT is a Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases, FAFB, and standalone BANC releases** — type-based pathfinding, interactive network visualizations with neurotransmitter grouping, 3D neuron morphology rendering, cross-dataset comparison, and EM↔LM driver line mapping (NeuronBridge). Everything is available both through a web UI and as standalone scripts.
 
@@ -51,14 +51,15 @@ DROCAT is a Python toolkit for analyzing and visualizing connectome data from **
 
 **Requirements:** conda (auto-installed if missing) and internet access on first run.
 
-**Option 1 — One-click install & launch.** After cloning the repository, double-click to open the launcher:
+**Option 1 — One-click install & launch.** After cloning the repository, launch DROCAT with the bundled launcher:
 
 | Platform | Command |
 | --- | --- |
-| macOS / Linux | `mac_DROCAT.command` |
-| Windows | `windows_DROCAT.bat` |
+| macOS | double-click `mac_DROCAT.command` |
+| Linux | run `./mac_DROCAT.command` in a terminal |
+| Windows | double-click `windows_DROCAT.bat` |
 
-On first run it creates the versioned `drocat-4.5.0` Python 3.11 environment (via the bundled installer in `archive/install/`), installs the pinned dependencies, runs `pip check`, verifies the installation, and opens the web UI at **http://127.0.0.1:8080**. Later runs are self-healing: a missing or inconsistent environment is repaired automatically before starting. If the port is busy, the launcher offers a new one interactively.
+On first run it creates the versioned `drocat-4.5.0` Python 3.11 environment (via the bundled installer in `archive/install/`; Python 3.10–3.11 is supported), installs the pinned dependencies, runs `pip check`, verifies the installation, and opens the web UI at **http://127.0.0.1:8080**. Later runs are self-healing: a missing or inconsistent environment is repaired automatically before starting. If the port is busy, the launcher offers a new one interactively.
 
 **Option 2 — Agent-assisted install.** Copy the following prompt to your AI agent and let it finish cloning the repo, installing, verifying, and launching DROCAT:
 
@@ -101,6 +102,7 @@ Every UI panel links to its own instruction guide (see [docs/ui_guides/README.ht
 | **Basic Usage** | [Basic Usage Guide](docs/core-features/BasicUsage_Guide.md) | `FindDirect.py`, `FindPath.py` |
 | **Score Calculations** | [Score Calculation Guide](docs/core-features/ScoreCalculation_Guide.md) | All pathfinding scripts |
 | **EM↔LM Mapping** | [NeuronBridge Guide](docs/core-features/NeuronBridge_Guide.md) | `NeuronBridge_FindLines.py` |
+| **FlyLight Imagery** | [FlyLight Guide](docs/core-features/FlyLight_Guide.md) | `FlyLight_fetcher.py` |
 | **Cross-Dataset** | [Comparison Guide](docs/core-features/CrossDatasetComparison_Guide.md) | `InterDatasetComparator.py` |
 | **Homolog Finding** | [Homolog Guide](docs/core-features/HomologFinding_Guide.md) | `FindHomologs.py` (Connectivity tab → Find Similar) |
 | **3D Visualization** | [3D Skeleton Guide](docs/visualizations/3D_Skeleton_Guide.md) | `plot3dSkeleton.py` |
@@ -152,11 +154,14 @@ All NeuPrint server datasets are supported (verified against `api.neuprint.janel
 - **Script-first analysis with coding agents** — run pathfinding, comparison, NeuronBridge, FlyLight, homolog, profile, PlotPath, and 3D skeleton scripts without the UI, via the [`drocat-usage`](skills/drocat-usage/SKILL.md) skill and its `run_direct.py` launcher.
 - **Local FAFB + standalone BANC dataset support** — local-first FAFB caching and public-bucket BANC caching so repeated local-release queries avoid network round-trips entirely; Polars-backed matrix/CSV steps measured 10-100x faster in the [December 2025 benchmarks](docs/technical/PERFORMANCE_OPTIMIZATIONS_DEC2025.md) ([FAFB Integration](docs/FAFB_INTEGRATION.md), [BANC Integration](docs/BANC_INTEGRATION.md)).
 - **NT visualization & grouping** — neurotransmitter edge groups, custom groups, export/import ([Network Features](docs/visualizations/VisualizePath_Network_Features.md)).
-- **Similarity tab reorganization** — the Similarity group is now two main tabs, each with Find Similar / Comparison sub-tabs: **Connectivity** (find similar = homolog search across datasets or within one dataset via Target = Source; comparison = multi-dataset connectivity profiling) and **Morphology** (find similar = intra-dataset vector/NBLAST search; comparison = intra-dataset N×N morphology comparison with type-level + bodyId-level matrices, heatmaps, and a report — `vector_v2` or NBLAST scoring, NBLAST capped at 30 total neurons). The old "Connectivity similarity" mode is folded into Find Similar — it was intra-dataset homolog finding under another name. Morphological find-similar details: multiple queries run independently, connectivity-expanded candidates read directly from the connection cache (top-N×3 similar *types* expanded to all their members), ROI filtering, intra-type reference data, dual result tables (bodyId-level `results.csv` + type-level `type_summary.csv`), and query-plus-top-N 3D skeleton visualizations. NBLAST type means use ipsilateral pairs only (mirror scores are unreliable); the vector method lateral-normalizes and uses both sides. A full-morphology mode downloads every skeleton with a resumable progress/ETA pull and compares against the whole local population ([Connectivity guide](docs/ui_guides/connectivity.html), [Morphology guide](docs/ui_guides/morphology.html), [Comparison guide](docs/ui_guides/morphology_comparison.html)).
+- **Similarity tab reorganization** — the Similarity group is now two main tabs, each with Find Similar / Comparison sub-tabs:
+    - **Connectivity**: find similar is a homolog search across datasets (or within one dataset via Target = Source); comparison is multi-dataset connectivity profiling.
+    - **Morphology**: find similar is an intra-dataset vector/NBLAST search; comparison is an intra-dataset N×N morphology comparison with type-level and bodyId-level matrices, heatmaps, and a report (`vector_v2` or NBLAST scoring, capped at 30 neurons).
+    - The old "Connectivity similarity" mode is folded into Find Similar (it was intra-dataset homolog finding under another name); see the [Connectivity](docs/ui_guides/connectivity.html), [Morphology](docs/ui_guides/morphology.html), and [Comparison](docs/ui_guides/morphology_comparison.html) guides for connectivity-expanded candidates, ROI filtering, dual result tables, and the resumable full-morphology download.
 - **Palette editor** — drag-and-drop reordering of discrete palette colors, a range slider applied directly to the displayed palette, a reset button beside the preview, and lateral range labels.
 - **3D Skeleton reorganization** — independent card blocks for general appearance, neuron colors, synapse colors, and brain-region ROIs, with hemisphere-aware options.
 
-📖 **[Full changelog](docs/README.md#recent-updates)** · **[Agent-assisted install](docs/INSTALLATION.md#5-agent-assisted-install)**
+📖 **[Full changelog](docs/README.md#v450-changelog)** · **[Agent-assisted install](docs/INSTALLATION.md#5-agent-assisted-install)**
 
 ---
 
