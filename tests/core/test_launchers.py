@@ -2,9 +2,21 @@
 mac_DROCAT.command / windows_DROCAT.bat files, the packed installers, and the
 token workflow they implement. These guard the first-run / self-healing /
 token UX contract."""
+import importlib.util
+import re
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
+
+# The shell launchers only run on macOS/Linux and on Windows via Git Bash;
+# skip the executable parser checks where no bash is available.
+requires_bash = pytest.mark.skipif(
+    shutil.which("bash") is None, reason="bash not available"
+)
 
 
 class TestRunDrocatLaunchers:
@@ -183,3 +195,116 @@ class TestInstallers:
         text = (ROOT / "archive/install/install.bat").read_text(encoding="utf-8")
         assert "install.ps1" in text
         assert "-ExecutionPolicy Bypass" in text
+
+
+# The shell launchers/installer parse config.json with a hand-rolled awk
+# reader (`json_value`). These tests actually execute it against both JSON
+# layouts users write: the pretty-printed default and the single-line nested
+# form shown in the docs. A regression here silently produces a corrupt env
+# name (a stray trailing quote) instead of failing loudly.
+
+_JSON_VALUE_RE = re.compile(
+    r"^([ \t]*)json_value\(\)\s*\{(?P<body>.*?)^\1\}", re.S | re.M
+)
+
+
+def _json_value_source(path: Path) -> str:
+    match = _JSON_VALUE_RE.search(path.read_text(encoding="utf-8"))
+    assert match, f"json_value() not found in {path}"
+    return match.group(0)
+
+
+def _run_json_value(path: Path, section: str, key: str, config: Path) -> str:
+    script = f"{_json_value_source(path)}\nprintf '%s' \"$(json_value {section} {key} '{config}')\"\n"
+    proc = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, check=True
+    )
+    return proc.stdout
+
+
+@requires_bash
+@pytest.mark.parametrize(
+    "shell_file",
+    ["archive/install/install.sh", "mac_DROCAT.command"],
+)
+class TestConfigJsonValueParser:
+    _CASES = {
+        "pretty": (
+            '{\n  "tokens": {\n    "neuprint": "NPTOKEN",\n    "cave": ""\n  },\n'
+            '  "envs": {\n    "4.5.0": "my-custom-env"\n  }\n}\n'
+        ),
+        # The exact single-line nested form in docs/INSTALLATION.md: the
+        # closing brace follows the value with no space.
+        "single_line": (
+            '{\n  "tokens": { "neuprint": "NPTOKEN", "cave": "" },\n'
+            '  "envs": { "4.5.0": "my-custom-env" }\n}\n'
+        ),
+        "single_line_spaced": (
+            '{\n  "tokens": { "neuprint": "NPTOKEN" },\n'
+            '  "envs": { "4.5.0": "my-custom-env" }\n}\n'
+        ),
+    }
+
+    def test_env_override_has_no_stray_quote(self, shell_file, tmp_path):
+        path = ROOT / shell_file
+        for label, text in self._CASES.items():
+            cfg = tmp_path / f"{label}.json"
+            cfg.write_text(text, encoding="utf-8")
+            assert _run_json_value(path, "envs", "4.5.0", cfg) == "my-custom-env", label
+
+    def test_token_value_has_no_stray_quote(self, shell_file, tmp_path):
+        path = ROOT / shell_file
+        cfg = tmp_path / "c.json"
+        cfg.write_text(self._CASES["single_line"], encoding="utf-8")
+        assert _run_json_value(path, "tokens", "neuprint", cfg) == "NPTOKEN"
+
+    def test_empty_values_stay_empty(self, shell_file, tmp_path):
+        # An empty entry means "auto-find": it must not become a bare quote.
+        path = ROOT / shell_file
+        cfg = tmp_path / "c.json"
+        cfg.write_text('{\n  "envs": { "4.5.0": "" }\n}\n', encoding="utf-8")
+        assert _run_json_value(path, "envs", "4.5.0", cfg) == ""
+
+
+def _load_verify_install():
+    path = ROOT / "skills/drocat-install/scripts/verify_install.py"
+    spec = importlib.util.spec_from_file_location("drocat_verify_install", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestVerifyInstallConfigRead:
+    """The verifier must read the BOM that Windows PowerShell writes."""
+
+    def test_bom_config_reports_configured_token(self, tmp_path):
+        module = _load_verify_install()
+        token = b"a" * 64
+        # Windows PowerShell `Set-Content -Encoding UTF8` prepends a BOM.
+        (tmp_path / "config.json").write_bytes(
+            b"\xef\xbb\xbf"
+            + b'{\n  "tokens": {\n    "neuprint": "'
+            + token
+            + b'"\n  },\n  "envs": {\n    "4.5.0": "drocat-4.5.0"\n  }\n}\n'
+        )
+        has_token, source = module.config_neuprint_token(tmp_path)
+        assert has_token is True
+        assert source and source.endswith("config.json")
+
+    def test_missing_token_is_advisory(self, tmp_path):
+        module = _load_verify_install()
+        (tmp_path / "config.json").write_text(
+            '{\n  "tokens": {\n    "neuprint": ""\n  }\n}\n', encoding="utf-8"
+        )
+        has_token, _source = module.config_neuprint_token(tmp_path)
+        assert has_token is False
+
+    def test_placeholder_token_is_not_configured(self, tmp_path):
+        module = _load_verify_install()
+        (tmp_path / "config.json").write_text(
+            '{\n  "tokens": {\n    "neuprint": "YOUR_NEUPRINT_TOKEN_HERE"\n  }\n}\n',
+            encoding="utf-8",
+        )
+        has_token, _source = module.config_neuprint_token(tmp_path)
+        assert has_token is False
+

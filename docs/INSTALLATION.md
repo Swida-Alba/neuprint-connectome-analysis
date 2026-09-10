@@ -48,12 +48,13 @@ automatically before starting the UI.
   abort with a clear error (never silently switching envs or rewriting the
   config).
 - **Auto-fill:** an empty `envs."4.5.0"` entry means "create/use the default
-  versioned env automatically". The installers and launchers write the
-  environment they actually used back into `config_local.json` (never
-  `config.json`), so after the first install the fallback entry holds the
-  concrete env name (e.g. `drocat-4.5.0`) and every script resolves it
-  directly - while the `config.json` entry stays empty. Editing
-  `config.json` always wins.
+  versioned env automatically". When `config_local.json` already exists, the
+  installers and launchers write the environment they actually used back into
+  it (never `config.json`), so after the first install the fallback entry holds
+  the concrete env name (e.g. `drocat-4.5.0`) and every script resolves it
+  directly - while the `config.json` entry stays empty. The auto-fill only
+  edits an existing file: it never creates `config_local.json` (the UI Settings
+  tab creates it when you save tokens). Editing `config.json` always wins.
 - All installers/launchers set `PYTHONNOUSERSITE=1`, so packages from a
   user-level Python cannot contaminate the environment.
 - Do **not** install `neuronbridge-python` — DROCAT bundles its own client

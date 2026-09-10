@@ -2,6 +2,7 @@
 
 import json
 import os
+from pathlib import Path
 
 from nicegui import run, ui
 
@@ -998,14 +999,7 @@ def create_settings_tab():
 
         # Keep the versioned env map and any other sections of the local
         # config, and only replace the tokens section.
-        data = {}
-        if config_path.exists():
-            try:
-                parsed = json.loads(config_path.read_text(encoding="utf-8"))
-                if isinstance(parsed, dict):
-                    data = parsed
-            except Exception:
-                data = {}
+        data = _read_config_dict(config_path)
         data["tokens"] = {
             "neuprint": saved_tokens.get("neuprint", ""),
             "cave": saved_tokens.get("cave", ""),
@@ -1069,6 +1063,23 @@ def create_settings_tab():
 
     save_btn.on_click(save_tokens)
     test_btn.on_click(test_connection)
+
+
+def _read_config_dict(config_path: Path) -> dict:
+    """Read a config JSON object, tolerating a missing/corrupt file.
+
+    Uses ``utf-8-sig`` because Windows PowerShell's
+    ``Set-Content -Encoding UTF8`` prepends a BOM; plain ``utf-8`` would
+    reject the file and the caller would silently drop the sections it
+    meant to preserve (envs, output dir, ...).
+    """
+    if not config_path.exists():
+        return {}
+    try:
+        parsed = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _load_tokens() -> dict:

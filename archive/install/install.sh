@@ -54,6 +54,9 @@ json_value() {
                 rest = substr(line, index(line, "\"" key "\":") + length("\"" key "\":"))
                 sub(/^[[:space:]]*/, "", rest)
                 gsub(/[{}]/, "", rest)
+                # Stripping the closing brace can leave trailing whitespace
+                # that defeats the quote trim below; trim again first.
+                sub(/[[:space:]]*$/, "", rest)
                 gsub(/^"|"$/, "", rest)
                 print rest
                 exit

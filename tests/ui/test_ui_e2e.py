@@ -2454,6 +2454,46 @@ class TestDatasetService:
         committed = _json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
         assert committed["tokens"] == {"neuprint": "committed-np", "cave": ""}
 
+    def test_settings_save_tokens_preserves_envs_from_bom_config(self, tmp_path, monkeypatch):
+        """A config_local.json written by Windows PowerShell (BOM + autofilled
+        envs) must keep its envs section through a token save: reading it with
+        plain utf-8 would fail, silently dropping the section."""
+        import json as _json
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs import settings as settings_module
+
+        (tmp_path / "config.json").write_text(
+            _json.dumps({"tokens": {"neuprint": "", "cave": ""}, "envs": {"4.5.0": ""}}),
+            encoding="utf-8",
+        )
+        (tmp_path / "config_local.json").write_bytes(
+            b"\xef\xbb\xbf"
+            + _json.dumps(
+                {"tokens": {"neuprint": "", "cave": ""}, "envs": {"4.5.0": "drocat-4.5.0"}}
+            ).encode("utf-8")
+        )
+        monkeypatch.setattr(settings_module, "PROJECT_ROOT", tmp_path)
+
+        client = Client(page("/settings-save-tokens-bom"))
+        with client:
+            settings_module.create_settings_tab()
+
+        neuprint_input = next(
+            el for el in client.elements.values()
+            if (getattr(el, "_props", {}).get("label") == "NeuPrint Token")
+        )
+        neuprint_input.value = "bom-saved"
+        save_btn = next(
+            el for el in client.elements.values()
+            if getattr(el, "text", "") == "Save Tokens"
+        )
+        next(iter(save_btn._event_listeners.values())).handler(None)
+
+        saved = _json.loads((tmp_path / "config_local.json").read_text(encoding="utf-8-sig"))
+        assert saved["tokens"] == {"neuprint": "bom-saved", "cave": ""}
+        assert saved["envs"] == {"4.5.0": "drocat-4.5.0"}
+
     def test_settings_dataset_cache_card(self):
         """The Settings tab exposes full-dataset and complete-connection pulls:
         a dataset selector, a force-rebuild option, run/cancel buttons, and a

@@ -1,2 +1,9 @@
 # Bundled neuron indexes: binary parquet seeds, no textual diffs.
 neuron_indexes/**/*.parquet binary
+
+# Windows batch/PowerShell scripts must check out with CRLF so cmd.exe parses
+# labels and parenthesized blocks correctly, independent of the cloner's
+# core.autocrlf setting. The POSIX launchers (mac_DROCAT.command,
+# archive/install/install.sh) intentionally stay LF.
+*.bat text eol=crlf
+*.ps1 text eol=crlf

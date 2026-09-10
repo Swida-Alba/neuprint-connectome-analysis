@@ -113,6 +113,19 @@ def test_ui_requirements_match_ui_extra_when_present():
     assert declared == _requirements_file(ui_requirements)
 
 
+def test_declared_py_modules_exist_in_src():
+    """Every py-modules entry must map to an existing src/<name>.py.
+
+    A stale entry (the module was removed) makes the build metadata lie and
+    breaks `import <name>` for anyone who trusted it; it is otherwise inert,
+    so only an explicit check catches it.
+    """
+    project = _toml(PROJECT_ROOT / "pyproject.toml")
+    declared = project["tool"]["setuptools"]["py-modules"]
+    missing = [name for name in declared if not (PROJECT_ROOT / "src" / f"{name}.py").exists()]
+    assert not missing, f"pyproject.toml declares missing py-modules: {missing}"
+
+
 def test_supported_python_window_and_removed_conflicts():
     project = _toml(PROJECT_ROOT / "pyproject.toml")
     vispath = _toml(PROJECT_ROOT / "vispath-subproject" / "pyproject.toml")

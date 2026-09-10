@@ -143,6 +143,37 @@ def run_version_probe(python_exe: str, manifests: list[Path]) -> dict:
         return {str(path): {"probe": f"failed: {detail}"} for path in manifests}
 
 
+def config_neuprint_token(project: Path) -> tuple[bool, str | None]:
+    """Return ``(has_token, source)`` from config_local.json then config.json.
+
+    Reads with ``utf-8-sig`` because Windows PowerShell's
+    ``Set-Content -Encoding UTF8`` writes a BOM, which plain ``utf-8``
+    decoding rejects — that would hide a configured token and fail
+    ``--require-token``.
+    """
+    has_token = False
+    source: str | None = None
+    for filename in ("config_local.json", "config.json"):
+        config_token = project / filename
+        if not config_token.exists():
+            continue
+        source = str(config_token)
+        try:
+            cfg = json.loads(config_token.read_text(encoding="utf-8-sig"))
+            neuprint_value = (cfg.get("tokens") or {}).get("neuprint") or ""
+        except Exception:
+            neuprint_value = ""
+        if (
+            isinstance(neuprint_value, str)
+            and neuprint_value.strip()
+            and "YOUR_" not in neuprint_value
+            and len(neuprint_value.strip().strip("'\"")) > 20
+        ):
+            has_token = True
+            break
+    return has_token, source
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", required=True, help="Path to the DROCAT repository")
@@ -251,26 +282,7 @@ def main() -> int:
 
     # Token file: config_local.json (gitignored override) then config.json
     # (committed clean defaults).
-    has_neuprint = False
-    token_source = None
-    for filename in ("config_local.json", "config.json"):
-        config_token = project / filename
-        if not config_token.exists():
-            continue
-        try:
-            cfg = json.loads(config_token.read_text(encoding="utf-8"))
-            neuprint_value = (cfg.get("tokens") or {}).get("neuprint") or ""
-        except Exception:
-            neuprint_value = ""
-        token_source = str(config_token)
-        has_neuprint = (
-            isinstance(neuprint_value, str)
-            and neuprint_value.strip()
-            and "YOUR_" not in neuprint_value
-            and len(neuprint_value.strip().strip("'\"")) > 20
-        )
-        if has_neuprint:
-            break
+    has_neuprint, token_source = config_neuprint_token(project)
     if token_source:
         token_label = (
             "tokens (NeuPrint token configured)"
