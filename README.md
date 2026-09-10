@@ -28,6 +28,7 @@ DROCAT is a Python toolkit for analyzing and visualizing connectome data from **
   - [Supported Datasets](#supported-datasets)
     - [FAFB + standalone BANC local releases (3)](#fafb--standalone-banc-local-releases-3)
   - [What's New in v4.5.0](#whats-new-in-v450)
+  - [Releases](#releases)
   - [Contributing](#contributing)
   - [License](#license)
   - [Support](#support)
@@ -162,6 +163,34 @@ All NeuPrint server datasets are supported (verified against `api.neuprint.janel
 - **3D Skeleton reorganization** — independent card blocks for general appearance, neuron colors, synapse colors, and brain-region ROIs, with hemisphere-aware options.
 
 📖 **[Full changelog](docs/README.md#v450-changelog)** · **[Agent-assisted install](docs/INSTALLATION.md#5-agent-assisted-install)**
+
+---
+
+## Releases
+
+DROCAT ships one versioned branch per release (`v4.5.0`, `v4.4.5`, …), each mirrored as a Git tag and a [GitHub Release](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/releases). The default branch tracks the current release, and every release pins its own conda environment name (`drocat-<version>`), so multiple versions can coexist on one machine.
+
+| Release | Date | Highlights |
+| --- | --- | --- |
+| **v4.5.0** — current | August 2026 | Script-first agent analysis, local FAFB + standalone BANC support, Similarity tab reorganization, NT grouping, palette editor, 3D skeleton reorganization (see [What's New](#whats-new-in-v450)) |
+| v4.4.5 — latest published | 2026-08-04 | Agent-assisted direct runs |
+| v4.4.0 | 2026-01-10 | Local FAFB + standalone BANC datasets, priority-based neuron search, NT visualization |
+| v4.3.0 | 2025-12-23 | NeuronBridge integration with region filtering, FlyLight |
+| v4.2.0 | 2025-12-14 | FAFB download guidance and fixes |
+| v4.1.0 | 2025-12-01 | Simplified connectivity verification (Jaccard + rank) |
+| v4.0.0 | 2025-11-24 | Modular v4 rearchitecture |
+
+Older releases (v3.x and the v2.1 beta) remain available as tags.
+
+**Get a specific release:**
+
+```bash
+git clone https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git
+cd Drosophila-cross-dataset-connectome-analysis
+git checkout v4.4.5   # a tagged release; omit to stay on the current default branch
+```
+
+Consolidated per-release notes live in the [changelog](docs/README.md#v450-changelog).
 
 ---
 
